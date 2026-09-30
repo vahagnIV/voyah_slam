@@ -18,6 +18,7 @@ add_executable(voyahslam_tests
     features/binocular_camera_frame_test.cpp
     map/map_point_storage_test.cpp
     map/frame_test.cpp
+    map/observation_storage_test.cpp
 )
 
 target_include_directories(voyahslam_tests
