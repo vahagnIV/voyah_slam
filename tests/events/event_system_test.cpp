@@ -1,5 +1,6 @@
 #include <voyahslam/events/map_events.h>
 #include <voyahslam/events/observable.h>
+#include <voyahslam/features/camera_frame.h>
 #include <voyahslam/features/orb_feature_extractor.h>
 #include <voyahslam/memory/object_pool.h>
 
@@ -9,6 +10,9 @@ namespace voyahslam::events {
 namespace {
 
 using OrbMapPointsAdded = MapPointsAdded<features::OrbFeatureExtractor>;
+using OrbCameraFrame = features::CameraFrame<uint8_t, 32>;
+using OrbKeyFrameCreated = KeyFrameCreated<features::OrbFeatureExtractor, OrbCameraFrame>;
+using OrbNewKeyFrameCandidate = NewKeyFrameCandidate<features::OrbFeatureExtractor, OrbCameraFrame>;
 
 TEST(EventSystemTest, EventTypeTag) {
     memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(4);
@@ -138,6 +142,28 @@ TEST(EventSystemTest, ObservableSyncAndAsync) {
     auto* got = listener.GetNextEvent();
     ASSERT_NE(got, nullptr);
     EXPECT_EQ(got->type, EventType::MapPointsAdded);
+}
+
+TEST(EventSystemTest, PositionUpdatedHasFrameId) {
+    memory::ObjectPool<PositionUpdated, memory::ThreadSafePolicy> pool(4);
+    auto* event = pool.Create();
+    event->frame_id = map::FrameId{42};
+    EXPECT_EQ(event->frame_id, map::FrameId{42});
+    event->Recycle();
+}
+
+TEST(EventSystemTest, KeyFrameCreatedTypeTag) {
+    memory::ObjectPool<OrbKeyFrameCreated, memory::ThreadSafePolicy> pool(4);
+    auto* event = pool.Create();
+    EXPECT_EQ(event->type, EventType::KeyFrameCreated);
+    event->Recycle();
+}
+
+TEST(EventSystemTest, NewKeyFrameCandidateTypeTag) {
+    memory::ObjectPool<OrbNewKeyFrameCandidate, memory::ThreadSafePolicy> pool(4);
+    auto* event = pool.Create();
+    EXPECT_EQ(event->type, EventType::NewKeyFrameCandidate);
+    event->Recycle();
 }
 
 TEST(EventSystemTest, ObservableNoAsyncSkipsRefCount) {

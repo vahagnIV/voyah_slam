@@ -34,7 +34,7 @@ void Recyclable<T, SyncPolicy>::AddRef() {
 
 template <typename T, typename SyncPolicy>
 void Recyclable<T, SyncPolicy>::Recycle() {
-    if (ref_count_.fetch_add(-1, std::memory_order_relaxed) == 1) {
+    if (ref_count_.fetch_add(-1, std::memory_order_acq_rel) == 1) {
         assert(object_pool_ && "Recycle() called on an object not owned by a pool");
         object_pool_->Recycle(static_cast<T*>(this));
     }

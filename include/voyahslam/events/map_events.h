@@ -87,6 +87,7 @@ struct KeyFramePoseUpdated
 struct PositionUpdated
     : Event
     , memory::Recyclable<PositionUpdated, memory::ThreadSafePolicy> {
+    map::FrameId frame_id;
     geometry::TPose pose;
     double timestamp;
 
@@ -98,6 +99,46 @@ struct PositionUpdated
                 },
                 [](Event* e, int n) {
                     static_cast<PositionUpdated*>(e)->SetRefCount(n);
+                }) {}
+};
+
+template <typename TFeatureExtractor, typename TCameraFrameType>
+struct KeyFrameCreated
+    : Event
+    , memory::Recyclable<KeyFrameCreated<TFeatureExtractor, TCameraFrameType>, memory::ThreadSafePolicy> {
+    map::FrameId frame_id;
+    geometry::TPose pose;
+    TCameraFrameType camera_frame;
+    double timestamp;
+
+    KeyFrameCreated()
+        : Event(EventType::KeyFrameCreated,
+                [](Event* e) {
+                    static_cast<KeyFrameCreated*>(e)->
+                        memory::Recyclable<KeyFrameCreated, memory::ThreadSafePolicy>::Recycle();
+                },
+                [](Event* e, int n) {
+                    static_cast<KeyFrameCreated*>(e)->SetRefCount(n);
+                }) {}
+};
+
+template <typename TFeatureExtractor, typename TCameraFrameType>
+struct NewKeyFrameCandidate
+    : Event
+    , memory::Recyclable<NewKeyFrameCandidate<TFeatureExtractor, TCameraFrameType>, memory::ThreadSafePolicy> {
+    map::FrameId frame_id;
+    geometry::TPose pose;
+    TCameraFrameType camera_frame;
+    double timestamp;
+
+    NewKeyFrameCandidate()
+        : Event(EventType::NewKeyFrameCandidate,
+                [](Event* e) {
+                    static_cast<NewKeyFrameCandidate*>(e)->
+                        memory::Recyclable<NewKeyFrameCandidate, memory::ThreadSafePolicy>::Recycle();
+                },
+                [](Event* e, int n) {
+                    static_cast<NewKeyFrameCandidate*>(e)->SetRefCount(n);
                 }) {}
 };
 
