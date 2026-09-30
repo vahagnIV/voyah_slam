@@ -1,0 +1,47 @@
+#ifndef VOYAHSLAM_FEATURES_IMAGE_FEATURES_H
+#define VOYAHSLAM_FEATURES_IMAGE_FEATURES_H
+
+#include <voyahslam/defs.h>
+
+namespace voyahslam::features {
+
+template<typename TScalar, unsigned int Length>
+class ImageFeatures {
+public:
+    constexpr static unsigned int kDescSize = Length;
+    typedef Eigen::Matrix<TScalar, kDescSize, 1> TDescriptor;
+    typedef Eigen::Matrix<TScalar, kDescSize, Eigen::Dynamic> TDescriptors;
+    ImageFeatures() = default;
+
+    ImageFeatures(
+        geometry::TPoints2DF&& points,
+        geometry::TRowVectorF&& strengths,
+        geometry::TRowVectorF&& angles,
+        TDescriptors&& descriptors)
+        : points_(std::move(points))
+          , strengths_(std::move(strengths))
+          , angles_(std::move(angles))
+          , descriptors_(std::move(descriptors))
+    {
+    }
+
+    ImageFeatures(const ImageFeatures&) = default;
+    ImageFeatures& operator=(const ImageFeatures&) = default;
+    ImageFeatures(ImageFeatures&&) = default;
+    ImageFeatures& operator=(ImageFeatures&&) = default;
+
+    [[nodiscard]] const geometry::TPoints2DF& points() const { return points_; }
+    [[nodiscard]] const geometry::TRowVectorF& strengths() const { return strengths_; }
+    [[nodiscard]] const geometry::TRowVectorF& angles() const { return angles_; }
+    [[nodiscard]] const TDescriptors& descriptors() const { return descriptors_; }
+
+protected:
+    geometry::TPoints2DF points_;
+    geometry::TRowVectorF strengths_;
+    geometry::TRowVectorF angles_;
+    TDescriptors descriptors_;
+};
+
+} // namespace voyahslam::features
+
+#endif // VOYAHSLAM_FEATURES_IMAGE_FEATURES_H
