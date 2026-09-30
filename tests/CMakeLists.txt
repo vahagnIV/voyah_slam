@@ -12,6 +12,14 @@ add_executable(voyahslam_tests
     features/keypoint_matches_test.cpp
     features/distortion_models/distortion_model_test.cpp
     features/distortion_models/kannala_brandt_distortion_model_test.cpp
+    memory/object_pool_test.cpp
+    map/id_types_test.cpp
+    features/stereo_rig_test.cpp
+    features/binocular_camera_frame_test.cpp
+    map/map_point_storage_test.cpp
+    map/frame_test.cpp
+    map/observation_storage_test.cpp
+    events/event_system_test.cpp
 )
 
 target_include_directories(voyahslam_tests

@@ -11,6 +11,7 @@ find_package(stb REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(fmt REQUIRED)
+find_package(concurrentqueue REQUIRED)
 
 # Main library
 add_subdirectory(src)
