@@ -153,14 +153,16 @@ enum class EventType : uint8_t {
 
 struct Event {
     EventType type;
-    void (*recycle_)(Event*);    // set by concrete type's constructor, used by Listener
+    void (*recycle_)(Event*);            // used by Listener for auto-recycle
+    void (*set_ref_count_)(Event*, int); // used by Observable::Notify for async fan-out
 
 protected:
-    Event(EventType t, void (*r)(Event*)) : type(t), recycle_(r) {}
+    Event(EventType t, void (*r)(Event*), void (*s)(Event*, int))
+        : type(t), recycle_(r), set_ref_count_(s) {}
 };
 ```
 
-No virtual functions. `Event` carries a type tag for `switch`/`static_cast` dispatch and a `recycle_` function pointer for automatic recycling by the Listener (see §2). The function pointer is set once at construction by each concrete event type — zero runtime cost beyond one indirect call when recycling.
+No virtual functions. `Event` carries a type tag for `switch`/`static_cast` dispatch, a `recycle_` function pointer for automatic recycling by the Listener (see §2), and a `set_ref_count_` function pointer so `Observable::Notify()` can set the async fan-out ref count through the base pointer. Both are set once at construction by each concrete event type — zero runtime cost beyond one indirect call each.
 
 ### Concrete Events
 
@@ -183,6 +185,9 @@ struct MapPointsAdded
                 [](Event* e) {
                     static_cast<MapPointsAdded*>(e)->
                         Recyclable<MapPointsAdded, memory::ThreadSafePolicy>::Recycle();
+                },
+                [](Event* e, int n) {
+                    static_cast<MapPointsAdded*>(e)->SetRefCount(n);
                 }) {}
 };
 ```
