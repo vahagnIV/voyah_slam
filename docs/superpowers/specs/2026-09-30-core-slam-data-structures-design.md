@@ -35,38 +35,111 @@ Adds atomic reference counting to any type. When ref count reaches 0, the object
 
 **Files:** `include/voyahslam/memory/object_pool.h`, `recyclable.h`, `sync_policy.h`
 
-## 2. Observer / Observable
+## 2. Event Delivery: Observable, AsyncObserver, Listener
 
-Template-based pub-sub with no virtual functions. Each class can inherit from multiple `Observable<TEventBase>` and `Observer<TEventBase>`.
+Template-based pub-sub with **no virtual functions**. An Observable supports two connection types:
 
-### Observer\<TEventBase\>
+- **Sync** — handler executes inline during `Notify()`, no queue, no ref counting, event can live on the stack.
+- **Async** — event is enqueued to each connected AsyncObserver's queue. Ref counting ensures the event stays alive until all consumers finish.
 
-```cpp
-template <typename TEventBase>
-class Observer {
-    moodycamel::ConcurrentQueue<TEventBase*> queue_;
-public:
-    bool TryDequeue(TEventBase*& out);
-    moodycamel::ConcurrentQueue<TEventBase*>& queue();
-};
-```
+The connection type (sync vs async) is the "plug" between producer and consumer. A single Observable can have both sync and async connections.
 
-### Observable\<TEventBase\>
+### Observable\<TEvent\>
 
 ```cpp
-template <typename TEventBase>
+template <typename TEvent>
 class Observable {
-    std::vector<moodycamel::ConcurrentQueue<TEventBase*>*> observers_;
+    struct SyncHandler {
+        void (*fn)(void* ctx, TEvent*);
+        void* ctx;
+    };
+
+    std::vector<moodycamel::ConcurrentQueue<TEvent*>*> async_queues_;
+    std::vector<SyncHandler> sync_handlers_;
+
 public:
-    void Subscribe(Observer<TEventBase>& observer);
-    void Notify(TEventBase* event);   // sets refcount = observer_count, enqueues to all
-    size_t observer_count() const;
+    void ConnectAsync(AsyncObserver<TEvent>& observer);
+
+    template <typename T>
+    void ConnectSync(T& target, void (*fn)(void*, TEvent*));
+
+    void Notify(TEvent* event);
+    size_t async_count() const;
 };
 ```
 
-`Notify()` expects the event to be `Recyclable`. It calls `SetRefCount(observers_.size())` then enqueues the raw pointer to each observer's queue. Each observer calls `Recycle()` on the concrete type after processing — the last one returns the event to its pool.
+`Notify()` flow:
+1. Call sync handlers first (inline, event guaranteed alive during call).
+2. If async queues exist: `SetRefCount(async_queues_.size())`, enqueue pointer to each queue.
 
-**Files:** `include/voyahslam/events/observer.h`, `include/voyahslam/events/observable.h`
+Sync handlers execute **before** async enqueue — no race on the event pointer. Sync handlers use a raw function pointer + `void*` context (no `std::function`, no heap allocation, no type erasure).
+
+### AsyncObserver\<TEvent\>
+
+Each AsyncObserver has a **single** `ConcurrentQueue`. One Observable → one AsyncObserver is a 1:1 channel. For fan-out, the Observable stores multiple queue pointers (one per AsyncObserver).
+
+```cpp
+template <typename TEvent>
+class AsyncObserver {
+    moodycamel::ConcurrentQueue<TEvent*> queue_;
+public:
+    Listener<TEvent> GetListener();
+    moodycamel::ConcurrentQueue<TEvent*>& queue();
+};
+```
+
+### Listener\<TEvent\>
+
+Iterates queued events. **Auto-recycles** — the consumer never calls `Recycle()`. When `GetNextEvent()` is called, it recycles the previous event. The destructor recycles the last event.
+
+```cpp
+template <typename TEvent>
+class Listener {
+    moodycamel::ConcurrentQueue<TEvent*>& queue_;
+    TEvent* current_ = nullptr;
+public:
+    explicit Listener(moodycamel::ConcurrentQueue<TEvent*>& queue);
+
+    TEvent* GetNextEvent();   // recycles previous, returns next or nullptr
+    ~Listener();              // recycles last event
+    
+    Listener(const Listener&) = delete;
+    Listener& operator=(const Listener&) = delete;
+    Listener(Listener&& other) noexcept;
+};
+```
+
+Recycling uses the `recycle_` function pointer stored in `Event` (see §3) — one indirect call per event, no virtual dispatch:
+
+```cpp
+TEvent* Listener::GetNextEvent() {
+    if (current_) current_->recycle_(current_);
+    if (!queue_.try_dequeue(current_)) current_ = nullptr;
+    return current_;
+}
+```
+
+### Consumer pattern
+
+```cpp
+// Consumer never sees Recycle()
+auto listener = from_mapper_.GetListener();
+while (auto* event = listener.GetNextEvent()) {
+    switch (event->type) {
+        case EventType::MapPointsAdded: {
+            auto* e = static_cast<MapPointsAdded<FE>*>(event);
+            applyMapPointDiffs(e);
+            break;   // Listener handles recycling on next iteration / destruction
+        }
+    }
+}
+```
+
+### Overhead analysis
+
+Events are coarse-grained: one `MapPointsAdded` carries all new points as Eigen matrices (3×N positions, DescSize×N descriptors). Typical load: 5–10 events per frame at 60fps = 300–600 events/sec. The function-pointer indirect call (~2ns) and queue enqueue are negligible. The hot path (matching, projection, BA) operates directly on `MapPointStorage` arrays — no events involved.
+
+**Files:** `include/voyahslam/events/observable.h`, `async_observer.h`, `listener.h`
 
 ## 3. Event System
 
@@ -86,16 +159,39 @@ enum class EventType : uint8_t {
 
 struct Event {
     EventType type;
+    void (*recycle_)(Event*);    // set by concrete type's constructor, used by Listener
+
 protected:
-    explicit Event(EventType t) : type(t) {}
+    Event(EventType t, void (*r)(Event*)) : type(t), recycle_(r) {}
 };
 ```
 
-No virtual functions. `Event` is a tag-carrying base; consumers switch on `type` and `static_cast` to the concrete type.
+No virtual functions. `Event` carries a type tag for `switch`/`static_cast` dispatch and a `recycle_` function pointer for automatic recycling by the Listener (see §2). The function pointer is set once at construction by each concrete event type — zero runtime cost beyond one indirect call when recycling.
 
 ### Concrete Events
 
-Each concrete event inherits from both `Event` (for the type tag) and `Recyclable<ConcreteType, ThreadSafePolicy>` (for pool recycling). Templated on `TFeatureExtractor` where they carry descriptors.
+Each concrete event inherits from both `Event` (for the type tag + recycle function pointer) and `Recyclable<ConcreteType, ThreadSafePolicy>` (for pool recycling). The constructor wires the `recycle_` function pointer to the correct `Recyclable::Recycle()` call via `static_cast`. Templated on `TFeatureExtractor` where they carry descriptors.
+
+```cpp
+template <typename TFeatureExtractor>
+struct MapPointsAdded
+    : Event
+    , memory::Recyclable<MapPointsAdded<TFeatureExtractor>, memory::ThreadSafePolicy>
+{
+    MapPointId start_id;
+    uint32_t count;
+    geometry::TPoints3DF positions;
+    typename TFeatureExtractor::TDescriptors descriptors;
+    geometry::TPoints3DF normals;
+
+    MapPointsAdded()
+        : Event(EventType::MapPointsAdded,
+                [](Event* e) {
+                    static_cast<MapPointsAdded*>(e)->
+                        Recyclable<MapPointsAdded, memory::ThreadSafePolicy>::Recycle();
+                }) {}
+};
+```
 
 **Mapper diff events (templated on TFeatureExtractor):**
 
@@ -120,22 +216,7 @@ PositionUpdated:              frame_id, pose, timestamp
 LoopDetected: correction data (pose corrections, point fusions)
 ```
 
-Each concrete event type has its own `ObjectPool` instance. The `Recyclable` mixin's `object_pool_` pointer routes `Recycle()` back to the correct pool.
-
-**Consumer pattern:**
-```cpp
-Event* event;
-while (observer.TryDequeue(event)) {
-    switch (event->type) {
-        case EventType::MapPointsAdded: {
-            auto* e = static_cast<MapPointsAdded<FE>*>(event);
-            // apply diff to local map...
-            e->Recycle();
-            break;
-        }
-    }
-}
-```
+Each concrete event type has its own `ObjectPool` instance. The `Recyclable` mixin's `object_pool_` pointer routes `Recycle()` back to the correct pool. The `recycle_` function pointer in `Event` allows the Listener to recycle any event through the base pointer without virtual dispatch.
 
 **Files:** `include/voyahslam/events/event_types.h`, `include/voyahslam/events/map_events.h`
 
@@ -327,23 +408,25 @@ Add `concurrentqueue` (moodycamel) to conanfile.txt. It's available as `concurre
 
 ```
 Tracker:
-  - Observable<Event>  → publishes to: Mapper, Visualizer
-  - Observer<Event>    → subscribes to: Mapper (map diffs)
+  - Observable<Event>       → publishes to: Mapper (async), Visualizer (async)
+  - AsyncObserver<Event>    → receives from: Mapper (map diffs)
   - Owns: local MapPointStorage, local ObservationStorage, current tracking pose
 
 Mapper:
-  - Observable<Event>  → publishes to: Tracker, LoopCloser, Visualizer  
-  - Observer<Event>    → subscribes to: Tracker (keyframe candidates), LoopCloser (corrections)
+  - Observable<Event>       → publishes to: Tracker (async), LoopCloser (async),
+                               Visualizer (async), internal handlers (sync)
+  - AsyncObserver<Event>    → receives from: Tracker (keyframe candidates),
+                               LoopCloser (corrections)
   - Owns: authoritative MapPointStorage, Frames, ObservationStorage
   - Single writer of map data
 
 LoopCloser:
-  - Observable<Event>  → publishes to: Mapper
-  - Observer<Event>    → subscribes to: Mapper (map diffs)
+  - Observable<Event>       → publishes to: Mapper (async)
+  - AsyncObserver<Event>    → receives from: Mapper (map diffs)
   - Owns: local MapPointStorage (for loop detection)
 
 Visualizer (future):
-  - Observer<Event>    → subscribes to: Tracker (poses), Mapper (map diffs)
+  - AsyncObserver<Event>    → receives from: Tracker (poses), Mapper (map diffs)
   - Owns: local MapPointStorage (for rendering)
 ```
 
@@ -356,10 +439,11 @@ include/voyahslam/
 │   ├── recyclable.h
 │   └── sync_policy.h
 ├── events/
-│   ├── event_types.h          // EventType enum + Event base struct
+│   ├── event_types.h          // EventType enum + Event base struct (with recycle_ fn ptr)
 │   ├── map_events.h           // all concrete event structs
-│   ├── observer.h
-│   └── observable.h
+│   ├── observable.h           // Observable<TEvent> with sync/async connections
+│   ├── async_observer.h       // AsyncObserver<TEvent> with single queue
+│   └── listener.h             // Listener<TEvent> with auto-recycle iteration
 ├── map/
 │   ├── map_point_id.h
 │   ├── frame_id.h
@@ -392,6 +476,6 @@ include/voyahslam/
 - BinocularCameraFrame: construction with StereoRig
 - ObservationStorage: add observations mono + stereo, size checks
 - Memory: pool create/recycle lifecycle, ref counting, multi-observer Recycle ordering
-- Observer/Observable: publish to multiple observers, ref count reaches 0
+- Observable/AsyncObserver/Listener: async fan-out to multiple AsyncObservers, Listener auto-recycles, sync handlers called inline, ref count reaches 0 after all Listeners drain
 - Build with both conan-release and conan-debug presets
 - Existing 78 tests still pass
