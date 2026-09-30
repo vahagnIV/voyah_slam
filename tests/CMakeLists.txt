@@ -15,6 +15,7 @@ add_executable(voyahslam_tests
     memory/object_pool_test.cpp
     map/id_types_test.cpp
     features/stereo_rig_test.cpp
+    features/binocular_camera_frame_test.cpp
 )
 
 target_include_directories(voyahslam_tests
