@@ -37,33 +37,29 @@ Adds atomic reference counting to any type. When ref count reaches 0, the object
 
 ## 2. Event Delivery: Observable, AsyncObserver, Listener
 
-Template-based pub-sub with **no virtual functions**. An Observable supports two connection types:
+Pub-sub with **no virtual functions** and **no templates** on the delivery layer. All queues carry `Event*` (the base). Concrete event types (some templated on `TFeatureExtractor`) are only known at the consumer's `switch`/`static_cast` site. An Observable supports two connection types:
 
 - **Sync** — handler executes inline during `Notify()`, no queue, no ref counting, event can live on the stack.
 - **Async** — event is enqueued to each connected AsyncObserver's queue. Ref counting ensures the event stays alive until all consumers finish.
 
 The connection type (sync vs async) is the "plug" between producer and consumer. A single Observable can have both sync and async connections.
 
-### Observable\<TEvent\>
+### Observable
 
 ```cpp
-template <typename TEvent>
 class Observable {
     struct SyncHandler {
-        void (*fn)(void* ctx, TEvent*);
+        void (*fn)(void* ctx, Event*);
         void* ctx;
     };
 
-    std::vector<moodycamel::ConcurrentQueue<TEvent*>*> async_queues_;
+    std::vector<moodycamel::ConcurrentQueue<Event*>*> async_queues_;
     std::vector<SyncHandler> sync_handlers_;
 
 public:
-    void ConnectAsync(AsyncObserver<TEvent>& observer);
-
-    template <typename T>
-    void ConnectSync(T& target, void (*fn)(void*, TEvent*));
-
-    void Notify(TEvent* event);
+    void ConnectAsync(AsyncObserver& observer);
+    void ConnectSync(void (*fn)(void*, Event*), void* ctx);
+    void Notify(Event* event);
     size_t async_count() const;
 };
 ```
@@ -74,33 +70,31 @@ public:
 
 Sync handlers execute **before** async enqueue — no race on the event pointer. Sync handlers use a raw function pointer + `void*` context (no `std::function`, no heap allocation, no type erasure).
 
-### AsyncObserver\<TEvent\>
+### AsyncObserver
 
-Each AsyncObserver has a **single** `ConcurrentQueue`. One Observable → one AsyncObserver is a 1:1 channel. For fan-out, the Observable stores multiple queue pointers (one per AsyncObserver).
+Each AsyncObserver has a **single** `ConcurrentQueue<Event*>`. One Observable → one AsyncObserver is a 1:1 channel. For fan-out, the Observable stores multiple queue pointers (one per AsyncObserver).
 
 ```cpp
-template <typename TEvent>
 class AsyncObserver {
-    moodycamel::ConcurrentQueue<TEvent*> queue_;
+    moodycamel::ConcurrentQueue<Event*> queue_;
 public:
-    Listener<TEvent> GetListener();
-    moodycamel::ConcurrentQueue<TEvent*>& queue();
+    Listener GetListener();
+    moodycamel::ConcurrentQueue<Event*>& queue();
 };
 ```
 
-### Listener\<TEvent\>
+### Listener
 
 Iterates queued events. **Auto-recycles** — the consumer never calls `Recycle()`. When `GetNextEvent()` is called, it recycles the previous event. The destructor recycles the last event.
 
 ```cpp
-template <typename TEvent>
 class Listener {
-    moodycamel::ConcurrentQueue<TEvent*>& queue_;
-    TEvent* current_ = nullptr;
+    moodycamel::ConcurrentQueue<Event*>& queue_;
+    Event* current_ = nullptr;
 public:
-    explicit Listener(moodycamel::ConcurrentQueue<TEvent*>& queue);
+    explicit Listener(moodycamel::ConcurrentQueue<Event*>& queue);
 
-    TEvent* GetNextEvent();   // recycles previous, returns next or nullptr
+    Event* GetNextEvent();    // recycles previous, returns next or nullptr
     ~Listener();              // recycles last event
     
     Listener(const Listener&) = delete;
@@ -112,7 +106,7 @@ public:
 Recycling uses the `recycle_` function pointer stored in `Event` (see §3) — one indirect call per event, no virtual dispatch:
 
 ```cpp
-TEvent* Listener::GetNextEvent() {
+Event* Listener::GetNextEvent() {
     if (current_) current_->recycle_(current_);
     if (!queue_.try_dequeue(current_)) current_ = nullptr;
     return current_;
