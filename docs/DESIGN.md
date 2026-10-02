@@ -22,6 +22,12 @@ lock-free queues, and every thread keeps its own replica of the map.
 Predecessor project: `../slamlab2`. Image processing, feature extraction,
 geometry, distortion models etc. were ported from there.
 
+**Long-term goal beyond ORB-SLAM3:** *mixed* maps — monocular and binocular
+keyframes in the same map (e.g. a stereo rig whose second camera drops out, or
+merging mono and stereo sessions). Data structures should not hard-wire one
+sensor type per map. For now the Tracker accepts both measurement types; how
+keyframes of different types share the map is still open (Open Question 17).
+
 ## 2. Core Principles
 
 1. **No locks.** No mutex anywhere on the map or event path. Cross-thread
@@ -102,7 +108,14 @@ defined in `src/` with `INSTANTIATE_CLASS` (ORB + SIFT).
 All bodies are empty for now (skeleton, 2026-10-02).
 
 ### Tracker
-- Input: images. Extracts features, tracks against **its own** map replica.
+- Runs its **own thread and queue**. `Track()` does not track: it enqueues the
+  measurement and returns. The Tracker thread processes, in one loop, both
+  incoming measurements and the Mapper's map diffs, so applying diffs to its
+  replica and tracking against that replica never race — no locks needed.
+  Results go out as events (`PositionUpdated`).
+- Input: feature measurements (mono or binocular) with timestamps. Feature
+  extraction happens before `Track()` (in the user application for now).
+- Tracks against **its own** map replica.
 - Optimizes **only its own camera pose** relative to the map (motion-only BA).
   Never touches `Frame`s, map points, or observations.
 - Publishes `PositionUpdated` (frame id, pose, timestamp) for each tracked frame.
@@ -346,6 +359,9 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-02 | `ObjectPool` free-list is a lock-free Treiber stack with tagged head; links in a separate index array. | Removes the last mutex from the event path; slot memory never read concurrently with construction. Verified with ThreadSanitizer. |
 | 2026-10-02 | `Observable::Notify()` always takes ownership of the event. | One rule for producers regardless of how observers are wired. |
 | 2026-10-02 | Pooled objects are default-constructed once and kept alive; `Recycle()` doesn't destroy, reuse calls optional `Reset()`. `Create()` takes no arguments. | Payload buffers (the bulk of allocation) are reused, not just the event shell. |
+| 2026-10-02 | Tracker has its own thread and queue; `Track()` only enqueues. | Map diffs and tracking are processed on one thread, so the Tracker's replica needs no locks. |
+| 2026-10-02 | Long-term goal: mixed monocular/binocular keyframes in one map. Tracker accepts both measurement types now; binding decided later. | Extension beyond ORB-SLAM3. |
+| 2026-10-02 | Configuration lives in the user application; reference app in `examples/full_slam/`. | Library stays free of config-file parsing. |
 | 2026-10-02 | Orchestrator named `Slam<FE>`; components share a non-virtual `EventNode` base for their observable + inbox. | `Slam` is what the user instantiates; `System` is too generic. One base avoids repeating the observer API in three classes. |
 | 2026-10-02 | One event type per header, plus `events/events.h` umbrella; `map_events.h` removed. | User preference: easier to navigate and to include only what is used. |
 | 2026-10-02 | Event payloads use grow-only `ColumnBuffer` (capacity + count) instead of plain `Eigen::Matrix`. | Eigen reallocates on any size change; grow-only buffers reach a steady state with zero allocations. Chosen over fixed max-size buffers, which waste memory and need a hard cap. |
@@ -374,18 +390,22 @@ branch → review → merge to `master`. Update this document at the end.
    local BA and loop closure) — not designed yet.
 9. Keyframe culling and how `Frame` removal propagates (`KeyFrameRemoved` event?).
 10. IMU / multi-map (Atlas) support — out of scope for now.
-15. **Tracker threading:** does `Track()` run tracking on the caller's thread
-    (as ORB-SLAM3 does, with the Tracker loop only draining Mapper diffs between
-    frames), or enqueue the frame for the Tracker's own thread? The first gives
-    the caller the pose synchronously; the second decouples camera and tracking.
-16. **`Track()` inputs:** frames carry no timestamp or id yet; also, should the
-    Tracker receive images and run feature extraction itself?
-17. **Mono vs stereo in Mapper/LoopCloser:** they are templated only on
-    `TFeatureExtractor`, but keyframes are `Frame<FE, TCameraFrameType>`. Add a
-    camera-frame template parameter, or make the Tracker's `Track` overloads
-    select it at `Slam` level?
-18. **Component construction:** configuration (StereoRig, extractor settings,
-    pool sizes) — constructor arguments vs a config struct passed through `Slam`.
+15. ~~Tracker threading~~ — decided 2026-10-02: own thread + queue (§4).
+    Remaining detail: one queue for measurements and map diffs, or two (drain
+    all pending map diffs first, then track one measurement; also allows
+    dropping stale measurements when tracking falls behind)? Note that
+    `moodycamel::ConcurrentQueue` is FIFO per producer only, so a single shared
+    queue gives no ordering between Mapper diffs and measurements anyway.
+16. **Measurement naming and timestamps:** measurements need a timestamp.
+    Proposed renames: `CameraFrame` → `MonocularMeasurement`,
+    `BinocularCameraFrame` → `BinocularMeasurement` (avoids the
+    `CameraFrame` / `Frame` (=KeyFrame) / `MonoFrame` alias confusion).
+17. **Mixed mono/binocular keyframes:** `Frame<FE, TCameraFrameType>` fixes one
+    type per map; Mapper/LoopCloser are templated only on `FE`. Needs a design
+    that lets both keyframe types coexist (goal in §1).
+18. ~~Component construction~~ — decided 2026-10-02: configuration (rig,
+    extractor settings, pool sizes) is done by the user application; the
+    reference application will live in `examples/full_slam/`.
 11. ~~Payload buffers are not reused~~ — resolved 2026-10-02 (objects stay alive
     in the pool, payloads in grow-only `ColumnBuffer`s). Related: chunking large
     loop-closure diffs (Q3) would also bound the buffers' peak capacity.
@@ -415,6 +435,8 @@ branch → review → merge to `master`. Update this document at the end.
   wiring tested).
 
 **Next:**
+- Rename measurements + add timestamps (Open Question 16), Tracker queue(s) (15).
+- `examples/full_slam/`: user application that configures and runs `Slam`.
 - Design the Tracker (initialization mono/stereo, track-with-motion-model,
   track-reference-keyframe, track-local-map, relocalization, keyframe decision).
 - Then the Mapper, then the LoopCloser.
