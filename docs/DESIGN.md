@@ -70,6 +70,37 @@ geometry, distortion models etc. were ported from there.
                                    Visualizer (future)
 ```
 
+### Slam (orchestrator) and EventNode
+
+`slam::Slam<TFeatureExtractor>` (`slam/slam.h`) owns the three components and
+wires them asynchronously in its constructor:
+
+| Publisher | → Async observers |
+|---|---|
+| Tracker | Mapper |
+| Mapper | Tracker, LoopCloser |
+| LoopCloser | Mapper |
+
+`Start()` starts consumers before producers (Mapper, LoopCloser, Tracker);
+`Stop()` stops producers first (Tracker, LoopCloser, Mapper); the destructor
+calls `Stop()`. `Slam` is neither copyable nor movable — components hold
+pointers to each other's inboxes. Extra observers (visualizer, logging) attach
+via `slam.tracker()/mapper()/loop_closer().AddObserver(...)` before `Start()`.
+
+Every component derives from `events::EventNode` (`events/event_node.h`, no
+virtuals): an `Observable` it publishes through, one `AsyncObserver` inbox it
+consumes, `AddObserver(AsyncObserver&)`, `AddSyncObserver(fn, ctx)`, `inbox()`.
+Components are templated on `TFeatureExtractor`, declared in headers and
+defined in `src/` with `INSTANTIATE_CLASS` (ORB + SIFT).
+
+| Component | Header | Public API so far |
+|---|---|---|
+| `tracking::Tracker<FE>` | `tracking/tracker.h` | `Start()`, `Stop()`, `Track(const TCameraFrame&)`, `Track(const TBinocularCameraFrame&)` |
+| `mapping::Mapper<FE>` | `mapping/mapper.h` | `Start()`, `Stop()` |
+| `loop_closing::LoopCloser<FE>` | `loop_closing/loop_closer.h` | `Start()`, `Stop()` |
+
+All bodies are empty for now (skeleton, 2026-10-02).
+
 ### Tracker
 - Input: images. Extracts features, tracks against **its own** map replica.
 - Optimizes **only its own camera pose** relative to the map (motion-only BA).
@@ -315,6 +346,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-02 | `ObjectPool` free-list is a lock-free Treiber stack with tagged head; links in a separate index array. | Removes the last mutex from the event path; slot memory never read concurrently with construction. Verified with ThreadSanitizer. |
 | 2026-10-02 | `Observable::Notify()` always takes ownership of the event. | One rule for producers regardless of how observers are wired. |
 | 2026-10-02 | Pooled objects are default-constructed once and kept alive; `Recycle()` doesn't destroy, reuse calls optional `Reset()`. `Create()` takes no arguments. | Payload buffers (the bulk of allocation) are reused, not just the event shell. |
+| 2026-10-02 | Orchestrator named `Slam<FE>`; components share a non-virtual `EventNode` base for their observable + inbox. | `Slam` is what the user instantiates; `System` is too generic. One base avoids repeating the observer API in three classes. |
 | 2026-10-02 | One event type per header, plus `events/events.h` umbrella; `map_events.h` removed. | User preference: easier to navigate and to include only what is used. |
 | 2026-10-02 | Event payloads use grow-only `ColumnBuffer` (capacity + count) instead of plain `Eigen::Matrix`. | Eigen reallocates on any size change; grow-only buffers reach a steady state with zero allocations. Chosen over fixed max-size buffers, which waste memory and need a hard cap. |
 
@@ -342,6 +374,18 @@ branch → review → merge to `master`. Update this document at the end.
    local BA and loop closure) — not designed yet.
 9. Keyframe culling and how `Frame` removal propagates (`KeyFrameRemoved` event?).
 10. IMU / multi-map (Atlas) support — out of scope for now.
+15. **Tracker threading:** does `Track()` run tracking on the caller's thread
+    (as ORB-SLAM3 does, with the Tracker loop only draining Mapper diffs between
+    frames), or enqueue the frame for the Tracker's own thread? The first gives
+    the caller the pose synchronously; the second decouples camera and tracking.
+16. **`Track()` inputs:** frames carry no timestamp or id yet; also, should the
+    Tracker receive images and run feature extraction itself?
+17. **Mono vs stereo in Mapper/LoopCloser:** they are templated only on
+    `TFeatureExtractor`, but keyframes are `Frame<FE, TCameraFrameType>`. Add a
+    camera-frame template parameter, or make the Tracker's `Track` overloads
+    select it at `Slam` level?
+18. **Component construction:** configuration (StereoRig, extractor settings,
+    pool sizes) — constructor arguments vs a config struct passed through `Slam`.
 11. ~~Payload buffers are not reused~~ — resolved 2026-10-02 (objects stay alive
     in the pool, payloads in grow-only `ColumnBuffer`s). Related: chunking large
     loop-closure diffs (Q3) would also bound the buffers' peak capacity.
@@ -366,6 +410,9 @@ branch → review → merge to `master`. Update this document at the end.
 - Decide on Open Question 14 (pool sizing per event type).
 - `NewKeyFrameCandidate` doesn't carry the tracked `(map_point_id, feature_idx)`
   observations yet (§6 says it should) — add when designing the Tracker.
+
+- Skeleton: `Slam`, `Tracker`, `Mapper`, `LoopCloser`, `EventNode` (empty bodies,
+  wiring tested).
 
 **Next:**
 - Design the Tracker (initialization mono/stereo, track-with-motion-model,
