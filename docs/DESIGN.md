@@ -24,9 +24,9 @@ geometry, distortion models etc. were ported from there.
 
 ## 2. Core Principles
 
-1. **No locks.** No mutex guards map data. Cross-thread communication only via
-   events on `moodycamel::ConcurrentQueue`. (The only mutex in the system is in
-   `ObjectPool<T, ThreadSafePolicy>` for event allocation — off the map path.)
+1. **No locks.** No mutex anywhere on the map or event path. Cross-thread
+   communication only via events on `moodycamel::ConcurrentQueue`; event pools
+   are lock-free (§6.1).
 2. **One replica of the map per thread.** Tracker, Mapper, LoopCloser (and later
    the Visualizer) each own a local copy: `MapPointStorage`, `Frame`s,
    `ObservationStorage`.
@@ -163,17 +163,21 @@ is a **`Recyclable`** object that knows how to return itself to its pool.
 **The building blocks (`include/voyahslam/memory/`):**
 
 - `ObjectPool<T, SyncPolicy>` — one contiguous slab of `max_count` slots
-  allocated once in the constructor. Free slots form an intrusive singly-linked
-  free-list stored *inside* the unused slots themselves (no side allocation).
-  `Create(args...)` pops a slot and placement-constructs `T`; `Recycle(T*)`
-  destroys `T` and pushes the slot back. Both are O(1). Exhaustion asserts.
+  allocated once in the constructor. Free slots form a stack of slot indices
+  whose links live in a separate `atomic<uint32_t>` array, so slot memory is
+  never read by the allocator and is not touched (or committed by the OS) until
+  first use. `Create(args...)` pops a slot and placement-constructs `T`
+  (asserts when exhausted); `TryCreate(args...)` returns `nullptr` instead;
+  `Recycle(T*)` destroys `T` and pushes the slot back. All O(1).
 - `Recyclable<T, SyncPolicy>` — CRTP mixin that gives an object an atomic
   reference count (starts at **1**) and a back-pointer to the pool that created it.
   `Recycle()` decrements; whoever drops the count to 0 returns the object to its
   pool. `SetRefCount(n)` sets the count in one store (used for fan-out).
-- `SyncPolicy` — `ThreadSafePolicy` (mutex around the free-list, needed for event
-  pools because `Create` and `Recycle` run on different threads) or
-  `NoSyncPolicy` (zero-cost, single-thread pools).
+- `SyncPolicy` — `ThreadSafePolicy`: the free-list is a lock-free Treiber stack
+  (CAS on a 64-bit head packing `tag << 32 | index`; the tag is bumped on every
+  push/pop to defeat ABA). Required for event pools, because `Create` runs on the
+  producer thread and `Recycle` on whichever consumer acknowledges last.
+  `NoSyncPolicy`: same structure with plain loads/stores, for single-thread pools.
 - `Event` — non-virtual base with a type tag and two function pointers
   (`recycle_`, `set_ref_count_`) wired by each concrete event's constructor, so
   code holding only an `Event*` can manage the lifetime without virtual dispatch
@@ -219,14 +223,17 @@ pointer returned by `GetNextEvent()` is a **borrow**, valid until the next
    acknowledged exactly once.
 
 **Rules for producers:**
-1. After `Notify()` with at least one async connection, the producer no longer
-   owns the event (`SetRefCount(N)` overwrote its initial reference).
-2. With only sync connections, `Notify()` does no ref counting and the producer
-   still owns the event: it must `Recycle()` it (if pooled) or it can simply live
-   on the stack.
+1. **`Notify()` always takes ownership.** After it returns the producer must not
+   touch the event. With N > 0 async observers, the count is set to N and the
+   consumers release it; with none, `Notify()` recycles it right after the sync
+   handlers. The producer doesn't need to know how it is wired.
+2. An event with a null `recycle_` is never recycled — this is how a
+   stack-allocated event is published to sync-only observers.
 3. Sync handlers run inline before the async enqueue and must not retain the
    event or `AddRef()` it — the subsequent `SetRefCount(N)` would overwrite that
    reference.
+4. Use `TryCreate()` where exhaustion is an expected, recoverable condition
+   (back-pressure) and `Create()` where it indicates a bug.
 
 ## 7. Coding Conventions
 
@@ -275,6 +282,8 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-02 | Tracker optimizes only its own pose; never mutates map objects. Its replica changes only via Mapper diffs. | Same. |
 | 2026-10-02 | `MapPointId` / `FrameId` are never reused. | Stale IDs from lagging replicas are detectable and can't alias new objects; replicas share slot layout. |
 | 2026-10-02 | Tracker lag between `NewKeyFrameCandidate` and resulting diffs is accepted. | Matches ORB-SLAM3 behaviour; Tracker keeps tracking with its current replica. |
+| 2026-10-02 | `ObjectPool` free-list is a lock-free Treiber stack with tagged head; links in a separate index array. | Removes the last mutex from the event path; slot memory never read concurrently with construction. Verified with ThreadSanitizer. |
+| 2026-10-02 | `Observable::Notify()` always takes ownership of the event. | One rule for producers regardless of how observers are wired. |
 
 ## 9. Open Questions
 
@@ -309,20 +318,13 @@ branch → review → merge to `master`. Update this document at the end.
     (`std::vector::clear()` keeps capacity; Eigen dynamic matrices do **not** —
     `resize()` to a different size reallocates, so they'd need fixed max-capacity
     storage plus a `count`, or `Eigen::Map` over a capacity-preserving buffer).
-12. **The event pool takes a mutex.** `ObjectPool<T, ThreadSafePolicy>` locks a
-    `std::mutex` in `Create()` (producer thread) and `Recycle()` (whichever
-    consumer acknowledges last). Critical sections are tiny, but it is a lock on
-    every event. Lock-free options: Treiber stack with ABA tag, or a
-    `moodycamel::ConcurrentQueue<T*>` as the free-list.
-13. **Ownership in `Notify()` depends on wiring.** Whether the producer must
-    recycle after `Notify()` depends on whether async observers are connected,
-    which the producer code may not know. Making `Notify()` always take ownership
-    (sync handlers run, then either enqueue to N or recycle when N = 0) would give
-    a single rule. Stack-allocated sync-only events would then need a no-op
-    `recycle_`.
-14. **Pool sizing.** Default `max_count` is 1,000,000 and `BuildFreeList()` writes
-    every slot, so each pool commits `sizeof(T) × 10⁶` bytes up front. Pools
-    should be sized per event type from the worst-case backlog (rule 3 in §6.1).
+12. ~~Event pool takes a mutex~~ — resolved 2026-10-02 (lock-free Treiber stack).
+13. ~~Ownership in `Notify()` depends on wiring~~ — resolved 2026-10-02
+    (`Notify()` always takes ownership).
+14. **Pool sizing.** Slot memory is now only committed on first use, but the
+    index array (4 B/slot) is written up front, and the default `max_count` is
+    still 1,000,000. Pools should be sized per event type from the worst-case
+    backlog (consumer rule 3 in §6.1).
 
 ## 10. Status and Next Steps
 
@@ -334,10 +336,7 @@ branch → review → merge to `master`. Update this document at the end.
 - Remove free-list reuse from `MapPointStorage` (ids are monotonic now); decide
   storage-growth strategy (Open Question 2).
 - Make sure `FrameId` allocation is monotonic too.
-- Decide on Open Questions 11–14 (event payload reuse, lock-free pool,
-  `Notify()` ownership, pool sizing).
-- `ObservableAsyncFanOut` test doesn't prove the event returned to the pool
-  (pool has spare slots, so `Create()` succeeds anyway) — use a pool of size 1.
+- Decide on Open Questions 11 (event payload buffer reuse) and 14 (pool sizing).
 
 **Next:**
 - Design the Tracker (initialization mono/stereo, track-with-motion-model,

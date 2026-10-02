@@ -3,6 +3,8 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <thread>
 #include <vector>
@@ -97,6 +99,68 @@ TEST(ObjectPoolTest, ThreadSafety) {
     }
 
     EXPECT_EQ(total_created.load(), 400);
+}
+
+TEST(ObjectPoolTest, ConcurrentCreateRecycleNeverHandsOutSameSlotTwice) {
+    constexpr int kThreads = 8;
+    constexpr int kIterations = 200'000;
+    // Fewer slots than threads: maximal contention on the free-list head.
+    constexpr int kSlots = kThreads - 2;
+    ObjectPool<ThreadSafeTestObject, ThreadSafePolicy> pool(kSlots);
+
+    std::array<ThreadSafeTestObject*, kSlots> slots{};
+    for (auto& slot : slots) slot = pool.Create();
+    for (auto* slot : slots) slot->Recycle();
+    std::array<std::atomic<int>, kSlots> in_use{};
+    auto slot_index = [&slots](const ThreadSafeTestObject* obj) {
+        return static_cast<int>(std::find(slots.begin(), slots.end(), obj) - slots.begin());
+    };
+
+    std::atomic<int> collisions{0};
+    auto worker = [&](int thread_idx) {
+        for (int i = 0; i < kIterations; ++i) {
+            ThreadSafeTestObject* obj = nullptr;
+            while (!(obj = pool.TryCreate(thread_idx))) {
+                std::this_thread::yield();
+            }
+            int idx = slot_index(obj);
+            if (idx == kSlots || in_use[idx].exchange(1, std::memory_order_acq_rel) != 0) {
+                collisions.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (obj->value != thread_idx) collisions.fetch_add(1, std::memory_order_relaxed);
+            if (idx != kSlots) in_use[idx].store(0, std::memory_order_release);
+            obj->Recycle();
+        }
+    };
+
+    std::vector<std::thread> threads;
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back(worker, t);
+    }
+    for (auto& t : threads) {
+        t.join();
+    }
+
+    EXPECT_EQ(collisions.load(), 0);
+    // Every slot must be back in the pool.
+    std::vector<ThreadSafeTestObject*> all;
+    for (int i = 0; i < kSlots; ++i) {
+        all.push_back(pool.TryCreate(i));
+        ASSERT_NE(all.back(), nullptr);
+    }
+    EXPECT_EQ(pool.TryCreate(0), nullptr);
+    for (auto* obj : all) obj->Recycle();
+}
+
+TEST(ObjectPoolTest, TryCreateReturnsNullWhenExhausted) {
+    ObjectPool<TestObject, NoSyncPolicy> pool(1);
+    auto* obj = pool.TryCreate(1);
+    ASSERT_NE(obj, nullptr);
+    EXPECT_EQ(pool.TryCreate(2), nullptr);
+    obj->Recycle();
+    auto* again = pool.TryCreate(3);
+    ASSERT_NE(again, nullptr);
+    again->Recycle();
 }
 
 TEST(ObjectPoolDeathTest, PoolExhaustion) {

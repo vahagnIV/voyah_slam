@@ -6,6 +6,10 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <thread>
+#include <vector>
+
 namespace voyahslam::events {
 namespace {
 
@@ -89,7 +93,9 @@ TEST(EventSystemTest, ObservableSyncHandler) {
 }
 
 TEST(EventSystemTest, ObservableAsyncFanOut) {
-    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(4);
+    // Single slot: Create() after draining only succeeds if the event really
+    // went back to the pool.
+    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(1);
 
     Observable observable;
     AsyncObserver observer1;
@@ -116,9 +122,88 @@ TEST(EventSystemTest, ObservableAsyncFanOut) {
     }
 
     // Both listeners recycled → ref count hit 0 → event returned to pool
-    auto* reused = pool.Create();
-    EXPECT_NE(reused, nullptr);
-    reused->Recycle();
+    auto* reused = pool.TryCreate();
+    EXPECT_EQ(reused, event);
+    if (reused) reused->Recycle();
+}
+
+TEST(EventSystemTest, NotifyWithOnlySyncHandlersRecyclesPooledEvent) {
+    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(1);
+    Observable observable;
+    int sync_count = 0;
+    observable.ConnectSync(
+        [](void* ctx, Event*) { ++*static_cast<int*>(ctx); },
+        &sync_count);
+
+    auto* event = pool.Create();
+    observable.Notify(event);  // Notify always takes ownership
+
+    EXPECT_EQ(sync_count, 1);
+    auto* reused = pool.TryCreate();
+    EXPECT_EQ(reused, event);
+    if (reused) reused->Recycle();
+}
+
+TEST(EventSystemTest, NotifyWithoutConnectionsRecyclesPooledEvent) {
+    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(1);
+    Observable observable;
+
+    auto* event = pool.Create();
+    observable.Notify(event);
+
+    auto* reused = pool.TryCreate();
+    EXPECT_EQ(reused, event);
+    if (reused) reused->Recycle();
+}
+
+TEST(EventSystemTest, CrossThreadFanOutReturnsEveryEventToPool) {
+    constexpr int kEvents = 50'000;
+    constexpr int kPoolSize = 16;
+    memory::ObjectPool<PositionUpdated, memory::ThreadSafePolicy> pool(kPoolSize);
+    Observable observable;
+    AsyncObserver observer1;
+    AsyncObserver observer2;
+    observable.ConnectAsync(observer1);
+    observable.ConnectAsync(observer2);
+
+    std::atomic<bool> done{false};
+    auto consume = [&done](AsyncObserver& observer, uint64_t& out_sum) {
+        auto listener = observer.GetListener();
+        while (true) {
+            Event* e = listener.GetNextEvent();
+            if (e) {
+                out_sum += static_cast<PositionUpdated*>(e)->frame_id.value;
+            } else if (done.load(std::memory_order_acquire)) {
+                if (!(e = listener.GetNextEvent())) break;
+                out_sum += static_cast<PositionUpdated*>(e)->frame_id.value;
+            }
+        }
+    };
+    uint64_t sum1 = 0;
+    uint64_t sum2 = 0;
+    std::thread consumer1(consume, std::ref(observer1), std::ref(sum1));
+    std::thread consumer2(consume, std::ref(observer2), std::ref(sum2));
+
+    uint64_t expected = 0;
+    for (int i = 0; i < kEvents; ++i) {
+        PositionUpdated* e = nullptr;
+        while (!(e = pool.TryCreate())) std::this_thread::yield();
+        e->frame_id = map::FrameId{static_cast<uint32_t>(i)};
+        expected += static_cast<uint64_t>(i);
+        observable.Notify(e);
+    }
+    done.store(true, std::memory_order_release);
+    consumer1.join();
+    consumer2.join();
+
+    EXPECT_EQ(sum1, expected);
+    EXPECT_EQ(sum2, expected);
+    std::vector<PositionUpdated*> all;
+    for (int i = 0; i < kPoolSize; ++i) {
+        all.push_back(pool.TryCreate());
+        ASSERT_NE(all.back(), nullptr);
+    }
+    for (auto* e : all) e->Recycle();
 }
 
 TEST(EventSystemTest, ObservableSyncAndAsync) {
