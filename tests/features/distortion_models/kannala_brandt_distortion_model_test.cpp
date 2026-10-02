@@ -392,6 +392,31 @@ TEST_F(KannalaBrandtDistortionModelTest,
   }
 }
 
+// TUM-VI 1024x1024 fisheye: even theta = 90 degrees projects inside the image
+// (diagonal radius ~1.58 rad * fx < 1024 - cx), so a lookup that walks outward
+// until it leaves the image never terminated.
+TEST_F(KannalaBrandtDistortionModelTest, LookupTerminatesForFisheyeWiderThanImage) {
+  KannalaBrandtDistortionModel model(0.010171079892421483, -0.010816440029919381,
+                                     0.005942781769412756, -0.001662284667857643);
+  geometry::TMatrix33F K;
+  K << 380.81042871360756, 0, 510.29465304840727,
+       0, 380.81194179427075, 514.3304630538506,
+       0, 0, 1;
+  model.PrecomputeInitialGuessLookup(K, 1024, 1024);
+  ASSERT_TRUE(model.IsLookupTablePrecomputed());
+
+  // Round trip up to ~80 degrees off-axis.
+  for (precision_t r : {0.1, 0.5, 1.0, 2.0, 5.0}) {
+    geometry::THomogenousPointsF point(3, 1);
+    point << r / std::sqrt(2.0), r / std::sqrt(2.0), 1.0;
+    geometry::THomogenousPointsF distorted = point;
+    model.Distort(distorted);
+    model.Undistort(distorted);
+    EXPECT_NEAR(distorted(0, 0) / distorted(2, 0), point(0, 0), 1e-6) << "r = " << r;
+    EXPECT_NEAR(distorted(1, 0) / distorted(2, 0), point(1, 0), 1e-6) << "r = " << r;
+  }
+}
+
 TEST_F(KannalaBrandtDistortionModelTest, UndistortIsInverseOfDistort) {
   // Test with different coefficient sets to ensure robustness
   std::vector<std::vector<precision_t>> test_coefficients = {

@@ -5,6 +5,7 @@ stb/cci.20240531
 opencv/4.12.0
 spdlog/1.17.0
 concurrentqueue/1.0.4
+yaml-cpp/0.8.0
 
 [generators]
 CMakeDeps
