@@ -8,14 +8,13 @@
 
 namespace voyahslam::events {
 
-template <typename TFeatureExtractor, typename TCameraFrameType>
+template <typename TFeatureExtractor, typename TMeasurement>
 struct KeyFrameCreated
     : Event
-    , memory::Recyclable<KeyFrameCreated<TFeatureExtractor, TCameraFrameType>, memory::ThreadSafePolicy> {
+    , memory::Recyclable<KeyFrameCreated<TFeatureExtractor, TMeasurement>, memory::ThreadSafePolicy> {
     map::FrameId frame_id;
     geometry::TPose pose;
-    TCameraFrameType camera_frame;
-    double timestamp;
+    TMeasurement measurement;  // carries the timestamp
 
     KeyFrameCreated()
         : Event(EventType::KeyFrameCreated,

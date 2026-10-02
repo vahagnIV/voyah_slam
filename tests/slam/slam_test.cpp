@@ -35,12 +35,17 @@ TEST(SlamTest, StartStopAndDestroy) {
     slam.Stop();
 }
 
-TEST(SlamTest, TrackerAcceptsMonoAndBinocularFrames) {
+TEST(SlamTest, TrackEnqueuesMonocularAndBinocularMeasurements) {
+    using TTracker = Slam<features::SIFTFeatureExtractor>::TTracker;
     Slam<features::SIFTFeatureExtractor> slam;
-    slam.tracker().Track(Slam<features::SIFTFeatureExtractor>::TTracker::TCameraFrame{});
-    static_assert(requires(OrbSlam::TTracker t, const OrbSlam::TTracker::TBinocularCameraFrame& f) {
-        t.Track(f);
-    });
+    EXPECT_EQ(slam.tracker().pending_measurements(), 0u);
+
+    slam.tracker().Track(TTracker::TMonocularMeasurement{});
+    TTracker::TBinocularMeasurement binocular;
+    slam.tracker().Track(binocular);             // copy
+    slam.tracker().Track(std::move(binocular));  // move
+
+    EXPECT_EQ(slam.tracker().pending_measurements(), 3u);
 }
 
 } // namespace

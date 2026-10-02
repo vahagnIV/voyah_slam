@@ -7,7 +7,7 @@ add_executable(voyahslam_tests
     images/filter_tests.cpp
     images/gaussian_blur_tests.cpp
     images/resizer_tests.cpp
-    features/camera_frame_test.cpp
+    features/monocular_measurement_test.cpp
     features/image_features_test.cpp
     features/keypoint_matches_test.cpp
     features/distortion_models/distortion_model_test.cpp
@@ -16,7 +16,7 @@ add_executable(voyahslam_tests
     memory/column_buffer_test.cpp
     map/id_types_test.cpp
     features/stereo_rig_test.cpp
-    features/binocular_camera_frame_test.cpp
+    features/binocular_measurement_test.cpp
     map/map_point_storage_test.cpp
     map/frame_test.cpp
     map/observation_storage_test.cpp
