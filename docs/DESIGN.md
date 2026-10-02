@@ -123,7 +123,7 @@ Detailed spec: `docs/superpowers/specs/2026-09-30-core-slam-data-structures-desi
 | `StereoRig` | `features/stereo_rig.h` | K left/right, R/t right→left, baseline, distortion models. |
 | `BinocularCameraFrame<T, L>` | `features/binocular_camera_frame.h` | Left/right `CameraFrame`, per-feature depth, right match index. |
 | `Event`, `EventType` | `events/event_types.h` | Base event: type tag + `recycle_` / `set_ref_count_` fn pointers. |
-| concrete events | `events/map_events.h` | See §6. |
+| concrete events | `events/<event_name>.h` | One header per event (e.g. `events/map_points_added.h`); `events/events.h` includes all. See §6. |
 | `Observable` | `events/observable.h` | Sync handlers (inline, fn ptr + ctx) run first, then async enqueue with ref count = #async queues. |
 | `AsyncObserver` | `events/async_observer.h` | One queue per observer (1:1 channel). |
 | `Listener` | `events/listener.h` | Iterates a queue; auto-recycles previous/last event; move-only. |
@@ -257,9 +257,11 @@ pointer returned by `GetNextEvent()` is a **borrow**, valid until the next
 
 **Adding a new event type:** inherit `Event` and
 `memory::Recyclable<Self, memory::ThreadSafePolicy>`, wire `recycle_` /
-`set_ref_count_` in the constructor (see `map_events.h`), make it default
+`set_ref_count_` in the constructor (see e.g. `events/map_points_added.h`), make it default
 constructible, store variable-size payloads in `ColumnBuffer`s / `std::vector`s,
-and give it `Reset()` if it has any.
+and give it `Reset()` if it has any. Put it in its own header
+`events/<snake_case_name>.h`, add the `EventType` value, and add it to
+`events/events.h`.
 
 ## 7. Coding Conventions
 
@@ -277,6 +279,8 @@ and give it `Reset()` if it has any.
 **Structure:**
 - C++20.
 - Include guards `VOYAHSLAM_<PATH>_H` (no `#pragma once`).
+- One event type per header; file name is the event name in `snake_case`.
+- Every header is self-contained: it compiles when included first and alone.
 - Public headers included as `#include <voyahslam/...>`.
 - Template classes header-only; non-template classes have a `.cpp` in `src/` mirroring `include/`.
 - `[[nodiscard]]` on const accessors.
@@ -311,6 +315,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-02 | `ObjectPool` free-list is a lock-free Treiber stack with tagged head; links in a separate index array. | Removes the last mutex from the event path; slot memory never read concurrently with construction. Verified with ThreadSanitizer. |
 | 2026-10-02 | `Observable::Notify()` always takes ownership of the event. | One rule for producers regardless of how observers are wired. |
 | 2026-10-02 | Pooled objects are default-constructed once and kept alive; `Recycle()` doesn't destroy, reuse calls optional `Reset()`. `Create()` takes no arguments. | Payload buffers (the bulk of allocation) are reused, not just the event shell. |
+| 2026-10-02 | One event type per header, plus `events/events.h` umbrella; `map_events.h` removed. | User preference: easier to navigate and to include only what is used. |
 | 2026-10-02 | Event payloads use grow-only `ColumnBuffer` (capacity + count) instead of plain `Eigen::Matrix`. | Eigen reallocates on any size change; grow-only buffers reach a steady state with zero allocations. Chosen over fixed max-size buffers, which waste memory and need a hard cap. |
 
 ## 9. Open Questions

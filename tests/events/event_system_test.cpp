@@ -1,4 +1,4 @@
-#include <voyahslam/events/map_events.h>
+#include <voyahslam/events/events.h>
 #include <voyahslam/events/observable.h>
 #include <voyahslam/features/camera_frame.h>
 #include <voyahslam/features/orb_feature_extractor.h>
