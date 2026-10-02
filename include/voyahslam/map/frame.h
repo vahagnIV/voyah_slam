@@ -3,21 +3,19 @@
 
 #include <utility>
 #include <voyahslam/defs.h>
-#include <voyahslam/features/binocular_camera_frame.h>
-#include <voyahslam/features/camera_frame.h>
+#include <voyahslam/features/binocular_measurement.h>
+#include <voyahslam/features/monocular_measurement.h>
 #include <voyahslam/map/frame_id.h>
 
 namespace voyahslam::map {
 
-template <typename TFeatureExtractor, typename TCameraFrameType>
+template <typename TFeatureExtractor, typename TMeasurement>
 class Frame {
 public:
-    Frame(FrameId id, const geometry::TPose& pose,
-          TCameraFrameType&& camera_frame, double timestamp)
+    Frame(FrameId id, const geometry::TPose& pose, TMeasurement&& measurement)
         : id_(id)
         , pose_(pose)
-        , camera_frame_(std::move(camera_frame))
-        , timestamp_(timestamp) {}
+        , measurement_(std::move(measurement)) {}
 
     Frame(const Frame&) = default;
     Frame& operator=(const Frame&) = default;
@@ -27,23 +25,22 @@ public:
     [[nodiscard]] FrameId id() const { return id_; }
     [[nodiscard]] const geometry::TPose& pose() const { return pose_; }
     geometry::TPose& mutable_pose() { return pose_; }
-    [[nodiscard]] const TCameraFrameType& camera_frame() const { return camera_frame_; }
-    [[nodiscard]] double timestamp() const { return timestamp_; }
+    [[nodiscard]] const TMeasurement& measurement() const { return measurement_; }
+    [[nodiscard]] double timestamp() const { return measurement_.timestamp(); }
 
 private:
     FrameId id_;
     geometry::TPose pose_;
-    TCameraFrameType camera_frame_;
-    double timestamp_;
+    TMeasurement measurement_;
 };
 
 template <typename FE>
 using MonoFrame = Frame<FE,
-    features::CameraFrame<typename FE::TDescriptorScalarType, FE::DescriptorSize>>;
+    features::MonocularMeasurement<typename FE::TDescriptorScalarType, FE::DescriptorSize>>;
 
 template <typename FE>
 using StereoFrame = Frame<FE,
-    features::BinocularCameraFrame<typename FE::TDescriptorScalarType, FE::DescriptorSize>>;
+    features::BinocularMeasurement<typename FE::TDescriptorScalarType, FE::DescriptorSize>>;
 
 } // namespace voyahslam::map
 

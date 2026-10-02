@@ -3,12 +3,10 @@
 
 #include <atomic>
 #include <cassert>
+#include <voyahslam/memory/object_pool.h>
 #include <voyahslam/memory/sync_policy.h>
 
 namespace voyahslam::memory {
-
-template <typename T, typename SyncPolicy>
-class ObjectPool;
 
 template <typename T, typename SyncPolicy = NoSyncPolicy>
 class Recyclable {

@@ -1,16 +1,16 @@
 #include <gtest/gtest.h>
-#include "voyahslam/features/camera_frame.h"
+#include "voyahslam/features/monocular_measurement.h"
 #include "voyahslam/features/distortion_models/dummy_distortion_model.h"
 #include "voyahslam/defs.h"
 
 using voyahslam::features::ImageFeatures;
 using namespace voyahslam::geometry;
 using namespace voyahslam::features;
-using voyahslam::features::CameraFrame;
+using voyahslam::features::MonocularMeasurement;
 using voyahslam::features::distortion_models::DummyDistortionModel;
 using voyahslam::precision_t;
 
-class CameraFrameTest : public ::testing::Test {
+class MonocularMeasurementTest : public ::testing::Test {
 protected:
     static constexpr int DescriptorSize = 32;
     typedef uint8_t TDescriptorScalarType;
@@ -39,7 +39,7 @@ protected:
     Eigen::Matrix<precision_t, 3, 3> K_;
 };
 
-TEST_F(CameraFrameTest, ConstructorAndGetters) {
+TEST_F(MonocularMeasurementTest, ConstructorAndGetters) {
     auto points = points_;
     // Create original features
     ImageFeatures<TDescriptorScalarType, DescriptorSize> original_features(
@@ -53,14 +53,16 @@ TEST_F(CameraFrameTest, ConstructorAndGetters) {
     DummyDistortionModel dummy_model;
 
     // Create frame features
-    CameraFrame camera_frame(
+    MonocularMeasurement measurement(
         std::move(original_features),
         K_,
-        &dummy_model
+        &dummy_model,
+        12.5
     );
 
     // Verify camera matrix
-    EXPECT_TRUE(camera_frame.K().isApprox(K_));
+    EXPECT_DOUBLE_EQ(measurement.timestamp(), 12.5);
+    EXPECT_TRUE(measurement.K().isApprox(K_));
 
     // Verify normalized points
     // For our test case with identity-like K, normalized points should be similar to original points
@@ -69,13 +71,13 @@ TEST_F(CameraFrameTest, ConstructorAndGetters) {
     expected_normalized.topRows(2) = points;
     expected_normalized.row(2).setOnes();
     expected_normalized = K_.inverse() * expected_normalized;
-    EXPECT_TRUE(camera_frame.normalized_points().isApprox(expected_normalized));
+    EXPECT_TRUE(measurement.normalized_points().isApprox(expected_normalized));
 
     // Verify features getter
-    EXPECT_TRUE(camera_frame.points().isApprox(points));
+    EXPECT_TRUE(measurement.points().isApprox(points));
 }
 
-TEST_F(CameraFrameTest, MoveSemantics) {
+TEST_F(MonocularMeasurementTest, MoveSemantics) {
     auto points = points_;
     // Create original features
     ImageFeatures<TDescriptorScalarType, DescriptorSize> original_features(
@@ -89,18 +91,19 @@ TEST_F(CameraFrameTest, MoveSemantics) {
     DummyDistortionModel dummy_model;
 
     // Create frame features
-    CameraFrame camera_frame1(
+    MonocularMeasurement measurement1(
         std::move(original_features),
         K_,
-        &dummy_model
+        &dummy_model,
+        0.0
     );
 
     // Move construct
-    CameraFrame camera_frame2(std::move(camera_frame1));
+    MonocularMeasurement measurement2(std::move(measurement1));
 
     // Verify that the data was moved correctly
-    EXPECT_TRUE(camera_frame2.K().isApprox(K_));
-    EXPECT_EQ(camera_frame2.normalized_points().cols(), 3);
-    EXPECT_EQ(camera_frame2.normalized_points().rows(), 3);
-    EXPECT_TRUE(camera_frame2.points().isApprox(points));
+    EXPECT_TRUE(measurement2.K().isApprox(K_));
+    EXPECT_EQ(measurement2.normalized_points().cols(), 3);
+    EXPECT_EQ(measurement2.normalized_points().rows(), 3);
+    EXPECT_TRUE(measurement2.points().isApprox(points));
 }

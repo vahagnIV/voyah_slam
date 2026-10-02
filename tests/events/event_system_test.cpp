@@ -1,6 +1,6 @@
-#include <voyahslam/events/map_events.h>
+#include <voyahslam/events/events.h>
 #include <voyahslam/events/observable.h>
-#include <voyahslam/features/camera_frame.h>
+#include <voyahslam/features/monocular_measurement.h>
 #include <voyahslam/features/orb_feature_extractor.h>
 #include <voyahslam/memory/object_pool.h>
 
@@ -14,9 +14,9 @@ namespace voyahslam::events {
 namespace {
 
 using OrbMapPointsAdded = MapPointsAdded<features::OrbFeatureExtractor>;
-using OrbCameraFrame = features::CameraFrame<uint8_t, 32>;
-using OrbKeyFrameCreated = KeyFrameCreated<features::OrbFeatureExtractor, OrbCameraFrame>;
-using OrbNewKeyFrameCandidate = NewKeyFrameCandidate<features::OrbFeatureExtractor, OrbCameraFrame>;
+using OrbMonocularMeasurement = features::MonocularMeasurement<uint8_t, 32>;
+using OrbKeyFrameCreated = KeyFrameCreated<features::OrbFeatureExtractor, OrbMonocularMeasurement>;
+using OrbNewKeyFrameCandidate = NewKeyFrameCandidate<features::OrbFeatureExtractor, OrbMonocularMeasurement>;
 
 TEST(EventSystemTest, EventTypeTag) {
     memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(4);

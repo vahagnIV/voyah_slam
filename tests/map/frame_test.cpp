@@ -7,7 +7,7 @@ namespace voyahslam::map {
 namespace {
 
 using OrbFeatures = features::ImageFeatures<uint8_t, 32>;
-using OrbCameraFrame = features::CameraFrame<uint8_t, 32>;
+using OrbMonocularMeasurement = features::MonocularMeasurement<uint8_t, 32>;
 
 OrbFeatures MakeFeatures(int n) {
     geometry::TPoints2DF points = geometry::TPoints2DF::Random(2, n) * 100.0 +
@@ -22,14 +22,14 @@ OrbFeatures MakeFeatures(int n) {
 TEST(FrameTest, MonoFrameConstruction) {
     geometry::TPose pose = geometry::TPose::Identity();
     geometry::TMatrix33F K = geometry::TMatrix33F::Identity();
-    auto camera_frame = OrbCameraFrame(MakeFeatures(10), K, nullptr);
+    auto measurement = OrbMonocularMeasurement(MakeFeatures(10), K, nullptr, 1.0);
 
     MonoFrame<features::OrbFeatureExtractor> frame(
-        FrameId{0}, pose, std::move(camera_frame), 1.0);
+        FrameId{0}, pose, std::move(measurement));
 
     EXPECT_EQ(frame.id(), FrameId{0});
     EXPECT_TRUE(frame.pose().isApprox(geometry::TPose::Identity()));
-    EXPECT_EQ(frame.camera_frame().points().cols(), 10);
+    EXPECT_EQ(frame.measurement().points().cols(), 10);
     EXPECT_DOUBLE_EQ(frame.timestamp(), 1.0);
 }
 
@@ -43,24 +43,24 @@ TEST(FrameTest, StereoFrameConstruction) {
         .baseline = 0.12,
     };
 
-    features::BinocularCameraFrame<uint8_t, 32> bcf(
-        MakeFeatures(5), MakeFeatures(5), rig);
+    features::BinocularMeasurement<uint8_t, 32> bcf(
+        MakeFeatures(5), MakeFeatures(5), rig, 2.5);
 
     StereoFrame<features::OrbFeatureExtractor> frame(
-        FrameId{1}, pose, std::move(bcf), 2.5);
+        FrameId{1}, pose, std::move(bcf));
 
     EXPECT_EQ(frame.id(), FrameId{1});
-    EXPECT_EQ(frame.camera_frame().left().points().cols(), 5);
+    EXPECT_EQ(frame.measurement().left().points().cols(), 5);
     EXPECT_DOUBLE_EQ(frame.timestamp(), 2.5);
 }
 
 TEST(FrameTest, MutablePose) {
     geometry::TPose pose = geometry::TPose::Identity();
     geometry::TMatrix33F K = geometry::TMatrix33F::Identity();
-    auto camera_frame = OrbCameraFrame(MakeFeatures(3), K, nullptr);
+    auto measurement = OrbMonocularMeasurement(MakeFeatures(3), K, nullptr, 0.0);
 
     MonoFrame<features::OrbFeatureExtractor> frame(
-        FrameId{0}, pose, std::move(camera_frame), 0.0);
+        FrameId{0}, pose, std::move(measurement));
 
     frame.mutable_pose()(0, 3) = 5.0;
     EXPECT_DOUBLE_EQ(frame.pose()(0, 3), 5.0);

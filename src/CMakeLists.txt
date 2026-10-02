@@ -11,6 +11,10 @@ add_library(voyahslam
     features/orb/image_pyramid.cpp
     features/orb/extract_node.cpp
     features/orb/quad_tree_distributor.cpp
+    tracking/tracker.cpp
+    mapping/mapper.cpp
+    loop_closing/loop_closer.cpp
+    slam/slam.cpp
 )
 
 target_include_directories(voyahslam

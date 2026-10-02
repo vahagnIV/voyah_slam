@@ -1,4 +1,4 @@
-#include <voyahslam/features/binocular_camera_frame.h>
+#include <voyahslam/features/binocular_measurement.h>
 
 #include <gtest/gtest.h>
 
@@ -6,7 +6,7 @@ namespace voyahslam::features {
 namespace {
 
 using TestFeatures = ImageFeatures<uint8_t, 32>;
-using TestBinocular = BinocularCameraFrame<uint8_t, 32>;
+using TestBinocular = BinocularMeasurement<uint8_t, 32>;
 
 TestFeatures MakeFeatures(int n) {
     geometry::TPoints2DF points = geometry::TPoints2DF::Random(2, n) * 100.0 +
@@ -28,9 +28,9 @@ StereoRig MakeRig() {
     };
 }
 
-TEST(BinocularCameraFrameTest, Construction) {
+TEST(BinocularMeasurementTest, Construction) {
     auto rig = MakeRig();
-    auto bcf = TestBinocular(MakeFeatures(5), MakeFeatures(5), rig);
+    auto bcf = TestBinocular(MakeFeatures(5), MakeFeatures(5), rig, 3.0);
 
     EXPECT_TRUE(bcf.left().K().isIdentity());
     EXPECT_TRUE(bcf.right().K().isIdentity());
@@ -38,9 +38,17 @@ TEST(BinocularCameraFrameTest, Construction) {
     EXPECT_EQ(bcf.right_indices().size(), 5);
 }
 
-TEST(BinocularCameraFrameTest, Accessors) {
+TEST(BinocularMeasurementTest, TimestampIsSharedByBothCameras) {
     auto rig = MakeRig();
-    auto bcf = TestBinocular(MakeFeatures(3), MakeFeatures(4), rig);
+    auto measurement = TestBinocular(MakeFeatures(2), MakeFeatures(2), rig, 7.25);
+    EXPECT_DOUBLE_EQ(measurement.timestamp(), 7.25);
+    EXPECT_DOUBLE_EQ(measurement.left().timestamp(), 7.25);
+    EXPECT_DOUBLE_EQ(measurement.right().timestamp(), 7.25);
+}
+
+TEST(BinocularMeasurementTest, Accessors) {
+    auto rig = MakeRig();
+    auto bcf = TestBinocular(MakeFeatures(3), MakeFeatures(4), rig, 3.0);
 
     EXPECT_DOUBLE_EQ(bcf.depth(0), -1.0);
     EXPECT_EQ(bcf.right_indices()(0), -1);

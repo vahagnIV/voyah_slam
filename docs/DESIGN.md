@@ -22,6 +22,12 @@ lock-free queues, and every thread keeps its own replica of the map.
 Predecessor project: `../slamlab2`. Image processing, feature extraction,
 geometry, distortion models etc. were ported from there.
 
+**Long-term goal beyond ORB-SLAM3:** *mixed* maps — monocular and binocular
+keyframes in the same map (e.g. a stereo rig whose second camera drops out, or
+merging mono and stereo sessions). Data structures should not hard-wire one
+sensor type per map. For now the Tracker accepts both measurement types; how
+keyframes of different types share the map is still open (Open Question 17).
+
 ## 2. Core Principles
 
 1. **No locks.** No mutex anywhere on the map or event path. Cross-thread
@@ -54,7 +60,7 @@ geometry, distortion models etc. were ported from there.
 | current tracking state | Frame | Lives privately inside the Tracker; never published as a map object. |
 | `MapPointStorage` | set of MapPoints | SoA, indexed by `MapPointId`. |
 | `ObservationStorage` | MapPoint↔KeyFrame observations | Flat SoA table. |
-| `CameraFrame` / `BinocularCameraFrame` | features of a frame | Mono / stereo feature containers. |
+| `MonocularMeasurement` / `BinocularMeasurement` | Frame (features part) | Features of one image / a stereo pair at a timestamp. Input to `Track()`. |
 | `StereoRig` | camera calibration | Immutable, shared by all threads. |
 
 ## 4. Threads and Responsibilities
@@ -70,8 +76,62 @@ geometry, distortion models etc. were ported from there.
                                    Visualizer (future)
 ```
 
+### Slam (orchestrator) and EventNode
+
+`slam::Slam<TFeatureExtractor>` (`slam/slam.h`) owns the three components and
+wires them asynchronously in its constructor:
+
+| Publisher | → Async observers |
+|---|---|
+| Tracker | Mapper |
+| Mapper | Tracker, LoopCloser |
+| LoopCloser | Mapper |
+
+`Start()` starts consumers before producers (Mapper, LoopCloser, Tracker);
+`Stop()` stops producers first (Tracker, LoopCloser, Mapper); the destructor
+calls `Stop()`. `Slam` is neither copyable nor movable — components hold
+pointers to each other's inboxes. Extra observers (visualizer, logging) attach
+via `slam.tracker()/mapper()/loop_closer().AddObserver(...)` before `Start()`.
+
+Every component derives from `events::EventNode` (`events/event_node.h`, no
+virtuals): an `Observable` it publishes through, one `AsyncObserver` inbox it
+consumes, `AddObserver(AsyncObserver&)`, `AddSyncObserver(fn, ctx)`, `inbox()`.
+Components are templated on `TFeatureExtractor`, declared in headers and
+defined in `src/` with `INSTANTIATE_CLASS` (ORB + SIFT).
+
+| Component | Header | Public API so far |
+|---|---|---|
+| `tracking::Tracker<FE>` | `tracking/tracker.h` | `Start()`, `Stop()`, `Track(TMonocularMeasurement)`, `Track(TBinocularMeasurement)`, `pending_measurements()` |
+| `mapping::Mapper<FE>` | `mapping/mapper.h` | `Start()`, `Stop()` |
+| `loop_closing::LoopCloser<FE>` | `loop_closing/loop_closer.h` | `Start()`, `Stop()` |
+
+All bodies are empty for now (skeleton, 2026-10-02), except `Tracker::Track()`,
+which enqueues.
+
 ### Tracker
-- Input: images. Extracts features, tracks against **its own** map replica.
+- Runs its **own thread with two input queues**:
+  - `inbox()` — map diffs from the Mapper (events),
+  - `measurements_` — `std::variant<TMonocularMeasurement, TBinocularMeasurement>`
+    filled by `Track()`.
+
+  `Track()` does not track: it moves the measurement into the queue and returns
+  (taken by value — pass an rvalue to avoid copying the feature matrices).
+  Loop on the Tracker thread:
+  ```
+  while running:
+      apply ALL pending map diffs from inbox()     // replica is now current
+      take a measurement (see Open Question 19)
+      track it; publish PositionUpdated (+ NewKeyFrameCandidate)
+  ```
+  Diffs and tracking run on the same thread, so the replica never changes while
+  being tracked against — no locks. Two queues rather than one: map diffs get
+  priority, stale measurements can be dropped, and a single
+  `moodycamel::ConcurrentQueue` wouldn't order Mapper diffs relative to
+  measurements anyway (it is FIFO per producer only).
+- Input: feature measurements (mono or binocular), each with its capture
+  timestamp. Both types may arrive in the same session (mixed-map goal, §1).
+  Feature extraction happens before `Track()` (in the user application for now).
+- Tracks against **its own** map replica.
 - Optimizes **only its own camera pose** relative to the map (motion-only BA).
   Never touches `Frame`s, map points, or observations.
 - Publishes `PositionUpdated` (frame id, pose, timestamp) for each tracked frame.
@@ -118,12 +178,13 @@ Detailed spec: `docs/superpowers/specs/2026-09-30-core-slam-data-structures-desi
 | `ColumnBuffer<TScalar, Rows>` | `memory/column_buffer.h` | Grow-only `Rows × N` Eigen buffer; `Resize(n)` allocates only beyond capacity. |
 | `MapPointId`, `FrameId` | `map/*_id.h` | Strong ID wrappers. |
 | `MapPointStorage<FE>` | `map/map_point_storage.h` | SoA: positions, descriptors, normals, num observations, valid flags. |
-| `Frame<FE, CF>` | `map/frame.h` | Keyframe: id, pose, camera frame, timestamp. `MonoFrame<FE>`, `StereoFrame<FE>` aliases. |
+| `MonocularMeasurement<T, L>` | `features/monocular_measurement.h` | `ImageFeatures` + K, undistorted & normalized points, `timestamp()`. |
+| `Frame<FE, TMeasurement>` | `map/frame.h` | Keyframe: id, pose, measurement; `timestamp()` comes from the measurement. `MonoFrame<FE>`, `StereoFrame<FE>` aliases. |
 | `ObservationStorage<Type>` | `map/observation_storage.h` | SoA observation table; stereo fields compiled out for mono. |
 | `StereoRig` | `features/stereo_rig.h` | K left/right, R/t right→left, baseline, distortion models. |
-| `BinocularCameraFrame<T, L>` | `features/binocular_camera_frame.h` | Left/right `CameraFrame`, per-feature depth, right match index. |
+| `BinocularMeasurement<T, L>` | `features/binocular_measurement.h` | Left/right `MonocularMeasurement`, per-feature depth, right match index; `timestamp()` = left's. |
 | `Event`, `EventType` | `events/event_types.h` | Base event: type tag + `recycle_` / `set_ref_count_` fn pointers. |
-| concrete events | `events/map_events.h` | See §6. |
+| concrete events | `events/<event_name>.h` | One header per event (e.g. `events/map_points_added.h`); `events/events.h` includes all. See §6. |
 | `Observable` | `events/observable.h` | Sync handlers (inline, fn ptr + ctx) run first, then async enqueue with ref count = #async queues. |
 | `AsyncObserver` | `events/async_observer.h` | One queue per observer (1:1 channel). |
 | `Listener` | `events/listener.h` | Iterates a queue; auto-recycles previous/last event; move-only. |
@@ -135,12 +196,12 @@ Ported from slamlab2: `images/`, `io/`, `algebra/`, `geometry/`, `features/`
 
 | Event | Producer → Consumer | Payload |
 |---|---|---|
-| `NewKeyFrameCandidate<FE, CF>` | Tracker → Mapper | frame, observations `(map_point_id, feature_idx)` |
+| `NewKeyFrameCandidate<FE, TMeasurement>` | Tracker → Mapper | frame_id, pose, measurement, observations `(map_point_id, feature_idx)` (TODO) |
 | `PositionUpdated` | Tracker → Visualizer/others | frame_id, pose, timestamp |
 | `MapPointsAdded<FE>` | Mapper → all | start_id, positions, descriptors, normals (`Resize(n)`, `count()`) |
 | `MapPointsUpdated<FE>` | Mapper → all | ids, positions, descriptors, normals (`Resize(n)`, `count()`) |
 | `MapPointsRemoved` | Mapper → all | ids |
-| `KeyFrameCreated<FE, CF>` | Mapper → all | frame |
+| `KeyFrameCreated<FE, TMeasurement>` | Mapper → all | frame_id, pose, measurement |
 | `KeyFramePoseUpdated` | Mapper → all | frame_id, pose |
 | `LoopDetected` | LoopCloser → Mapper | query/match frames + verification data (TBD) |
 
@@ -257,9 +318,11 @@ pointer returned by `GetNextEvent()` is a **borrow**, valid until the next
 
 **Adding a new event type:** inherit `Event` and
 `memory::Recyclable<Self, memory::ThreadSafePolicy>`, wire `recycle_` /
-`set_ref_count_` in the constructor (see `map_events.h`), make it default
+`set_ref_count_` in the constructor (see e.g. `events/map_points_added.h`), make it default
 constructible, store variable-size payloads in `ColumnBuffer`s / `std::vector`s,
-and give it `Reset()` if it has any.
+and give it `Reset()` if it has any. Put it in its own header
+`events/<snake_case_name>.h`, add the `EventType` value, and add it to
+`events/events.h`.
 
 ## 7. Coding Conventions
 
@@ -277,6 +340,8 @@ and give it `Reset()` if it has any.
 **Structure:**
 - C++20.
 - Include guards `VOYAHSLAM_<PATH>_H` (no `#pragma once`).
+- One event type per header; file name is the event name in `snake_case`.
+- Every header is self-contained: it compiles when included first and alone.
 - Public headers included as `#include <voyahslam/...>`.
 - Template classes header-only; non-template classes have a `.cpp` in `src/` mirroring `include/`.
 - `[[nodiscard]]` on const accessors.
@@ -311,6 +376,13 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-02 | `ObjectPool` free-list is a lock-free Treiber stack with tagged head; links in a separate index array. | Removes the last mutex from the event path; slot memory never read concurrently with construction. Verified with ThreadSanitizer. |
 | 2026-10-02 | `Observable::Notify()` always takes ownership of the event. | One rule for producers regardless of how observers are wired. |
 | 2026-10-02 | Pooled objects are default-constructed once and kept alive; `Recycle()` doesn't destroy, reuse calls optional `Reset()`. `Create()` takes no arguments. | Payload buffers (the bulk of allocation) are reused, not just the event shell. |
+| 2026-10-02 | Tracker has its own thread and queue; `Track()` only enqueues. | Map diffs and tracking are processed on one thread, so the Tracker's replica needs no locks. |
+| 2026-10-02 | Tracker uses two queues: map diffs (inbox) drained first, then measurements. `Track()` takes the measurement by value and enqueues it. | Replica is current before every tracking step; allows dropping stale measurements; one moodycamel queue wouldn't order the two producers anyway. |
+| 2026-10-02 | `CameraFrame` → `MonocularMeasurement`, `BinocularCameraFrame` → `BinocularMeasurement`; timestamp stored in the measurement (binocular uses the left's); removed from `Frame` and keyframe events. | Avoids `CameraFrame`/`Frame`/`MonoFrame` confusion; one source of truth for time. |
+| 2026-10-02 | Long-term goal: mixed monocular/binocular keyframes in one map. Tracker accepts both measurement types now; binding decided later. | Extension beyond ORB-SLAM3. |
+| 2026-10-02 | Configuration lives in the user application; reference app in `examples/full_slam/`. | Library stays free of config-file parsing. |
+| 2026-10-02 | Orchestrator named `Slam<FE>`; components share a non-virtual `EventNode` base for their observable + inbox. | `Slam` is what the user instantiates; `System` is too generic. One base avoids repeating the observer API in three classes. |
+| 2026-10-02 | One event type per header, plus `events/events.h` umbrella; `map_events.h` removed. | User preference: easier to navigate and to include only what is used. |
 | 2026-10-02 | Event payloads use grow-only `ColumnBuffer` (capacity + count) instead of plain `Eigen::Matrix`. | Eigen reallocates on any size change; grow-only buffers reach a steady state with zero allocations. Chosen over fixed max-size buffers, which waste memory and need a hard cap. |
 
 ## 9. Open Questions
@@ -337,6 +409,21 @@ branch → review → merge to `master`. Update this document at the end.
    local BA and loop closure) — not designed yet.
 9. Keyframe culling and how `Frame` removal propagates (`KeyFrameRemoved` event?).
 10. IMU / multi-map (Atlas) support — out of scope for now.
+15. ~~Tracker threading~~ — decided 2026-10-02: own thread, two queues (§4).
+16. ~~Measurement naming and timestamps~~ — decided 2026-10-02:
+    `MonocularMeasurement` / `BinocularMeasurement`, timestamp in the measurement.
+17. **Mixed mono/binocular keyframes:** `Frame<FE, TCameraFrameType>` fixes one
+    type per map; Mapper/LoopCloser are templated only on `FE`. Needs a design
+    that lets both keyframe types coexist (goal in §1).
+18. ~~Component construction~~ — decided 2026-10-02: configuration (rig,
+    extractor settings, pool sizes) is done by the user application; the
+    reference application will live in `examples/full_slam/`.
+19. **Tracker measurement policy:** track every measurement in order, or skip
+    to the newest when falling behind (real-time)? Possibly configurable.
+20. **Tracker idle wait:** how the Tracker thread sleeps when both queues are
+    empty and is woken by either a `Track()` call or a Mapper diff, without
+    locks (e.g. a C++20 `std::atomic` wait/notify counter signalled by both
+    `Track()` and `AsyncObserver` enqueue). Same question for Mapper/LoopCloser.
 11. ~~Payload buffers are not reused~~ — resolved 2026-10-02 (objects stay alive
     in the pool, payloads in grow-only `ColumnBuffer`s). Related: chunking large
     loop-closure diffs (Q3) would also bound the buffers' peak capacity.
@@ -350,12 +437,17 @@ branch → review → merge to `master`. Update this document at the end.
 
 ## 10. Status and Next Steps
 
-**Done (on `master`):**
+**Done:**
 - Ported core modules from slamlab2 (78 tests).
 - Core data layer + event system (merge `91b56aa`).
+- Lock-free event pool, `Notify()` ownership, payload buffer reuse (merge `2e10c59`).
+- One header per event; `Slam` / `Tracker` / `Mapper` / `LoopCloser` /
+  `EventNode` skeleton with wiring; measurement rename + timestamps; Tracker
+  measurement queue (branches `refactor/event-per-file`,
+  `feat/slam-threads-skeleton` — merge pending).
 
-**Required follow-up from 2026-10-02 decisions:**
-- Remove free-list reuse from `MapPointStorage` (ids are monotonic now); decide
+**Required follow-up:**
+- Remove free-list reuse from `MapPointStorage` (ids are never reused); decide
   storage-growth strategy (Open Question 2).
 - Make sure `FrameId` allocation is monotonic too.
 - Decide on Open Question 14 (pool sizing per event type).
@@ -363,6 +455,9 @@ branch → review → merge to `master`. Update this document at the end.
   observations yet (§6 says it should) — add when designing the Tracker.
 
 **Next:**
+- `examples/full_slam/`: user application that configures and runs `Slam`.
+- Component loops: threads, idle wait (Open Question 20), Tracker measurement
+  policy (19).
 - Design the Tracker (initialization mono/stereo, track-with-motion-model,
   track-reference-keyframe, track-local-map, relocalization, keyframe decision).
 - Then the Mapper, then the LoopCloser.
