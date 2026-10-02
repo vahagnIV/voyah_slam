@@ -5,3 +5,5 @@ add_executable(hello_voyahslam
 target_link_libraries(hello_voyahslam
     PRIVATE voyahslam
 )
+
+add_subdirectory(full_slam)
