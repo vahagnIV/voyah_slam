@@ -19,16 +19,26 @@ public:
         sync_handlers_.push_back({fn, ctx});
     }
 
+    // Takes ownership of `event`: sync handlers run inline first, then the event
+    // is handed to the async observers (each acknowledges it through its
+    // Listener) or, with no async observers, recycled immediately. The caller
+    // must not touch `event` after this call. Events with a null `recycle_`
+    // (e.g. stack-allocated, sync-only) are never recycled.
     void Notify(Event* event) {
         for (auto& handler : sync_handlers_) {
             handler.fn(handler.ctx, event);
         }
 
-        if (!async_queues_.empty()) {
-            event->set_ref_count_(event, static_cast<int>(async_queues_.size()));
-            for (auto* queue : async_queues_) {
-                queue->enqueue(event);
+        if (async_queues_.empty()) {
+            if (event->recycle_) {
+                event->recycle_(event);
             }
+            return;
+        }
+
+        event->set_ref_count_(event, static_cast<int>(async_queues_.size()));
+        for (auto* queue : async_queues_) {
+            queue->enqueue(event);
         }
     }
 

@@ -1,72 +1,118 @@
 #ifndef VOYAHSLAM_MEMORY_OBJECT_POOL_H
 #define VOYAHSLAM_MEMORY_OBJECT_POOL_H
 
+#include <atomic>
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
+#include <memory>
 #include <new>
-#include <type_traits>
-#include <utility>
 #include <voyahslam/memory/sync_policy.h>
 
 namespace voyahslam::memory {
 
+// Fixed-capacity pool of reusable objects. Each slot's object is
+// default-constructed the first time the slot is handed out and then kept alive
+// across Recycle()/Create() cycles, so whatever it allocated (vectors, Eigen
+// buffers) is reused instead of freed. On reuse the pool resets the reference
+// count and calls `T::Reset()` if T has one. Objects are destroyed only when the
+// pool is destroyed.
+//
+// The free-list is a stack of slot indices whose
+// links live in a separate array, so a slot's memory is never read while another
+// thread may be constructing an object in it, and slots are not touched (or
+// committed by the OS) until first use. With ThreadSafePolicy the stack is a
+// lock-free Treiber stack; the head packs (tag << 32 | index) and the tag is
+// bumped on every operation to prevent ABA.
 template <typename T, typename SyncPolicy = NoSyncPolicy>
-class ObjectPool : private SyncPolicy {
+class ObjectPool {
 public:
     explicit ObjectPool(size_t max_count = 1'000'000);
     ObjectPool(const ObjectPool&) = delete;
     ObjectPool& operator=(const ObjectPool&) = delete;
     ~ObjectPool();
 
-    template <typename... Args>
-    T* Create(Args&&... args);
+    // Asserts if the pool is exhausted.
+    T* Create();
+    // Returns nullptr if the pool is exhausted.
+    T* TryCreate();
     void Recycle(T* obj);
 
 private:
-    struct FreeNode { FreeNode* next; };
-    static constexpr size_t kAlign = (alignof(T) > alignof(FreeNode)) ? alignof(T) : alignof(FreeNode);
-    static constexpr size_t kSize  = (sizeof(T)  > sizeof(FreeNode))  ? sizeof(T)  : sizeof(FreeNode);
+    static constexpr uint32_t kNil = std::numeric_limits<uint32_t>::max();
+    static constexpr size_t kAlign = alignof(T);
+    static constexpr size_t kSize = sizeof(T);  // always a multiple of alignof(T)
+
+    static_assert(std::atomic<uint64_t>::is_always_lock_free);
 
     std::byte* storage_ = nullptr;
-    FreeNode* head_ = nullptr;
+    std::unique_ptr<std::atomic<uint32_t>[]> next_;
+    // Written only by the thread that currently owns the slot; read in ~ObjectPool.
+    std::unique_ptr<bool[]> constructed_;
+    std::atomic<uint64_t> head_{0};
     size_t max_count_ = 0;
 
-    void BuildFreeList() noexcept;
+    static uint64_t Pack(uint32_t tag, uint32_t index) {
+        return (static_cast<uint64_t>(tag) << 32) | index;
+    }
+    static uint32_t Tag(uint64_t head) { return static_cast<uint32_t>(head >> 32); }
+    static uint32_t Index(uint64_t head) { return static_cast<uint32_t>(head); }
+
+    uint32_t PopSlot();
+    void PushSlot(uint32_t index);
+    T* SlotAt(uint32_t index) const;
     bool BelongsToPool(const void* p) const noexcept;
 };
 
 template <typename T, typename SyncPolicy>
-ObjectPool<T, SyncPolicy>::ObjectPool(size_t max_count)
-        : max_count_(max_count) {
-    static_assert(std::is_trivially_destructible_v<FreeNode>, "sanity");
-    storage_ = static_cast<std::byte*>(
-            ::operator new(max_count_ * kSize, std::align_val_t(kAlign))
-    );
-    BuildFreeList();
+ObjectPool<T, SyncPolicy>::ObjectPool(size_t max_count) :
+    next_(std::make_unique<std::atomic<uint32_t>[]>(max_count)),
+    constructed_(std::make_unique<bool[]>(max_count)),
+    max_count_(max_count) {
+    assert(max_count > 0 && max_count < kNil && "ObjectPool size out of range");
+    storage_ = static_cast<std::byte*>(::operator new(max_count_ * kSize, std::align_val_t(kAlign)));
+    for (size_t i = 0; i < max_count_; ++i) {
+        next_[i].store(i + 1 < max_count_ ? static_cast<uint32_t>(i + 1) : kNil,
+                       std::memory_order_relaxed);
+    }
+    head_.store(Pack(0, 0), std::memory_order_release);
 }
 
 template <typename T, typename SyncPolicy>
 ObjectPool<T, SyncPolicy>::~ObjectPool() {
+    for (size_t i = 0; i < max_count_; ++i) {
+        if (constructed_[i]) {
+            SlotAt(static_cast<uint32_t>(i))->~T();
+        }
+    }
     ::operator delete(storage_, std::align_val_t(kAlign));
 }
 
 template <typename T, typename SyncPolicy>
-template <typename... Args>
-T* ObjectPool<T, SyncPolicy>::Create(Args&&... args) {
-    typename SyncPolicy::Lock lock(*this);
+T* ObjectPool<T, SyncPolicy>::Create() {
+    T* obj = TryCreate();
+    assert(obj && "ObjectPool exhausted");
+    return obj;
+}
 
-    if (!head_) {
-        assert(!"ObjectPool exhausted");
+template <typename T, typename SyncPolicy>
+T* ObjectPool<T, SyncPolicy>::TryCreate() {
+    uint32_t index = PopSlot();
+    if (index == kNil) {
         return nullptr;
     }
-
-    FreeNode* node = head_;
-    head_ = head_->next;
-
-    T* obj = reinterpret_cast<T*>(node);
-    new (obj) T(std::forward<Args>(args)...);
-    obj->object_pool_ = this;
+    T* obj = SlotAt(index);
+    if (!constructed_[index]) {
+        new (obj) T();
+        obj->object_pool_ = this;
+        constructed_[index] = true;
+    } else {
+        obj->ref_count_.store(1, std::memory_order_relaxed);
+        if constexpr (requires { obj->Reset(); }) {
+            obj->Reset();
+        }
+    }
     return obj;
 }
 
@@ -74,30 +120,57 @@ template <typename T, typename SyncPolicy>
 void ObjectPool<T, SyncPolicy>::Recycle(T* obj) {
     if (!obj) return;
     assert(BelongsToPool(obj) && "Recycling pointer not from this pool");
-
-    typename SyncPolicy::Lock lock(*this);
-    obj->~T();
-
-    auto* node = reinterpret_cast<FreeNode*>(obj);
-    node->next = head_;
-    head_ = node;
+    PushSlot(static_cast<uint32_t>((reinterpret_cast<std::byte*>(obj) - storage_) / kSize));
 }
 
 template <typename T, typename SyncPolicy>
-void ObjectPool<T, SyncPolicy>::BuildFreeList() noexcept {
-    head_ = nullptr;
-    for (size_t i = 0; i < max_count_; ++i) {
-        auto* node = reinterpret_cast<FreeNode*>(storage_ + i * kSize);
-        node->next = head_;
-        head_ = node;
+uint32_t ObjectPool<T, SyncPolicy>::PopSlot() {
+    uint64_t head = head_.load(std::memory_order_acquire);
+    if constexpr (SyncPolicy::kThreadSafe) {
+        while (true) {
+            uint32_t index = Index(head);
+            if (index == kNil) return kNil;
+            uint32_t next = next_[index].load(std::memory_order_relaxed);
+            if (head_.compare_exchange_weak(head, Pack(Tag(head) + 1, next),
+                                            std::memory_order_acquire,
+                                            std::memory_order_acquire)) {
+                return index;
+            }
+        }
+    } else {
+        uint32_t index = Index(head);
+        if (index == kNil) return kNil;
+        head_.store(Pack(Tag(head) + 1, next_[index].load(std::memory_order_relaxed)),
+                    std::memory_order_relaxed);
+        return index;
     }
+}
+
+template <typename T, typename SyncPolicy>
+void ObjectPool<T, SyncPolicy>::PushSlot(uint32_t index) {
+    uint64_t head = head_.load(std::memory_order_relaxed);
+    if constexpr (SyncPolicy::kThreadSafe) {
+        do {
+            next_[index].store(Index(head), std::memory_order_relaxed);
+        } while (!head_.compare_exchange_weak(head, Pack(Tag(head) + 1, index),
+                                              std::memory_order_release,
+                                              std::memory_order_relaxed));
+    } else {
+        next_[index].store(Index(head), std::memory_order_relaxed);
+        head_.store(Pack(Tag(head) + 1, index), std::memory_order_relaxed);
+    }
+}
+
+template <typename T, typename SyncPolicy>
+T* ObjectPool<T, SyncPolicy>::SlotAt(uint32_t index) const {
+    return reinterpret_cast<T*>(storage_ + static_cast<size_t>(index) * kSize);
 }
 
 template <typename T, typename SyncPolicy>
 bool ObjectPool<T, SyncPolicy>::BelongsToPool(const void* p) const noexcept {
     auto addr = reinterpret_cast<std::uintptr_t>(p);
     auto base = reinterpret_cast<std::uintptr_t>(storage_);
-    return addr >= base && addr < base + max_count_ * kSize;
+    return addr >= base && addr < base + max_count_ * kSize && (addr - base) % kSize == 0;
 }
 
 } // namespace voyahslam::memory
