@@ -114,7 +114,8 @@ Detailed spec: `docs/superpowers/specs/2026-09-30-core-slam-data-structures-desi
 |---|---|---|
 | `ObjectPool<T, SyncPolicy>` | `memory/object_pool.h` | Pre-allocated slab, intrusive free-list, asserts on exhaustion. |
 | `Recyclable<T, SyncPolicy>` | `memory/recyclable.h` | CRTP atomic ref count (acq_rel); returns object to its pool at 0. `SetRefCount(n)` for fan-out. |
-| `ThreadSafePolicy` / `NoSyncPolicy` | `memory/sync_policy.h` | Locking policy for the pool. |
+| `ThreadSafePolicy` / `NoSyncPolicy` | `memory/sync_policy.h` | Pool free-list mode: lock-free CAS / single-thread. |
+| `ColumnBuffer<TScalar, Rows>` | `memory/column_buffer.h` | Grow-only `Rows × N` Eigen buffer; `Resize(n)` allocates only beyond capacity. |
 | `MapPointId`, `FrameId` | `map/*_id.h` | Strong ID wrappers. |
 | `MapPointStorage<FE>` | `map/map_point_storage.h` | SoA: positions, descriptors, normals, num observations, valid flags. |
 | `Frame<FE, CF>` | `map/frame.h` | Keyframe: id, pose, camera frame, timestamp. `MonoFrame<FE>`, `StereoFrame<FE>` aliases. |
@@ -136,8 +137,8 @@ Ported from slamlab2: `images/`, `io/`, `algebra/`, `geometry/`, `features/`
 |---|---|---|
 | `NewKeyFrameCandidate<FE, CF>` | Tracker → Mapper | frame, observations `(map_point_id, feature_idx)` |
 | `PositionUpdated` | Tracker → Visualizer/others | frame_id, pose, timestamp |
-| `MapPointsAdded<FE>` | Mapper → all | start_id, count, positions, descriptors, normals |
-| `MapPointsUpdated<FE>` | Mapper → all | ids, positions, descriptors, normals |
+| `MapPointsAdded<FE>` | Mapper → all | start_id, positions, descriptors, normals (`Resize(n)`, `count()`) |
+| `MapPointsUpdated<FE>` | Mapper → all | ids, positions, descriptors, normals (`Resize(n)`, `count()`) |
 | `MapPointsRemoved` | Mapper → all | ids |
 | `KeyFrameCreated<FE, CF>` | Mapper → all | frame |
 | `KeyFramePoseUpdated` | Mapper → all | frame_id, pose |
@@ -154,11 +155,14 @@ Rules:
 
 ### 6.1 Event Lifecycle: Pooled, Reference-Counted, Acknowledged
 
-**Goal:** publishing an event must not hit the general-purpose heap allocator.
-Events are produced at frame rate on every thread; `new`/`delete` per event
-means allocator contention between threads and unpredictable latency. Instead,
-every concrete event type has a pre-allocated **`ObjectPool`**, and each event
-is a **`Recyclable`** object that knows how to return itself to its pool.
+**Goal:** publishing an event must not hit the general-purpose heap allocator —
+neither for the event object nor for its payload. Events are produced at frame
+rate on every thread; `new`/`delete` per event means allocator contention
+between threads and unpredictable latency. Instead, every concrete event type
+has a pre-allocated **`ObjectPool`**, each event is a **`Recyclable`** object
+that knows how to return itself to its pool, and pooled objects are **kept
+alive** between uses so their payload buffers are reused (steady state: zero
+allocations per event).
 
 **The building blocks (`include/voyahslam/memory/`):**
 
@@ -166,9 +170,17 @@ is a **`Recyclable`** object that knows how to return itself to its pool.
   allocated once in the constructor. Free slots form a stack of slot indices
   whose links live in a separate `atomic<uint32_t>` array, so slot memory is
   never read by the allocator and is not touched (or committed by the OS) until
-  first use. `Create(args...)` pops a slot and placement-constructs `T`
-  (asserts when exhausted); `TryCreate(args...)` returns `nullptr` instead;
-  `Recycle(T*)` destroys `T` and pushes the slot back. All O(1).
+  first use. `Create()` pops a slot (asserts when exhausted); `TryCreate()`
+  returns `nullptr` instead. The first time a slot is used its `T` is
+  default-constructed; on every later reuse the pool resets the ref count to 1
+  and calls `T::Reset()` if `T` defines one. `Recycle(T*)` just pushes the slot
+  back — **the object is not destroyed**, so vectors and Eigen buffers inside it
+  keep their allocations. Objects are destroyed only in `~ObjectPool`. All O(1).
+- `ColumnBuffer<TScalar, Rows>` — grow-only `Rows × N` Eigen buffer used for
+  event payloads. `Resize(n)` sets the visible column count and reallocates
+  (geometrically, preserving data) only when `n` exceeds capacity; `matrix()`
+  returns the `leftCols(n)` view. Plain `Eigen::Matrix` can't be used here
+  because it reallocates on every size change.
 - `Recyclable<T, SyncPolicy>` — CRTP mixin that gives an object an atomic
   reference count (starts at **1**) and a back-pointer to the pool that created it.
   `Recycle()` decrements; whoever drops the count to 0 returns the object to its
@@ -234,6 +246,20 @@ pointer returned by `GetNextEvent()` is a **borrow**, valid until the next
    reference.
 4. Use `TryCreate()` where exhaustion is an expected, recoverable condition
    (back-pressure) and `Create()` where it indicates a bug.
+5. A created event may be a reused one. Events with a `Reset()` come back
+   cleared (counts 0, ids empty, capacity kept). Events **without** `Reset()`
+   (`PositionUpdated`, `KeyFramePoseUpdated`, `KeyFrameCreated`,
+   `NewKeyFrameCandidate`, `LoopDetected`) still hold the previous values: the
+   producer must set every field.
+6. Fill batched payloads with `e->Resize(n)` and then write into
+   `e->positions.matrix()` / `.col(i)` etc. — never assign a freshly built
+   `Eigen::Matrix` to a buffer's storage, that would throw away the reuse.
+
+**Adding a new event type:** inherit `Event` and
+`memory::Recyclable<Self, memory::ThreadSafePolicy>`, wire `recycle_` /
+`set_ref_count_` in the constructor (see `map_events.h`), make it default
+constructible, store variable-size payloads in `ColumnBuffer`s / `std::vector`s,
+and give it `Reset()` if it has any.
 
 ## 7. Coding Conventions
 
@@ -284,6 +310,8 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-02 | Tracker lag between `NewKeyFrameCandidate` and resulting diffs is accepted. | Matches ORB-SLAM3 behaviour; Tracker keeps tracking with its current replica. |
 | 2026-10-02 | `ObjectPool` free-list is a lock-free Treiber stack with tagged head; links in a separate index array. | Removes the last mutex from the event path; slot memory never read concurrently with construction. Verified with ThreadSanitizer. |
 | 2026-10-02 | `Observable::Notify()` always takes ownership of the event. | One rule for producers regardless of how observers are wired. |
+| 2026-10-02 | Pooled objects are default-constructed once and kept alive; `Recycle()` doesn't destroy, reuse calls optional `Reset()`. `Create()` takes no arguments. | Payload buffers (the bulk of allocation) are reused, not just the event shell. |
+| 2026-10-02 | Event payloads use grow-only `ColumnBuffer` (capacity + count) instead of plain `Eigen::Matrix`. | Eigen reallocates on any size change; grow-only buffers reach a steady state with zero allocations. Chosen over fixed max-size buffers, which waste memory and need a hard cap. |
 
 ## 9. Open Questions
 
@@ -309,15 +337,9 @@ branch → review → merge to `master`. Update this document at the end.
    local BA and loop closure) — not designed yet.
 9. Keyframe culling and how `Frame` removal propagates (`KeyFrameRemoved` event?).
 10. IMU / multi-map (Atlas) support — out of scope for now.
-11. **Payload buffers are not actually reused.** `ObjectPool::Recycle()` runs
-    `~T()` and `Create()` placement-constructs a fresh `T`, so an event's Eigen
-    matrices / `std::vector`s free their heap buffers on recycle and reallocate
-    when the next producer fills them. The pool saves the event *shell*, not the
-    payload — which is where the bulk of the allocation is. Options: keep objects
-    constructed in the pool and `Reset()` them instead of destroying them
-    (`std::vector::clear()` keeps capacity; Eigen dynamic matrices do **not** —
-    `resize()` to a different size reallocates, so they'd need fixed max-capacity
-    storage plus a `count`, or `Eigen::Map` over a capacity-preserving buffer).
+11. ~~Payload buffers are not reused~~ — resolved 2026-10-02 (objects stay alive
+    in the pool, payloads in grow-only `ColumnBuffer`s). Related: chunking large
+    loop-closure diffs (Q3) would also bound the buffers' peak capacity.
 12. ~~Event pool takes a mutex~~ — resolved 2026-10-02 (lock-free Treiber stack).
 13. ~~Ownership in `Notify()` depends on wiring~~ — resolved 2026-10-02
     (`Notify()` always takes ownership).
@@ -336,7 +358,9 @@ branch → review → merge to `master`. Update this document at the end.
 - Remove free-list reuse from `MapPointStorage` (ids are monotonic now); decide
   storage-growth strategy (Open Question 2).
 - Make sure `FrameId` allocation is monotonic too.
-- Decide on Open Questions 11 (event payload buffer reuse) and 14 (pool sizing).
+- Decide on Open Question 14 (pool sizing per event type).
+- `NewKeyFrameCandidate` doesn't carry the tracked `(map_point_id, feature_idx)`
+  observations yet (§6 says it should) — add when designing the Tracker.
 
 **Next:**
 - Design the Tracker (initialization mono/stereo, track-with-motion-model,

@@ -8,12 +8,18 @@
 #include <limits>
 #include <memory>
 #include <new>
-#include <utility>
 #include <voyahslam/memory/sync_policy.h>
 
 namespace voyahslam::memory {
 
-// Fixed-capacity slab allocator. The free-list is a stack of slot indices whose
+// Fixed-capacity pool of reusable objects. Each slot's object is
+// default-constructed the first time the slot is handed out and then kept alive
+// across Recycle()/Create() cycles, so whatever it allocated (vectors, Eigen
+// buffers) is reused instead of freed. On reuse the pool resets the reference
+// count and calls `T::Reset()` if T has one. Objects are destroyed only when the
+// pool is destroyed.
+//
+// The free-list is a stack of slot indices whose
 // links live in a separate array, so a slot's memory is never read while another
 // thread may be constructing an object in it, and slots are not touched (or
 // committed by the OS) until first use. With ThreadSafePolicy the stack is a
@@ -28,11 +34,9 @@ public:
     ~ObjectPool();
 
     // Asserts if the pool is exhausted.
-    template <typename... Args>
-    T* Create(Args&&... args);
+    T* Create();
     // Returns nullptr if the pool is exhausted.
-    template <typename... Args>
-    T* TryCreate(Args&&... args);
+    T* TryCreate();
     void Recycle(T* obj);
 
 private:
@@ -44,6 +48,8 @@ private:
 
     std::byte* storage_ = nullptr;
     std::unique_ptr<std::atomic<uint32_t>[]> next_;
+    // Written only by the thread that currently owns the slot; read in ~ObjectPool.
+    std::unique_ptr<bool[]> constructed_;
     std::atomic<uint64_t> head_{0};
     size_t max_count_ = 0;
 
@@ -62,6 +68,7 @@ private:
 template <typename T, typename SyncPolicy>
 ObjectPool<T, SyncPolicy>::ObjectPool(size_t max_count) :
     next_(std::make_unique<std::atomic<uint32_t>[]>(max_count)),
+    constructed_(std::make_unique<bool[]>(max_count)),
     max_count_(max_count) {
     assert(max_count > 0 && max_count < kNil && "ObjectPool size out of range");
     storage_ = static_cast<std::byte*>(::operator new(max_count_ * kSize, std::align_val_t(kAlign)));
@@ -74,26 +81,38 @@ ObjectPool<T, SyncPolicy>::ObjectPool(size_t max_count) :
 
 template <typename T, typename SyncPolicy>
 ObjectPool<T, SyncPolicy>::~ObjectPool() {
+    for (size_t i = 0; i < max_count_; ++i) {
+        if (constructed_[i]) {
+            SlotAt(static_cast<uint32_t>(i))->~T();
+        }
+    }
     ::operator delete(storage_, std::align_val_t(kAlign));
 }
 
 template <typename T, typename SyncPolicy>
-template <typename... Args>
-T* ObjectPool<T, SyncPolicy>::Create(Args&&... args) {
-    T* obj = TryCreate(std::forward<Args>(args)...);
+T* ObjectPool<T, SyncPolicy>::Create() {
+    T* obj = TryCreate();
     assert(obj && "ObjectPool exhausted");
     return obj;
 }
 
 template <typename T, typename SyncPolicy>
-template <typename... Args>
-T* ObjectPool<T, SyncPolicy>::TryCreate(Args&&... args) {
+T* ObjectPool<T, SyncPolicy>::TryCreate() {
     uint32_t index = PopSlot();
     if (index == kNil) {
         return nullptr;
     }
-    T* obj = new (SlotAt(index)) T(std::forward<Args>(args)...);
-    obj->object_pool_ = this;
+    T* obj = SlotAt(index);
+    if (!constructed_[index]) {
+        new (obj) T();
+        obj->object_pool_ = this;
+        constructed_[index] = true;
+    } else {
+        obj->ref_count_.store(1, std::memory_order_relaxed);
+        if constexpr (requires { obj->Reset(); }) {
+            obj->Reset();
+        }
+    }
     return obj;
 }
 
@@ -101,7 +120,6 @@ template <typename T, typename SyncPolicy>
 void ObjectPool<T, SyncPolicy>::Recycle(T* obj) {
     if (!obj) return;
     assert(BelongsToPool(obj) && "Recycling pointer not from this pool");
-    obj->~T();
     PushSlot(static_cast<uint32_t>((reinterpret_cast<std::byte*>(obj) - storage_) / kSize));
 }
 

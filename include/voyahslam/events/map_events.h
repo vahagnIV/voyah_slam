@@ -2,10 +2,12 @@
 #define VOYAHSLAM_EVENTS_MAP_EVENTS_H
 
 #include <cstdint>
+#include <vector>
 #include <voyahslam/defs.h>
 #include <voyahslam/events/event_types.h>
 #include <voyahslam/map/frame_id.h>
 #include <voyahslam/map/map_point_id.h>
+#include <voyahslam/memory/column_buffer.h>
 #include <voyahslam/memory/recyclable.h>
 
 namespace voyahslam::events {
@@ -14,11 +16,24 @@ template <typename TFeatureExtractor>
 struct MapPointsAdded
     : Event
     , memory::Recyclable<MapPointsAdded<TFeatureExtractor>, memory::ThreadSafePolicy> {
-    map::MapPointId start_id;
-    uint32_t count;
-    geometry::TPoints3DF positions;
-    typename TFeatureExtractor::TDescriptors descriptors;
-    geometry::TPoints3DF normals;
+    // New points occupy the contiguous id range [start_id, start_id + count()).
+    map::MapPointId start_id{};
+    memory::ColumnBuffer<precision_t, 3> positions;
+    memory::ColumnBuffer<typename TFeatureExtractor::TDescriptorScalarType,
+                         TFeatureExtractor::DescriptorSize> descriptors;
+    memory::ColumnBuffer<precision_t, 3> normals;
+
+    // Sets the number of points in all columns; allocates only beyond capacity.
+    void Resize(uint32_t count) {
+        positions.Resize(count);
+        descriptors.Resize(count);
+        normals.Resize(count);
+    }
+    [[nodiscard]] uint32_t count() const { return static_cast<uint32_t>(positions.cols()); }
+    void Reset() {
+        start_id = {};
+        Resize(0);
+    }
 
     MapPointsAdded()
         : Event(EventType::MapPointsAdded,
@@ -36,9 +51,20 @@ struct MapPointsUpdated
     : Event
     , memory::Recyclable<MapPointsUpdated<TFeatureExtractor>, memory::ThreadSafePolicy> {
     std::vector<map::MapPointId> ids;
-    geometry::TPoints3DF positions;
-    typename TFeatureExtractor::TDescriptors descriptors;
-    geometry::TPoints3DF normals;
+    memory::ColumnBuffer<precision_t, 3> positions;
+    memory::ColumnBuffer<typename TFeatureExtractor::TDescriptorScalarType,
+                         TFeatureExtractor::DescriptorSize> descriptors;
+    memory::ColumnBuffer<precision_t, 3> normals;
+
+    // Sets the number of points in ids and all columns; allocates only beyond capacity.
+    void Resize(uint32_t count) {
+        ids.resize(count);
+        positions.Resize(count);
+        descriptors.Resize(count);
+        normals.Resize(count);
+    }
+    [[nodiscard]] uint32_t count() const { return static_cast<uint32_t>(ids.size()); }
+    void Reset() { Resize(0); }
 
     MapPointsUpdated()
         : Event(EventType::MapPointsUpdated,
@@ -55,6 +81,8 @@ struct MapPointsRemoved
     : Event
     , memory::Recyclable<MapPointsRemoved, memory::ThreadSafePolicy> {
     std::vector<map::MapPointId> ids;
+
+    void Reset() { ids.clear(); }
 
     MapPointsRemoved()
         : Event(EventType::MapPointsRemoved,

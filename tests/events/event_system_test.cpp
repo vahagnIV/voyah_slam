@@ -127,6 +127,66 @@ TEST(EventSystemTest, ObservableAsyncFanOut) {
     if (reused) reused->Recycle();
 }
 
+TEST(EventSystemTest, MapPointsAddedResizesAllColumnsTogether) {
+    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(1);
+    auto* e = pool.Create();
+    e->Resize(7);
+    EXPECT_EQ(e->count(), 7u);
+    EXPECT_EQ(e->positions.cols(), 7);
+    EXPECT_EQ(e->descriptors.cols(), 7);
+    EXPECT_EQ(e->normals.cols(), 7);
+    EXPECT_EQ(e->descriptors.matrix().rows(), features::OrbFeatureExtractor::DescriptorSize);
+    e->Recycle();
+}
+
+TEST(EventSystemTest, RecycledMapPointsAddedReusesItsBuffers) {
+    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(1);
+    Observable observable;
+    AsyncObserver observer;
+    observable.ConnectAsync(observer);
+
+    auto* e = pool.Create();
+    e->Resize(500);
+    const auto* positions = e->positions.matrix().data();
+    const auto* descriptors = e->descriptors.matrix().data();
+    observable.Notify(e);
+    {
+        auto listener = observer.GetListener();
+        ASSERT_EQ(listener.GetNextEvent(), e);
+    }
+
+    auto* reused = pool.Create();
+    ASSERT_EQ(reused, e);
+    EXPECT_EQ(reused->count(), 0u);  // Reset() on reuse
+    reused->Resize(300);
+    EXPECT_EQ(reused->positions.matrix().data(), positions);
+    EXPECT_EQ(reused->descriptors.matrix().data(), descriptors);
+    reused->Recycle();
+}
+
+TEST(EventSystemTest, RecycledMapPointsUpdatedAndRemovedAreReset) {
+    using OrbMapPointsUpdated = MapPointsUpdated<features::OrbFeatureExtractor>;
+    memory::ObjectPool<OrbMapPointsUpdated, memory::ThreadSafePolicy> updated_pool(1);
+    memory::ObjectPool<MapPointsRemoved, memory::ThreadSafePolicy> removed_pool(1);
+
+    auto* updated = updated_pool.Create();
+    updated->Resize(4);
+    EXPECT_EQ(updated->ids.size(), 4u);
+    EXPECT_EQ(updated->positions.cols(), 4);
+    updated->Recycle();
+    updated = updated_pool.Create();
+    EXPECT_EQ(updated->count(), 0u);
+    EXPECT_TRUE(updated->ids.empty());
+    updated->Recycle();
+
+    auto* removed = removed_pool.Create();
+    removed->ids.push_back(map::MapPointId{3});
+    removed->Recycle();
+    removed = removed_pool.Create();
+    EXPECT_TRUE(removed->ids.empty());
+    removed->Recycle();
+}
+
 TEST(EventSystemTest, NotifyWithOnlySyncHandlersRecyclesPooledEvent) {
     memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(1);
     Observable observable;

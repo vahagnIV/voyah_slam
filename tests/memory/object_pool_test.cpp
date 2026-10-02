@@ -14,25 +14,45 @@ namespace {
 
 struct TestObject : Recyclable<TestObject, NoSyncPolicy> {
     int value = 0;
-    explicit TestObject(int v = 0) : value(v) {}
 };
 
 struct ThreadSafeTestObject : Recyclable<ThreadSafeTestObject, ThreadSafePolicy> {
     int value = 0;
-    explicit ThreadSafeTestObject(int v = 0) : value(v) {}
 };
+
+struct BufferObject : Recyclable<BufferObject, NoSyncPolicy> {
+    std::vector<int> buffer;
+    int reset_calls = 0;
+    void Reset() {
+        buffer.clear();
+        ++reset_calls;
+    }
+};
+
+int g_destroyed = 0;
+struct CountingObject : Recyclable<CountingObject, NoSyncPolicy> {
+    ~CountingObject() { ++g_destroyed; }
+};
+
+// Create a pooled object and set its value (objects are default-constructed).
+template <typename TPool>
+auto* Make(TPool& pool, int value) {
+    auto* obj = pool.Create();
+    obj->value = value;
+    return obj;
+}
 
 TEST(ObjectPoolTest, CreateAndRecycle) {
     ObjectPool<TestObject, NoSyncPolicy> pool(4);
 
-    auto* obj = pool.Create(42);
+    auto* obj = Make(pool, 42);
     ASSERT_NE(obj, nullptr);
     EXPECT_EQ(obj->value, 42);
 
     auto* addr = obj;
     obj->Recycle();
 
-    auto* obj2 = pool.Create(99);
+    auto* obj2 = Make(pool, 99);
     EXPECT_EQ(obj2, addr);
     EXPECT_EQ(obj2->value, 99);
     obj2->Recycle();
@@ -41,12 +61,12 @@ TEST(ObjectPoolTest, CreateAndRecycle) {
 TEST(ObjectPoolTest, RefCounting) {
     ObjectPool<TestObject, NoSyncPolicy> pool(2);
 
-    auto* obj = pool.Create(10);
+    auto* obj = Make(pool, 10);
     obj->SetRefCount(3);
 
     obj->Recycle();
     // ref_count is now 2 — pool should NOT have reclaimed
-    auto* other = pool.Create(20);
+    auto* other = Make(pool, 20);
     EXPECT_NE(other, obj);  // obj still held, got a different slot
     other->Recycle();
 
@@ -56,7 +76,7 @@ TEST(ObjectPoolTest, RefCounting) {
     obj->Recycle();
     // ref_count hit 0 → returned to pool
 
-    auto* reused = pool.Create(30);
+    auto* reused = Make(pool, 30);
     EXPECT_EQ(reused->value, 30);
     reused->Recycle();
 }
@@ -64,7 +84,7 @@ TEST(ObjectPoolTest, RefCounting) {
 TEST(ObjectPoolTest, SetRefCountAndAddRef) {
     ObjectPool<TestObject, NoSyncPolicy> pool(2);
 
-    auto* obj = pool.Create(10);
+    auto* obj = Make(pool, 10);
     obj->SetRefCount(2);
     obj->AddRef();  // now 3
 
@@ -72,7 +92,7 @@ TEST(ObjectPoolTest, SetRefCountAndAddRef) {
     obj->Recycle();  // 1
     obj->Recycle();  // 0 → returned to pool
 
-    auto* reused = pool.Create(77);
+    auto* reused = Make(pool, 77);
     EXPECT_EQ(reused->value, 77);
     reused->Recycle();
 }
@@ -83,7 +103,7 @@ TEST(ObjectPoolTest, ThreadSafety) {
 
     auto worker = [&pool, &total_created]() {
         for (int i = 0; i < 100; ++i) {
-            auto* obj = pool.Create(i);
+            auto* obj = Make(pool, i);
             ASSERT_NE(obj, nullptr);
             total_created.fetch_add(1, std::memory_order_relaxed);
             obj->Recycle();
@@ -120,9 +140,10 @@ TEST(ObjectPoolTest, ConcurrentCreateRecycleNeverHandsOutSameSlotTwice) {
     auto worker = [&](int thread_idx) {
         for (int i = 0; i < kIterations; ++i) {
             ThreadSafeTestObject* obj = nullptr;
-            while (!(obj = pool.TryCreate(thread_idx))) {
+            while (!(obj = pool.TryCreate())) {
                 std::this_thread::yield();
             }
+            obj->value = thread_idx;
             int idx = slot_index(obj);
             if (idx == kSlots || in_use[idx].exchange(1, std::memory_order_acq_rel) != 0) {
                 collisions.fetch_add(1, std::memory_order_relaxed);
@@ -145,30 +166,77 @@ TEST(ObjectPoolTest, ConcurrentCreateRecycleNeverHandsOutSameSlotTwice) {
     // Every slot must be back in the pool.
     std::vector<ThreadSafeTestObject*> all;
     for (int i = 0; i < kSlots; ++i) {
-        all.push_back(pool.TryCreate(i));
+        all.push_back(pool.TryCreate());
         ASSERT_NE(all.back(), nullptr);
     }
-    EXPECT_EQ(pool.TryCreate(0), nullptr);
+    EXPECT_EQ(pool.TryCreate(), nullptr);
     for (auto* obj : all) obj->Recycle();
 }
 
 TEST(ObjectPoolTest, TryCreateReturnsNullWhenExhausted) {
     ObjectPool<TestObject, NoSyncPolicy> pool(1);
-    auto* obj = pool.TryCreate(1);
+    auto* obj = pool.TryCreate();
     ASSERT_NE(obj, nullptr);
-    EXPECT_EQ(pool.TryCreate(2), nullptr);
+    EXPECT_EQ(pool.TryCreate(), nullptr);
     obj->Recycle();
-    auto* again = pool.TryCreate(3);
+    auto* again = pool.TryCreate();
     ASSERT_NE(again, nullptr);
     again->Recycle();
 }
 
+TEST(ObjectPoolTest, RecycledObjectKeepsItsAllocationsAndIsReset) {
+    ObjectPool<BufferObject, NoSyncPolicy> pool(1);
+
+    auto* obj = pool.Create();
+    obj->buffer.resize(1000, 42);
+    const int* data = obj->buffer.data();
+    obj->Recycle();
+
+    auto* reused = pool.Create();
+    ASSERT_EQ(reused, obj);
+    EXPECT_EQ(reused->reset_calls, 1);  // not called on first construction
+    EXPECT_TRUE(reused->buffer.empty());
+    EXPECT_GE(reused->buffer.capacity(), 1000u);
+    reused->buffer.resize(1000);
+    EXPECT_EQ(reused->buffer.data(), data);
+    reused->Recycle();
+}
+
+TEST(ObjectPoolTest, RefCountIsResetOnReuse) {
+    ObjectPool<TestObject, NoSyncPolicy> pool(1);
+    auto* obj = pool.Create();
+    obj->SetRefCount(2);
+    obj->Recycle();
+    obj->Recycle();  // 0 → back to pool
+
+    auto* reused = pool.Create();
+    ASSERT_EQ(reused, obj);
+    reused->Recycle();  // single Recycle must suffice
+    EXPECT_EQ(pool.TryCreate(), obj);
+}
+
+TEST(ObjectPoolTest, DestructorDestroysEveryConstructedObjectOnce) {
+    g_destroyed = 0;
+    {
+        ObjectPool<CountingObject, NoSyncPolicy> pool(8);
+        auto* a = pool.Create();
+        auto* b = pool.Create();
+        auto* c = pool.Create();
+        a->Recycle();
+        b->Recycle();
+        (void)pool.Create();  // reuses b's slot, no new construction
+        (void)c;
+        EXPECT_EQ(g_destroyed, 0);  // Recycle no longer destroys
+    }
+    EXPECT_EQ(g_destroyed, 3);
+}
+
 TEST(ObjectPoolDeathTest, PoolExhaustion) {
     ObjectPool<TestObject, NoSyncPolicy> pool(1);
-    auto* obj = pool.Create(1);
+    auto* obj = Make(pool, 1);
     ASSERT_NE(obj, nullptr);
 
-    EXPECT_DEATH(pool.Create(2), "ObjectPool exhausted");
+    EXPECT_DEATH(pool.Create(), "ObjectPool exhausted");
 
     obj->Recycle();
 }
