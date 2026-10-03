@@ -46,16 +46,26 @@ as soon as they come up.
 
 - [ ] `MapPointStorage`: stop reusing freed slots (ids are never reused);
       decide storage-growth strategy. (OQ 2)
-- [ ] Make `FrameId` allocation monotonic.
 - [ ] Size event pools per event type. (OQ 14)
 - [ ] `NewKeyFrameCandidate`: add the tracked `(map_point_id, feature_idx)`
       observations.
 
 ## Threads
 
-- [ ] Component loops: threads, lock-free idle wait (OQ 20), Tracker
-      measurement policy (OQ 19).
-- [ ] Design the Tracker, then the Mapper, then the LoopCloser.
+- [ ] Tracker measurement policy (OQ 19).
+- [ ] `Tracker::Stop()` leaves still-queued measurements unprocessed (dropped);
+      decide together with the measurement policy. (OQ 19)
+- [ ] Real `PoseEstimator` (track with motion model / reference keyframe /
+      local map; motion-only BA) — geometry spec; replaces the stub in place.
+- [ ] Real `MapInitializer` (two-view mono init, stereo init, map points) —
+      geometry spec. Treat an engaged-but-empty result as failure (`Mapper`
+      uses `keyframes_.back()`).
+- [ ] Apply map diffs to the Tracker replica (currently a no-op).
+- [ ] Keyframe decision: Tracker publishes `NewKeyFrameCandidate`; Mapper
+      handling (currently only acknowledged).
+- [ ] Relocalization in `TrackerState::Lost` (now it behaves like
+      `WaitingForMap`; the Mapper starts a new map on `TrackingLost`).
+- [ ] LoopCloser logic (its `ProcessPending()` only acknowledges events).
 
 ## Visualization
 
@@ -80,8 +90,12 @@ as soon as they come up.
 
 - [ ] `AsyncObserver` destruction doesn't acknowledge events still queued, so
       their pool slots never return. Drain on destruction.
-- [ ] Mono/stereo variants of `KeyFrameCreated` / `NewKeyFrameCandidate` share
-      one `EventType`. (OQ 24)
+- [ ] **Event pool lifetime** (OQ 25): components own the pools of the events
+      they publish but consumers (e.g. the `MapViewer` inbox) can hold them; the
+      apps declare the viewer before `slam`, so on exception unwinding `Slam` is
+      destroyed first and the viewer's destructor drain recycles into freed
+      pools. Normal shutdown (`slam.Stop(); viewer.Stop()`) is safe. Needs pools
+      that outlive all producers and consumers.
 
 ## Environment
 

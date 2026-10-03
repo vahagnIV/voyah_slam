@@ -8,7 +8,7 @@
 > `docs/superpowers/specs/` and `docs/superpowers/plans/`. When they disagree
 > with this document, **this document wins** — fix the spec or note the change here.
 
-Last updated: 2026-10-02
+Last updated: 2026-10-03
 
 ---
 
@@ -108,14 +108,50 @@ defined in `src/` with `INSTANTIATE_CLASS` (ORB + SIFT).
 
 | Component | Header | Public API so far |
 |---|---|---|
-| `tracking::Tracker<FE>` | `tracking/tracker.h` | `Start()`, `Stop()`, `Track(TMonocularMeasurement)`, `Track(TBinocularMeasurement)`, `pending_measurements()` |
-| `mapping::Mapper<FE>` | `mapping/mapper.h` | `Start()`, `Stop()` |
-| `loop_closing::LoopCloser<FE>` | `loop_closing/loop_closer.h` | `Start()`, `Stop()` |
+| `tracking::Tracker<FE>` | `tracking/tracker.h` | `Start()`, `Stop()`, `Track(TMonocularMeasurement)`, `Track(TBinocularMeasurement)`, `ProcessPending()`, `state()`, `current_map_id()`, `pending_measurements()` |
+| `mapping::Mapper<FE>` | `mapping/mapper.h` | `Mapper(MapperOptions)`, `Start()`, `Stop()`, `ProcessPending()`, `state()`, `current_map_id()` |
+| `loop_closing::LoopCloser<FE>` | `loop_closing/loop_closer.h` | `Start()`, `Stop()`, `ProcessPending()` (drains and acknowledges only) |
 
-All bodies are empty for now (skeleton, 2026-10-02), except `Tracker::Track()`,
-which enqueues.
+Each component owns a `events::WorkerThread` (`events/worker_thread.h`) bound to
+the `events::WakeSignal` of its `EventNode` (`events/wake_signal.h`) and a
+public `[[nodiscard]] bool ProcessPending()` (one pass, returns true if it did
+work; tests drive it without a thread). Spec:
+`docs/superpowers/specs/2026-10-03-tracking-states-design.md`.
+
+**Waking without locks (resolves OQ 20).** `WakeSignal` is a
+`std::atomic<uint32_t>` counter with C++20 `wait`/`notify_one` (a futex on
+Linux): `Snapshot()`, `Notify()`, `Wait(seen)`. `AsyncObserver::Push()` enqueues
+and notifies the attached signal (`SetWakeSignal()`); `Tracker::Track()`
+notifies after enqueuing. `WorkerThread` loop: `seen = Snapshot(); if (!running)
+break; if (!process_pending()) Wait(seen);`. The snapshot is taken **before**
+the `running` check — otherwise a `Stop()` landing between the check and the
+snapshot is already counted in `seen` and `Wait` would never return (spec
+amendment found during implementation). A `Notify()` between `Snapshot()` and
+`Wait()` changes the counter, so no wake-up is lost.
+
+**Stub geometry.** Real two-view initialization and pose estimation are not
+built yet; they sit behind `tracking::PoseEstimator<FE>`
+(`tracking/pose_estimator.h`: `Estimate()` succeeds iff the measurement has
+>= `kMinTrackedFeatures` (50) features, pose = last pose) and
+`mapping::MapInitializer<FE>` (`mapping/map_initializer.h`: `TryInitialize()`,
+`Reset()`). Stub rules: binocular -> 1 identity keyframe at once; monocular ->
+first measurement becomes the reference, success when both have >=
+`kMinInitFeatures` (100) features and the timestamps are >=
+`MapperOptions::min_mono_init_interval` (1 s) apart (2 keyframes), else the
+reference is kept or replaced. A follow-up spec replaces the bodies in place.
 
 ### Tracker
+- **State machine** (`TrackerState`, readable from any thread via `state()`):
+  `WaitingForMap` -> `Tracking` -> `Lost` -> `Tracking`...
+  One `ProcessPending()` pass: (1) drain the whole inbox applying the `map_id`
+  consumer rule (§6) — `MapCreated` sets `last_pose_`, the map's frame id and
+  moves `WaitingForMap`/`Lost` to `Tracking`; other diffs of the current map
+  update the replica (no-op yet); (2) take **one** measurement: in
+  `WaitingForMap`/`Lost` publish it as `InitializationMeasurement`
+  (`map_id` 0); in `Tracking` run `PoseEstimator::Estimate()` — success
+  publishes `PositionUpdated`, failure publishes `TrackingLost(current map)`
+  and moves to `Lost`. `Lost` currently behaves like `WaitingForMap`
+  (relocalization will live there).
 - Runs its **own thread with two input queues**:
   - `inbox()` — map diffs from the Mapper (events),
   - `measurements_` — `std::variant<TMonocularMeasurement, TBinocularMeasurement>`
@@ -154,6 +190,21 @@ which enqueues.
 
 ### Mapper
 - The authoritative map and the **only** map writer.
+- **State machine** (`MapperState`, `state()`): `Initializing` -> `Mapping`.
+  *Initialization protocol:* while `Tracker` has no map it forwards
+  measurements as `InitializationMeasurement`. In `Initializing` the Mapper
+  feeds a **copy** of each to `MapInitializer::TryInitialize()` (the event is
+  shared; never move out of it). Monocular initialization takes many frames
+  (reference + a later frame), stereo one measurement. On success the Mapper
+  creates a `Frame` per initial keyframe (ids from a monotonic counter, never
+  reused across maps), takes `current_map_id_ = next_map_id_++`, publishes
+  `KeyFrameCreated` for each keyframe and then `MapCreated(map_id, frame id,
+  pose)` and moves to `Mapping`; the Tracker switches to `Tracking` on
+  `MapCreated`. `InitializationMeasurement` is ignored while `Mapping`.
+  `TrackingLost` for the current map (in `Mapping`) clears keyframes, resets
+  the initializer and returns to `Initializing`, so the next success starts
+  map n+1 (relocalization / multi-map later). A stale `TrackingLost` is ignored.
+  `NewKeyFrameCandidate` / `LoopDetected` are only acknowledged for now.
 - Consumes `NewKeyFrameCandidate`: accepts/rejects, creates the `Frame`, records
   observations, triangulates new map points, local BA, map point culling and
   fusion, keyframe culling.
@@ -211,14 +262,17 @@ Ported from slamlab2: `images/`, `io/`, `algebra/`, `geometry/`, `features/`
 
 | Event | Producer → Consumer | Payload |
 |---|---|---|
-| `NewKeyFrameCandidate<FE, TMeasurement>` | Tracker → Mapper | frame_id, pose, measurement, observations `(map_point_id, feature_idx)` (TODO) |
+| `NewKeyFrameCandidate<FE>` | Tracker → Mapper | frame_id, pose, measurement (`features::TMeasurement<FE>`), observations `(map_point_id, feature_idx)` (TODO) |
 | `PositionUpdated` | Tracker → Visualizer/others | frame_id, pose, timestamp |
 | `MapPointsAdded<FE>` | Mapper → all | start_id, positions, descriptors, normals (`Resize(n)`, `count()`) |
 | `MapPointsUpdated<FE>` | Mapper → all | ids, positions, descriptors, normals (`Resize(n)`, `count()`) |
 | `MapPointsRemoved` | Mapper → all | ids |
-| `KeyFrameCreated<FE, TMeasurement>` | Mapper → all | frame_id, pose, measurement |
+| `KeyFrameCreated<FE>` | Mapper → all | frame_id, pose, measurement (`features::TMeasurement<FE>`) |
 | `KeyFramePoseUpdated` | Mapper → all | frame_id, pose |
 | `LoopDetected` | LoopCloser → Mapper | query/match frames + verification data (TBD) |
+| `InitializationMeasurement<FE>` | Tracker → Mapper (+ other Tracker observers) | `features::TMeasurement<FE>` (`map_id` 0) |
+| `MapCreated` | Mapper → all | frame_id, pose of the keyframe the Tracker continues from; marks the initial map complete |
+| `TrackingLost` | Tracker → all | timestamp (`map_id` = the lost map) |
 
 Rules:
 - Events are coarse-grained (one event per batch, Eigen matrices inside).
@@ -233,6 +287,23 @@ Rules:
   `StereoRig`). A serializer turns such references into values (inline, or sent
   once and referenced). Everything mutable or short-lived travels by value —
   e.g. a pointer to a reused Tracker buffer is never allowed.
+- **Measurement variant (resolves OQ 24).** `features/measurement.h` defines
+  `TMonocularMeasurement<FE>`, `TBinocularMeasurement<FE>` and
+  `TMeasurement<FE> = std::variant<mono, binocular>`. `KeyFrameCreated`,
+  `NewKeyFrameCandidate` and `InitializationMeasurement` hold a
+  `TMeasurement<FE>`, so mono and stereo share one event type each.
+- **`map_id`.** `map::MapId` (`map/map_id.h`, strong `uint32_t`; ids start at
+  1, only increase, `MapId{0}` = not tied to a map). `Event` has a public
+  `map_id` field that **producers must set on every publish** (pooled events
+  are reused without reset). It is the map the Mapper is building (diffs,
+  `MapCreated`), the map the Tracker tracks against (`NewKeyFrameCandidate`,
+  `PositionUpdated`, `TrackingLost`) or 0 (`InitializationMeasurement`).
+  **Consumer rule** (`map_id == 0` exempt): `< current` -> stale, acknowledge
+  and ignore; `> current` -> first event of a newer map: reset the replica,
+  adopt `current = map_id`, apply (the initial map's `KeyFrameCreated` events
+  arrive *before* its `MapCreated`, so they must not be dropped); `== current`
+  -> apply. The Mapper builds map n+1 only after `TrackingLost(n)`, so a newer
+  map never appears while the Tracker tracks an older one.
 - **No subscription filtering:** an `Observable` delivers every event to every
   connected observer (the viewer also receives `NewKeyFrameCandidate` and just
   acknowledges it). A future serializing observer chooses what to send.
@@ -524,6 +595,12 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-02 | Orchestrator named `Slam<FE>`; components share a non-virtual `EventNode` base for their observable + inbox. | `Slam` is what the user instantiates; `System` is too generic. One base avoids repeating the observer API in three classes. |
 | 2026-10-02 | One event type per header, plus `events/events.h` umbrella; `map_events.h` removed. | User preference: easier to navigate and to include only what is used. |
 | 2026-10-02 | Event payloads use grow-only `ColumnBuffer` (capacity + count) instead of plain `Eigen::Matrix`. | Eigen reallocates on any size change; grow-only buffers reach a steady state with zero allocations. Chosen over fixed max-size buffers, which waste memory and need a hard cap. |
+| 2026-10-03 | Scope A for the first protocol: state machines + component loops + initialization protocol, with geometry behind rule-based stubs (`PoseEstimator`, `MapInitializer`). | Runs the whole pipeline end to end now; the geometry spec replaces the stub bodies in place without touching the protocol. |
+| 2026-10-03 | Mono/stereo measurements travel as `std::variant` (`features::TMeasurement<FE>`) inside events instead of a template parameter (OQ 24). | One `EventType` per event; consumers holding `Event*` can pick the concrete type; mixed keyframes stay possible. |
+| 2026-10-03 | Idle wait via per-component `WakeSignal` (atomic counter, C++20 wait/notify) + `WorkerThread` (OQ 20). Snapshot is taken before the `running` check. | Lock-free sleep/wake from both `Track()` and queue pushes; the snapshot order avoids a lost `Stop()` wake-up. |
+| 2026-10-03 | The Mapper (only map writer) performs initialization from `InitializationMeasurement`s forwarded by the Tracker. | Single-writer principle: the Tracker never creates map objects. |
+| 2026-10-03 | Maps are identified by a monotonic `map_id` on every event; consumer rule: ignore older, reset-and-adopt newer, apply equal; 0 exempt. | Detects stale events across map restarts; the initial map's diffs precede `MapCreated`, so a newer id must adopt rather than drop. |
+| 2026-10-03 | Monocular initialization needs many frames (reference + a later frame); stereo uses one measurement. | Mono needs parallax between views; stereo has depth from one pair. |
 
 ## 9. Open Questions
 
@@ -560,10 +637,9 @@ branch → review → merge to `master`. Update this document at the end.
     reference application will live in `examples/full_slam/`.
 19. **Tracker measurement policy:** track every measurement in order, or skip
     to the newest when falling behind (real-time)? Possibly configurable.
-20. **Tracker idle wait:** how the Tracker thread sleeps when both queues are
-    empty and is woken by either a `Track()` call or a Mapper diff, without
-    locks (e.g. a C++20 `std::atomic` wait/notify counter signalled by both
-    `Track()` and `AsyncObserver` enqueue). Same question for Mapper/LoopCloser.
+20. ~~Tracker idle wait~~ — resolved 2026-10-03: per-component `WakeSignal`
+    (atomic counter, C++20 wait/notify) signalled by `AsyncObserver::Push()` and
+    `Tracker::Track()`; `WorkerThread` sleeps on it (§4).
 21. **ORB extraction speed.** Was ≈ 210 ms per 1024² image in Release with
     Conan's OpenCV 4.12; with OpenCV 5.1 (no per-call resize in `cv::FAST`) it
     is ≈ 70 ms (see decisions log). ORB-SLAM3 reference numbers are for 512²
@@ -612,12 +688,9 @@ branch → review → merge to `master`. Update this document at the end.
     the Tracker design.
 23. **Radial-tangential distortion** (EuRoC MAV) is not implemented; the reader
     rejects such calibrations.
-24. **Mono/stereo variants share an event tag.** `KeyFrameCreated<FE,
-    TMeasurement>` and `NewKeyFrameCandidate<FE, TMeasurement>` use one
-    `EventType` for both measurement types, so a consumer holding `Event*`
-    can't pick the concrete type. Options: separate tags
-    (`KeyFrameCreatedMono` / `...Stereo`) or a measurement-kind field. Tied to
-    mixed keyframes (OQ 17).
+24. ~~Mono/stereo variants share an event tag~~ — resolved 2026-10-03:
+    measurements travel as `features::TMeasurement<FE>`, a `std::variant`
+    inside the events (§6). Mixed keyframes in one map remain OQ 17.
 11. ~~Payload buffers are not reused~~ — resolved 2026-10-02 (objects stay alive
     in the pool, payloads in grow-only `ColumnBuffer`s). Related: chunking large
     loop-closure diffs (Q3) would also bound the buffers' peak capacity.
@@ -628,6 +701,13 @@ branch → review → merge to `master`. Update this document at the end.
     index array (4 B/slot) is written up front, and the default `max_count` is
     still 1,000,000. Pools should be sized per event type from the worst-case
     backlog (consumer rule 3 in §6.1).
+25. **Event pool lifetime.** Components own the pools of the events they
+    publish, but consumers (e.g. the `MapViewer` inbox) can still hold those
+    events. The apps declare the viewer before `slam`, so on exception unwinding
+    `Slam` is destroyed first and the viewer's destructor drain would recycle
+    events into freed pools. Normal shutdown (`slam.Stop(); viewer.Stop()`) is
+    safe. Needs a design decision: pools that outlive all producers and
+    consumers.
 
 ## 10. Status and Next Steps
 
@@ -645,10 +725,17 @@ branch → review → merge to `master`. Update this document at the end.
   loop in `KannalaBrandtDistortionModel::PrecomputeInitialGuessLookup` for
   fisheye lenses wider than the image.
 
+- Tracker/Mapper state machines and initialization protocol (branch
+  `feat/tracking-states`, merge pending): `MapId` + `Event::map_id` consumer
+  rule, `TMeasurement` variant in events, `InitializationMeasurement` /
+  `MapCreated` / `TrackingLost` events, `WakeSignal` + `WorkerThread`
+  component threads (OQ 20, 24 resolved), stub `PoseEstimator` /
+  `MapInitializer`, end-to-end `Slam` protocol test; apps print component
+  states.
+
 **Required follow-up:**
 - Remove free-list reuse from `MapPointStorage` (ids are never reused); decide
   storage-growth strategy (Open Question 2).
-- Make sure `FrameId` allocation is monotonic too.
 - Decide on Open Question 14 (pool sizing per event type).
 - `NewKeyFrameCandidate` doesn't carry the tracked `(map_point_id, feature_idx)`
   observations yet (§6 says it should) — add when designing the Tracker.
@@ -657,8 +744,10 @@ branch → review → merge to `master`. Update this document at the end.
 - ORB extractor plan in Open Question 21 (own FAST, buffers, descriptor
   rounding, keypoint level). Building OpenCV from source to link against
   (in progress, user).
-- Component loops: threads, idle wait (Open Question 20), Tracker measurement
-  policy (19).
-- Design the Tracker (initialization mono/stereo, track-with-motion-model,
-  track-reference-keyframe, track-local-map, relocalization, keyframe decision).
+- Tracker measurement policy (19).
+- Real geometry behind the stubs: two-view initialization (`MapInitializer`)
+  and pose estimation (track-with-motion-model, track-reference-keyframe,
+  track-local-map; `PoseEstimator`), applying map diffs to the Tracker replica,
+  relocalization in `Lost`, keyframe decision (`NewKeyFrameCandidate`).
+- Event pool lifetime (Open Question 25).
 - Then the Mapper, then the LoopCloser.
