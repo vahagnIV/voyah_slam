@@ -5,6 +5,7 @@
 #include <chrono>
 #include <stdexcept>
 #include <thread>
+#include <vector>
 #include <voyahslam/events/observable.h>
 #include <voyahslam/events/position_updated.h>
 #include <voyahslam/features/orb_feature_extractor.h>
@@ -117,6 +118,26 @@ TEST(MapViewerTest, ReceivesFromTwoProducers) {
     EXPECT_TRUE(WaitForProcessed(viewer, 20));
     viewer.Stop();
     EXPECT_EQ(viewer.events_processed(), 20u);
+    // Every slot came back: all 32 can be taken at once.
+    std::vector<events::PositionUpdated*> taken;
+    for (int i = 0; i < 32; ++i) {
+        taken.push_back(pool.TryCreate());
+        ASSERT_NE(taken.back(), nullptr) << "slot " << i << " not returned";
+    }
+    for (auto* event : taken) event->Recycle();
+}
+
+TEST(MapViewerTest, DestructorStopsRunningViewerAndAcknowledges) {
+    TPool pool(1);
+    events::Observable producer;
+    {
+        TViewer viewer;
+        producer.ConnectAsync(viewer.inbox());
+        viewer.Start();
+        Publish(producer, pool);
+        // Leave scope while running, without Stop().
+    }
+    EXPECT_TRUE(SlotReturned(pool));
 }
 
 TEST(MapViewerTest, StartTwiceAndRestart) {

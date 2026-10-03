@@ -37,10 +37,13 @@ int main(int argc, char** argv) {
         std::optional<voyahviz::ImageWindow> window;
         if (options.show) window.emplace("binocular_full_slam");
 
-        TSlam slam;
         // 3D viewer: consumes Tracker and Mapper events on its own thread (later
-        // a remote process behind a serializing observer). Wire before Start().
+        // a remote process behind a serializing observer). Declared before slam
+        // so that, also when an exception unwinds, slam is destroyed (stopped)
+        // first and nothing is published into a destroyed inbox.
         voyahviz::MapViewer<TFeatureExtractor> viewer;
+        TSlam slam;
+        // Wire before Start().
         slam.tracker().AddObserver(viewer.inbox());
         slam.mapper().AddObserver(viewer.inbox());
         viewer.Start();

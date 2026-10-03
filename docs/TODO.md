@@ -66,6 +66,15 @@ as soon as they come up.
       `SceneState` on the viewer side.
 - [ ] Separate image flow for the camera view (images/keypoints are outside the
       SLAM events).
+- [ ] `MapViewer` hardening (deferred review minors, 2026-10-03):
+      `Start()`/`Stop()` aren't safe to call concurrently or from the viewer
+      thread (matters once a Pangolin window-close calls `Stop()`); `Start()`
+      leaves `running_` true if thread creation throws; reject non-finite /
+      extreme `fps`, and wake `Stop()` immediately (low fps delays it by a
+      period); exceptions from future `Apply()`/`Render()` would terminate.
+- [ ] `SceneState`: counter array sized from the last `EventType` enumerator;
+      add a count sentinel / `static_assert` and bounds-check types (needed once
+      events are deserialized from the network).
 
 ## Event system
 
