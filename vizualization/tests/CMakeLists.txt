@@ -1,6 +1,7 @@
 add_executable(voyahviz_tests
     color_image_test.cpp
     keypoint_drawing_test.cpp
+    scene_state_test.cpp
 )
 
 target_link_libraries(voyahviz_tests

@@ -4,6 +4,7 @@ add_library(voyahviz STATIC
     src/color_image.cpp
     src/keypoint_drawing.cpp
     src/image_window.cpp
+    src/scene_state.cpp
 )
 
 target_include_directories(voyahviz
