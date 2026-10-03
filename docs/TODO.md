@@ -53,8 +53,10 @@ as soon as they come up.
 ## Threads
 
 - [ ] Tracker measurement policy (OQ 19).
-- [ ] `Tracker::Stop()` leaves still-queued measurements unprocessed (dropped);
-      decide together with the measurement policy. (OQ 19)
+- [ ] `Tracker::Stop()` leaves still-queued measurements in the queue: they are
+      processed after a restart, or destroyed with the Tracker. Decide whether
+      Stop() should drain or discard them together with the measurement
+      policy. (OQ 19)
 - [ ] Real `PoseEstimator` (track with motion model / reference keyframe /
       local map; motion-only BA) — geometry spec; replaces the stub in place.
 - [ ] Real `MapInitializer` (two-view mono init, stereo init, map points) —
@@ -97,6 +99,46 @@ as soon as they come up.
       recycles into freed pools. The apps now guard against it (a guard after
       `slam` runs `slam.Stop(); viewer.Stop()` on every exit path), but the
       library still needs pools that outlive all producers and consumers.
+
+## Review follow-ups (tracking states, 2026-10-03)
+
+Deferred minor findings from the per-task and final reviews.
+
+- [ ] **Before relocalization / multi-map:** the Tracker adopts a newer map's
+      id but drops its `MapCreated` while `Tracking` (treated as a duplicate);
+      the next `PositionUpdated` would carry the new map id with the old
+      frame/pose. Make the duplicate check specific to the last `MapCreated`.
+- [ ] `SceneState` and `LoopCloser` don't apply the `map_id` consumer rule
+      (no replicas yet) — apply it when they get replicas. DESIGN §6 "rule for
+      every consumer" should exempt the Mapper (it assigns map ids).
+- [ ] Docs: `PositionUpdated.frame_id` is the `MapCreated` keyframe id, not the
+      current frame's; the `slam.h` stop-order comment overstates (the graph is
+      cyclic, events stay queued in stopped inboxes); DESIGN.md Tracker section
+      keeps the older loop pseudo-code beside the state machine; event pool
+      size (256) is not documented.
+- [ ] Mapper: `keyframes_.back()` is unguarded if a real `TryInitialize`
+      returns an engaged empty result — treat it as failure; transition log
+      wording ("0 keyframes" with the old map id, "1 keyframes").
+- [ ] Share one `NumFeatures(TMeasurement)` helper (the "left camera for
+      binocular" visit is duplicated in `pose_estimator.cpp` and
+      `map_initializer.cpp`, in two dispatch styles).
+- [ ] Document thread-usage rules: one waiter per `WakeSignal` (`notify_one`);
+      never call `WorkerThread::Start()`/`Stop()` from its callback (self-join);
+      the defensive join in `Start()`.
+- [ ] Tests to add: inbox-first / one-measurement-per-pass ordering in the
+      Tracker; consumer rule for stale/newer non-`MapCreated` events; Mapper
+      acknowledging `NewKeyFrameCandidate`/`LoopDetected` and returning false on
+      an empty inbox; `Slam` forwarding `MapperOptions`; 49/50 and 99/100
+      feature boundaries; e2e checks of every `PositionUpdated` map id.
+- [ ] Test robustness: `WaitBlocksUntilNotify` hangs rather than fails if
+      `Wait` breaks (relies on ctest `--timeout`); `RunsUntilNoWorkThenSleeps`
+      20 ms settle may flake on loaded CI and calls `Notify` needlessly;
+      `ObservableDeliversThroughPush` doesn't assert the queue is empty;
+      unseeded `Random()` in `tests/support/test_measurements.h`.
+- [ ] Hygiene: include order / unused alias in `event_system_test.cpp`; missing
+      `<type_traits>` / `<variant>` includes; `MapId::value` (like `FrameId`)
+      has no default initializer; `tracker.h` and `full_slam_common.h` pull in
+      heavy headers.
 
 ## Environment
 
