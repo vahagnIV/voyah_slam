@@ -1,5 +1,5 @@
 add_executable(voyahviz_tests
-    image_conversion_test.cpp
+    color_image_test.cpp
     keypoint_drawing_test.cpp
 )
 

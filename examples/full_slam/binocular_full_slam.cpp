@@ -5,9 +5,7 @@
 
 #include <dataset_reader/euroc_dataset_reader.h>
 #include <dataset_reader/playback_clock.h>
-#include <opencv2/core.hpp>
 #include <optional>
-#include <voyahviz/image_conversion.h>
 #include <voyahviz/image_window.h>
 #include <voyahviz/keypoint_drawing.h>
 #include <voyahslam/features/orb_feature_extractor.h>
@@ -58,13 +56,9 @@ int main(int argc, char** argv) {
             size_t num_features = static_cast<size_t>(measurement.left().points().cols() +
                                                       measurement.right().points().cols());
             if (window) {
-                cv::Mat side_by_side;
-                cv::hconcat(voyahviz::DrawMeasurement(voyahviz::ToCvMat(frame.left), measurement.left(),
-                                                      rig.distortion_left),
-                            voyahviz::DrawMeasurement(voyahviz::ToCvMat(frame.right), measurement.right(),
-                                                      rig.distortion_right),
-                            side_by_side);
-                window->Show(side_by_side);
+                window->Show(voyahviz::HorizontalConcat(
+                    voyahviz::DrawMeasurement(frame.left, measurement.left(), rig.distortion_left),
+                    voyahviz::DrawMeasurement(frame.right, measurement.right(), rig.distortion_right)));
             }
             slam.tracker().Track(std::move(measurement));
 

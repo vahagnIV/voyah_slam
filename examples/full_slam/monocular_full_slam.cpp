@@ -6,7 +6,6 @@
 #include <dataset_reader/euroc_dataset_reader.h>
 #include <dataset_reader/playback_clock.h>
 #include <optional>
-#include <voyahviz/image_conversion.h>
 #include <voyahviz/image_window.h>
 #include <voyahviz/keypoint_drawing.h>
 #include <voyahslam/features/orb_feature_extractor.h>
@@ -51,7 +50,7 @@ int main(int argc, char** argv) {
             auto extracted = std::chrono::steady_clock::now();
             size_t num_features = static_cast<size_t>(measurement.points().cols());
             if (window) {
-                window->Show(voyahviz::DrawMeasurement(voyahviz::ToCvMat(frame.image), measurement,
+                window->Show(voyahviz::DrawMeasurement(frame.image, measurement,
                                                        camera.distortion));
             }
             slam.tracker().Track(std::move(measurement));
