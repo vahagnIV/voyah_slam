@@ -2,6 +2,9 @@
 
 Lock-free, event-driven, ORB-SLAM3-inspired SLAM library (C++20, Eigen, Conan 2).
 
+Pending work is tracked in `docs/TODO.md` — check it, and add items there
+whenever something is deferred.
+
 **Read `docs/DESIGN.md` first** — it holds the architecture, principles, coding
 conventions, decisions log, open questions and next steps. Keep it up to date:
 whenever a design decision is made or changed, record it there (decisions log +
