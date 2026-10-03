@@ -11,7 +11,9 @@ target_include_directories(voyahviz
 
 target_link_libraries(voyahviz
     PUBLIC voyahslam
-    PUBLIC opencv::opencv
+    PUBLIC opencv_core
+    PRIVATE opencv_imgproc
+    PRIVATE opencv_highgui
 )
 
 add_subdirectory(tests)

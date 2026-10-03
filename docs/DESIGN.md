@@ -419,8 +419,16 @@ installed in `/usr/local`) is the natural candidate.
   (mirroring the `include/` layout under `tests/`).
 
 **Build & test (Conan 2 + CMake):**
-- Dependencies (`conanfile.txt`): gtest, eigen, stb, opencv, spdlog, concurrentqueue,
+- Dependencies (`conanfile.txt`): gtest, eigen, stb, spdlog, concurrentqueue,
   yaml-cpp (examples only).
+- **OpenCV is not from Conan:** OpenCV **5.x** built from source and installed
+  in `/usr/local` (`find_package(OpenCV 5 ... core imgproc features highgui)`,
+  config in `/usr/local/lib/cmake/opencv5`). Every dev machine needs it.
+  Build it with a GUI backend for voyahviz (`WITH_GTK=ON`; GTK2 dev files are
+  enough). OpenCV 5 renamed `features2d` → `features` and split `calib3d` into
+  `calib` / `geometry` / `stereo` (compat headers `features2d.hpp`,
+  `calib3d.hpp` exist). Linked as: `voyahslam` → core, imgproc, features;
+  `voyahviz` → core (public), imgproc, highgui; tests → all.
 - Debug: `cmake --build cmake-build-debug/build/Debug && ctest --test-dir cmake-build-debug/build/Debug --output-on-failure`
 - Release: `conan install . --output-folder=build --build=missing -s build_type=Release`, then the `conan-release` preset.
 
@@ -448,6 +456,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-02 | `CameraFrame` → `MonocularMeasurement`, `BinocularCameraFrame` → `BinocularMeasurement`; timestamp stored in the measurement (binocular uses the left's); removed from `Frame` and keyframe events. | Avoids `CameraFrame`/`Frame`/`MonoFrame` confusion; one source of truth for time. |
 | 2026-10-02 | Long-term goal: mixed monocular/binocular keyframes in one map. Tracker accepts both measurement types now; binding decided later. | Extension beyond ORB-SLAM3. |
 | 2026-10-02 | Configuration lives in the user application; reference app in `examples/full_slam/`. | Library stays free of config-file parsing. |
+| 2026-10-03 | Link a source-built OpenCV 5.1 from `/usr/local` instead of Conan's OpenCV 4.12. | Conan's 4.12 `cv::FAST` resizes its output to 10 000 keypoints on every call (57% of extraction time). With 5.1: mono extraction 231 → 70 ms, stereo ~404 → 149 ms on TUM-VI 1024² (float images). Also gives a GTK GUI backend. |
 | 2026-10-03 | Visualization in a separate `voyahviz` library (`vizualization/`), allowed to use OpenCV; images via `cv::imshow`, keypoints drawn with `cv::circle`/`cv::line` rather than `cv::drawKeypoints`. | Dev-only tool. Own drawing avoids converting to `cv::KeyPoint` (whose size/octave we don't have) and allows orientation ticks and future colouring by level/tracking state. |
 | 2026-10-03 | Measurements drop features whose ray is > 85° off the optical axis (`kMaxRayAngle`), tested in distorted space via `Distort()` of an 85° ray. | z = 1 normalized points can't represent ≥ 90° rays (fisheye); model-agnostic check needs no new distortion-model API. |
 | 2026-10-02 | Dataset reader is synchronous (no thread); apps pace with `PlaybackClock` (absolute deadlines). | Measured: load ≈ 10 ms vs extraction ≈ 220 ms per frame — a reader thread can't help; keeps the reader trivially testable. |
