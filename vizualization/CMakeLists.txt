@@ -1,6 +1,7 @@
-# voyahviz: visualization for voyahslam (development tool, may depend on OpenCV).
+# voyahviz: visualization for voyahslam (development tool). Uses OpenCV
+# internally; the public API only exposes voyahslam types.
 add_library(voyahviz STATIC
-    src/image_conversion.cpp
+    src/color_image.cpp
     src/keypoint_drawing.cpp
     src/image_window.cpp
 )
@@ -11,7 +12,8 @@ target_include_directories(voyahviz
 
 target_link_libraries(voyahviz
     PUBLIC voyahslam
-    PUBLIC opencv_core
+    # OpenCV is an implementation detail: never in public headers, linked PRIVATE.
+    PRIVATE opencv_core
     PRIVATE opencv_imgproc
     PRIVATE opencv_highgui
 )

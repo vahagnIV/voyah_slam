@@ -51,6 +51,13 @@ keyframes of different types share the map is still open (Open Question 17).
    at compile time via templates.
 7. **Structure-of-Arrays storage** for map points and observations, so the hot
    loops (projection, matching, BA) run over contiguous Eigen matrices.
+8. **OpenCV is an implementation detail.** Our public headers
+   (`include/voyahslam/`, `vizualization/include/voyahviz/`) never include
+   OpenCV; public APIs take and return our types (`images::Image`,
+   measurements, `ImageFeatures`, ...) and OpenCV is linked `PRIVATE`, so a
+   user of the library never needs its headers or `find_package(OpenCV)`.
+   Small dependencies (Eigen, spdlog, concurrentqueue) may appear in public
+   headers — requiring users to have them is fine.
 
 ## 3. Terminology
 
@@ -364,15 +371,19 @@ extractor is the bottleneck (Open Question 21).
 
 ## Visualization Library (`vizualization/`, `voyahviz`)
 
-Development tool, never part of the production build, so it may depend on
-OpenCV (HighGUI); it links `voyahslam` and its API takes our types.
-Namespace and include prefix: `voyahviz` (`#include <voyahviz/...>`).
+Development tool, never part of the production build. Implemented with
+OpenCV (HighGUI, imgproc), but — like every library of ours — OpenCV is
+private: the public API uses only voyahslam types and OpenCV is linked
+`PRIVATE` (principle 8). Namespace / include prefix: `voyahviz`.
 
 | Header | Contents |
 |---|---|
-| `image_conversion.h` | `ToCvMat(TImageU8Gray)` (zero-copy wrap, honours offset/stride), `ToCvMat(TImageF32Gray)` ([0,1] → 8-bit copy) |
-| `keypoint_drawing.h` | `KeypointStyle`; `DrawKeypoints(image, points, angles*)` → BGR copy with circles + orientation ticks; `DrawFeatures(image, ImageFeatures)` for raw extractor output; `ProjectToImage(measurement, distortion)` / `DrawMeasurement(...)` |
-| `image_window.h` | `ImageWindow`: named HighGUI window, `Show()`, `WaitKey()`, `GuiBackend()`; throws if OpenCV has no GUI backend |
+| `color_image.h` | `TColorImage` = `images::Image<uint8_t, 3>` (interleaved B, G, R); `Color` (RGB); `ToColor(TImageU8Gray)`; `HorizontalConcat(left, right)` |
+| `keypoint_drawing.h` | `KeypointStyle`; `DrawKeypoints(TColorImage& out_canvas, points, angles*)` and a gray-image overload returning a new canvas; `DrawFeatures(image, ImageFeatures)` for raw extractor output; `ProjectToImage(measurement, distortion)` / `DrawMeasurement(...)` |
+| `image_window.h` | `ImageWindow`: named window, `Show(TImageU8Gray / TColorImage)`, `WaitKey()`, `GuiBackend()`; throws if no GUI backend |
+
+Internally `src/opencv_wrapping.h` wraps our images as `cv::Mat` without
+copying (channels interleaved, stride in pixels).
 
 **Pitfall:** `MonocularMeasurement::points()` are *undistorted* pixel
 coordinates — on a fisheye they don't line up with the raw image.
@@ -407,6 +418,14 @@ installed in `/usr/local`) is the natural candidate.
 - Include guards `VOYAHSLAM_<PATH>_H` (no `#pragma once`).
 - One event type per header; file name is the event name in `snake_case`.
 - Every header is self-contained: it compiles when included first and alone.
+- No OpenCV in public headers (principle 8): OpenCV usage lives in `.cpp` files
+  and private headers under `src/` (e.g. `src/opencv_bindings/`,
+  `vizualization/src/opencv_wrapping.h`).
+- Link-level note: `voyahslam` is a static library, so its consumers still
+  *link* OpenCV's shared libraries. In-tree, CMake propagates that
+  automatically. When we add `install()`/package export, the package config must
+  do `find_dependency(OpenCV)` itself (or `voyahslam` becomes a shared
+  library) so the user still never calls `find_package(OpenCV)`.
 - Public headers included as `#include <voyahslam/...>`.
 - Template classes header-only; non-template classes have a `.cpp` in `src/` mirroring `include/`.
 - `[[nodiscard]]` on const accessors.
@@ -458,6 +477,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-03 | `images::TWorkingImage` is 8-bit (`TImageU8Gray`), not float. | FAST/BRIEF only compare intensities, float = 4× memory traffic. GPU backends read 8-bit textures as normalized floats, so float storage isn't needed for a future GPU extractor; the extractor interface (image in, features out) is the GPU boundary. Same feature count; mono 231 → 209 ms. |
 | 2026-10-03 | Long-term goal: drop the OpenCV dependency. | User preference; own Gaussian blur already, FAST next. |
 | 2026-10-03 | Link a source-built OpenCV 5.1 from `/usr/local` instead of Conan's OpenCV 4.12. | Conan's 4.12 `cv::FAST` resizes its output to 10 000 keypoints on every call (57% of extraction time). With 5.1: mono extraction 231 → 70 ms, stereo ~404 → 149 ms on TUM-VI 1024² (float images). Also gives a GTK GUI backend. |
+| 2026-10-03 | No OpenCV types in public headers; OpenCV linked `PRIVATE`; APIs use our types. voyahviz reworked accordingly (`TColorImage`, `Color`). Small libs (Eigen, spdlog, concurrentqueue) may stay public. | User requirement: library users must not need OpenCV headers or `find_package(OpenCV)`; requiring the small libs is acceptable. |
 | 2026-10-03 | Visualization in a separate `voyahviz` library (`vizualization/`), allowed to use OpenCV; images via `cv::imshow`, keypoints drawn with `cv::circle`/`cv::line` rather than `cv::drawKeypoints`. | Dev-only tool. Own drawing avoids converting to `cv::KeyPoint` (whose size/octave we don't have) and allows orientation ticks and future colouring by level/tracking state. |
 | 2026-10-03 | Measurements drop features whose ray is > 85° off the optical axis (`kMaxRayAngle`), tested in distorted space via `Distort()` of an 85° ray. | z = 1 normalized points can't represent ≥ 90° rays (fisheye); model-agnostic check needs no new distortion-model API. |
 | 2026-10-02 | Dataset reader is synchronous (no thread); apps pace with `PlaybackClock` (absolute deadlines). | Measured: load ≈ 10 ms vs extraction ≈ 220 ms per frame — a reader thread can't help; keeps the reader trivially testable. |

@@ -21,29 +21,45 @@ TFeatures MakeFeatures(const geometry::TPoints2DF& points) {
     return TFeatures(std::move(copy), std::move(strengths), std::move(angles), std::move(descriptors));
 }
 
-TEST(KeypointDrawingTest, DrawsOnBgrCopyAtKeypointPositions) {
-    cv::Mat gray(50, 60, CV_8UC1, cv::Scalar(0));
+images::TImageU8Gray BlackImage(unsigned width, unsigned height) {
+    images::TImageU8Gray image(width, height);
+    for (unsigned y = 0; y < height; ++y)
+        for (unsigned x = 0; x < width; ++x) image.Set(y, x, 0, 0);
+    return image;
+}
+
+TEST(KeypointDrawingTest, DrawsOnColorCopyAtKeypointPositions) {
+    images::TImageU8Gray gray = BlackImage(60, 50);
     geometry::TPoints2DF points(2, 1);
     points << 20, 30;
 
     KeypointStyle style;
-    style.color = cv::Scalar(0, 0, 255);
+    style.color = Color{255, 0, 0};  // red
     style.radius = 4;
-    cv::Mat canvas = DrawKeypoints(gray, points, nullptr, style);
+    TColorImage canvas = DrawKeypoints(gray, points, nullptr, style);
 
-    ASSERT_EQ(canvas.type(), CV_8UC3);
-    ASSERT_EQ(canvas.size(), gray.size());
-    EXPECT_EQ(cv::countNonZero(gray), 0);  // input untouched
-    // A pixel on the circle (radius 4 to the right of the centre) is red.
-    cv::Vec3b on_circle = canvas.at<cv::Vec3b>(30, 24);
-    EXPECT_GT(on_circle[2], 100);
-    EXPECT_EQ(on_circle[0], 0);
+    ASSERT_EQ(canvas.Width(), 60u);
+    ASSERT_EQ(canvas.Height(), 50u);
+    EXPECT_EQ(gray.At(30, 24, 0), 0);  // input untouched
+    // On the circle (radius 4 right of the centre): red, stored as B, G, R.
+    EXPECT_GT(canvas.At(30, 24, 2), 100);
+    EXPECT_EQ(canvas.At(30, 24, 0), 0);
     // Far away stays black.
-    EXPECT_EQ(canvas.at<cv::Vec3b>(5, 5), cv::Vec3b(0, 0, 0));
+    EXPECT_EQ(canvas.At(5, 5, 2), 0);
+}
+
+TEST(KeypointDrawingTest, DrawsIntoExistingCanvas) {
+    TColorImage canvas = ToColor(BlackImage(60, 50));
+    geometry::TPoints2DF points(2, 1);
+    points << 20, 30;
+    KeypointStyle style;
+    style.radius = 4;
+    DrawKeypoints(canvas, points, nullptr, style);
+    EXPECT_GT(canvas.At(30, 24, 1), 100);  // default colour is green
 }
 
 TEST(KeypointDrawingTest, DrawsOrientationTick) {
-    cv::Mat gray(50, 60, CV_8UC1, cv::Scalar(0));
+    images::TImageU8Gray gray = BlackImage(60, 50);
     geometry::TPoints2DF points(2, 1);
     points << 20, 30;
     geometry::TRowVectorF angles(1);
@@ -52,8 +68,8 @@ TEST(KeypointDrawingTest, DrawsOrientationTick) {
     KeypointStyle style;
     style.radius = 2;
     style.orientation_length = 10;
-    cv::Mat canvas = DrawKeypoints(gray, points, &angles, style);
-    EXPECT_GT(canvas.at<cv::Vec3b>(30, 27)[1], 100);  // on the tick, outside the circle
+    TColorImage canvas = DrawKeypoints(gray, points, &angles, style);
+    EXPECT_GT(canvas.At(30, 27, 1), 100);  // on the tick, outside the circle
 }
 
 TEST(KeypointDrawingTest, ProjectToImageRecoversRawFisheyePixels) {
