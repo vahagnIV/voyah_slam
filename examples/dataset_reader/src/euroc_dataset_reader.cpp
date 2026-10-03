@@ -211,10 +211,7 @@ images::TWorkingImage EurocDatasetReader::LoadImage(size_t camera_idx, size_t id
     fs::path path = mav_dir_ / ("cam" + std::to_string(camera_idx)) / "data" / entries_.at(idx).file_name;
     std::ifstream file(path, std::ios::binary);
     if (!file) Fail("cannot open " + path.string());
-    images::TImageU8Gray image_u8 = io::ReadImageFromStream(file);
-    images::TWorkingImage image = image_u8.Convert<float>();
-    image *= 1.0f / 255.0f;
-    return image;
+    return io::ReadImageFromStream(file);
 }
 
 } // namespace voyahslam::dataset_reader

@@ -1,7 +1,10 @@
 #ifndef VOYAHSLAM_IMAGES_BILINEAR_INTERPOLATION_H
 #define VOYAHSLAM_IMAGES_BILINEAR_INTERPOLATION_H
 
+#include <algorithm>
 #include <cmath>
+#include <limits>
+#include <type_traits>
 #include <voyahslam/images/image.h>
 
 namespace voyahslam::images {
@@ -25,15 +28,19 @@ public:
     double result =
         InterpolateOnZeroOneInterval(value_at_top, value_at_bottom, y - ty);
 
+    if constexpr (std::is_integral_v<T>) {
+      result = std::round(result);
+    }
     result = std::max(
-        static_cast<double>(std::numeric_limits<T>::min()),
+        static_cast<double>(std::numeric_limits<T>::lowest()),
         std::min(static_cast<double>(std::numeric_limits<T>::max()), result));
     return static_cast<T>(result);
   }
 
 private:
-  T InterpolateOnZeroOneInterval(double value_at_zero, double value_at_one,
-                                 double x) const {
+  // Intermediates stay in double: returning T would truncate integer pixels twice.
+  static double InterpolateOnZeroOneInterval(double value_at_zero, double value_at_one,
+                                             double x) {
     return (value_at_one - value_at_zero) * x + value_at_zero;
   }
 };

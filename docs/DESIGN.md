@@ -346,9 +346,8 @@ timings.
 the OpenCV `%YAML:1.0` directive is stripped for yaml-cpp). It owns the
 distortion models and builds the `StereoRig` from both cameras' `T_cam_imu`
 (`T_left_right = T_left_imu · T_imu_right`, so `p_left = R_rl p_right + t_rl`).
-Images: decoded to 8 bit (16-bit PNGs reduced), returned as float in [0, 1] —
-the range `OrbFeatureExtractor` expects. `ReadImageFromStream32F` is avoided
-because stb applies a 2.2 gamma curve to LDR images when loading as float.
+Images: decoded to 8 bit (16-bit PNGs reduced) and returned as
+`images::TWorkingImage` (8-bit grayscale).
 Only `equidistant` (Kannala-Brandt) and `none` distortion are supported.
 
 **Timing — no reader thread.** The reader is synchronous and index-based. The
@@ -421,6 +420,8 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-02 | `CameraFrame` → `MonocularMeasurement`, `BinocularCameraFrame` → `BinocularMeasurement`; timestamp stored in the measurement (binocular uses the left's); removed from `Frame` and keyframe events. | Avoids `CameraFrame`/`Frame`/`MonoFrame` confusion; one source of truth for time. |
 | 2026-10-02 | Long-term goal: mixed monocular/binocular keyframes in one map. Tracker accepts both measurement types now; binding decided later. | Extension beyond ORB-SLAM3. |
 | 2026-10-02 | Configuration lives in the user application; reference app in `examples/full_slam/`. | Library stays free of config-file parsing. |
+| 2026-10-03 | `images::TWorkingImage` is 8-bit (`TImageU8Gray`), not float. | FAST/BRIEF only compare intensities, float = 4× memory traffic. GPU backends read 8-bit textures as normalized floats, so float storage isn't needed for a future GPU extractor; the extractor interface (image in, features out) is the GPU boundary. Same feature count; mono 231 → 209 ms. |
+| 2026-10-03 | Long-term goal: drop the OpenCV dependency. | User preference; own Gaussian blur already, FAST next. |
 | 2026-10-03 | Measurements drop features whose ray is > 85° off the optical axis (`kMaxRayAngle`), tested in distorted space via `Distort()` of an 85° ray. | z = 1 normalized points can't represent ≥ 90° rays (fisheye); model-agnostic check needs no new distortion-model API. |
 | 2026-10-02 | Dataset reader is synchronous (no thread); apps pace with `PlaybackClock` (absolute deadlines). | Measured: load ≈ 10 ms vs extraction ≈ 220 ms per frame — a reader thread can't help; keeps the reader trivially testable. |
 | 2026-10-02 | `ObjectPool::Create()` aborts on exhaustion in every build type (not `assert`). | Release builds silently returned `nullptr`. |
@@ -467,11 +468,38 @@ branch → review → merge to `master`. Update this document at the end.
     empty and is woken by either a `Track()` call or a Mapper diff, without
     locks (e.g. a C++20 `std::atomic` wait/notify counter signalled by both
     `Track()` and `AsyncObserver` enqueue). Same question for Mapper/LoopCloser.
-21. **ORB extraction is ~10× too slow:** ≈ 220 ms per 1024² image in Release
-    (ORB-SLAM3: ~10–20 ms); stereo doubles it. Real-time at 20 Hz is impossible
-    until `OrbFeatureExtractor` (ported from slamlab2) is profiled and optimized.
-    Options after that: extract left/right in parallel, move extraction off the
-    app thread.
+21. **ORB extraction is ~10× too slow:** ≈ 210 ms per 1024² image in Release
+    (ORB-SLAM3: ~10–20 ms). Profiled 2026-10-03 (perf, DWARF unwinding):
+    - **57% `cv::FAST`:** the OpenCV 4.12 we link does `keypoints.resize(10000)`
+      (280 KB, value-initialized) on every call before detecting; we call it per
+      35-px cell (~1500–2500 calls/image, most cells twice because the dark
+      TUM-VI images need the threshold-7 retry). Fresh memory → page faults.
+      The allocator churn also makes timings depend on glibc's dynamic
+      mmap/trim thresholds (stereo was 2× slower than 2× mono until fixed via
+      `GLIBC_TUNABLES`).
+    - 17% descriptors incl. our `images::Filter` blur (allocates two images per
+      level per frame, per-tap border clamping); rest: allocations, pyramid
+      resize, PNG decode.
+
+    **Comparison with ORB-SLAM3** (`ORBextractor.cc`), same algorithm otherwise:
+    - Cells: ORB-SLAM3 grows each cell by 6 px so FAST's 3-px border doesn't
+      leave blind strips; ours don't overlap → undetectable 6-px strips every
+      35 px.
+    - Descriptor sampling: ORB-SLAM3 rounds rotated pattern offsets (`cvRound`),
+      we truncate (`cast<int>`) → descriptors differ bit-wise (matters for using
+      ORB-SLAM3 DBoW2 vocabularies).
+    - ORB-SLAM3 keeps each keypoint's pyramid level (`octave`) and size;
+      `ImageFeatures` loses the level — Tracker/Mapper need it (scale-aware
+      search radius, BA weighting).
+    - ORB-SLAM3 pads levels with a 19-px reflected border; we have none.
+    - ORB-SLAM3 blurs into `uint8` with `cv::GaussianBlur`; our blurred image
+      is float. Unused `cv::minMaxLoc` per cell in ours.
+
+    **Plan:** own FAST-9-16 run once per level, corners assigned to cells
+    (≥ 20 if any, else ≥ 7) — fixes speed, blind strips, and drops OpenCV from
+    detection; preallocated blur/pyramid buffers; round descriptor offsets;
+    keep the level in `ImageFeatures`. Then re-profile. Parallel left/right
+    extraction after that.
 22. **Fisheye rays beyond 90°:** `MonocularMeasurement` stores undistorted
     *normalized* points (z = 1), which cannot represent rays at ≥ 90° off-axis;
     TUM-VI's image corners are there. **Interim (2026-10-03):** features whose
@@ -517,7 +545,9 @@ branch → review → merge to `master`. Update this document at the end.
   observations yet (§6 says it should) — add when designing the Tracker.
 
 **Next:**
-- Profile/optimize `OrbFeatureExtractor` (Open Question 21); fisheye > 90° (22).
+- ORB extractor plan in Open Question 21 (own FAST, buffers, descriptor
+  rounding, keypoint level). Building OpenCV from source to link against
+  (in progress, user).
 - Component loops: threads, idle wait (Open Question 20), Tracker measurement
   policy (19).
 - Design the Tracker (initialization mono/stereo, track-with-motion-model,

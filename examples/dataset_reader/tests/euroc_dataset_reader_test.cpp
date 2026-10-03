@@ -107,7 +107,7 @@ TEST(EurocDatasetReaderTest, ReadsKalibrStereoCalibration) {
     EXPECT_DOUBLE_EQ(rig.K_right(0, 0), 379.0);
 }
 
-TEST(EurocDatasetReaderTest, LoadsFramesWithTimestampsInSecondsAndUnitRangeImages) {
+TEST(EurocDatasetReaderTest, LoadsFramesWithTimestampsInSecondsAnd8BitImages) {
     SyntheticDataset dataset;
     dataset.AddCamera(0, {1000000000, 1050000000}, 255);
     dataset.AddCamera(1, {1000000000, 1050000000}, 51);
@@ -120,12 +120,12 @@ TEST(EurocDatasetReaderTest, LoadsFramesWithTimestampsInSecondsAndUnitRangeImage
     EXPECT_DOUBLE_EQ(mono.timestamp, 1.05);
     EXPECT_EQ(mono.image.Width(), 8u);
     EXPECT_EQ(mono.image.Height(), 6u);
-    EXPECT_FLOAT_EQ(mono.image.At(2, 3, 0), 1.0f);
+    EXPECT_EQ(mono.image.At(2, 3, 0), 255);
 
     BinocularFrame stereo = reader.LoadBinocular(0);
     EXPECT_DOUBLE_EQ(stereo.timestamp, 1.0);
-    EXPECT_FLOAT_EQ(stereo.left.At(0, 0, 0), 1.0f);
-    EXPECT_FLOAT_EQ(stereo.right.At(0, 0, 0), 0.2f);
+    EXPECT_EQ(stereo.left.At(0, 0, 0), 255);
+    EXPECT_EQ(stereo.right.At(0, 0, 0), 51);
 }
 
 TEST(EurocDatasetReaderTest, MonocularWhenCam1HasNoImages) {

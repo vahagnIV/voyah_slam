@@ -43,8 +43,8 @@ struct BinocularFrame {
 // Only the "equidistant" (Kannala-Brandt) distortion model is supported so far.
 //
 // The reader does no timing and starts no threads: frames are loaded on
-// demand, by index, on the caller's thread. Images are returned as grayscale
-// floats in [0, 1]; 16-bit PNGs are reduced to 8 bits first.
+// demand, by index, on the caller's thread. Images are returned as 8-bit
+// grayscale (images::TWorkingImage); 16-bit PNGs are reduced to 8 bits.
 class EurocDatasetReader {
 public:
     explicit EurocDatasetReader(const std::filesystem::path& root);

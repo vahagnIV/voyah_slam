@@ -488,7 +488,8 @@ OrbFeatureExtractor::ComputeKeyPointsOctTree(size_t features) const {
 float OrbFeatureExtractor::ComputeOrientationSinglePoint(
     const images::TWorkingImage &image, const geometry::TPoint2DF &point) {
 
-  images::TWorkingImage::TScalar m_01 = 0, m_10 = 0;
+  // int accumulators: the sums overflow the 8-bit pixel type immediately.
+  int m_01 = 0, m_10 = 0;
 
   int x = point.x();
   int y = point.y();
@@ -499,19 +500,19 @@ float OrbFeatureExtractor::ComputeOrientationSinglePoint(
 
   int step = (int)image.Stride();
   for (int v = 1; v <= HALF_PATCH_SIZE; ++v) {
-    images::TWorkingImage::TScalar v_sum = 0;
+    int v_sum = 0;
     int d = UMax[v];
     int step_v = v * step;
     for (int u = -d; u <= d; ++u) {
-      images::TWorkingImage::TScalar val_plus = center[u + step_v];
-      images::TWorkingImage::TScalar val_minus = center[u - step_v];
+      int val_plus = center[u + step_v];
+      int val_minus = center[u - step_v];
       v_sum += (val_plus - val_minus);
       m_10 += u * (val_plus + val_minus);
     }
     m_01 += v * v_sum;
   }
 
-  return atan2(m_01, m_10);
+  return std::atan2(static_cast<float>(m_01), static_cast<float>(m_10));
 }
 
 geometry::TRowVectorF OrbFeatureExtractor::ComputeOrientation(
@@ -614,7 +615,8 @@ OrbFeatureExtractor::ComputePointsPerLevel(size_t level, int n_features) const {
 OrbFeatureExtractor::TDescriptors OrbFeatureExtractor::ComputeDescriptors(
     const images::TWorkingImage &image, const geometry::TPoints2DF &points,
     const geometry::TRowVectorF &angles) const {
-  auto blurred = images::Filter<images::TWorkingImage::TScalar>::ApplySeparable(
+  // 8-bit image, float kernel -> float blurred image.
+  auto blurred = images::Filter<images::TWorkingImage::TScalar, 1, float>::ApplySeparable(
       gaussian_filter_x_, gaussian_filter_y_, image);
   TDescriptors result;
   result.resize(DescriptorSize, points.cols());
@@ -642,7 +644,7 @@ OrbFeatureExtractor::TDescriptors OrbFeatureExtractor::ComputeDescriptors(
             (rotation * PATTERN[pattern_start_idx + 2 * j].cast<float>())
                 .cast<int>();
         int d = dx.y() * blurred.Stride() + dx.x();
-        images::TWorkingImage::TScalar t0 = center[d], t1;
+        typename decltype(blurred)::TScalar t0 = center[d], t1;
         dx = (rotation * PATTERN[pattern_start_idx + 2 * j + 1].cast<float>())
                  .cast<int>();
         d = dx.y() * blurred.Stride() + dx.x();
