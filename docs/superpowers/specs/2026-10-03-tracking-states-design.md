@@ -59,9 +59,18 @@ rule 5), so a stale `map_id` would otherwise leak.
 | `LoopDetected` | map the LoopCloser searched |
 | `InitializationMeasurement` | `0` (no map yet) |
 
-**Rule for every consumer:** an event with `map_id != 0` and
-`map_id != current map` is acknowledged and ignored. A `MapCreated` with a
-`map_id` greater than the current one means "drop the old map".
+**Rule for every consumer** (events with `map_id == 0` are exempt):
+
+- `map_id < current` → stale (an older map): acknowledge and ignore.
+- `map_id > current` → the first event of a newer map: drop the replica,
+  `current = map_id`, then apply the event. (The initial map's
+  `KeyFrameCreated` events arrive *before* its `MapCreated`, so they must not
+  be dropped.)
+- `map_id == current` → apply.
+
+`MapCreated` for the current map marks the map complete. The Mapper only
+builds map n+1 after `TrackingLost(n)`, so a newer map never appears while
+the Tracker is tracking an older one.
 
 ### 1.2 Measurement variant
 
@@ -210,11 +219,12 @@ Members: `current_map_id_` (starts `MapId{0}`), `last_pose_`, `PoseEstimator`.
 
 `ProcessPending()` — one pass:
 
-1. Drain the inbox completely:
-   - `MapCreated` with `map_id > current_map_id_` → `current_map_id_ = map_id`,
-     `last_pose_ = pose`, state → `Tracking`.
-   - `MapCreated` with `map_id <= current_map_id_` → ignore.
-   - other events with `map_id != 0 && map_id != current_map_id_` → ignore.
+1. Drain the inbox completely, applying the consumer rule of §1.1 first
+   (`map_id < current` → ignore; `map_id > current` → reset replica,
+   `current_map_id_ = map_id`):
+   - `MapCreated` (now `map_id == current_map_id_`) → `last_pose_ = pose`,
+     `map_frame_id_ = frame_id`, state → `Tracking` (from `WaitingForMap` or
+     `Lost`; a duplicate while `Tracking` is ignored).
    - other events of the current map → replica update (no-op for now).
 2. If a measurement is queued, take **one**:
    - `WaitingForMap` / `Lost` → publish `InitializationMeasurement`
@@ -272,7 +282,7 @@ transitions are logged, e.g. `Tracker: WaitingForMap -> Tracking (map 1)`,
 | `AsyncObserver`/`Observable` | `Push` notifies the attached signal; `Notify` delivers via `Push`; existing event tests updated and green |
 | `WorkerThread` | runs `process_pending` until it returns false, then sleeps; wakes on `Notify`; `Stop()` wakes and joins; `Stop()` twice / without `Start()` safe |
 | `PoseEstimator`, `MapInitializer` | each stub rule above (mono interval, feature thresholds, reference replacement, stereo, `Reset`) |
-| Tracker (`ProcessPending`, no thread) | forwards `InitializationMeasurement` while `WaitingForMap`; `MapCreated` → `Tracking`; good measurement → `PositionUpdated` with `map_id`; 0 features → `TrackingLost` + `Lost`; stale `MapCreated` and other-map events ignored; `Lost` forwards again |
+| Tracker (`ProcessPending`, no thread) | forwards `InitializationMeasurement` while `WaitingForMap`; `KeyFrameCreated(1)` then `MapCreated(1)` → `Tracking` on map 1; good measurement → `PositionUpdated` with `map_id`; 0 features → `TrackingLost` + `Lost`; stale (`map_id` < current) `MapCreated` ignored; `Lost` forwards again; `MapCreated(2)` after loss → `Tracking` on map 2 |
 | Mapper (`ProcessPending`, no thread) | stereo initializes from one measurement; mono waits for the interval; too few features replaces the reference; `KeyFrameCreated` precede `MapCreated`; frame ids increase across maps; `TrackingLost` (current) → `Initializing`, next map id 2; stale `TrackingLost` ignored; `InitializationMeasurement` ignored while `Mapping` |
 | End to end (`Slam`, threads) | mono measurements → external observer sees `MapCreated(1)` then `PositionUpdated`; a 0-feature measurement → `TrackingLost(1)`; more measurements → `MapCreated(2)`. Also under ThreadSanitizer |
 | `SceneState` | counts the three new event types |
