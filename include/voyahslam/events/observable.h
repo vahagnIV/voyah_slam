@@ -12,7 +12,7 @@ public:
     Observable() = default;
 
     void ConnectAsync(AsyncObserver& observer) {
-        async_queues_.push_back(&observer.queue());
+        async_observers_.push_back(&observer);
     }
 
     void ConnectSync(void (*fn)(void*, Event*), void* ctx) {
@@ -29,20 +29,20 @@ public:
             handler.fn(handler.ctx, event);
         }
 
-        if (async_queues_.empty()) {
+        if (async_observers_.empty()) {
             if (event->recycle_) {
                 event->recycle_(event);
             }
             return;
         }
 
-        event->set_ref_count_(event, static_cast<int>(async_queues_.size()));
-        for (auto* queue : async_queues_) {
-            queue->enqueue(event);
+        event->set_ref_count_(event, static_cast<int>(async_observers_.size()));
+        for (auto* observer : async_observers_) {
+            observer->Push(event);
         }
     }
 
-    [[nodiscard]] size_t async_count() const { return async_queues_.size(); }
+    [[nodiscard]] size_t async_count() const { return async_observers_.size(); }
 
 private:
     struct SyncHandler {
@@ -50,7 +50,7 @@ private:
         void* ctx;
     };
 
-    std::vector<moodycamel::ConcurrentQueue<Event*>*> async_queues_;
+    std::vector<AsyncObserver*> async_observers_;
     std::vector<SyncHandler> sync_handlers_;
 };
 
