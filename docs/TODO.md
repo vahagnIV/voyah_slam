@@ -57,6 +57,32 @@ as soon as they come up.
       measurement policy (OQ 19).
 - [ ] Design the Tracker, then the Mapper, then the LoopCloser.
 
+## Visualization
+
+- [ ] Pangolin renderer in `MapViewer::Render()`; decode event payloads in
+      `SceneState` (map points, keyframe poses, current pose, trajectory).
+- [ ] Event serialization + transport (HTTP or ROS) for a remote viewer: a
+      serializing async observer on the SLAM side, a receiver feeding
+      `SceneState` on the viewer side.
+- [ ] Separate image flow for the camera view (images/keypoints are outside the
+      SLAM events).
+- [ ] `MapViewer` hardening (deferred review minors, 2026-10-03):
+      `Start()`/`Stop()` aren't safe to call concurrently or from the viewer
+      thread (matters once a Pangolin window-close calls `Stop()`); `Start()`
+      leaves `running_` true if thread creation throws; reject non-finite /
+      extreme `fps`, and wake `Stop()` immediately (low fps delays it by a
+      period); exceptions from future `Apply()`/`Render()` would terminate.
+- [ ] `SceneState`: counter array sized from the last `EventType` enumerator;
+      add a count sentinel / `static_assert` and bounds-check types (needed once
+      events are deserialized from the network).
+
+## Event system
+
+- [ ] `AsyncObserver` destruction doesn't acknowledge events still queued, so
+      their pool slots never return. Drain on destruction.
+- [ ] Mono/stereo variants of `KeyFrameCreated` / `NewKeyFrameCandidate` share
+      one `EventType`. (OQ 24)
+
 ## Environment
 
 - [ ] Second dev machine: build OpenCV 5.x from source into `/usr/local` with

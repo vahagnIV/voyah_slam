@@ -170,8 +170,16 @@ which enqueues.
 - Publishes `LoopDetected` (query frame, matched frame, and whatever verification
   data is useful to the Mapper). Never modifies the map.
 
-### Visualizer (future)
-- Subscribes to Mapper diffs and Tracker poses; owns a render-only replica.
+### Visualizer (MapViewer)
+- `voyahviz::MapViewer` (see "Visualization Library") subscribes to Tracker
+  and Mapper events through one inbox and builds a render-only `SceneState`
+  from them. It is not part of `Slam`; the apps attach it.
+- **Remote visualization (target):** SLAM and viewer run on different
+  machines. On the SLAM machine an async observer serializes events and sends
+  them over HTTP or ROS; on the viewer machine a receiver rebuilds the events
+  and feeds the same `SceneState`/renderer code. Hence the viewer may use
+  nothing but event contents. Camera images are a separate flow (acquisition
+  and feature extraction are outside the SLAM logic).
 
 ## 5. Data Layer (implemented)
 
@@ -220,6 +228,14 @@ Rules:
   up identical to the Mapper's map as of the last applied event.
 - Because IDs are never reused, `MapPointsAdded` allocates a contiguous id range
   `[start_id, start_id + count)` and every replica stores point `i` at the same slot.
+- **Pointer rule:** an event may point only at data that never changes and lives
+  for the whole run (calibration and configuration, e.g. a `DistortionModel` or
+  `StereoRig`). A serializer turns such references into values (inline, or sent
+  once and referenced). Everything mutable or short-lived travels by value —
+  e.g. a pointer to a reused Tracker buffer is never allowed.
+- **No subscription filtering:** an `Observable` delivers every event to every
+  connected observer (the viewer also receives `NewKeyFrameCandidate` and just
+  acknowledges it). A future serializing observer chooses what to send.
 
 ### 6.1 Event Lifecycle: Pooled, Reference-Counted, Acknowledged
 
@@ -397,8 +413,29 @@ viewer fed by Tracker/Mapper events must marshal frames to that thread.
 `monocular_full_slam` / `binocular_full_slam --show` display the live frame(s)
 with keypoints (stereo side by side); `q`/`Esc` quits.
 
-Possible later: a 3D map/trajectory viewer — Pangolin (used by ORB-SLAM3,
-installed in `/usr/local`) is the natural candidate.
+### Map Viewer
+
+Spec: `docs/superpowers/specs/2026-10-03-map-viewer-design.md`.
+
+| Header | Contents |
+|---|---|
+| `scene_state.h` | `SceneState<FE>`: `Apply(const Event&)`, `applied_count(type)`, `total_applied()`. Built only from events; no threads/GUI. Now only counts per `EventType` (switch without `default`, so a new type warns); payload decoding comes with Pangolin |
+| `map_viewer.h` | `MapViewer<FE>(fps = 30)`: one `AsyncObserver` inbox, own thread, `Start()`/`Stop()`, `inbox()`, `events_processed()` (atomic). Empty `Render()` hook for Pangolin |
+
+- Loop: drain inbox through a local `Listener` (acknowledges each event) →
+  `SceneState::Apply` → `Render()` → sleep to the next absolute deadline (no
+  catch-up when late). No busy-waiting, independent of OQ 20.
+- `Stop()`: joins, then drains once more so queued events return to their
+  pools; idempotent, safe without `Start()`; restart allowed; destructor stops.
+  `fps <= 0` throws.
+- **Ordering:** connect with `AddObserver(viewer.inbox())` before the producers
+  start; stop `Slam` before the viewer.
+- Pools feeding the viewer must cover the backlog published between two ticks
+  (≈ 33 ms at 30 fps) — relevant to OQ 14.
+- The full_slam apps always attach a `MapViewer` and print
+  `viewer: N events processed` (0 until Tracker/Mapper publish).
+- Pangolin (used by ORB-SLAM3, installed in `/usr/local`) will render 3D map
+  points, keyframes and the current pose.
 
 ## 7. Coding Conventions
 
@@ -477,6 +514,8 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-03 | `images::TWorkingImage` is 8-bit (`TImageU8Gray`), not float. | FAST/BRIEF only compare intensities, float = 4× memory traffic. GPU backends read 8-bit textures as normalized floats, so float storage isn't needed for a future GPU extractor; the extractor interface (image in, features out) is the GPU boundary. Same feature count; mono 231 → 209 ms. |
 | 2026-10-03 | Long-term goal: drop the OpenCV dependency. | User preference; own Gaussian blur already, FAST next. |
 | 2026-10-03 | Link a source-built OpenCV 5.1 from `/usr/local` instead of Conan's OpenCV 4.12. | Conan's 4.12 `cv::FAST` resizes its output to 10 000 keypoints on every call (57% of extraction time). With 5.1: mono extraction 231 → 70 ms, stereo ~404 → 149 ms on TUM-VI 1024² (float images). Also gives a GTK GUI backend. |
+| 2026-10-03 | Map viewer: `SceneState` (event-driven model) + `MapViewer` (own thread, single inbox, fixed-rate loop); attached by the apps, not by `Slam`. | Emulates the future remote viewer: everything comes from events, so the consuming code is unchanged behind a serializer. Own thread decouples rendering from the processing loop and suits Pangolin. |
+| 2026-10-03 | Respect the event boundary now; serialization + transport (HTTP/ROS) later. | Format depends on the transport choice; the boundary is what must not change. |
 | 2026-10-03 | No OpenCV types in public headers; OpenCV linked `PRIVATE`; APIs use our types. voyahviz reworked accordingly (`TColorImage`, `Color`). Small libs (Eigen, spdlog, concurrentqueue) may stay public. | User requirement: library users must not need OpenCV headers or `find_package(OpenCV)`; requiring the small libs is acceptable. |
 | 2026-10-03 | Visualization in a separate `voyahviz` library (`vizualization/`), allowed to use OpenCV; images via `cv::imshow`, keypoints drawn with `cv::circle`/`cv::line` rather than `cv::drawKeypoints`. | Dev-only tool. Own drawing avoids converting to `cv::KeyPoint` (whose size/octave we don't have) and allows orientation ticks and future colouring by level/tracking state. |
 | 2026-10-03 | Measurements drop features whose ray is > 85° off the optical axis (`kMaxRayAngle`), tested in distorted space via `Distort()` of an 85° ray. | z = 1 normalized points can't represent ≥ 90° rays (fisheye); model-agnostic check needs no new distortion-model API. |
@@ -573,6 +612,12 @@ branch → review → merge to `master`. Update this document at the end.
     the Tracker design.
 23. **Radial-tangential distortion** (EuRoC MAV) is not implemented; the reader
     rejects such calibrations.
+24. **Mono/stereo variants share an event tag.** `KeyFrameCreated<FE,
+    TMeasurement>` and `NewKeyFrameCandidate<FE, TMeasurement>` use one
+    `EventType` for both measurement types, so a consumer holding `Event*`
+    can't pick the concrete type. Options: separate tags
+    (`KeyFrameCreatedMono` / `...Stereo`) or a measurement-kind field. Tied to
+    mixed keyframes (OQ 17).
 11. ~~Payload buffers are not reused~~ — resolved 2026-10-02 (objects stay alive
     in the pool, payloads in grow-only `ColumnBuffer`s). Related: chunking large
     loop-closure diffs (Q3) would also bound the buffers' peak capacity.
