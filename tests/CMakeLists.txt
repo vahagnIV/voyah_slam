@@ -27,6 +27,8 @@ add_executable(voyahslam_tests
     tracking/pose_estimator_test.cpp
     tracking/tracker_test.cpp
     mapping/map_initializer_test.cpp
+    mapping/mapper_test.cpp
+    loop_closing/loop_closer_test.cpp
 )
 
 target_include_directories(voyahslam_tests

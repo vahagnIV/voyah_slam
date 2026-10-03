@@ -4,7 +4,8 @@
 namespace voyahslam::slam {
 
 template <typename TFeatureExtractor>
-Slam<TFeatureExtractor>::Slam() {
+Slam<TFeatureExtractor>::Slam(mapping::MapperOptions mapper_options)
+    : mapper_(mapper_options) {
     tracker_.AddObserver(mapper_.inbox());
     mapper_.AddObserver(tracker_.inbox());
     mapper_.AddObserver(loop_closer_.inbox());
