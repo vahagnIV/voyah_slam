@@ -149,8 +149,8 @@ reference is kept or replaced. A follow-up spec replaces the bodies in place.
   update the replica (no-op yet); (2) take **one** measurement: in
   `WaitingForMap`/`Lost` publish it as `InitializationMeasurement`
   (`map_id` 0); in `Tracking` run `PoseEstimator::Estimate()` — success
-  publishes `PositionUpdated`, failure publishes `TrackingLost(current map)`
-  and moves to `Lost`. `Lost` currently behaves like `WaitingForMap`
+  publishes `PositionUpdated`, failure moves to `Lost` and then publishes
+  `TrackingLost(current map)`. `Lost` currently behaves like `WaitingForMap`
   (relocalization will live there).
 - Runs its **own thread with two input queues**:
   - `inbox()` — map diffs from the Mapper (events),
@@ -197,9 +197,9 @@ reference is kept or replaced. A follow-up spec replaces the bodies in place.
   shared; never move out of it). Monocular initialization takes many frames
   (reference + a later frame), stereo one measurement. On success the Mapper
   creates a `Frame` per initial keyframe (ids from a monotonic counter, never
-  reused across maps), takes `current_map_id_ = next_map_id_++`, publishes
-  `KeyFrameCreated` for each keyframe and then `MapCreated(map_id, frame id,
-  pose)` and moves to `Mapping`; the Tracker switches to `Tracking` on
+  reused across maps), takes `current_map_id_ = next_map_id_++`, moves to
+  `Mapping`, then publishes `KeyFrameCreated` for each keyframe and then
+  `MapCreated(map_id, frame id, pose)`; the Tracker switches to `Tracking` on
   `MapCreated`. `InitializationMeasurement` is ignored while `Mapping`.
   `TrackingLost` for the current map (in `Mapping`) clears keyframes, resets
   the initializer and returns to `Initializing`, so the next success starts
@@ -600,6 +600,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-03 | Idle wait via per-component `WakeSignal` (atomic counter, C++20 wait/notify) + `WorkerThread` (OQ 20). Snapshot is taken before the `running` check. | Lock-free sleep/wake from both `Track()` and queue pushes; the snapshot order avoids a lost `Stop()` wake-up. |
 | 2026-10-03 | The Mapper (only map writer) performs initialization from `InitializationMeasurement`s forwarded by the Tracker. | Single-writer principle: the Tracker never creates map objects. |
 | 2026-10-03 | Maps are identified by a monotonic `map_id` on every event; consumer rule: ignore older, reset-and-adopt newer, apply equal; 0 exempt. | Detects stale events across map restarts; the initial map's diffs precede `MapCreated`, so a newer id must adopt rather than drop. |
+| 2026-10-03 | A component changes its state (and `current_map_id_`) **before** publishing the event that announces it (`MapCreated` -> `Mapping`, `TrackingLost` -> `Lost`). | Whoever observes the event, on any thread, then also observes the new `state()`; publishing first let `state()` lag the protocol. |
 | 2026-10-03 | Monocular initialization needs many frames (reference + a later frame); stereo uses one measurement. | Mono needs parallax between views; stereo has depth from one pair. |
 
 ## 9. Open Questions
@@ -704,10 +705,14 @@ branch → review → merge to `master`. Update this document at the end.
 25. **Event pool lifetime.** Components own the pools of the events they
     publish, but consumers (e.g. the `MapViewer` inbox) can still hold those
     events. The apps declare the viewer before `slam`, so on exception unwinding
-    `Slam` is destroyed first and the viewer's destructor drain would recycle
-    events into freed pools. Normal shutdown (`slam.Stop(); viewer.Stop()`) is
-    safe. Needs a design decision: pools that outlive all producers and
-    consumers.
+    `Slam` is destroyed first — while the viewer thread may still be running
+    and draining its inbox (`DrainInbox()` recycles into the Tracker/Mapper
+    pools) — and the viewer's destructor drain then recycles into freed pools
+    too. The apps now guard against this: a guard declared right after `slam`
+    runs `slam.Stop(); viewer.Stop()` on every exit path, so the viewer is
+    stopped and fully drained before `~Slam` (as `tests/slam/slam_test.cpp`
+    does). This is a caller-side workaround; the library-level design stays
+    open: pools that outlive all producers and consumers.
 
 ## 10. Status and Next Steps
 

@@ -91,11 +91,12 @@ as soon as they come up.
 - [ ] `AsyncObserver` destruction doesn't acknowledge events still queued, so
       their pool slots never return. Drain on destruction.
 - [ ] **Event pool lifetime** (OQ 25): components own the pools of the events
-      they publish but consumers (e.g. the `MapViewer` inbox) can hold them; the
-      apps declare the viewer before `slam`, so on exception unwinding `Slam` is
-      destroyed first and the viewer's destructor drain recycles into freed
-      pools. Normal shutdown (`slam.Stop(); viewer.Stop()`) is safe. Needs pools
-      that outlive all producers and consumers.
+      they publish but consumers (e.g. the `MapViewer` inbox) can hold them.
+      Without care, on exception unwinding `~Slam` runs while the viewer thread
+      may still be draining into its pools, and the viewer's destructor drain
+      recycles into freed pools. The apps now guard against it (a guard after
+      `slam` runs `slam.Stop(); viewer.Stop()` on every exit path), but the
+      library still needs pools that outlive all producers and consumers.
 
 ## Environment
 
