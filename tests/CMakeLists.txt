@@ -25,6 +25,7 @@ add_executable(voyahslam_tests
     events/worker_thread_test.cpp
     slam/slam_test.cpp
     tracking/pose_estimator_test.cpp
+    tracking/tracker_test.cpp
     mapping/map_initializer_test.cpp
 )
 
