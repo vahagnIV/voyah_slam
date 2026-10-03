@@ -21,7 +21,14 @@ add_executable(voyahslam_tests
     map/frame_test.cpp
     map/observation_storage_test.cpp
     events/event_system_test.cpp
+    events/wake_signal_test.cpp
+    events/worker_thread_test.cpp
     slam/slam_test.cpp
+    tracking/pose_estimator_test.cpp
+    tracking/tracker_test.cpp
+    mapping/map_initializer_test.cpp
+    mapping/mapper_test.cpp
+    loop_closing/loop_closer_test.cpp
 )
 
 target_include_directories(voyahslam_tests

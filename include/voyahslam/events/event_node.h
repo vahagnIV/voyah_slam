@@ -5,16 +5,18 @@
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/event_types.h>
 #include <voyahslam/events/observable.h>
+#include <voyahslam/events/wake_signal.h>
 
 namespace voyahslam::events {
 
 // Connection points of a component that runs its own loop (Tracker, Mapper,
 // LoopCloser): it publishes through an Observable and receives through a single
 // AsyncObserver, its inbox. Wiring is not thread-safe — connect everything
-// before Start().
+// before Start(). The inbox notifies the node's WakeSignal on every push, so the
+// component's worker thread sleeps on it while there is nothing to do.
 class EventNode {
 public:
-    EventNode() = default;
+    EventNode() { inbox_.SetWakeSignal(&wake_signal_); }
     EventNode(const EventNode&) = delete;
     EventNode& operator=(const EventNode&) = delete;
 
@@ -31,8 +33,14 @@ public:
     [[nodiscard]] size_t async_observer_count() const { return observable_.async_count(); }
 
 protected:
+    // Notified by the inbox and by any other input the component has.
+    [[nodiscard]] WakeSignal& wake_signal() { return wake_signal_; }
+
     Observable observable_;
     AsyncObserver inbox_;
+
+private:
+    WakeSignal wake_signal_;
 };
 
 } // namespace voyahslam::events

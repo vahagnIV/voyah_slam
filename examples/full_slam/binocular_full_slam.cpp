@@ -39,10 +39,22 @@ int main(int argc, char** argv) {
 
         // 3D viewer: consumes Tracker and Mapper events on its own thread (later
         // a remote process behind a serializing observer). Declared before slam
-        // so that, also when an exception unwinds, slam is destroyed (stopped)
-        // first and nothing is published into a destroyed inbox.
+        // so that slam is destroyed first and nothing is published into a
+        // destroyed inbox.
         voyahviz::MapViewer<TFeatureExtractor> viewer;
         TSlam slam;
+        // Also when an exception unwinds: stop the producers, then the viewer
+        // (its final drain recycles events into slam's pools), all before
+        // ~Slam destroys those pools. Both Stop()s are idempotent, so the
+        // explicit stops below on the normal path are fine.
+        struct StopAll {
+            TSlam& slam;
+            voyahviz::MapViewer<TFeatureExtractor>& viewer;
+            ~StopAll() {
+                slam.Stop();
+                viewer.Stop();
+            }
+        } stop_all{slam, viewer};
         // Wire before Start().
         slam.tracker().AddObserver(viewer.inbox());
         slam.mapper().AddObserver(viewer.inbox());
@@ -81,6 +93,8 @@ int main(int argc, char** argv) {
         slam.Stop();
         viewer.Stop();
         stats.Print(std::cout);
+        std::cout << "tracker state: " << full_slam::StateName(slam.tracker().state()) << "\n"
+                  << "mapper state: " << full_slam::StateName(slam.mapper().state()) << "\n";
         std::cout << "viewer: " << viewer.events_processed() << " events processed\n";
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";

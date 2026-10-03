@@ -1,5 +1,7 @@
 #include <voyahslam/events/events.h>
 #include <voyahslam/events/observable.h>
+#include <voyahslam/features/binocular_measurement.h>
+#include <voyahslam/features/measurement.h>
 #include <voyahslam/features/monocular_measurement.h>
 #include <voyahslam/features/orb_feature_extractor.h>
 #include <voyahslam/memory/object_pool.h>
@@ -7,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <variant>
 #include <thread>
 #include <vector>
 
@@ -15,8 +18,10 @@ namespace {
 
 using OrbMapPointsAdded = MapPointsAdded<features::OrbFeatureExtractor>;
 using OrbMonocularMeasurement = features::MonocularMeasurement<uint8_t, 32>;
-using OrbKeyFrameCreated = KeyFrameCreated<features::OrbFeatureExtractor, OrbMonocularMeasurement>;
-using OrbNewKeyFrameCandidate = NewKeyFrameCandidate<features::OrbFeatureExtractor, OrbMonocularMeasurement>;
+using OrbBinocularMeasurement = features::BinocularMeasurement<uint8_t, 32>;
+using OrbKeyFrameCreated = KeyFrameCreated<features::OrbFeatureExtractor>;
+using OrbNewKeyFrameCandidate = NewKeyFrameCandidate<features::OrbFeatureExtractor>;
+using OrbInitializationMeasurement = InitializationMeasurement<features::OrbFeatureExtractor>;
 
 TEST(EventSystemTest, EventTypeTag) {
     memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(4);
@@ -327,6 +332,41 @@ TEST(EventSystemTest, ObservableNoAsyncSkipsRefCount) {
     observable.Notify(&event);
     EXPECT_EQ(counter, 1);
     // No crash: set_ref_count_ was nullptr and was never called
+}
+
+TEST(EventSystemTest, NewEventTypeTags) {
+    memory::ObjectPool<MapCreated, memory::ThreadSafePolicy> created(1);
+    memory::ObjectPool<TrackingLost, memory::ThreadSafePolicy> lost(1);
+    memory::ObjectPool<OrbInitializationMeasurement, memory::ThreadSafePolicy> init(1);
+
+    auto* c = created.Create();
+    auto* l = lost.Create();
+    auto* i = init.Create();
+    EXPECT_EQ(c->type, EventType::MapCreated);
+    EXPECT_EQ(l->type, EventType::TrackingLost);
+    EXPECT_EQ(i->type, EventType::InitializationMeasurement);
+    EXPECT_EQ(c->map_id, map::MapId{0});
+    EXPECT_EQ(l->map_id, map::MapId{0});
+    EXPECT_EQ(i->map_id, map::MapId{0});
+    c->Recycle();
+    l->Recycle();
+    i->Recycle();
+}
+
+TEST(EventSystemTest, KeyFrameCreatedHoldsMonoOrStereo) {
+    memory::ObjectPool<OrbKeyFrameCreated, memory::ThreadSafePolicy> pool(1);
+
+    auto* event = pool.Create();
+    event->measurement = features::TMonocularMeasurement<features::OrbFeatureExtractor>{};
+    EXPECT_TRUE(std::holds_alternative<features::TMonocularMeasurement<features::OrbFeatureExtractor>>(
+        event->measurement));
+    event->Recycle();
+
+    event = pool.Create();
+    event->measurement = features::TBinocularMeasurement<features::OrbFeatureExtractor>{};
+    EXPECT_TRUE(std::holds_alternative<features::TBinocularMeasurement<features::OrbFeatureExtractor>>(
+        event->measurement));
+    event->Recycle();
 }
 
 } // namespace

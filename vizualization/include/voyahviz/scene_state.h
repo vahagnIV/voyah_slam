@@ -23,7 +23,7 @@ public:
 
 private:
     static constexpr size_t kNumEventTypes =
-        static_cast<size_t>(voyahslam::events::EventType::PositionUpdated) + 1;
+        static_cast<size_t>(voyahslam::events::EventType::TrackingLost) + 1;
 
     void Count(voyahslam::events::EventType type);
 

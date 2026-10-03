@@ -45,5 +45,21 @@ TEST(SceneStateTest, CountsAppliedEventsPerType) {
     EXPECT_EQ(scene.total_applied(), 4u);
 }
 
+TEST(SceneStateTest, CountsNewEventTypes) {
+    memory::ObjectPool<events::MapCreated, memory::ThreadSafePolicy> created(1);
+    memory::ObjectPool<events::TrackingLost, memory::ThreadSafePolicy> lost(1);
+    memory::ObjectPool<events::InitializationMeasurement<features::OrbFeatureExtractor>,
+                       memory::ThreadSafePolicy> init(1);
+
+    TOrbScene scene;
+    ApplyOne(scene, created);
+    ApplyOne(scene, lost);
+    ApplyOne(scene, init);
+
+    EXPECT_EQ(scene.applied_count(EventType::MapCreated), 1u);
+    EXPECT_EQ(scene.applied_count(EventType::TrackingLost), 1u);
+    EXPECT_EQ(scene.applied_count(EventType::InitializationMeasurement), 1u);
+}
+
 } // namespace
 } // namespace voyahviz

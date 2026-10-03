@@ -9,6 +9,8 @@
 #include <iostream>
 #include <limits>
 #include <string>
+#include <voyahslam/mapping/mapper.h>
+#include <voyahslam/tracking/tracker.h>
 
 namespace voyahslam::full_slam {
 
@@ -55,6 +57,23 @@ inline Options ParseOptions(int argc, char** argv) {
     }
     if (options.dataset.empty()) usage();
     return options;
+}
+
+inline const char* StateName(tracking::TrackerState state) {
+    switch (state) {
+        case tracking::TrackerState::WaitingForMap: return "WaitingForMap";
+        case tracking::TrackerState::Tracking: return "Tracking";
+        case tracking::TrackerState::Lost: return "Lost";
+    }
+    return "?";
+}
+
+inline const char* StateName(mapping::MapperState state) {
+    switch (state) {
+        case mapping::MapperState::Initializing: return "Initializing";
+        case mapping::MapperState::Mapping: return "Mapping";
+    }
+    return "?";
 }
 
 // Collects how late frames were delivered and how long loading and feature

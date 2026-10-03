@@ -3,18 +3,19 @@
 
 #include <voyahslam/defs.h>
 #include <voyahslam/events/event_types.h>
+#include <voyahslam/features/measurement.h>
 #include <voyahslam/map/frame_id.h>
 #include <voyahslam/memory/recyclable.h>
 
 namespace voyahslam::events {
 
-template <typename TFeatureExtractor, typename TMeasurement>
+template <typename TFeatureExtractor>
 struct KeyFrameCreated
     : Event
-    , memory::Recyclable<KeyFrameCreated<TFeatureExtractor, TMeasurement>, memory::ThreadSafePolicy> {
+    , memory::Recyclable<KeyFrameCreated<TFeatureExtractor>, memory::ThreadSafePolicy> {
     map::FrameId frame_id;
     geometry::TPose pose;
-    TMeasurement measurement;  // carries the timestamp
+    features::TMeasurement<TFeatureExtractor> measurement;  // carries the timestamp
 
     KeyFrameCreated()
         : Event(EventType::KeyFrameCreated,
