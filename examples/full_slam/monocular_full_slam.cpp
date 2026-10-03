@@ -74,6 +74,8 @@ int main(int argc, char** argv) {
         slam.Stop();
         viewer.Stop();
         stats.Print(std::cout);
+        std::cout << "tracker state: " << full_slam::StateName(slam.tracker().state()) << "\n"
+                  << "mapper state: " << full_slam::StateName(slam.mapper().state()) << "\n";
         std::cout << "viewer: " << viewer.events_processed() << " events processed\n";
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
