@@ -74,9 +74,12 @@ public:
   }
 
 private:
-  static Image<decltype(std::declval<T>() * std::declval<K>()), C>
-  ApplyHorizontal(const Image<K, 1> &kernel, const Image<T, C> &image) {
-    using ResultType = decltype(std::declval<T>() * std::declval<K>());
+  // Templated on the input pixel type: in the separable filter the second pass
+  // reads the first pass's (wider) result type.
+  template <typename TIn>
+  static Image<decltype(std::declval<TIn>() * std::declval<K>()), C>
+  ApplyHorizontal(const Image<K, 1> &kernel, const Image<TIn, C> &image) {
+    using ResultType = decltype(std::declval<TIn>() * std::declval<K>());
     Image<ResultType, C> result(image.Width(), image.Height());
     const size_t kernel_size = kernel.Width();
     const size_t kernel_center = kernel_size / 2;
@@ -114,9 +117,12 @@ private:
     return result;
   }
 
-  static Image<decltype(std::declval<T>() * std::declval<K>()), C>
-  ApplyVertical(const Image<K, 1> &kernel, const Image<T, C> &image) {
-    using ResultType = decltype(std::declval<T>() * std::declval<K>());
+  // Templated on the input pixel type: in the separable filter the second pass
+  // reads the first pass's (wider) result type.
+  template <typename TIn>
+  static Image<decltype(std::declval<TIn>() * std::declval<K>()), C>
+  ApplyVertical(const Image<K, 1> &kernel, const Image<TIn, C> &image) {
+    using ResultType = decltype(std::declval<TIn>() * std::declval<K>());
     Image<ResultType, C> result(image.Width(), image.Height());
     const size_t kernel_size = kernel.Height();
     const size_t kernel_center = kernel_size / 2;

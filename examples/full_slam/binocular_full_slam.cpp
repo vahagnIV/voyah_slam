@@ -47,9 +47,11 @@ int main(int argc, char** argv) {
             TBinocularMeasurement measurement(std::move(left), std::move(right), rig,
                                               frame.timestamp);
             auto extracted = std::chrono::steady_clock::now();
+            size_t num_features = static_cast<size_t>(measurement.left().points().cols() +
+                                                      measurement.right().points().cols());
             slam.tracker().Track(std::move(measurement));
 
-            stats.Add(lateness, loaded - start, extracted - loaded);
+            stats.Add(lateness, loaded - start, extracted - loaded, num_features);
             if ((i + 1) % 100 == 0) std::cout << "frame " << i + 1 << "/" << num_frames << "\n";
         }
 

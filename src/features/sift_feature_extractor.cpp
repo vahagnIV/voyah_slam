@@ -4,11 +4,9 @@
 
 namespace voyahslam::features {
 
-SIFTFeatureExtractor::TFeatures SIFTFeatureExtractor::DetectAndExtract(const images::TImageF32Gray &image, size_t number_of_features) const {
-    auto denormalized = image * 255;
-    auto uint_image = denormalized.Convert<uint8_t>();
-
-    cv::Mat cv_image(image.Height(), image.Width(), CV_8U, uint_image.GetData());
+SIFTFeatureExtractor::TFeatures SIFTFeatureExtractor::DetectAndExtract(const images::TWorkingImage &image, size_t number_of_features) const {
+    cv::Mat cv_image(image.Height(), image.Width(), CV_8U,
+                     const_cast<uint8_t*>(&image.At(0, 0, 0)), image.Stride());
 
     std::vector<cv::KeyPoint> keypoints;
     cv::Mat descriptors;

@@ -55,8 +55,9 @@ inline Options ParseOptions(int argc, char** argv) {
 class PlaybackStats {
 public:
     void Add(std::chrono::duration<double> lateness, std::chrono::duration<double> load,
-             std::chrono::duration<double> extract) {
+             std::chrono::duration<double> extract, size_t features) {
         ++frames_;
+        total_features_ += features;
         if (lateness.count() > 0.0) ++late_frames_;
         max_lateness_ = std::max(max_lateness_, lateness.count());
         total_load_ += load.count();
@@ -70,7 +71,8 @@ public:
             << ", max lateness: " << max_lateness_ * 1e3 << " ms\n"
             << "mean load: " << total_load_ / n * 1e3 << " ms"
             << ", mean extract: " << total_extract_ / n * 1e3 << " ms"
-            << ", max load+extract: " << max_frame_ * 1e3 << " ms\n";
+            << ", max load+extract: " << max_frame_ * 1e3 << " ms\n"
+            << "mean features per frame: " << static_cast<double>(total_features_) / n << "\n";
     }
 
 private:
@@ -80,6 +82,7 @@ private:
     double total_load_ = 0.0;
     double total_extract_ = 0.0;
     double max_frame_ = 0.0;
+    size_t total_features_ = 0;
 };
 
 } // namespace voyahslam::full_slam

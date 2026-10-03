@@ -17,7 +17,7 @@ public:
 
     SIFTFeatureExtractor() = default;
 
-    [[nodiscard]] TFeatures DetectAndExtract(const images::TImageF32Gray& image, size_t number_of_features) const;
+    [[nodiscard]] TFeatures DetectAndExtract(const images::TWorkingImage& image, size_t number_of_features) const;
 
     static TDescriptorScalarType Distance(const TDescriptor& desc1, const TDescriptor& desc2);
 };

@@ -22,7 +22,9 @@ struct ImageTypeConverter<images::TImageF32Gray> {
 template<>
 struct ImageTypeConverter<images::TImageU8Gray> {
   static cv::Mat ConvertToCvMatUint8Gray(const images::TWorkingImage &image) {
-    return cv::Mat(image.Height(), image.Width(), CV_8U, (void *)image.GetData());
+    // Wraps without copying; honours the view's offset and stride.
+    return cv::Mat(image.Height(), image.Width(), CV_8U,
+                   const_cast<uint8_t *>(&image.At(0, 0, 0)), image.Stride());
   }
 };
 

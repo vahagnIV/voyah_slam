@@ -21,8 +21,10 @@ TEST_F(ResizerTests, ResizesImage) {
   auto resized = resizer.Resize(image, 2, 2);
   ASSERT_DOUBLE_EQ(resized.At(0, 0, 0), 1);
   ASSERT_DOUBLE_EQ(resized.At(1, 0, 0), 1);
-  ASSERT_DOUBLE_EQ(resized.At(0, 1, 0), 1);
-  ASSERT_DOUBLE_EQ(resized.At(1, 1, 0), 1);
+  // Output column 1 samples source x = 1.5, halfway between 2 and 1: the
+  // bilinear value 1.5 is rounded (not truncated) for integer pixels.
+  ASSERT_DOUBLE_EQ(resized.At(0, 1, 0), 2);
+  ASSERT_DOUBLE_EQ(resized.At(1, 1, 0), 2);
 }
 
 } // namespace voyahslam::tests

@@ -134,7 +134,10 @@ private:
 
 typedef Image<float, 1> TImageF32Gray;
 typedef Image<uint8_t, 1> TImageU8Gray;
-typedef TImageF32Gray TWorkingImage;
+// Image type feature extraction works on: 8-bit grayscale. Detection and
+// descriptors only compare intensities, so float adds memory traffic without
+// precision; a GPU backend would read 8-bit textures as normalized floats.
+typedef TImageU8Gray TWorkingImage;
 
 template <typename K>
 std::ostream &operator<<(std::ostream &stream, const Image<K, 1> &image) {
