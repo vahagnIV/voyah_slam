@@ -148,10 +148,13 @@ public:
 };
 ```
 
-Loop: `while (running) { uint32_t seen = signal.Snapshot();
-if (!process_pending()) signal.Wait(seen); }`. `Stop()` clears `running`,
-calls `signal.Notify()`, joins. A notification between `Snapshot()` and
-`Wait()` changes the value, so `Wait` returns immediately (no lost wake-up).
+Loop: `for (;;) { uint32_t seen = signal.Snapshot(); if (!running) break;
+if (!process_pending()) signal.Wait(seen); }` — the snapshot is taken
+**before** the `running` check, otherwise a `Stop()` landing between the check
+and the snapshot is already counted in `seen` and `Wait` never returns.
+`Stop()` clears `running`, calls `signal.Notify()`, joins. A notification
+between `Snapshot()` and `Wait()` changes the value, so `Wait` returns
+immediately (no lost wake-up).
 Defined in `src/events/worker_thread.cpp`.
 
 ### 2.4 Components
