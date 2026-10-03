@@ -8,6 +8,7 @@
 #include <optional>
 #include <voyahviz/image_window.h>
 #include <voyahviz/keypoint_drawing.h>
+#include <voyahviz/map_viewer.h>
 #include <voyahslam/features/orb_feature_extractor.h>
 #include <voyahslam/slam/slam.h>
 
@@ -37,6 +38,12 @@ int main(int argc, char** argv) {
         if (options.show) window.emplace("binocular_full_slam");
 
         TSlam slam;
+        // 3D viewer: consumes Tracker and Mapper events on its own thread (later
+        // a remote process behind a serializing observer). Wire before Start().
+        voyahviz::MapViewer<TFeatureExtractor> viewer;
+        slam.tracker().AddObserver(viewer.inbox());
+        slam.mapper().AddObserver(viewer.inbox());
+        viewer.Start();
         slam.Start();
 
         dataset_reader::PlaybackClock clock(options.rate);
@@ -67,8 +74,11 @@ int main(int argc, char** argv) {
             if ((i + 1) % 100 == 0) std::cout << "frame " << i + 1 << "/" << num_frames << "\n";
         }
 
+        // Stop the producers before the viewer so nothing arrives after its final drain.
         slam.Stop();
+        viewer.Stop();
         stats.Print(std::cout);
+        std::cout << "viewer: " << viewer.events_processed() << " events processed\n";
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
         return EXIT_FAILURE;
