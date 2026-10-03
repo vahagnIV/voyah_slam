@@ -1,6 +1,7 @@
 #ifndef VOYAHSLAM_FEATURES_IMAGE_FEATURES_H
 #define VOYAHSLAM_FEATURES_IMAGE_FEATURES_H
 
+#include <vector>
 #include <voyahslam/defs.h>
 
 namespace voyahslam::features {
@@ -36,6 +37,14 @@ public:
     [[nodiscard]] const TDescriptors& descriptors() const { return descriptors_; }
 
 protected:
+    // Keeps only the features at `indices` (ascending), in that order.
+    void KeepFeatures(const std::vector<Eigen::Index>& indices) {
+        points_ = points_(Eigen::all, indices).eval();
+        strengths_ = strengths_(Eigen::all, indices).eval();
+        angles_ = angles_(Eigen::all, indices).eval();
+        descriptors_ = descriptors_(Eigen::all, indices).eval();
+    }
+
     geometry::TPoints2DF points_;
     geometry::TRowVectorF strengths_;
     geometry::TRowVectorF angles_;

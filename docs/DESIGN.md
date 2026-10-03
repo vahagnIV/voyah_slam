@@ -421,6 +421,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-02 | `CameraFrame` → `MonocularMeasurement`, `BinocularCameraFrame` → `BinocularMeasurement`; timestamp stored in the measurement (binocular uses the left's); removed from `Frame` and keyframe events. | Avoids `CameraFrame`/`Frame`/`MonoFrame` confusion; one source of truth for time. |
 | 2026-10-02 | Long-term goal: mixed monocular/binocular keyframes in one map. Tracker accepts both measurement types now; binding decided later. | Extension beyond ORB-SLAM3. |
 | 2026-10-02 | Configuration lives in the user application; reference app in `examples/full_slam/`. | Library stays free of config-file parsing. |
+| 2026-10-03 | Measurements drop features whose ray is > 85° off the optical axis (`kMaxRayAngle`), tested in distorted space via `Distort()` of an 85° ray. | z = 1 normalized points can't represent ≥ 90° rays (fisheye); model-agnostic check needs no new distortion-model API. |
 | 2026-10-02 | Dataset reader is synchronous (no thread); apps pace with `PlaybackClock` (absolute deadlines). | Measured: load ≈ 10 ms vs extraction ≈ 220 ms per frame — a reader thread can't help; keeps the reader trivially testable. |
 | 2026-10-02 | `ObjectPool::Create()` aborts on exhaustion in every build type (not `assert`). | Release builds silently returned `nullptr`. |
 | 2026-10-02 | Orchestrator named `Slam<FE>`; components share a non-virtual `EventNode` base for their observable + inbox. | `Slam` is what the user instantiates; `System` is too generic. One base avoids repeating the observer API in three classes. |
@@ -472,11 +473,12 @@ branch → review → merge to `master`. Update this document at the end.
     Options after that: extract left/right in parallel, move extraction off the
     app thread.
 22. **Fisheye rays beyond 90°:** `MonocularMeasurement` stores undistorted
-    *normalized* points (z = 1), which cannot represent rays at ≥ 90° off-axis.
-    TUM-VI's image corners are there (θ_d ≈ 1.9 rad at the corner vs 1.58 at
-    90°); `KannalaBrandtDistortionModel::Undistort` returns wrong points for
-    them. Needs bearing vectors (unit 3D) instead of z = 1 points, or masking
-    features beyond a max angle.
+    *normalized* points (z = 1), which cannot represent rays at ≥ 90° off-axis;
+    TUM-VI's image corners are there. **Interim (2026-10-03):** features whose
+    ray is more than `MonocularMeasurement::kMaxRayAngle` = 85° off-axis are
+    dropped at construction. **Long term:** store unit bearing vectors instead of
+    z = 1 points (needed for full fisheye FOV and mixed cameras) — decide with
+    the Tracker design.
 23. **Radial-tangential distortion** (EuRoC MAV) is not implemented; the reader
     rejects such calibrations.
 11. ~~Payload buffers are not reused~~ — resolved 2026-10-02 (objects stay alive

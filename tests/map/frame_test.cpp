@@ -10,8 +10,8 @@ using OrbFeatures = features::ImageFeatures<uint8_t, 32>;
 using OrbMonocularMeasurement = features::MonocularMeasurement<uint8_t, 32>;
 
 OrbFeatures MakeFeatures(int n) {
-    geometry::TPoints2DF points = geometry::TPoints2DF::Random(2, n) * 100.0 +
-                                  geometry::TPoints2DF::Constant(2, n, 320.0);
+    // K = I, so these are normalized coordinates: rays <= ~35 degrees off-axis.
+    geometry::TPoints2DF points = geometry::TPoints2DF::Random(2, n) * 0.5;
     geometry::TRowVectorF strengths = geometry::TRowVectorF::Random(n);
     geometry::TRowVectorF angles = geometry::TRowVectorF::Random(n);
     OrbFeatures::TDescriptors descs = OrbFeatures::TDescriptors::Random(32, n);
