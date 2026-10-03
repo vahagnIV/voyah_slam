@@ -14,6 +14,7 @@ add_library(voyahslam
     tracking/tracker.cpp
     mapping/mapper.cpp
     loop_closing/loop_closer.cpp
+    events/worker_thread.cpp
     slam/slam.cpp
 )
 

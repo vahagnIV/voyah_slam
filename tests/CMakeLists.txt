@@ -22,6 +22,7 @@ add_executable(voyahslam_tests
     map/observation_storage_test.cpp
     events/event_system_test.cpp
     events/wake_signal_test.cpp
+    events/worker_thread_test.cpp
     slam/slam_test.cpp
 )
 
