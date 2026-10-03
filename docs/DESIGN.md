@@ -362,6 +362,33 @@ extractor is the bottleneck (Open Question 21).
 **Reference dataset:** TUM-VI `dataset-corridor1_1024_16` (20 Hz stereo,
 1024×1024 16-bit, equidistant fisheye, baseline 0.101 m).
 
+## Visualization Library (`vizualization/`, `voyahviz`)
+
+Development tool, never part of the production build, so it may depend on
+OpenCV (HighGUI); it links `voyahslam` and its API takes our types.
+Namespace and include prefix: `voyahviz` (`#include <voyahviz/...>`).
+
+| Header | Contents |
+|---|---|
+| `image_conversion.h` | `ToCvMat(TImageU8Gray)` (zero-copy wrap, honours offset/stride), `ToCvMat(TImageF32Gray)` ([0,1] → 8-bit copy) |
+| `keypoint_drawing.h` | `KeypointStyle`; `DrawKeypoints(image, points, angles*)` → BGR copy with circles + orientation ticks; `DrawFeatures(image, ImageFeatures)` for raw extractor output; `ProjectToImage(measurement, distortion)` / `DrawMeasurement(...)` |
+| `image_window.h` | `ImageWindow`: named HighGUI window, `Show()`, `WaitKey()`, `GuiBackend()`; throws if OpenCV has no GUI backend |
+
+**Pitfall:** `MonocularMeasurement::points()` are *undistorted* pixel
+coordinates — on a fisheye they don't line up with the raw image.
+`DrawFeatures()` is deleted for measurements; use `DrawMeasurement()`, which
+maps features back via `K · Distort(normalized)`.
+
+**Threading:** HighGUI isn't thread-safe; create the window and call
+`Show()`/`WaitKey()` from one thread (the apps' main thread). A future live
+viewer fed by Tracker/Mapper events must marshal frames to that thread.
+
+`monocular_full_slam` / `binocular_full_slam --show` display the live frame(s)
+with keypoints (stereo side by side); `q`/`Esc` quits.
+
+Possible later: a 3D map/trajectory viewer — Pangolin (used by ORB-SLAM3,
+installed in `/usr/local`) is the natural candidate.
+
 ## 7. Coding Conventions
 
 **Naming (Google C++ style):**
@@ -391,8 +418,16 @@ extractor is the bottleneck (Open Question 21).
   (mirroring the `include/` layout under `tests/`).
 
 **Build & test (Conan 2 + CMake):**
-- Dependencies (`conanfile.txt`): gtest, eigen, stb, opencv, spdlog, concurrentqueue,
+- Dependencies (`conanfile.txt`): gtest, eigen, stb, spdlog, concurrentqueue,
   yaml-cpp (examples only).
+- **OpenCV is not from Conan:** OpenCV **5.x** built from source and installed
+  in `/usr/local` (`find_package(OpenCV 5 ... core imgproc features highgui)`,
+  config in `/usr/local/lib/cmake/opencv5`). Every dev machine needs it.
+  Build it with a GUI backend for voyahviz (`WITH_GTK=ON`; GTK2 dev files are
+  enough). OpenCV 5 renamed `features2d` → `features` and split `calib3d` into
+  `calib` / `geometry` / `stereo` (compat headers `features2d.hpp`,
+  `calib3d.hpp` exist). Linked as: `voyahslam` → core, imgproc, features;
+  `voyahviz` → core (public), imgproc, highgui; tests → all.
 - Debug: `cmake --build cmake-build-debug/build/Debug && ctest --test-dir cmake-build-debug/build/Debug --output-on-failure`
 - Release: `conan install . --output-folder=build --build=missing -s build_type=Release`, then the `conan-release` preset.
 
@@ -422,6 +457,8 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-02 | Configuration lives in the user application; reference app in `examples/full_slam/`. | Library stays free of config-file parsing. |
 | 2026-10-03 | `images::TWorkingImage` is 8-bit (`TImageU8Gray`), not float. | FAST/BRIEF only compare intensities, float = 4× memory traffic. GPU backends read 8-bit textures as normalized floats, so float storage isn't needed for a future GPU extractor; the extractor interface (image in, features out) is the GPU boundary. Same feature count; mono 231 → 209 ms. |
 | 2026-10-03 | Long-term goal: drop the OpenCV dependency. | User preference; own Gaussian blur already, FAST next. |
+| 2026-10-03 | Link a source-built OpenCV 5.1 from `/usr/local` instead of Conan's OpenCV 4.12. | Conan's 4.12 `cv::FAST` resizes its output to 10 000 keypoints on every call (57% of extraction time). With 5.1: mono extraction 231 → 70 ms, stereo ~404 → 149 ms on TUM-VI 1024² (float images). Also gives a GTK GUI backend. |
+| 2026-10-03 | Visualization in a separate `voyahviz` library (`vizualization/`), allowed to use OpenCV; images via `cv::imshow`, keypoints drawn with `cv::circle`/`cv::line` rather than `cv::drawKeypoints`. | Dev-only tool. Own drawing avoids converting to `cv::KeyPoint` (whose size/octave we don't have) and allows orientation ticks and future colouring by level/tracking state. |
 | 2026-10-03 | Measurements drop features whose ray is > 85° off the optical axis (`kMaxRayAngle`), tested in distorted space via `Distort()` of an 85° ray. | z = 1 normalized points can't represent ≥ 90° rays (fisheye); model-agnostic check needs no new distortion-model API. |
 | 2026-10-02 | Dataset reader is synchronous (no thread); apps pace with `PlaybackClock` (absolute deadlines). | Measured: load ≈ 10 ms vs extraction ≈ 220 ms per frame — a reader thread can't help; keeps the reader trivially testable. |
 | 2026-10-02 | `ObjectPool::Create()` aborts on exhaustion in every build type (not `assert`). | Release builds silently returned `nullptr`. |
@@ -468,8 +505,15 @@ branch → review → merge to `master`. Update this document at the end.
     empty and is woken by either a `Track()` call or a Mapper diff, without
     locks (e.g. a C++20 `std::atomic` wait/notify counter signalled by both
     `Track()` and `AsyncObserver` enqueue). Same question for Mapper/LoopCloser.
-21. **ORB extraction is ~10× too slow:** ≈ 210 ms per 1024² image in Release
-    (ORB-SLAM3: ~10–20 ms). Profiled 2026-10-03 (perf, DWARF unwinding):
+21. **ORB extraction speed.** Was ≈ 210 ms per 1024² image in Release with
+    Conan's OpenCV 4.12; with OpenCV 5.1 (no per-call resize in `cv::FAST`) it
+    is ≈ 70 ms (see decisions log). ORB-SLAM3 reference numbers are for 512²
+    images with CLAHE applied first — not comparable to 1024². With OpenCV 5.1
+    the 8-bit working image is ~8% *slower* than float (≈ 76 vs 70 ms mono);
+    suspects: per-pixel `std::round` in `BilinearInterpolation`, 8-bit → float
+    conversion per tap in `Filter` — re-profile before the extractor rework.
+    Profile of the
+    4.12 build, 2026-10-03 (perf, DWARF unwinding):
     - **57% `cv::FAST`:** the OpenCV 4.12 we link does `keypoints.resize(10000)`
       (280 KB, value-initialized) on every call before detecting; we call it per
       35-px cell (~1500–2500 calls/image, most cells twice because the dark

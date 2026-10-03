@@ -8,7 +8,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(GTest REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(stb REQUIRED)
-find_package(OpenCV REQUIRED)
+# OpenCV comes from a system install (built from source, /usr/local), not Conan.
+find_package(OpenCV 5 REQUIRED COMPONENTS core imgproc features highgui)
 find_package(spdlog REQUIRED)
 find_package(fmt REQUIRED)
 find_package(concurrentqueue REQUIRED)
@@ -18,7 +19,11 @@ add_subdirectory(src)
 
 # Tests
 enable_testing()
+include(GoogleTest)
 add_subdirectory(tests)
+
+# Visualization (development tool, links OpenCV)
+add_subdirectory(vizualization)
 
 # Examples
 add_subdirectory(examples)

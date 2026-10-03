@@ -31,7 +31,7 @@ target_include_directories(voyahslam_tests
 target_link_libraries(voyahslam_tests
     PRIVATE voyahslam
     PRIVATE GTest::gtest_main
-    PRIVATE opencv::opencv
+    PRIVATE ${OpenCV_LIBS}
 )
 
 include(GoogleTest)

@@ -3,6 +3,7 @@ add_executable(monocular_full_slam
 )
 target_link_libraries(monocular_full_slam
     PRIVATE voyahslam_dataset_reader
+    PRIVATE voyahviz
 )
 
 add_executable(binocular_full_slam
@@ -10,4 +11,5 @@ add_executable(binocular_full_slam
 )
 target_link_libraries(binocular_full_slam
     PRIVATE voyahslam_dataset_reader
+    PRIVATE voyahviz
 )

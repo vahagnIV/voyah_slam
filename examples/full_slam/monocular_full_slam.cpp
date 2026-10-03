@@ -5,6 +5,10 @@
 
 #include <dataset_reader/euroc_dataset_reader.h>
 #include <dataset_reader/playback_clock.h>
+#include <optional>
+#include <voyahviz/image_conversion.h>
+#include <voyahviz/image_window.h>
+#include <voyahviz/keypoint_drawing.h>
 #include <voyahslam/features/orb_feature_extractor.h>
 #include <voyahslam/slam/slam.h>
 
@@ -26,6 +30,9 @@ int main(int argc, char** argv) {
 
         TFeatureExtractor extractor(full_slam::kScaleFactor, full_slam::kNumLevels,
                                     full_slam::kInitThresholdFast, full_slam::kMinThresholdFast);
+        std::optional<voyahviz::ImageWindow> window;
+        if (options.show) window.emplace("monocular_full_slam");
+
         TSlam slam;
         slam.Start();
 
@@ -43,9 +50,14 @@ int main(int argc, char** argv) {
                                               frame.timestamp);
             auto extracted = std::chrono::steady_clock::now();
             size_t num_features = static_cast<size_t>(measurement.points().cols());
+            if (window) {
+                window->Show(voyahviz::DrawMeasurement(voyahviz::ToCvMat(frame.image), measurement,
+                                                       camera.distortion));
+            }
             slam.tracker().Track(std::move(measurement));
 
             stats.Add(lateness, loaded - start, extracted - loaded, num_features);
+            if (window && full_slam::IsQuitKey(window->WaitKey(1))) break;
             if ((i + 1) % 100 == 0) std::cout << "frame " << i + 1 << "/" << num_frames << "\n";
         }
 

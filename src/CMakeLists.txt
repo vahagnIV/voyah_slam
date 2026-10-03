@@ -27,5 +27,7 @@ target_link_libraries(voyahslam
     PUBLIC spdlog::spdlog
     PUBLIC moodycamel::concurrentqueue
     PRIVATE stb::stb
-    PRIVATE opencv::opencv
+    PRIVATE opencv_core
+    PRIVATE opencv_imgproc
+    PRIVATE opencv_features
 )

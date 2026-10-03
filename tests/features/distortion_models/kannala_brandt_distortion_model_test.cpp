@@ -1,7 +1,7 @@
 #include "kannala_brandt_distortion_model_test.h"
 #include <cmath>
 
-#include <opencv2/calib3d/calib3d.hpp>
+#include <opencv2/calib3d.hpp>
 
 using namespace voyahslam::features::distortion_models;
 
