@@ -1,4 +1,5 @@
 #include <voyahslam/map/frame_id.h>
+#include <voyahslam/map/map_id.h>
 #include <voyahslam/map/map_point_id.h>
 
 #include <gtest/gtest.h>
@@ -25,6 +26,11 @@ TEST(FrameIdTest, Equality) {
 
 TEST(FrameIdTest, Ordering) {
     EXPECT_LT(FrameId{0}, FrameId{100});
+}
+
+TEST(IdTypesTest, MapIdOrdering) {
+    EXPECT_LT(MapId{1}, MapId{2});
+    EXPECT_EQ(MapId{}, MapId{0});
 }
 
 TEST(IdTypeSafetyTest, NotConvertible) {

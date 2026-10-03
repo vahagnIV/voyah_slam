@@ -20,6 +20,9 @@ void SceneState<TFeatureExtractor>::Apply(const voyahslam::events::Event& event)
         case EventType::KeyFramePoseUpdated:
         case EventType::LoopDetected:
         case EventType::PositionUpdated:
+        case EventType::InitializationMeasurement:
+        case EventType::MapCreated:
+        case EventType::TrackingLost:
             Count(event.type);
             break;
     }

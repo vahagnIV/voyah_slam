@@ -3,10 +3,8 @@
 
 #include <concurrentqueue.h>
 #include <cstddef>
-#include <variant>
 #include <voyahslam/events/event_node.h>
-#include <voyahslam/features/binocular_measurement.h>
-#include <voyahslam/features/monocular_measurement.h>
+#include <voyahslam/features/measurement.h>
 
 namespace voyahslam::tracking {
 
@@ -21,12 +19,8 @@ namespace voyahslam::tracking {
 template <typename TFeatureExtractor>
 class Tracker : public events::EventNode {
 public:
-    using TMonocularMeasurement =
-        features::MonocularMeasurement<typename TFeatureExtractor::TDescriptorScalarType,
-                                       TFeatureExtractor::DescriptorSize>;
-    using TBinocularMeasurement =
-        features::BinocularMeasurement<typename TFeatureExtractor::TDescriptorScalarType,
-                                       TFeatureExtractor::DescriptorSize>;
+    using TMonocularMeasurement = features::TMonocularMeasurement<TFeatureExtractor>;
+    using TBinocularMeasurement = features::TBinocularMeasurement<TFeatureExtractor>;
 
     void Start();
     void Stop();
@@ -41,9 +35,7 @@ public:
     [[nodiscard]] size_t pending_measurements() const { return measurements_.size_approx(); }
 
 private:
-    using TMeasurement = std::variant<TMonocularMeasurement, TBinocularMeasurement>;
-
-    moodycamel::ConcurrentQueue<TMeasurement> measurements_;
+    moodycamel::ConcurrentQueue<features::TMeasurement<TFeatureExtractor>> measurements_;
 };
 
 } // namespace voyahslam::tracking
