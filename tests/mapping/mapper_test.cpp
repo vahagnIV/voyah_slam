@@ -192,6 +192,31 @@ TEST_F(MapperTest, IgnoresStaleTrackingLost) {
     EXPECT_EQ(mapper_.num_keyframes(), 1u);
 }
 
+TEST_F(MapperTest, StateIsMappingWhenMapCreatedIsPublished) {
+    // A synchronous observer runs on the publishing thread, inside Notify, so
+    // it sees the state at the exact moment MapCreated is published.
+    struct Probe {
+        TMapper* mapper;
+        bool seen = false;
+        MapperState state = MapperState::Initializing;
+    } probe{&mapper_};
+    mapper_.AddSyncObserver(
+        [](void* ctx, events::Event* event) {
+            auto* p = static_cast<Probe*>(ctx);
+            if (event->type == events::EventType::MapCreated) {
+                p->seen = true;
+                p->state = p->mapper->state();
+            }
+        },
+        &probe);
+
+    PublishInitializationMeasurement(test::MakeBinocular(200, 0.0));
+    Drain();
+
+    ASSERT_TRUE(probe.seen);
+    EXPECT_EQ(probe.state, MapperState::Mapping);
+}
+
 TEST_F(MapperTest, DoesNotConsumeSharedMeasurement) {
     events::AsyncObserver other;
     events::Listener other_listener = other.GetListener();

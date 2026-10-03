@@ -79,11 +79,13 @@ void Mapper<TFeatureExtractor>::OnInitializationMeasurement(
     current_map_id_.store(next_map_id_, std::memory_order_release);
     ++next_map_id_.value;
 
+    // The state changes before the events that announce it are published, so
+    // anyone who observes MapCreated also observes state() == Mapping.
+    SetState(MapperState::Mapping);
     for (const TKeyFrame& keyframe : keyframes_) {
         PublishKeyFrameCreated(keyframe);
     }
     PublishMapCreated(keyframes_.back());
-    SetState(MapperState::Mapping);
 }
 
 template <typename TFeatureExtractor>

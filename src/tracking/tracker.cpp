@@ -116,8 +116,9 @@ void Tracker<TFeatureExtractor>::ProcessMeasurement(TMeasurement& measurement) {
         last_pose_ = estimate.pose;
         PublishPositionUpdated(timestamp);
     } else {
-        PublishTrackingLost(timestamp);
+        // State first: whoever observes TrackingLost also observes Lost.
         SetState(TrackerState::Lost);
+        PublishTrackingLost(timestamp);
     }
 }
 

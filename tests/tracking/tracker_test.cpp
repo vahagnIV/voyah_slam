@@ -147,6 +147,32 @@ TEST_F(TrackerTest, LosesTrackingOnFewFeatures) {
     EXPECT_EQ(tracker_.state(), TrackerState::Lost);
 }
 
+TEST_F(TrackerTest, StateIsLostWhenTrackingLostIsPublished) {
+    EnterTracking(1, 1, NonIdentityPose());
+    // A synchronous observer runs on the publishing thread, inside Notify, so
+    // it sees the state at the exact moment TrackingLost is published.
+    struct Probe {
+        TTracker* tracker;
+        bool seen = false;
+        TrackerState state = TrackerState::WaitingForMap;
+    } probe{&tracker_};
+    tracker_.AddSyncObserver(
+        [](void* ctx, events::Event* event) {
+            auto* p = static_cast<Probe*>(ctx);
+            if (event->type == events::EventType::TrackingLost) {
+                p->seen = true;
+                p->state = p->tracker->state();
+            }
+        },
+        &probe);
+
+    tracker_.Track(test::MakeMonocular(0, 3.0));
+    Drain();
+
+    ASSERT_TRUE(probe.seen);
+    EXPECT_EQ(probe.state, TrackerState::Lost);
+}
+
 TEST_F(TrackerTest, IgnoresStaleMapCreated) {
     EnterTracking(2, 5, NonIdentityPose());
 
