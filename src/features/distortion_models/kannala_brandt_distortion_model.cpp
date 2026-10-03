@@ -32,22 +32,26 @@ void KannalaBrandtDistortionModel::SetCoefficients(
 
 void KannalaBrandtDistortionModel::PrecomputeInitialGuessLookup(
     geometry::TMatrix33F &K, size_t image_width, size_t image_height) {
+  // Sample theta uniformly along the image diagonal direction until the
+  // distorted point leaves the image. Rays at or beyond 90 degrees have no
+  // pinhole (z = 1) representation, so stop at pi/2 for fisheye lenses whose
+  // image extends that far; also stop if the polynomial stops increasing.
   std::map<precision_t, precision_t> initial_guess_lookup_map;
-  precision_t x_real = 0.0, y_real = 0.0;
-  precision_t px = 0.0, py = 0.0;
-  const precision_t step = 0.01;
+  const precision_t theta_step = 1e-3;
+  const precision_t diagonal = 1.0 / std::sqrt(2.0);
 
-  while (px < image_width && py < image_height) {
-    precision_t r = std::sqrt(x_real * x_real + y_real * y_real);
-    precision_t theta = std::atan(r);
+  for (precision_t theta = 0.0; theta < M_PI_2; theta += theta_step) {
     precision_t theta_d = ComputeRadialDistance(theta);
+    if (!initial_guess_lookup_map.empty() &&
+        theta_d <= initial_guess_lookup_map.rbegin()->first) {
+      break;
+    }
     initial_guess_lookup_map[theta_d] = theta;
-    precision_t x_distorted = r == 0 ? 0 : theta_d * x_real / r;
-    precision_t y_distorted = r == 0 ? 0 : theta_d * y_real / r;
-    px = K(0, 0) * x_distorted + K(0, 2);
-    py = K(1, 1) * y_distorted + K(1, 2);
-    x_real += step;
-    y_real += step;
+    precision_t px = K(0, 0) * theta_d * diagonal + K(0, 2);
+    precision_t py = K(1, 1) * theta_d * diagonal + K(1, 2);
+    if (px >= image_width || py >= image_height) {
+      break;
+    }
   }
 
   ComputeInitialGuess(initial_guess_lookup_map);

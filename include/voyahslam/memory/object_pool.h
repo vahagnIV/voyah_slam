@@ -5,6 +5,8 @@
 #include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <memory>
 #include <new>
@@ -33,7 +35,7 @@ public:
     ObjectPool& operator=(const ObjectPool&) = delete;
     ~ObjectPool();
 
-    // Asserts if the pool is exhausted.
+    // Aborts if the pool is exhausted (in every build type).
     T* Create();
     // Returns nullptr if the pool is exhausted.
     T* TryCreate();
@@ -92,7 +94,11 @@ ObjectPool<T, SyncPolicy>::~ObjectPool() {
 template <typename T, typename SyncPolicy>
 T* ObjectPool<T, SyncPolicy>::Create() {
     T* obj = TryCreate();
-    assert(obj && "ObjectPool exhausted");
+    if (!obj) {
+        // Not an assert: exhaustion must fail loudly in release builds too.
+        std::fputs("ObjectPool exhausted\n", stderr);
+        std::abort();
+    }
     return obj;
 }
 

@@ -324,6 +324,45 @@ and give it `Reset()` if it has any. Put it in its own header
 `events/<snake_case_name>.h`, add the `EventType` value, and add it to
 `events/events.h`.
 
+## Example Applications (`examples/`)
+
+Configuration lives in the user application (§9 Q18), so `examples/` holds the
+reference applications:
+
+| Target | Kind | Purpose |
+|---|---|---|
+| `voyahslam_dataset_reader` | static lib (`examples/dataset_reader/`) | `EurocDatasetReader`, `PlaybackClock` |
+| `monocular_full_slam` | executable (`examples/full_slam/`) | cam0 → `MonocularMeasurement` → `Tracker::Track()` |
+| `binocular_full_slam` | executable (`examples/full_slam/`) | cam0+cam1 → `BinocularMeasurement` → `Tracker::Track()` |
+| `dataset_reader_tests` | gtest | Synthetic-dataset tests for the reader and clock |
+
+Usage: `<app> <dataset_root> [--rate=R] [--max-frames=N]` (rate 1 = real
+time, 0 = as fast as possible). Both apps print lateness and load/extract
+timings.
+
+**`EurocDatasetReader`** reads the EuRoC layout (`mav0/cam{0,1}/data.csv`,
+`data/<ns>.png`) used by EuRoC MAV and TUM-VI. Calibration: Kalibr
+`dso/camchain.yaml` (TUM-VI) if present, else `mav0/camN/sensor.yaml` (EuRoC;
+the OpenCV `%YAML:1.0` directive is stripped for yaml-cpp). It owns the
+distortion models and builds the `StereoRig` from both cameras' `T_cam_imu`
+(`T_left_right = T_left_imu · T_imu_right`, so `p_left = R_rl p_right + t_rl`).
+Images: decoded to 8 bit (16-bit PNGs reduced), returned as float in [0, 1] —
+the range `OrbFeatureExtractor` expects. `ReadImageFromStream32F` is avoided
+because stb applies a 2.2 gamma curve to LDR images when loading as float.
+Only `equidistant` (Kannala-Brandt) and `none` distortion are supported.
+
+**Timing — no reader thread.** The reader is synchronous and index-based. The
+app's main loop paces itself with `PlaybackClock::WaitUntil(timestamp)`:
+absolute deadlines (`anchor + (t - t0) / rate`), so per-frame work doesn't
+accumulate drift as long as it fits in the frame gap; if it doesn't, the clock
+returns the lateness rather than drifting silently. Measured on TUM-VI
+corridor1 (Release, 1024², 1500 ORB features): load ≈ 10 ms, ORB extraction
+≈ 220 ms per image — so a separate reader thread would buy nothing; the
+extractor is the bottleneck (Open Question 21).
+
+**Reference dataset:** TUM-VI `dataset-corridor1_1024_16` (20 Hz stereo,
+1024×1024 16-bit, equidistant fisheye, baseline 0.101 m).
+
 ## 7. Coding Conventions
 
 **Naming (Google C++ style):**
@@ -353,7 +392,8 @@ and give it `Reset()` if it has any. Put it in its own header
   (mirroring the `include/` layout under `tests/`).
 
 **Build & test (Conan 2 + CMake):**
-- Dependencies (`conanfile.txt`): gtest, eigen, stb, opencv, spdlog, concurrentqueue.
+- Dependencies (`conanfile.txt`): gtest, eigen, stb, opencv, spdlog, concurrentqueue,
+  yaml-cpp (examples only).
 - Debug: `cmake --build cmake-build-debug/build/Debug && ctest --test-dir cmake-build-debug/build/Debug --output-on-failure`
 - Release: `conan install . --output-folder=build --build=missing -s build_type=Release`, then the `conan-release` preset.
 
@@ -381,6 +421,9 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-02 | `CameraFrame` → `MonocularMeasurement`, `BinocularCameraFrame` → `BinocularMeasurement`; timestamp stored in the measurement (binocular uses the left's); removed from `Frame` and keyframe events. | Avoids `CameraFrame`/`Frame`/`MonoFrame` confusion; one source of truth for time. |
 | 2026-10-02 | Long-term goal: mixed monocular/binocular keyframes in one map. Tracker accepts both measurement types now; binding decided later. | Extension beyond ORB-SLAM3. |
 | 2026-10-02 | Configuration lives in the user application; reference app in `examples/full_slam/`. | Library stays free of config-file parsing. |
+| 2026-10-03 | Measurements drop features whose ray is > 85° off the optical axis (`kMaxRayAngle`), tested in distorted space via `Distort()` of an 85° ray. | z = 1 normalized points can't represent ≥ 90° rays (fisheye); model-agnostic check needs no new distortion-model API. |
+| 2026-10-02 | Dataset reader is synchronous (no thread); apps pace with `PlaybackClock` (absolute deadlines). | Measured: load ≈ 10 ms vs extraction ≈ 220 ms per frame — a reader thread can't help; keeps the reader trivially testable. |
+| 2026-10-02 | `ObjectPool::Create()` aborts on exhaustion in every build type (not `assert`). | Release builds silently returned `nullptr`. |
 | 2026-10-02 | Orchestrator named `Slam<FE>`; components share a non-virtual `EventNode` base for their observable + inbox. | `Slam` is what the user instantiates; `System` is too generic. One base avoids repeating the observer API in three classes. |
 | 2026-10-02 | One event type per header, plus `events/events.h` umbrella; `map_events.h` removed. | User preference: easier to navigate and to include only what is used. |
 | 2026-10-02 | Event payloads use grow-only `ColumnBuffer` (capacity + count) instead of plain `Eigen::Matrix`. | Eigen reallocates on any size change; grow-only buffers reach a steady state with zero allocations. Chosen over fixed max-size buffers, which waste memory and need a hard cap. |
@@ -424,6 +467,20 @@ branch → review → merge to `master`. Update this document at the end.
     empty and is woken by either a `Track()` call or a Mapper diff, without
     locks (e.g. a C++20 `std::atomic` wait/notify counter signalled by both
     `Track()` and `AsyncObserver` enqueue). Same question for Mapper/LoopCloser.
+21. **ORB extraction is ~10× too slow:** ≈ 220 ms per 1024² image in Release
+    (ORB-SLAM3: ~10–20 ms); stereo doubles it. Real-time at 20 Hz is impossible
+    until `OrbFeatureExtractor` (ported from slamlab2) is profiled and optimized.
+    Options after that: extract left/right in parallel, move extraction off the
+    app thread.
+22. **Fisheye rays beyond 90°:** `MonocularMeasurement` stores undistorted
+    *normalized* points (z = 1), which cannot represent rays at ≥ 90° off-axis;
+    TUM-VI's image corners are there. **Interim (2026-10-03):** features whose
+    ray is more than `MonocularMeasurement::kMaxRayAngle` = 85° off-axis are
+    dropped at construction. **Long term:** store unit bearing vectors instead of
+    z = 1 points (needed for full fisheye FOV and mixed cameras) — decide with
+    the Tracker design.
+23. **Radial-tangential distortion** (EuRoC MAV) is not implemented; the reader
+    rejects such calibrations.
 11. ~~Payload buffers are not reused~~ — resolved 2026-10-02 (objects stay alive
     in the pool, payloads in grow-only `ColumnBuffer`s). Related: chunking large
     loop-closure diffs (Q3) would also bound the buffers' peak capacity.
@@ -446,6 +503,11 @@ branch → review → merge to `master`. Update this document at the end.
   measurement queue (branches `refactor/event-per-file`,
   `feat/slam-threads-skeleton` — merge pending).
 
+- `examples/`: `voyahslam_dataset_reader` (EuRoC/TUM-VI), `monocular_full_slam`,
+  `binocular_full_slam` (branch `feat/full-slam-example`). Fixed an infinite
+  loop in `KannalaBrandtDistortionModel::PrecomputeInitialGuessLookup` for
+  fisheye lenses wider than the image.
+
 **Required follow-up:**
 - Remove free-list reuse from `MapPointStorage` (ids are never reused); decide
   storage-growth strategy (Open Question 2).
@@ -455,7 +517,7 @@ branch → review → merge to `master`. Update this document at the end.
   observations yet (§6 says it should) — add when designing the Tracker.
 
 **Next:**
-- `examples/full_slam/`: user application that configures and runs `Slam`.
+- Profile/optimize `OrbFeatureExtractor` (Open Question 21); fisheye > 90° (22).
 - Component loops: threads, idle wait (Open Question 20), Tracker measurement
   policy (19).
 - Design the Tracker (initialization mono/stereo, track-with-motion-model,

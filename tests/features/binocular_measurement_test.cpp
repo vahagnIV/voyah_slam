@@ -9,8 +9,8 @@ using TestFeatures = ImageFeatures<uint8_t, 32>;
 using TestBinocular = BinocularMeasurement<uint8_t, 32>;
 
 TestFeatures MakeFeatures(int n) {
-    geometry::TPoints2DF points = geometry::TPoints2DF::Random(2, n) * 100.0 +
-                                  geometry::TPoints2DF::Constant(2, n, 320.0);
+    // K = I, so these are normalized coordinates: rays <= ~35 degrees off-axis.
+    geometry::TPoints2DF points = geometry::TPoints2DF::Random(2, n) * 0.5;
     geometry::TRowVectorF strengths = geometry::TRowVectorF::Random(n);
     geometry::TRowVectorF angles = geometry::TRowVectorF::Random(n);
     TestFeatures::TDescriptors descs = TestFeatures::TDescriptors::Random(32, n);
