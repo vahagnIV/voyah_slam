@@ -5,6 +5,11 @@
 
 #include <dataset_reader/euroc_dataset_reader.h>
 #include <dataset_reader/playback_clock.h>
+#include <opencv2/core.hpp>
+#include <optional>
+#include <voyahviz/image_conversion.h>
+#include <voyahviz/image_window.h>
+#include <voyahviz/keypoint_drawing.h>
 #include <voyahslam/features/orb_feature_extractor.h>
 #include <voyahslam/slam/slam.h>
 
@@ -30,6 +35,9 @@ int main(int argc, char** argv) {
 
         TFeatureExtractor extractor(full_slam::kScaleFactor, full_slam::kNumLevels,
                                     full_slam::kInitThresholdFast, full_slam::kMinThresholdFast);
+        std::optional<voyahviz::ImageWindow> window;
+        if (options.show) window.emplace("binocular_full_slam");
+
         TSlam slam;
         slam.Start();
 
@@ -47,9 +55,19 @@ int main(int argc, char** argv) {
             TBinocularMeasurement measurement(std::move(left), std::move(right), rig,
                                               frame.timestamp);
             auto extracted = std::chrono::steady_clock::now();
+            if (window) {
+                cv::Mat side_by_side;
+                cv::hconcat(voyahviz::DrawMeasurement(voyahviz::ToCvMat(frame.left), measurement.left(),
+                                                      rig.distortion_left),
+                            voyahviz::DrawMeasurement(voyahviz::ToCvMat(frame.right), measurement.right(),
+                                                      rig.distortion_right),
+                            side_by_side);
+                window->Show(side_by_side);
+            }
             slam.tracker().Track(std::move(measurement));
 
             stats.Add(lateness, loaded - start, extracted - loaded);
+            if (window && full_slam::IsQuitKey(window->WaitKey(1))) break;
             if ((i + 1) % 100 == 0) std::cout << "frame " << i + 1 << "/" << num_frames << "\n";
         }
 

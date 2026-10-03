@@ -18,7 +18,11 @@ add_subdirectory(src)
 
 # Tests
 enable_testing()
+include(GoogleTest)
 add_subdirectory(tests)
+
+# Visualization (development tool, links OpenCV)
+add_subdirectory(vizualization)
 
 # Examples
 add_subdirectory(examples)

@@ -363,6 +363,33 @@ extractor is the bottleneck (Open Question 21).
 **Reference dataset:** TUM-VI `dataset-corridor1_1024_16` (20 Hz stereo,
 1024×1024 16-bit, equidistant fisheye, baseline 0.101 m).
 
+## Visualization Library (`vizualization/`, `voyahviz`)
+
+Development tool, never part of the production build, so it may depend on
+OpenCV (HighGUI); it links `voyahslam` and its API takes our types.
+Namespace and include prefix: `voyahviz` (`#include <voyahviz/...>`).
+
+| Header | Contents |
+|---|---|
+| `image_conversion.h` | `ToCvMat(TImageU8Gray)` (zero-copy wrap, honours offset/stride), `ToCvMat(TImageF32Gray)` ([0,1] → 8-bit copy) |
+| `keypoint_drawing.h` | `KeypointStyle`; `DrawKeypoints(image, points, angles*)` → BGR copy with circles + orientation ticks; `DrawFeatures(image, ImageFeatures)` for raw extractor output; `ProjectToImage(measurement, distortion)` / `DrawMeasurement(...)` |
+| `image_window.h` | `ImageWindow`: named HighGUI window, `Show()`, `WaitKey()`, `GuiBackend()`; throws if OpenCV has no GUI backend |
+
+**Pitfall:** `MonocularMeasurement::points()` are *undistorted* pixel
+coordinates — on a fisheye they don't line up with the raw image.
+`DrawFeatures()` is deleted for measurements; use `DrawMeasurement()`, which
+maps features back via `K · Distort(normalized)`.
+
+**Threading:** HighGUI isn't thread-safe; create the window and call
+`Show()`/`WaitKey()` from one thread (the apps' main thread). A future live
+viewer fed by Tracker/Mapper events must marshal frames to that thread.
+
+`monocular_full_slam` / `binocular_full_slam --show` display the live frame(s)
+with keypoints (stereo side by side); `q`/`Esc` quits.
+
+Possible later: a 3D map/trajectory viewer — Pangolin (used by ORB-SLAM3,
+installed in `/usr/local`) is the natural candidate.
+
 ## 7. Coding Conventions
 
 **Naming (Google C++ style):**
@@ -421,6 +448,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-02 | `CameraFrame` → `MonocularMeasurement`, `BinocularCameraFrame` → `BinocularMeasurement`; timestamp stored in the measurement (binocular uses the left's); removed from `Frame` and keyframe events. | Avoids `CameraFrame`/`Frame`/`MonoFrame` confusion; one source of truth for time. |
 | 2026-10-02 | Long-term goal: mixed monocular/binocular keyframes in one map. Tracker accepts both measurement types now; binding decided later. | Extension beyond ORB-SLAM3. |
 | 2026-10-02 | Configuration lives in the user application; reference app in `examples/full_slam/`. | Library stays free of config-file parsing. |
+| 2026-10-03 | Visualization in a separate `voyahviz` library (`vizualization/`), allowed to use OpenCV; images via `cv::imshow`, keypoints drawn with `cv::circle`/`cv::line` rather than `cv::drawKeypoints`. | Dev-only tool. Own drawing avoids converting to `cv::KeyPoint` (whose size/octave we don't have) and allows orientation ticks and future colouring by level/tracking state. |
 | 2026-10-03 | Measurements drop features whose ray is > 85° off the optical axis (`kMaxRayAngle`), tested in distorted space via `Distort()` of an 85° ray. | z = 1 normalized points can't represent ≥ 90° rays (fisheye); model-agnostic check needs no new distortion-model API. |
 | 2026-10-02 | Dataset reader is synchronous (no thread); apps pace with `PlaybackClock` (absolute deadlines). | Measured: load ≈ 10 ms vs extraction ≈ 220 ms per frame — a reader thread can't help; keeps the reader trivially testable. |
 | 2026-10-02 | `ObjectPool::Create()` aborts on exhaustion in every build type (not `assert`). | Release builds silently returned `nullptr`. |
