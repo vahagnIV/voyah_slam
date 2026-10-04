@@ -13,6 +13,7 @@
 #include <voyahslam/events/tracking_lost.h>
 #include <voyahslam/events/worker_thread.h>
 #include <voyahslam/features/measurement.h>
+#include <voyahslam/features/stereo_matcher.h>
 #include <voyahslam/geometry/rigid_transformation.h>
 #include <voyahslam/logging/logger.h>
 #include <voyahslam/map/frame_id.h>
@@ -28,13 +29,17 @@ enum class TrackerState : uint8_t {
     Lost,           // tracking failed: behaves like WaitingForMap (relocalization later)
 };
 
+struct TrackerOptions {
+    features::StereoMatcherOptions stereo_matcher;
+};
+
 // Estimates the camera pose of every incoming measurement against its own
 // replica of the map. Runs on its own thread with two inputs:
 //   - inbox():        map diffs from the Mapper,
 //   - measurements_:  monocular / binocular measurements from Track().
 // Each ProcessPending() pass first applies all pending map diffs, then tracks
 // one measurement, so the replica is never modified while it is being tracked
-// against. Publishes InitializationMeasurement, PositionUpdated and
+// against. Binocular measurements are stereo-matched on dequeue. Publishes InitializationMeasurement, PositionUpdated and
 // TrackingLost; never modifies map objects.
 template <typename TFeatureExtractor>
 class Tracker : public events::EventNode {
@@ -43,7 +48,7 @@ public:
     using TBinocularMeasurement = features::TBinocularMeasurement<TFeatureExtractor>;
     using TMeasurement = features::TMeasurement<TFeatureExtractor>;
 
-    Tracker() = default;
+    explicit Tracker(TrackerOptions options = {}) : options_(options) {}
     // Stops the worker before any member it uses is destroyed.
     ~Tracker();
 
@@ -83,6 +88,7 @@ private:
     void PublishPositionUpdated(double timestamp);
     void PublishTrackingLost(double timestamp);
 
+    const TrackerOptions options_;
     moodycamel::ConcurrentQueue<TMeasurement> measurements_;
     events::Listener inbox_listener_ = inbox_.GetListener();
 

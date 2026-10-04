@@ -105,6 +105,11 @@ void Tracker<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
 
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::ProcessMeasurement(TMeasurement& measurement) {
+    if (auto* binocular = std::get_if<TBinocularMeasurement>(&measurement)) {
+        binocular->SetStereoMatches(
+            features::MatchStereo<TFeatureExtractor>(*binocular, options_.stereo_matcher));
+    }
+
     if (state() != TrackerState::Tracking) {
         PublishInitializationMeasurement(measurement);
         return;

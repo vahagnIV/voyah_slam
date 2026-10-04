@@ -37,6 +37,14 @@ TEST(SlamTest, ExternalObserversCanBeAddedToEveryComponent) {
     EXPECT_EQ(slam.loop_closer().async_observer_count(), 2u);
 }
 
+TEST(SlamTest, ForwardsTrackerOptions) {
+    tracking::TrackerOptions tracker_options;
+    tracker_options.stereo_matcher.nn_ratio = 0.5;
+    OrbSlam slam({}, tracker_options);
+    slam.Start();
+    slam.Stop();
+}
+
 TEST(SlamTest, StartStopAndDestroy) {
     OrbSlam slam;
     slam.Start();
