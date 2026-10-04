@@ -170,6 +170,33 @@ public:
   max_iterations; w = 1 → min_iterations); stop when
   iterations ≥ clamp(required, min_iterations, max_iterations).
 - `success = false` if N < kSampleSize or no candidate ever scored > 0.
+- **Local refinement (amendment 2026-10-04):** if the estimator provides
+  `TModel Refine(const TModel&, const TwoViewCorrespondences&,
+  const Eigen::Array<bool, Eigen::Dynamic, 1>& inliers) const` (detected
+  with a `requires` expression — optional, not part of the concept), then
+  after the sampling loop: up to `RansacOptions::refinement_rounds` (default
+  3) rounds of refine on the current inliers → re-score → keep the refined
+  model only if its score is strictly higher, else stop. The result's
+  `score`/`inliers` are those of the returned model.
+
+### 3.5 Refinement (amendment 2026-10-04)
+
+Minimal-sample models overfit noise (measured: ~55 % of true inliers
+recovered, pose errors of several degrees at σ = 1 px). Both estimators get
+`Refine`, a Levenberg–Marquardt minimization over the inliers (≥ 15 % of the
+error drop or 10 iterations, numeric Jacobian is acceptable):
+
+- `EssentialEstimator::Refine`: parameterize E = [t]ₓR with R (3-dof
+  rotation update, applied as R ← exp([δω]ₓ) R) and t on the unit sphere
+  (2-dof update in the tangent plane, renormalized) — 5 dof; residual =
+  Sampson error per inlier. Start from the decomposition candidate of E
+  (any of the 4 gives the same E up to sign). Returns the refined E
+  (unit Frobenius norm).
+- `HomographyEstimator::Refine`: 8 parameters (H normalized to H(2,2) = 1,
+  or ‖H‖ = 1 with a fixed-scale update); residual = symmetric transfer error
+  of each inlier (4 components).
+- A refinement that produces a non-finite or ill-conditioned model returns
+  the input model unchanged.
 
 ## 4. Decomposition — `geometry/two_view_decomposition.h`
 
@@ -193,7 +220,7 @@ struct HomographyCandidate { RigidTransformation T_21; TVector3DF plane_normal; 
 enum class TwoViewModel { Homography, Essential };
 
 struct TwoViewOptions {
-    double homography_ratio_threshold = 0.50;  // pick H if S_H / (S_H + S_E) > this
+    double homography_inlier_ratio = 0.8;  // pick H if inliers_H >= this × inliers_E (amendment 2026-10-04)
     double min_parallax_deg = 1.0;
     size_t min_triangulated = 50;
     double min_good_fraction = 0.9;        // of the model's inliers
@@ -260,11 +287,17 @@ candidate has `num_good > uniqueness_ratio × best`, and
 
 **`Reconstruct`:** σ comes from `correspondences.sigma` (scores and the 4σ²
 reprojection test); runs `Ransac<HomographyEstimator>` and `Ransac<EssentialEstimator>`
-(seed from options; the essential run uses `seed + 1`); fails if both fail;
-S_H, S_E = best scores (0 for a failed run); RH = S_H / (S_H + S_E); if
-RH > `homography_ratio_threshold` → decompose H, `SelectPose` with
-`homography_uniqueness`; else decompose E, `SelectPose` with
-`essential_uniqueness`. Fills `TwoViewReconstruction`; `T_21` is the selected
+(seed from options; the essential run uses `seed + 1`); fails if both fail.
+**Model selection (amendment 2026-10-04, COLMAP rule):** choose H iff the H
+run succeeded and `inliers_H >= homography_inlier_ratio × inliers_E` (or the
+E run failed) — i.e. a homography explains nearly everything the essential
+matrix does (planar scene or near-pure rotation); otherwise E. The ORB-SLAM3
+score ratio is not used: it relies on the *uncalibrated* F estimator
+degenerating on planes, whereas a calibrated E fits planar points as well as
+general ones (measured: even ground-truth H vs E gives S_H/(S_H+S_E) ≈ 0.41).
+The per-estimator scores still rank hypotheses inside each RANSAC and are
+reported. Then: H → decompose, `SelectPose` with `homography_uniqueness`;
+E → decompose, `SelectPose` with `essential_uniqueness`. Fills `TwoViewReconstruction`; `T_21` is the selected
 candidate.
 
 Non-template parts (decomposition, `SelectPose`, `TwoViewReconstructor`,
@@ -287,6 +320,12 @@ TwoViewScene MakePlanarScene(size_t n, double outlier_fraction, double sigma, ui
 
 Points in view 1: general = uniform in a box at depth 4–8 within ±30° of the
 axis; planar = on the plane z = 5 (tilted ±15° in tests that need it).
+**Amendment 2026-10-04:** the planar *acceptance* test uses a scene that
+breaks the two-fold planar ambiguity — field of view ±45° (u, v ∈ [−1, 1]),
+tilt ≥ 30° and translation 1 m — so the 0.75 uniqueness check passes; a
+separate test asserts that the default narrow, near-frontal planar scene is
+**rejected** (ambiguous). `MakePlanarScene` gains `double half_fov_tan = 0.5`
+as the last parameter.
 Default T_21: rotation 5° about a random axis, translation 0.5 m (good
 parallax). Noise: Gaussian with std `sigma` on both views; outliers: x2
 replaced by uniform random normalized points within the field of view.
@@ -298,7 +337,8 @@ replaced by uniform random normalized points within the field of view.
 | `EssentialEstimator` | exact E (up to scale, x2ᵀEx1 ≈ 0) from 8 noise-free points; singular values (s, s, 0); degenerate sample → no model; score on a hand-computed case |
 | `Ransac` | recovers E with 30 % and 50 % outliers (inliers match ground truth ≥ 95 %); clean data stops well below `max_iterations`; same seed → identical result; N < kSampleSize → `success = false` |
 | Decomposition | the true `T_21` (t up to sign/scale, R exact) is among E's 4 and H's candidates |
-| `SelectPose` / `Reconstruct` | general scene → Essential, rotation error < 1°, translation direction error < 2°; planar scene → Homography, same tolerances; pure rotation / 1 cm baseline → `success = false` (parallax); 30 correspondences → `success = false` (min_triangulated); deterministic for a fixed seed |
+| Refinement | `Refine` lowers the summed residual on noisy inliers; refined E/H stay finite and well-conditioned; Ransac with refinement recovers ≥ 75 % of true inliers (vs ≥ 50 % without) |
+| `SelectPose` / `Reconstruct` | general scene → Essential, rotation error < 1°, translation direction error < 2°; wide-FOV tilted planar scene → Homography, same tolerances; narrow near-frontal planar scene → rejected (ambiguity); pure rotation / 1 cm baseline → `success = false` (parallax); 30 correspondences → `success = false` (min_triangulated); deterministic for a fixed seed |
 
 All tests seeded; no images.
 
