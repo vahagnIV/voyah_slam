@@ -5,6 +5,7 @@ add_library(voyahslam
     estimators/homography_estimator.cpp
     geometry/geometry.cpp
     geometry/two_view_decomposition.cpp
+    geometry/two_view_reconstruction.cpp
     io/read_image.cpp
     logging/logger.cpp
     features/orb_feature_extractor.cpp
