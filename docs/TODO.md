@@ -41,11 +41,14 @@ as soon as they come up.
       interim 85° cut-off in place. Decide with the Tracker design. (OQ 22)
 - [ ] **5-point essential solver** (priority raised: narrow-FOV robustness; the
       8-point solver is ambiguous on narrow FOV and wide-FOV tests are used).
-- [ ] Improve refinement convergence: LM can stop in a local minimum
-      (translation-direction error 3-10° on about half of the seeds vs
-      0.3-1.7° from the true E). Options: local optimization inside the RANSAC
-      loop, a better parameterization, or rely on bundle adjustment after
-      initialization.
+- [ ] Fix refinement inlier-set lock-in: least squares over the hard-thresholded
+      (χ² 3.841), self-selected inlier set drops true inliers and keeps 2-3
+      outlier levers (translation-direction error 3-10° on about half of the
+      seeds; on the worst seeds the true E outscores the returned model). LM
+      converges; more rounds or a looser re-collection threshold do not help.
+      Remedy: robust-loss local optimization over all correspondences
+      (Cauchy/Huber or a truncated-χ² loss matching the score; MSAC/MAGSAC-style
+      LO). Bundle adjustment after initialization provides further accuracy.
 - [ ] Migrate `TPose` users (`Frame`, events, Tracker, Mapper) to
       `RigidTransformation` before spec C.
 - [ ] Optional: run the H and E RANSACs in parallel.

@@ -549,8 +549,9 @@ N < `kSampleSize` or no positive score.
 has almost no parallax) and points with reprojection error > 4σ² in either view.
 Accept the candidate with the most good points if it has
 `> max(0.9 x inliers, 50)` good points, no other candidate has more than
-`uniqueness x best` (E: 0.7, H: 0.75) and parallax >= 1° (50th-smallest
-parallax angle, as ORB-SLAM3). Far points count as good but are not returned as
+`uniqueness x best` (E: 0.7, H: 0.75) and parallax >= 1°, the parallax being
+the angle at the 51st-smallest cosine, i.e. the 51st-largest parallax angle
+(index `min(50, n - 1)`, as ORB-SLAM3). Far points count as good but are not returned as
 triangulated.
 
 **Model selection (COLMAP rule).** `Reconstruct` runs `Ransac` for H and for E
@@ -563,10 +564,15 @@ ground-truth H vs E gives a ratio of about 0.41). Both scores are still
 reported. A non-positive sigma fails the reconstruction. The default narrow,
 near-frontal planar scene is rejected as ambiguous by design.
 
-**Measured accuracy limits.** Minimal-sample 8-point + LM refinement can stop in
-a local minimum: on a wide-FOV general scene the translation-direction error is
-0.3-1.7° from the true E but up to 9.9° from the refined estimate (about half of
-21 seeds under 2°); rotation < 1°. Only ~58 % of true inliers are flagged at
+**Measured accuracy limits.** On a wide-FOV general scene the
+translation-direction error is up to 9.9° (about half of 21 seeds under 2°);
+rotation < 1°. The cause is inlier-set lock-in, not LM convergence: LM reaches
+the same answer from the true E and from the returned E on the same inlier set,
+but that set is self-selected by a hard χ² threshold (3.841) — least squares
+over it drops true inliers and keeps 2-3 outliers as levers. On the worst seeds
+the true E scores higher than the returned model (2079 vs 1920 at seed 108,
+1891 vs 1670 at 113, 2111 vs 1862 at 116); more refinement rounds (30) or a
+looser re-collection threshold do not fix it. Only ~58 % of true inliers are flagged at
 σ = noise (noise in both views). Planar wide-FOV: 21/21 seeds < 1° / < 2°.
 Further accuracy is left to bundle adjustment right after initialization (as in
 ORB-SLAM3).
@@ -672,7 +678,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-04 | Local refinement: optional `Refine` (Levenberg-Marquardt over inliers) in each estimator, 5 rounds in `Ransac`; LM counts only accepted steps (20 accepted / 40 trials). | Minimal-sample models recovered only ~55 % of true inliers with errors of several degrees; counting rejected trials starved the budget. |
 | 2026-10-04 | H-vs-E selection uses the COLMAP rule (`inliers_H >= 0.8 x inliers_E`), not the ORB-SLAM3 score ratio. | A calibrated E fits planes as well as general scenes, so the ratio does not separate them (ground truth gave about 0.41). |
 | 2026-10-04 | Recovery/accuracy tests use wide-FOV scenes (`half_fov_tan = 1.0`, close to the TUM-VI fisheye); narrow-FOV and near-frontal planar scenes are tested as rejected/weak. | Narrow FOV is ambiguous for the 8-point solver; the weakness is tracked as 5-point priority rather than hidden by loose bounds. |
-| 2026-10-04 | Accepted accuracy limits: translation direction < 10° on general scenes (max 9.92° over 21 seeds), rotation < 1°, recovery >= 50 % (narrow) / >= 75 % (wide, 30 % outliers), `num_triangulated >= 0.5 x true inliers`. | Statistics of the scores (noise in both views) and local minima of the refinement; bundle adjustment after initialization provides the final accuracy. |
+| 2026-10-04 | Accepted accuracy limits: translation direction < 10° on general scenes (max 9.92° over 21 seeds), rotation < 1°, recovery >= 50 % (narrow) / >= 75 % (wide, 30 % outliers), `num_triangulated >= 0.5 x true inliers`. | Statistics of the scores (noise in both views) and inlier-set lock-in of the refinement (least squares over a hard-thresholded, self-selected inlier set; LM itself converges); bundle adjustment after initialization provides the final accuracy. |
 
 ## 9. Open Questions
 
