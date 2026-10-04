@@ -88,6 +88,11 @@ tuning deferred); binocular (stub) initialized immediately with 1 keyframe,
       processed after a restart, or destroyed with the Tracker. Decide whether
       Stop() should drain or discard them together with the measurement
       policy. (OQ 19)
+- [ ] **Future (not now): mixed mono/stereo sessions.** Mono and stereo
+      measurements may arrive in one session; Mapper and Tracker behaviour
+      depends on the sequence (mono then mono: today's two-view init; mono
+      then stereo, stereo then mono, …: to be designed). Keep both
+      observation storages and per-keyframe measurement types to allow it.
 - [ ] Real `PoseEstimator` (track with motion model / reference keyframe /
       local map; motion-only BA) — geometry spec; replaces the stub in place.
 - [ ] Real stereo initialization (needs stereo matching; the stereo

@@ -28,7 +28,9 @@ mono map.
 5. Synthetic stereo test support and tests, an app smoke run, and docs.
 
 **Out of scope (→ TODO.md):** epipolar-guided stereo search (an
-optimization); stereo-aware tracking (using depths and right observations);
+optimization); stereo-aware tracking (using depths and right observations); mixed mono/stereo
+measurements in one session (Mapper/Tracker behaviour depending on the
+sequence — a future design);
 tuning on TUM-VI 512 (deferred to the very end).
 
 **Success criteria**
