@@ -134,7 +134,7 @@ amendment found during implementation). A `Notify()` between `Snapshot()` and
 **Geometry status.** Monocular initialization is real (see "Monocular
 Initialization"): `mapping::MapInitializer<FE>` (`mapping/map_initializer.h`:
 `TryInitialize()`, `Reset()`) matches, reconstructs and scales the two views.
-Stereo initialization (binocular -> 1 identity keyframe at once) and
+Stereo initialization is real too (see "Stereo Initialization");
 `tracking::PoseEstimator<FE>` (`tracking/pose_estimator.h`: `Estimate()`
 succeeds iff the measurement has >= `kMinTrackedFeatures` (50) features, pose =
 last pose) remain stubs; a follow-up spec replaces their bodies in place.
@@ -248,8 +248,8 @@ Detailed spec: `docs/superpowers/specs/2026-09-30-core-slam-data-structures-desi
 | `MonocularMeasurement<T, L>` | `features/monocular_measurement.h` | `ImageFeatures` + K, undistorted & normalized points, `timestamp()`. |
 | `Frame<FE, TMeasurement>` | `map/frame.h` | Keyframe: id, pose, measurement; `timestamp()` comes from the measurement. `MonoFrame<FE>`, `StereoFrame<FE>` aliases. |
 | `ObservationStorage<Type>` | `map/observation_storage.h` | SoA observation table; stereo fields compiled out for mono. |
-| `StereoRig` | `features/stereo_rig.h` | K left/right, R/t right→left, baseline, distortion models. |
-| `BinocularMeasurement<T, L>` | `features/binocular_measurement.h` | Left/right `MonocularMeasurement`, per-feature depth, right match index; `timestamp()` = left's. |
+| `StereoRig` | `features/stereo_rig.h` | K left/right, `T_rl` (left → right: `p_r = T_rl p_l`), baseline, distortion models. |
+| `BinocularMeasurement<T, L>` | `features/binocular_measurement.h` | Left/right `MonocularMeasurement`, copy of its `StereoRig`, stereo matches (`SetStereoMatches`; per-feature depth, right index); `timestamp()` = left's. |
 | `Event`, `EventType` | `events/event_types.h` | Base event: type tag + `recycle_` / `set_ref_count_` fn pointers. |
 | concrete events | `events/<event_name>.h` | One header per event (e.g. `events/map_points_added.h`); `events/events.h` includes all. See §6. |
 | `Observable` | `events/observable.h` | Sync handlers (inline, fn ptr + ctx) run first, then async enqueue with ref count = #async queues. |
@@ -440,7 +440,7 @@ timings.
 `dso/camchain.yaml` (TUM-VI) if present, else `mav0/camN/sensor.yaml` (EuRoC;
 the OpenCV `%YAML:1.0` directive is stripped for yaml-cpp). It owns the
 distortion models and builds the `StereoRig` from both cameras' `T_cam_imu`
-(`T_left_right = T_left_imu · T_imu_right`, so `p_left = R_rl p_right + t_rl`).
+(`T_rl = T_right_imu · T_left_imu⁻¹` with `T_cam_imu` mapping IMU to camera, so `p_right = T_rl p_left`: `StereoRig::T_rl` maps left → right).
 Images: decoded to 8 bit (16-bit PNGs reduced) and returned as
 `images::TWorkingImage` (8-bit grayscale).
 Only `equidistant` (Kannala-Brandt) and `none` distortion are supported.
@@ -659,6 +659,55 @@ SIFT keypoints are sorted by response and truncated to `number_of_features`,
 and **SIFT angles are converted to radians** (they were degrees, and columns
 were left uninitialized when over-detecting).
 
+## Stereo Initialization (Tracker stereo matching, stereo `MapInitializer`)
+
+Spec: `docs/superpowers/specs/2026-10-04-stereo-initialization-design.md`.
+Verified on synthetic stereo frames and a TUM-VI smoke run (see `docs/TODO.md`).
+
+**Pipeline.**
+1. The Tracker thread, on dequeuing a `BinocularMeasurement`, calls
+   `features::MatchStereo` (options in `TrackerOptions::stereo_matcher`) and
+   stores the result with `SetStereoMatches` before the measurement is tracked
+   or forwarded as `InitializationMeasurement`. Mono measurements are
+   untouched.
+2. `MatchStereo` follows ORB-SLAM3 `ComputeStereoFishEyeMatches`: brute-force
+   descriptor matching (best < 0.7 x second best), one-to-one (the closer claim
+   wins), DLT triangulation of the undistorted normalized points, then checks:
+   positive depth in both cameras, per-image reprojection chi-square
+   (sigma scaled by pyramid level), and a parallax-cosine limit
+   (`max_parallax_cos` 0.99998). A rectified row search does not apply to
+   fisheye images; epipolar-guided search is a deferred optimization.
+3. `StereoMatches` (`right_indices`, `depths`, `num_matches`) lives in its own
+   header (`features/stereo_matches.h`) so that `BinocularMeasurement` and the
+   matcher do not include each other.
+4. Stereo `MapInitializer` (ORB-SLAM3): needs more than
+   `stereo_min_features` (500) left features; every left feature with a valid
+   depth becomes a map point at **metric scale** (`depth * normalized_point`,
+   no median normalization); at least `stereo_min_points` (100) required. The
+   result is **one** keyframe with an identity `T_cw`.
+   `InitialMapPoint::feature_in_second == -1` is the sentinel for maps with a
+   single keyframe. A binocular measurement drops any mono reference.
+5. The Mapper publishes the usual `MapPointsAdded` -> `KeyFrameCreated` ->
+   `MapCreated`. Point descriptors come from the left image; the normal is the
+   viewing direction of the single keyframe.
+
+**`StereoRig::T_rl`.** A `RigidTransformation` mapping left-camera coordinates
+to right-camera coordinates (`p_r = T_rl p_l`); `baseline = ‖T_rl.translation()‖`.
+It replaces `R_rl`/`t_rl`; the dataset reader previously computed the inverse.
+Test rigs put the right camera at +x, so the translation is `(-b, 0, 0)`.
+
+**Observation storage.** Each map keeps a mono `ObservationStorage` and a
+stereo one; stereo keyframes store `depth` and `right_feature_index`
+(`int16_t`) there. Both are cleared on a new map and on `TrackingLost`. Keeping
+both allows mixed mono/stereo sessions later (TODO).
+
+**Depth limit.** `max_parallax_cos = 0.99998` rejects rays closer than about
+0.64 degrees; with the 0.11 m baseline this caps stereo depth at about 17 m.
+
+**Smoke run** (TUM-VI `dataset-corridor1_1024_16`, Release, ORB):
+initialized on the first frame with 355 points; median point depth 1.96 m
+(quartiles 1.50 / 2.13 m, range 0.25-9.50 m).
+
 ## 7. Coding Conventions
 
 **Naming (Google C++ style):**
@@ -777,6 +826,14 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-04 | Window-creation failure counts as `window_closed()`, so `--viewer` without a display stops playback after the first frame. | The viewer keeps draining headless; an app that asked for a window should not silently play on without one. |
 | 2026-10-04 | `MapViewer::RunOnCurrentThread()` besides `Start()` (macOS hedge). | Cocoa requires the GUI on the main thread; the app would then play back on a worker thread. Not used by the apps yet. In this mode other threads end the run with `RequestStop()` only. |
 | 2026-10-04 | Apps: `--viewer` opens the window; playback stops when it is closed; after the last frame the app waits for it to be closed. | The map is only worth inspecting once playback ends; closing the window is the user's exit. |
+| 2026-10-04 | Stereo matcher follows ORB-SLAM3's fisheye method: brute-force descriptor match (ratio 0.7) plus triangulation checks (positive depth, chi-square, parallax). Epipolar-guided search deferred. | A rectified row search is unsuitable for fisheye images; brute force is simple and verifiable, guided search is an optimization (TODO). |
+| 2026-10-04 | Stereo matching runs on the Tracker thread, at dequeue, before the measurement is tracked or forwarded. | The Mapper then receives matched measurements; the Mapper thread stays free for map work and the measurement is matched once. |
+| 2026-10-04 | `StereoRig::T_rl` (left -> right, `RigidTransformation`) replaces `R_rl`/`t_rl`; the dataset reader computed the inverse and is fixed. | One documented convention; the old fields were used inconsistently. |
+| 2026-10-04 | `StereoMatches` is in its own header (`features/stereo_matches.h`). | Avoids an include cycle between `BinocularMeasurement` and the matcher. |
+| 2026-10-04 | Stereo initialization: one identity keyframe; every valid depth becomes a metric map point (ORB-SLAM3); thresholds 500 features / 100 points. | One stereo pair already carries scale and depth; no median normalization. |
+| 2026-10-04 | `InitialMapPoint::feature_in_second = -1` means a single-keyframe map. | The result type serves both mono (two keyframes) and stereo (one). |
+| 2026-10-04 | Stereo observations are stored per map in an `ObservationStorage<Stereo>` beside the mono one. | Keeps mixed mono/stereo sessions possible. |
+| 2026-10-04 | Stereo depth is capped at about 17 m by `max_parallax_cos = 0.99998` at the 0.11 m baseline. | Accepted for now; the limit is a matcher option, tune later. |
 
 ## 9. Open Questions
 
@@ -916,6 +973,11 @@ branch → review → merge to `master`. Update this document at the end.
   observations, `TPose` -> `RigidTransformation` migration (see "Monocular
   Initialization").
 
+- Stereo map initialization (branch `feat/stereo-initialization`, merge
+  pending): `StereoRig::T_rl`, ORB-SLAM3 fisheye-style `MatchStereo`, stereo
+  matching on the Tracker thread, stereo `MapInitializer`, Mapper stereo
+  observation storage (see "Stereo Initialization").
+
 - Pangolin 3D map viewer (branch `feat/pangolin-viewer`, merge pending):
   `SceneState` decoding, `MapViewer` window lifecycle, `PangolinRenderer`,
   apps `--viewer` (see "Map Viewer").
@@ -941,7 +1003,7 @@ branch → review → merge to `master`. Update this document at the end.
   (in progress, user).
 - Tracker measurement policy (19).
 - Real geometry behind the stubs: two-view initialization (`MapInitializer`;
-  mono done; stereo initialization still a stub) and pose estimation (track-with-motion-model, track-reference-keyframe,
+  mono and stereo done) and pose estimation (track-with-motion-model, track-reference-keyframe,
   track-local-map; `PoseEstimator`), applying map diffs to the Tracker replica,
   relocalization in `Lost`, keyframe decision (`NewKeyFrameCandidate`).
 - Event pool lifetime (Open Question 25).
