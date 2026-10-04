@@ -16,7 +16,7 @@
 - Namespaces: `voyahslam::geometry` (RigidTransformation, TwoViewCorrespondences, decomposition, reconstruction), `voyahslam::estimators` (ModelScore, concept, estimators, Ransac). Headers under `include/voyahslam/{geometry,estimators}/`, sources under `src/{geometry,estimators}/` (added to `src/CMakeLists.txt`), tests under `tests/{geometry,estimators}/` (added to `tests/CMakeLists.txt`).
 - Transform convention: `T_ab` maps points from frame b to frame a (p_a = T_ab · p_b); `T_ac = T_ab * T_bc`. Two-view result `T_21`: camera 1 → camera 2; x2 ~ R x1 + t.
 - Points are normalized image coordinates (z = 1). σ is in normalized units (`TwoViewCorrespondences::sigma`).
-- Values: H `kSampleSize = 4`, H χ² threshold 5.991 (score adds 5.991 − χ²); E `kSampleSize = 8`, E χ² threshold 3.841, score adds 5.991 − χ²; both: inlier iff both directions pass. RansacOptions defaults `max_iterations = 2000`, `min_iterations = 50`, `confidence = 0.99`, `seed = 0`; essential run uses `seed + 1`. TwoViewOptions defaults: `homography_ratio_threshold = 0.50`, `min_parallax_deg = 1.0`, `min_triangulated = 50`, `min_good_fraction = 0.9`, `essential_uniqueness = 0.7`, `homography_uniqueness = 0.75`, `max_point_parallax_cos = 0.99998`; reprojection gate 4σ².
+- Values: H `kSampleSize = 4`, H χ² threshold 5.991 (score adds 5.991 − χ²); E `kSampleSize = 8`, E χ² threshold 3.841, score adds 5.991 − χ²; both: inlier iff both directions pass. RansacOptions defaults `max_iterations = 2000`, `min_iterations = 50`, `confidence = 0.99`, `seed = 0`, `refinement_rounds = 3` (amendment); essential run uses `seed + 1`. TwoViewOptions defaults: `homography_inlier_ratio = 0.8` (amendment: H iff inliers_H ≥ 0.8 × inliers_E), `min_parallax_deg = 1.0`, `min_triangulated = 50`, `min_good_fraction = 0.9`, `essential_uniqueness = 0.7`, `homography_uniqueness = 0.75`, `max_point_parallax_cos = 0.99998`; reprojection gate 4σ².
 - Build/test: `cmake -S . -B cmake-build-debug/build/Debug && cmake --build cmake-build-debug/build/Debug -j8 && ctest --test-dir cmake-build-debug/build/Debug -j8 --timeout 60`; focused: `cmake-build-debug/build/Debug/tests/voyahslam_tests --gtest_filter='<Suite>*'`. All existing tests stay green. Every new header must also pass `clang++-18 -std=c++20 -stdlib=libc++ -fsyntax-only` (use the include/define flags from `cmake-build-debug/build/Debug/tests/CMakeFiles/voyahslam_tests.dir/flags.make`).
 
 ## Review Focus
@@ -124,7 +124,24 @@
 - [ ] **Step 4: Run** — pass; clang syntax check — clean.
 - [ ] **Step 5: Commit** `Add essential and homography decomposition`.
 
+### Task 7a: Local refinement (amendment 2026-10-04)
+
+**Files:**
+- Modify: `include/voyahslam/estimators/{essential_estimator,homography_estimator,ransac}.h`, `src/estimators/{essential_estimator,homography_estimator}.cpp`, `tests/support/two_view_scene.h` (new last parameter `double half_fov_tan = 0.5` on `MakeGeneralScene`/`MakePlanarScene` scaling the u, v range)
+- Test: `tests/estimators/essential_estimator_test.cpp`, `tests/estimators/homography_estimator_test.cpp`, `tests/estimators/ransac_test.cpp`, `tests/geometry/two_view_scene_test.cpp`
+
+**Interfaces:**
+- Produces: `TModel EssentialEstimator::Refine(const TModel&, const geometry::TwoViewCorrespondences&, const Eigen::Array<bool, Eigen::Dynamic, 1>& inliers) const`; same for `HomographyEstimator`; `RansacOptions::refinement_rounds = 3`; Ransac applies refinement when the estimator has `Refine` (requires-expression), per spec §3.4 amendment and §3.5.
+
+- [ ] **Step 1: Failing tests:** `EssentialEstimatorTest.RefineLowersSampsonError` (estimate from 8 noisy points of a σ = NormalizedSigma(1) scene, refine on the true inliers → summed Sampson error strictly lower, result finite with singular values (s, s, 0)); `HomographyEstimatorTest.RefineLowersTransferError` (same idea, symmetric transfer error); `.RefineKeepsModelOnDegenerateInput` (all-false inliers or < 4 inliers → returns input unchanged); `RansacTest.RefinementImprovesRecovery` (the 30 % / 50 % essential scenes: ≥ 75 % of true inliers flagged, ≤ 5 % outliers); update the existing recovery tests' comment (refinement now on by default); `TwoViewSceneTest.HalfFovScalesPointSpread`.
+- [ ] **Step 2: Run** — expected: compile failure (Refine missing).
+- [ ] **Step 3: Implement** per spec §3.4 amendment and §3.5 (LM, ≤ 10 iterations, early stop at relative decrease < 1e-6; E: 5-dof (R, t ∈ S²) parameterization; H: 8-dof; non-finite / ill-conditioned result → input returned).
+- [ ] **Step 4: Run** focused + full suite — pass; clang syntax check — clean. Report observed recovery numbers.
+- [ ] **Step 5: Commit** `Add local refinement (LM) to estimators and Ransac`.
+
 ### Task 7: SelectPose and TwoViewReconstructor
+
+> **Amendment 2026-10-04:** model selection uses `homography_inlier_ratio` (H iff inliers_H ≥ 0.8 × inliers_E or the E run failed), not the score ratio. Planar acceptance test `PlanarSceneSelectsHomography` uses `MakePlanarScene(300, 0.2, NormalizedSigma(1), seed, T_21 with 1 m translation, tilt 30°, half_fov_tan = 1.0)`; new test `NarrowFrontalPlanarSceneRejected` (default narrow, tilt 0 scene → `success = false`). Bounds: num_triangulated ≥ 0.5 × true inliers (ledger ruling); pose bounds rotation < 1°, translation direction < 2° unchanged. Work-in-progress for this task is in `git stash` "task7-wip" — restore it with `git stash pop` and continue from it.
 
 **Files:**
 - Create: `include/voyahslam/geometry/two_view_reconstruction.h`, `src/geometry/two_view_reconstruction.cpp`

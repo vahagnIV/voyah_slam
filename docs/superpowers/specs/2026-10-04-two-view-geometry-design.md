@@ -183,8 +183,9 @@ public:
 
 Minimal-sample models overfit noise (measured: ~55 % of true inliers
 recovered, pose errors of several degrees at σ = 1 px). Both estimators get
-`Refine`, a Levenberg–Marquardt minimization over the inliers (≥ 15 % of the
-error drop or 10 iterations, numeric Jacobian is acceptable):
+`Refine`, a Levenberg–Marquardt minimization over the inliers (at most 10
+iterations, stop early when the relative cost decrease < 1e-6; a numeric
+Jacobian is acceptable):
 
 - `EssentialEstimator::Refine`: parameterize E = [t]ₓR with R (3-dof
   rotation update, applied as R ← exp([δω]ₓ) R) and t on the unit sphere
