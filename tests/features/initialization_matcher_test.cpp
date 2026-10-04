@@ -146,10 +146,32 @@ TEST(InitializationMatcher, OrientationFilterDropsInconsistent) {
 }
 
 TEST(InitializationMatcher, OrientationWrapsAroundZero) {
-    // Differences of +0.01 and -0.01 rad fall into bin 0 after rounding.
-    const Measurement ref = Make({{.x = 100.0, .angle = 0.01, .seed = 1}, {.x = 300.0, .angle = 0.0, .seed = 2}});
-    const Measurement cur = Make({{.x = 100.0, .angle = 0.0, .seed = 1}, {.x = 300.0, .angle = 0.01, .seed = 2}});
-    EXPECT_EQ(RunMatcher(ref, cur), (std::vector<Eigen::Index>{0, 1}));
+    // 12 bins of 30 degrees. Rotation = ref - cur, wrapped to [0, 2 pi):
+    //   A: 11 x +0.01 rad          -> bin 0
+    //   B:  3 x -0.3 rad (wraps)   -> bin 11
+    //   C:  3 x 5.98 rad           -> bin 11 (same rotation as B)
+    //   E:  3 x pi                 -> bin 6
+    //   D:  1 x pi/2               -> bin 3, 4th bin: dropped
+    // Without the wrap, B would land in another bin and push one group out of the top three.
+    std::vector<Spec> ref_specs, cur_specs;
+    std::vector<int> expected_kept;
+    const auto add = [&](int count, double rotation, bool kept) {
+        for (int k = 0; k < count; ++k) {
+            const int i = static_cast<int>(ref_specs.size());
+            const double x = 20.0 + 11.0 * (i % 40);
+            const double y = 20.0 + 60.0 * (i / 40);
+            ref_specs.push_back({.x = x, .y = y, .angle = rotation, .seed = i});
+            cur_specs.push_back({.x = x, .y = y, .angle = 0.0, .seed = i});
+            expected_kept.push_back(kept ? i : -1);
+        }
+    };
+    add(11, 0.01, true);
+    add(3, -0.3, true);
+    add(3, 5.98, true);
+    add(3, std::numbers::pi, true);
+    add(1, std::numbers::pi / 2.0, false);
+    EXPECT_EQ(RunMatcher(Make(ref_specs), Make(cur_specs)),
+              std::vector<Eigen::Index>(expected_kept.begin(), expected_kept.end()));
 }
 
 TEST(InitializationMatcher, MaxReferenceLevel) {

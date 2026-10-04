@@ -18,7 +18,7 @@ struct InitializationMatcherOptions {
     double max_distance = 50.0;   // descriptor distance threshold (double so SIFT's float L2 fits)
     double nn_ratio = 0.9;        // best < nn_ratio * second best
     bool check_orientation = true;
-    size_t histogram_bins = 30;
+    size_t histogram_bins = 12;   // 12 bins of 30° — ORB-SLAM3's effective resolution (HISTO_LENGTH = 30 applied as 1/30 per degree)
     int max_reference_level = 0;  // only reference features with level <= this
 };
 
