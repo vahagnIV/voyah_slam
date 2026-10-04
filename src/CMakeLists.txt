@@ -1,6 +1,7 @@
 add_library(voyahslam
     voyahslam.cpp
     algebra/algebra.cpp
+    estimators/homography_estimator.cpp
     geometry/geometry.cpp
     io/read_image.cpp
     logging/logger.cpp
