@@ -22,6 +22,10 @@ public:
   [[nodiscard]] TFeatures DetectAndExtract(const images::TWorkingImage &image, size_t number_of_features) const;
   static TDescriptorScalarType Distance(const TDescriptor& desc1, const TDescriptor& desc2);
 
+  // Scale of pyramid `level` relative to the full-resolution image.
+  [[nodiscard]] double ScaleFactor(uint8_t level) const;
+  [[nodiscard]] size_t num_levels() const;
+
 private:
   precision_t scale_factor_;
   precision_t log_scale_factor_;

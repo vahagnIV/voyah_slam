@@ -18,7 +18,8 @@ TFeatures MakeFeatures(const geometry::TPoints2DF& points) {
     geometry::TRowVectorF strengths = geometry::TRowVectorF::Ones(n);
     geometry::TRowVectorF angles = geometry::TRowVectorF::Zero(n);
     TFeatures::TDescriptors descriptors = TFeatures::TDescriptors::Zero(32, n);
-    return TFeatures(std::move(copy), std::move(strengths), std::move(angles), std::move(descriptors));
+    return TFeatures(std::move(copy), std::move(strengths), std::move(angles), std::move(descriptors),
+                     features::TLevels::Zero(n));
 }
 
 images::TImageU8Gray BlackImage(unsigned width, unsigned height) {

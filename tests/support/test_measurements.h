@@ -34,7 +34,8 @@ inline TestImageFeatures MakeImageFeatures(size_t num_features) {
     TestImageFeatures::TDescriptors descriptors =
         TestImageFeatures::TDescriptors::Random(TestExtractor::DescriptorSize, n);
     return TestImageFeatures(std::move(points), std::move(strengths), std::move(angles),
-                             std::move(descriptors));
+                             std::move(descriptors),
+                             features::TLevels::Zero(n));
 }
 
 inline features::TMonocularMeasurement<TestExtractor> MakeMonocular(size_t num_features,

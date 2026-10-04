@@ -48,7 +48,8 @@ TEST_F(MonocularMeasurementTest, ConstructorAndGetters) {
         std::move(points_),
         std::move(strengths_),
         std::move(angles_),
-        std::move(descriptors_)
+        std::move(descriptors_),
+        TLevels::Zero(3)
     );
 
     // Create undistorted features
@@ -86,7 +87,8 @@ TEST_F(MonocularMeasurementTest, MoveSemantics) {
         std::move(points_),
         std::move(strengths_),
         std::move(angles_),
-        std::move(descriptors_)
+        std::move(descriptors_),
+        TLevels::Zero(3)
     );
 
     // Create undistorted features
@@ -147,7 +149,8 @@ TTestFeatures MakeFeaturesAt(const TPoints2DF& points) {
         angles(i) = 10.0 * static_cast<precision_t>(i);
     }
     TPoints2DF copy = points;
-    return TTestFeatures(std::move(copy), std::move(strengths), std::move(angles), std::move(descriptors));
+    return TTestFeatures(std::move(copy), std::move(strengths), std::move(angles), std::move(descriptors),
+                         TLevels::Zero(n));
 }
 
 } // namespace
@@ -188,4 +191,28 @@ TEST(MonocularMeasurementRayAngleTest, DropsPinholeFeaturesBeyondMaxRayAngle) {
 
     ASSERT_EQ(measurement.points().cols(), 1);
     EXPECT_NEAR(measurement.points()(0, 0), 100 * std::tan(60 * kDeg), 1e-9);
+}
+
+TEST_F(MonocularMeasurementTest, DropKeepsLevelsAligned) {
+    constexpr int n = 4;
+    TPoints2DF points(2, n);
+    points.col(0) << 320, 240;
+    points.col(1) << 320 + 500 * std::tan(87 * kDeg), 240;  // beyond 85 degrees: dropped
+    points.col(2) << 400, 260;
+    points.col(3) << 250, 200;
+    TLevels levels(n);
+    levels << 0, 1, 2, 3;
+    TFeatures features(std::move(points), TRowVectorF::Ones(n), TRowVectorF::Zero(n),
+                       TDescriptors::Zero(DescriptorSize, n), std::move(levels));
+
+    MonocularMeasurement<TDescriptorScalarType, DescriptorSize> measurement(
+        std::move(features), K_, nullptr, 0.0);
+
+    ASSERT_EQ(measurement.points().cols(), 3);
+    ASSERT_EQ(measurement.levels().cols(), 3);
+    EXPECT_EQ(measurement.levels()(0), 0);
+    EXPECT_EQ(measurement.levels()(1), 2);
+    EXPECT_EQ(measurement.levels()(2), 3);
+    EXPECT_FLOAT_EQ(measurement.points()(0, 1), 400.0F);
+    EXPECT_FLOAT_EQ(measurement.points()(0, 2), 250.0F);
 }

@@ -15,7 +15,8 @@ TestFeatures MakeFeatures(int n) {
     geometry::TRowVectorF angles = geometry::TRowVectorF::Random(n);
     TestFeatures::TDescriptors descs = TestFeatures::TDescriptors::Random(32, n);
     return TestFeatures(std::move(points), std::move(strengths),
-                        std::move(angles), std::move(descs));
+                        std::move(angles), std::move(descs),
+                        TLevels::Zero(n));
 }
 
 StereoRig MakeRig() {

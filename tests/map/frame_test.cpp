@@ -16,7 +16,8 @@ OrbFeatures MakeFeatures(int n) {
     geometry::TRowVectorF angles = geometry::TRowVectorF::Random(n);
     OrbFeatures::TDescriptors descs = OrbFeatures::TDescriptors::Random(32, n);
     return OrbFeatures(std::move(points), std::move(strengths),
-                       std::move(angles), std::move(descs));
+                       std::move(angles), std::move(descs),
+                       features::TLevels::Zero(n));
 }
 
 TEST(FrameTest, MonoFrameConstruction) {
