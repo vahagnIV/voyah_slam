@@ -30,15 +30,16 @@ int main(int argc, char** argv) {
 
         TFeatureExtractor extractor(full_slam::kScaleFactor, full_slam::kNumLevels,
                                     full_slam::kInitThresholdFast, full_slam::kMinThresholdFast);
-        std::optional<voyahviz::ImageWindow> window;
-        if (options.show) window.emplace("monocular_full_slam");
-
         // 3D viewer: consumes Tracker and Mapper events on its own thread (later
         // a remote process behind a serializing observer). Declared before slam
         // so that slam is destroyed first and nothing is published into a
         // destroyed inbox.
         voyahviz::MapViewer<TFeatureExtractor> viewer(
             voyahviz::MapViewerOptions{.show_window = options.viewer});
+        // Created after the viewer: cv::namedWindow (gtk_init) may start threads,
+        // and the viewer's constructor may setenv (so it must run first).
+        std::optional<voyahviz::ImageWindow> window;
+        if (options.show) window.emplace("monocular_full_slam");
         TSlam slam;
         // Also when an exception unwinds: stop the producers, then the viewer
         // (its final drain recycles events into slam's pools), all before
@@ -61,6 +62,7 @@ int main(int argc, char** argv) {
         dataset_reader::PlaybackClock clock(options.rate);
         full_slam::PlaybackStats stats;
         size_t num_frames = std::min(reader.size(), options.max_frames);
+        bool quit = false;
         for (size_t i = 0; i < num_frames; ++i) {
             auto lateness = clock.WaitUntil(reader.timestamp(i));
             auto start = std::chrono::steady_clock::now();
@@ -79,14 +81,17 @@ int main(int argc, char** argv) {
             slam.tracker().Track(std::move(measurement));
 
             stats.Add(lateness, loaded - start, extracted - loaded, num_features);
-            if (window && full_slam::IsQuitKey(window->WaitKey(1))) break;
+            if (window && full_slam::IsQuitKey(window->WaitKey(1))) {
+                quit = true;
+                break;
+            }
             if (viewer.window_closed()) break;
             if ((i + 1) % 100 == 0) std::cout << "frame " << i + 1 << "/" << num_frames << "\n";
         }
 
         // The map is only worth looking at once playback is done: keep the
-        // viewer alive until its window is closed.
-        if (options.viewer && !viewer.window_closed()) {
+        // viewer alive until its window is closed (not after a quit key).
+        if (options.viewer && !quit && !viewer.window_closed()) {
             std::cout << "Playback finished — close the 3D viewer to exit\n";
             viewer.WaitForWindowClose();
         }

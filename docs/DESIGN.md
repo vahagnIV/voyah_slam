@@ -460,9 +460,9 @@ extractor is the bottleneck (Open Question 21).
 ## Visualization Library (`vizualization/`, `voyahviz`)
 
 Development tool, never part of the production build. Implemented with
-OpenCV (HighGUI, imgproc) and Pangolin (3D map viewer), but — like every library of ours — OpenCV is
-private: the public API uses only voyahslam types and OpenCV is linked
-`PRIVATE` (principle 8). Namespace / include prefix: `voyahviz`.
+OpenCV (HighGUI, imgproc) and Pangolin (3D map viewer), but — like every
+library of ours — both are private: the public API uses only voyahslam types
+and OpenCV and Pangolin are linked `PRIVATE` (principle 8). Namespace / include prefix: `voyahviz`.
 
 | Header | Contents |
 |---|---|
@@ -518,7 +518,12 @@ Specs: `docs/superpowers/specs/2026-10-04-pangolin-viewer-design.md`
 - **Stop semantics:** `Stop()` in `Start()` mode joins and drains once more so
   queued events return to their pools; idempotent, safe without `Start()`,
   restart allowed, destructor stops. During `RunOnCurrentThread()`, `Stop()`
-  only requests the stop and the loop drains itself on its own thread. A
+  only requests the stop and the loop drains itself on its own thread; other
+  threads end that run with `RequestStop()` only (a `Stop()` before the loop is
+  entered would consume the request and a later `RunOnCurrentThread()` would
+  block), and `Stop()` / the destructor belong on the loop's thread after it
+  returns. `Start()`/`Stop()` must be called from one controlling thread
+  (externally ordered). A
   `RequestStop()` made before the loop is entered is kept (the run drains once
   and returns). `fps <= 0` throws.
 - **Window close does not end the loop.** It keeps draining headless (so the
@@ -764,11 +769,13 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-04 | SIFT radians / strongest-N fix: see the `ImageFeatures` level row above. | Same change; recorded there. |
 | 2026-10-04 | Monocular initialization: ORB-SLAM3 matcher + two-view reconstruction, scaled to median depth 1, published as `MapPointsAdded` -> `KeyFrameCreated` (with observations) -> `MapCreated`; per-map point ids; keyframes store `T_cw`. | Replicas need points before the keyframes that observe them; per-map ids keep storage compact and `(map_id, id)` unique. |
 | 2026-10-04 | Pangolin map viewer: `SceneState` decodes events into a scene model (newest map wins); `PangolinRenderer` is private to voyahviz. | Same code can later be fed by a deserializer on a remote machine; renderer stays swappable. |
-| 2026-10-04 | Ruling D: `Stop()` during `RunOnCurrentThread()` only requests the stop; the loop drains itself on its own thread. | Keeps the loop-thread invariant: the drain touches the scene/renderer, which only the loop thread may do. |
-| 2026-10-04 | Ruling E: closing the window does not end the loop; only `RequestStop()` / `Stop()` do. The loop keeps draining headless. | Producers' event pools must never stall because a user closed a window. |
+| 2026-10-04 | `Stop()` during `RunOnCurrentThread()` only requests the stop; the loop drains itself on its own thread. | Keeps the loop-thread invariant: the drain touches the scene/renderer, which only the loop thread may do. |
+| 2026-10-04 | Closing the window does not end the loop; only `RequestStop()` / `Stop()` do. The loop keeps draining headless. | Producers' event pools must never stall because a user closed a window. |
 | 2026-10-04 | A `RequestStop()` made before the loop is entered is preserved (never lost). | A producer finishing first must not leave `RunOnCurrentThread()` blocked forever. |
-| 2026-10-04 | Ruling F: on Linux under Wayland with `PANGOLIN_WINDOW_URI` unset, `MapViewer`'s constructor sets it to `x11://`. | Pangolin's Wayland backend blocks in `eglSwapBuffers` on GNOME, stalling the drain and the producers' pools. |
+| 2026-10-04 | On Linux under Wayland with `PANGOLIN_WINDOW_URI` unset, `MapViewer`'s constructor sets it to `x11://`. | Pangolin's Wayland backend blocks in `eglSwapBuffers` on GNOME, stalling the drain and the producers' pools. |
 | 2026-10-04 | Pangolin linked `PRIVATE` via `pango_display`. | No Pangolin headers/types for library users (principle 8). |
+| 2026-10-04 | Window-creation failure counts as `window_closed()`, so `--viewer` without a display stops playback after the first frame. | The viewer keeps draining headless; an app that asked for a window should not silently play on without one. |
+| 2026-10-04 | `MapViewer::RunOnCurrentThread()` besides `Start()` (macOS hedge). | Cocoa requires the GUI on the main thread; the app would then play back on a worker thread. Not used by the apps yet. In this mode other threads end the run with `RequestStop()` only. |
 | 2026-10-04 | Apps: `--viewer` opens the window; playback stops when it is closed; after the last frame the app waits for it to be closed. | The map is only worth inspecting once playback ends; closing the window is the user's exit. |
 
 ## 9. Open Questions

@@ -284,10 +284,10 @@ TEST(MapViewerTest, WaitForWindowCloseReturnsWhenHeadless) {
     started.Stop();
 }
 
-TEST(MapViewerTest, WaitForWindowCloseReturnsAfterLoopExit) {
-    TViewer viewer(MapViewerOptions{.fps = 30.0});
-    viewer.Start();
-    viewer.Stop();
+TEST(MapViewerTest, WaitForWindowCloseReturnsWhenNoLoopRunning) {
+    // No loop running (never started): takes the !loop_running_ path and
+    // returns at once. show_window is set, but without Start() no window opens.
+    TViewer viewer(MapViewerOptions{.fps = 30.0, .show_window = true});
     viewer.WaitForWindowClose();
     EXPECT_FALSE(viewer.window_closed());
 }

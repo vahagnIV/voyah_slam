@@ -37,6 +37,12 @@ struct MapViewerOptions {
 // not stop the loop: it keeps draining headless until RequestStop()/Stop(), so
 // producers' event pools never stall.
 //
+// Threading contract: Start() and Stop() must be called from one controlling
+// thread (externally ordered; they are not safe to race with each other). In
+// RunOnCurrentThread() mode other threads end the run with RequestStop() only;
+// Stop() and the destructor belong on the loop's thread, after
+// RunOnCurrentThread() has returned.
+//
 // Usage: connect producers with AddObserver(viewer.inbox()) before they start;
 // stop the producers before the viewer so nothing arrives after the final drain.
 template <typename TFeatureExtractor>
@@ -58,7 +64,9 @@ public:
     // drains (applies and acknowledges) whatever is still queued. While
     // RunOnCurrentThread() is active it only requests the stop:
     // RunOnCurrentThread() does its own final drain on its thread before
-    // returning. Idempotent; safe without Start().
+    // returning. Idempotent; safe without Start(). Do not call it from another
+    // thread before RunOnCurrentThread() is entered: with no loop running it
+    // consumes the request, and the later run would block (use RequestStop()).
     void Stop();
     // Runs the loop on the caller's thread; blocks until RequestStop() or
     // Stop(), then drains what is still queued and returns. Closing the window
@@ -68,7 +76,8 @@ public:
     // Ends either loop at its next iteration; does not join. Thread-safe. A
     // request made before the loop is entered is kept: that run drains once and
     // returns (so a producer finishing first can't leave RunOnCurrentThread()
-    // blocked). Stop() and the end of a run consume it.
+    // blocked). Stop() and the end of a run consume it. This is the only way for
+    // another thread to end a RunOnCurrentThread() run.
     void RequestStop();
 
     // True once the window was closed by the user or could not be created.

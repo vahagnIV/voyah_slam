@@ -110,15 +110,21 @@ tuning deferred); binocular (stub) initialized immediately with 1 keyframe,
       reject non-finite / extreme `fps`, and wake `Stop()` immediately (low fps
       delays it by a period); `width` / `height` / `camera_size` aren't
       validated; `Start()` thread-creation failure leaves the state stuck;
-      renderer partial-creation failure cleanup and non-`std` exceptions on the
-      loop thread; `Start()`/`Stop()` must be externally ordered (document);
+      renderer partial-creation failure cleanup; exceptions on the loop thread:
+      in `Start()` mode ANY exception (incl. `std::exception`) from
+      Apply/Draw/FinishFrame calls `std::terminate`; in `RunOnCurrentThread()`
+      mode it propagates but queued events stay unacknowledged until the next
+      `Stop()`/destructor; `RunOnCurrentThread()` consumed-stop hazard (a
+      cross-thread `Stop()` before entry; currently documented only);
       a pre-set stop with `show_window` creates and immediately destroys the
       window.
 - [ ] Viewer tests: window-mode paths have no automated test (consider a test
       seam that forces renderer-creation failure).
 - [ ] Viewer: points are drawn in immediate mode - use a VBO for large maps.
 - [ ] macOS setup: playback on a worker thread, viewer (`RunOnCurrentThread()`)
-      and image window on the main thread.
+      and image window on the main thread. In that mode other threads must end
+      the viewer with `RequestStop()` only; `Stop()` and the destructor run on
+      the main thread after `RunOnCurrentThread()` returns.
 - [ ] 2D initialization overlay in the viewer (matches between the reference and
       current frame).
 - [ ] Viewer extras: covisibility edges, colouring points by number of
