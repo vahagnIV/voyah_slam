@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <Eigen/Geometry>
 #include <support/test_measurements.h>
 #include <voyahslam/tracking/pose_estimator.h>
 
@@ -9,8 +10,11 @@ using Extractor = test::TestExtractor;
 using Measurement = features::TMeasurement<Extractor>;
 
 geometry::RigidTransformation NonIdentityPose() {
+    // Non-trivial rotation: 0.3 radians around Z axis
+    Eigen::AngleAxis<voyahslam::precision_t> angle_axis(0.3, geometry::TVector3DF::UnitZ());
+    geometry::TMatrix33F rotation = angle_axis.toRotationMatrix();
     geometry::TVector3DF translation(1.5F, -2.0F, 0.0F);
-    return geometry::RigidTransformation(geometry::TMatrix33F::Identity(), translation);
+    return geometry::RigidTransformation(rotation, translation);
 }
 
 TEST(PoseEstimatorTest, SucceedsWithEnoughFeatures) {

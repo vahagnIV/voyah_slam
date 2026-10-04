@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <Eigen/Geometry>
 #include <support/test_measurements.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
@@ -20,8 +21,11 @@ using TInitializationMeasurement = events::InitializationMeasurement<Extractor>;
 using Clock = std::chrono::steady_clock;
 
 geometry::RigidTransformation NonIdentityPose() {
+    // Non-trivial rotation: 0.3 radians around Z axis
+    Eigen::AngleAxis<voyahslam::precision_t> angle_axis(0.3, geometry::TVector3DF::UnitZ());
+    geometry::TMatrix33F rotation = angle_axis.toRotationMatrix();
     geometry::TVector3DF translation(1.5F, 0.0F, -0.5F);
-    return geometry::RigidTransformation(geometry::TMatrix33F::Identity(), translation);
+    return geometry::RigidTransformation(rotation, translation);
 }
 
 // Feeds the Tracker's inbox from `mapper_` (stands in for the Mapper) and

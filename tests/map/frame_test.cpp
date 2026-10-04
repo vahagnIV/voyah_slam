@@ -2,6 +2,7 @@
 #include <voyahslam/map/frame.h>
 
 #include <gtest/gtest.h>
+#include <Eigen/Geometry>
 
 namespace voyahslam::map {
 namespace {
@@ -63,9 +64,13 @@ TEST(FrameTest, MutablePose) {
     MonoFrame<features::OrbFeatureExtractor> frame(
         FrameId{0}, pose, std::move(measurement));
 
-    geometry::TVector3DF new_translation(0, 0, 5.0);
-    frame.mutable_pose() = geometry::RigidTransformation(geometry::TMatrix33F::Identity(), new_translation);
+    // Non-trivial rotation: 0.2 radians around X axis
+    Eigen::AngleAxis<voyahslam::precision_t> angle_axis(0.2, geometry::TVector3DF::UnitX());
+    geometry::TMatrix33F new_rotation = angle_axis.toRotationMatrix();
+    geometry::TVector3DF new_translation(1.0, 2.0, 5.0);
+    frame.mutable_pose() = geometry::RigidTransformation(new_rotation, new_translation);
     EXPECT_DOUBLE_EQ(frame.pose().translation()(2), 5.0);
+    EXPECT_FALSE(frame.pose().rotation().isApprox(geometry::TMatrix33F::Identity()));
 }
 
 } // namespace
