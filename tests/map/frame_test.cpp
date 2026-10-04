@@ -21,7 +21,7 @@ OrbFeatures MakeFeatures(int n) {
 }
 
 TEST(FrameTest, MonoFrameConstruction) {
-    geometry::TPose pose = geometry::TPose::Identity();
+    geometry::RigidTransformation pose = geometry::RigidTransformation::Identity();
     geometry::TMatrix33F K = geometry::TMatrix33F::Identity();
     auto measurement = OrbMonocularMeasurement(MakeFeatures(10), K, nullptr, 1.0);
 
@@ -29,13 +29,13 @@ TEST(FrameTest, MonoFrameConstruction) {
         FrameId{0}, pose, std::move(measurement));
 
     EXPECT_EQ(frame.id(), FrameId{0});
-    EXPECT_TRUE(frame.pose().isApprox(geometry::TPose::Identity()));
+    EXPECT_TRUE(frame.pose().ToMatrix34().isApprox(geometry::RigidTransformation::Identity().ToMatrix34()));
     EXPECT_EQ(frame.measurement().points().cols(), 10);
     EXPECT_DOUBLE_EQ(frame.timestamp(), 1.0);
 }
 
 TEST(FrameTest, StereoFrameConstruction) {
-    geometry::TPose pose = geometry::TPose::Identity();
+    geometry::RigidTransformation pose = geometry::RigidTransformation::Identity();
     features::StereoRig rig{
         .K_left = geometry::TMatrix33F::Identity(),
         .K_right = geometry::TMatrix33F::Identity(),
@@ -56,15 +56,16 @@ TEST(FrameTest, StereoFrameConstruction) {
 }
 
 TEST(FrameTest, MutablePose) {
-    geometry::TPose pose = geometry::TPose::Identity();
+    geometry::RigidTransformation pose = geometry::RigidTransformation::Identity();
     geometry::TMatrix33F K = geometry::TMatrix33F::Identity();
     auto measurement = OrbMonocularMeasurement(MakeFeatures(3), K, nullptr, 0.0);
 
     MonoFrame<features::OrbFeatureExtractor> frame(
         FrameId{0}, pose, std::move(measurement));
 
-    frame.mutable_pose()(0, 3) = 5.0;
-    EXPECT_DOUBLE_EQ(frame.pose()(0, 3), 5.0);
+    geometry::TVector3DF new_translation(0, 0, 5.0);
+    frame.mutable_pose() = geometry::RigidTransformation(geometry::TMatrix33F::Identity(), new_translation);
+    EXPECT_DOUBLE_EQ(frame.pose().translation()(2), 5.0);
 }
 
 } // namespace

@@ -6,12 +6,13 @@
 #include <vector>
 #include <voyahslam/defs.h>
 #include <voyahslam/features/measurement.h>
+#include <voyahslam/geometry/rigid_transformation.h>
 
 namespace voyahslam::mapping {
 
 template <typename TFeatureExtractor>
 struct InitialKeyFrame {
-    geometry::TPose pose;
+    geometry::RigidTransformation T_cw;
     features::TMeasurement<TFeatureExtractor> measurement;
 };
 

@@ -13,6 +13,7 @@
 #include <voyahslam/events/tracking_lost.h>
 #include <voyahslam/events/worker_thread.h>
 #include <voyahslam/features/measurement.h>
+#include <voyahslam/geometry/rigid_transformation.h>
 #include <voyahslam/logging/logger.h>
 #include <voyahslam/map/frame_id.h>
 #include <voyahslam/map/map_id.h>
@@ -88,7 +89,7 @@ private:
     std::atomic<TrackerState> state_{TrackerState::WaitingForMap};
     std::atomic<map::MapId> current_map_id_{map::MapId{0}};
     map::FrameId map_frame_id_{0};  // keyframe of the current map's MapCreated
-    geometry::TPose last_pose_ = geometry::TPose::Identity();
+    geometry::RigidTransformation last_pose_ = geometry::RigidTransformation::Identity();
     PoseEstimator<TFeatureExtractor> pose_estimator_;
 
     memory::ObjectPool<events::InitializationMeasurement<TFeatureExtractor>,

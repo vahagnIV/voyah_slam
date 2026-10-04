@@ -35,7 +35,7 @@ MapInitializer<TFeatureExtractor>::TryInitialize(TMeasurement measurement) {
     if (std::holds_alternative<features::TBinocularMeasurement<TFeatureExtractor>>(measurement)) {
         reference_.reset();
         TKeyFrames key_frames;
-        key_frames.push_back({geometry::TPose::Identity(), std::move(measurement)});
+        key_frames.push_back({geometry::RigidTransformation::Identity(), std::move(measurement)});
         return key_frames;
     }
 
@@ -50,8 +50,8 @@ MapInitializer<TFeatureExtractor>::TryInitialize(TMeasurement measurement) {
     }
 
     TKeyFrames key_frames;
-    key_frames.push_back({geometry::TPose::Identity(), std::move(*reference_)});
-    key_frames.push_back({geometry::TPose::Identity(), std::move(measurement)});
+    key_frames.push_back({geometry::RigidTransformation::Identity(), std::move(*reference_)});
+    key_frames.push_back({geometry::RigidTransformation::Identity(), std::move(measurement)});
     reference_.reset();
     return key_frames;
 }

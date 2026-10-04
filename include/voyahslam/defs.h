@@ -40,8 +40,6 @@ typedef Eigen::Matrix<precision_t, 3, 3> TMatrix33F;
 typedef Eigen::Matrix<precision_t, 3, 4> TMatrix34F;
 typedef Eigen::Matrix<precision_t, 4, 4> TMatrix44F;
 
-typedef Eigen::Matrix<precision_t, 3, 4> TPose;
-
 typedef Eigen::Matrix<precision_t, Eigen::Dynamic, Eigen::Dynamic> TMatrixXF;
 
 typedef Eigen::Matrix<precision_t, 1, 1> TScalarF;

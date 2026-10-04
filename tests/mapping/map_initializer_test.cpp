@@ -18,7 +18,7 @@ TEST(MapInitializerTest, StereoInitializesImmediately) {
     auto result = initializer.TryInitialize(test::MakeBinocular(200, 0.0));
     ASSERT_TRUE(result.has_value());
     ASSERT_EQ(result->size(), 1u);
-    EXPECT_TRUE((*result)[0].pose.isApprox(geometry::TPose::Identity()));
+    EXPECT_TRUE((*result)[0].T_cw.ToMatrix34().isApprox(geometry::RigidTransformation::Identity().ToMatrix34()));
     EXPECT_TRUE(std::holds_alternative<Binocular>((*result)[0].measurement));
 }
 
@@ -31,8 +31,8 @@ TEST(MapInitializerTest, MonoWaitsForInterval) {
     ASSERT_EQ(result->size(), 2u);
     EXPECT_DOUBLE_EQ(Timestamp((*result)[0].measurement), 0.0);
     EXPECT_DOUBLE_EQ(Timestamp((*result)[1].measurement), 1.0);
-    EXPECT_TRUE((*result)[0].pose.isApprox(geometry::TPose::Identity()));
-    EXPECT_TRUE((*result)[1].pose.isApprox(geometry::TPose::Identity()));
+    EXPECT_TRUE((*result)[0].T_cw.ToMatrix34().isApprox(geometry::RigidTransformation::Identity().ToMatrix34()));
+    EXPECT_TRUE((*result)[1].T_cw.ToMatrix34().isApprox(geometry::RigidTransformation::Identity().ToMatrix34()));
 }
 
 TEST(MapInitializerTest, FewFeaturesReplacesReference) {

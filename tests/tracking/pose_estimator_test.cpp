@@ -8,19 +8,17 @@ namespace {
 using Extractor = test::TestExtractor;
 using Measurement = features::TMeasurement<Extractor>;
 
-geometry::TPose NonIdentityPose() {
-    geometry::TPose pose = geometry::TPose::Identity();
-    pose(0, 3) = 1.5F;
-    pose(1, 3) = -2.0F;
-    return pose;
+geometry::RigidTransformation NonIdentityPose() {
+    geometry::TVector3DF translation(1.5F, -2.0F, 0.0F);
+    return geometry::RigidTransformation(geometry::TMatrix33F::Identity(), translation);
 }
 
 TEST(PoseEstimatorTest, SucceedsWithEnoughFeatures) {
     PoseEstimator<Extractor> estimator;
-    geometry::TPose last = NonIdentityPose();
+    geometry::RigidTransformation last = NonIdentityPose();
     auto result = estimator.Estimate(Measurement(test::MakeMonocular(50, 0.0)), last);
     EXPECT_TRUE(result.success);
-    EXPECT_TRUE(result.pose.isApprox(last));
+    EXPECT_TRUE(result.pose.ToMatrix34().isApprox(last.ToMatrix34()));
 }
 
 TEST(PoseEstimatorTest, FailsWithTooFewFeatures) {

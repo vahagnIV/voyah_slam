@@ -72,7 +72,7 @@ void Mapper<TFeatureExtractor>::OnInitializationMeasurement(
     }
 
     for (auto& keyframe : *initial) {
-        keyframes_.emplace_back(next_frame_id_, keyframe.pose, std::move(keyframe.measurement));
+        keyframes_.emplace_back(next_frame_id_, keyframe.T_cw, std::move(keyframe.measurement));
         ++next_frame_id_.value;
     }
     num_keyframes_.store(keyframes_.size(), std::memory_order_release);
