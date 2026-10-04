@@ -99,8 +99,8 @@ TEST(EurocDatasetReaderTest, ReadsKalibrStereoCalibration) {
 
     // Right camera sits 0.1 m along +x of the left one.
     const features::StereoRig& rig = reader.stereo_rig();
-    EXPECT_TRUE(rig.R_rl.isIdentity());
-    EXPECT_TRUE(rig.t_rl.isApprox(geometry::TVector3DF(0.1, 0.0, 0.0)));
+    EXPECT_TRUE(rig.T_rl.rotation().isIdentity());
+    EXPECT_TRUE(rig.T_rl.translation().isApprox(geometry::TVector3DF(-0.1, 0.0, 0.0)));
     EXPECT_DOUBLE_EQ(rig.baseline, 0.1);
     EXPECT_EQ(rig.distortion_left, reader.camera(0).distortion);
     EXPECT_EQ(rig.distortion_right, reader.camera(1).distortion);

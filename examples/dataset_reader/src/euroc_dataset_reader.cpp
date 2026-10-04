@@ -174,13 +174,13 @@ void EurocDatasetReader::LoadCalibration(const fs::path& root) {
 void EurocDatasetReader::BuildStereoRig() {
     const CameraCalibration& left = cameras_[0];
     const CameraCalibration& right = cameras_[1];
-    // T_left_right = T_left_imu * T_imu_right: maps right-camera points into the left camera.
-    geometry::TMatrix44F T_left_right = left.T_cam_imu * right.T_cam_imu.inverse();
+    // T_right_left = T_right_imu * T_imu_left: maps left-camera points into the right camera.
+    geometry::TMatrix44F T_right_left = right.T_cam_imu * left.T_cam_imu.inverse();
     stereo_rig_.K_left = left.K;
     stereo_rig_.K_right = right.K;
-    stereo_rig_.R_rl = T_left_right.topLeftCorner<3, 3>();
-    stereo_rig_.t_rl = T_left_right.topRightCorner<3, 1>();
-    stereo_rig_.baseline = stereo_rig_.t_rl.norm();
+    stereo_rig_.T_rl = geometry::RigidTransformation(geometry::TMatrix33F(T_right_left.topLeftCorner<3, 3>()),
+                                                     geometry::TVector3DF(T_right_left.topRightCorner<3, 1>()));
+    stereo_rig_.baseline = stereo_rig_.T_rl.translation().norm();
     stereo_rig_.distortion_left = left.distortion;
     stereo_rig_.distortion_right = right.distortion;
 }
