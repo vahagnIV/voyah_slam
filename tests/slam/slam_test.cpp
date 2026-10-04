@@ -37,14 +37,6 @@ TEST(SlamTest, ExternalObserversCanBeAddedToEveryComponent) {
     EXPECT_EQ(slam.loop_closer().async_observer_count(), 2u);
 }
 
-TEST(SlamTest, ForwardsTrackerOptions) {
-    tracking::TrackerOptions tracker_options;
-    tracker_options.stereo_matcher.nn_ratio = 0.5;
-    OrbSlam slam({}, tracker_options);
-    slam.Start();
-    slam.Stop();
-}
-
 TEST(SlamTest, StartStopAndDestroy) {
     OrbSlam slam;
     slam.Start();
@@ -98,8 +90,9 @@ public:
     // Polls until `condition` holds or 30 s pass; returns the final result.
     // Generous: a two-view reconstruction takes ~0.5 s in a Debug build.
     template <typename TCondition>
-    bool WaitFor(TCondition condition) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    bool WaitFor(TCondition condition,
+                 std::chrono::milliseconds timeout = std::chrono::seconds(30)) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (true) {
             Poll();
             if (condition()) {
@@ -126,6 +119,26 @@ private:
     events::Listener mapper_listener_ = mapper_events_.GetListener();
     events::Listener tracker_listener_ = tracker_events_.GetListener();
 };
+
+TEST(SlamTest, ForwardsTrackerOptions) {
+    // nn_ratio 0 fails every ratio test: no depths, so no stereo map. The same
+    // frame under default options does create a map.
+    const auto map_created_for = [](const tracking::TrackerOptions& tracker_options,
+                                    std::chrono::milliseconds wait) {
+        ProtocolRecorder recorder;
+        OrbSlam slam({}, tracker_options);
+        recorder.Attach(slam);
+        slam.Start();
+        slam.tracker().Track(test::MakeSyntheticStereoFrame().measurement);
+        const bool created = recorder.WaitFor([&] { return !recorder.map_created.empty(); }, wait);
+        slam.Stop();
+        return created;
+    };
+    tracking::TrackerOptions no_matches;
+    no_matches.stereo_matcher.nn_ratio = 0.0;
+    EXPECT_FALSE(map_created_for(no_matches, std::chrono::milliseconds(300)));
+    EXPECT_TRUE(map_created_for({}, std::chrono::seconds(30)));
+}
 
 TEST(SlamTest, EndToEndInitializeTrackLoseReinitialize) {
     // Map 1 from frames 0-14, tracking on frames 15-16, a featureless frame

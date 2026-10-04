@@ -114,6 +114,8 @@ TEST_F(TrackerTest, StereoMatchedBeforeForwarding) {
     EXPECT_TRUE(binocular.stereo_matched());
     ASSERT_EQ(binocular.depths().size(), expected.depths.size());
     EXPECT_TRUE(binocular.depths().isApprox(expected.depths));
+    ASSERT_EQ(binocular.right_indices().size(), expected.right_indices.size());
+    EXPECT_TRUE(binocular.right_indices() == expected.right_indices);
     EXPECT_GT((binocular.depths().array() > 0).count(), 0);
 }
 

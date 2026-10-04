@@ -670,12 +670,14 @@ Verified on synthetic stereo frames and a TUM-VI smoke run (see `docs/TODO.md`).
    stores the result with `SetStereoMatches` before the measurement is tracked
    or forwarded as `InitializationMeasurement`. Mono measurements are
    untouched.
-2. `MatchStereo` follows ORB-SLAM3 `ComputeStereoFishEyeMatches`: brute-force
-   descriptor matching (best < 0.7 x second best), one-to-one (the closer claim
-   wins), DLT triangulation of the undistorted normalized points, then checks:
-   positive depth in both cameras, per-image reprojection chi-square
-   (sigma scaled by pyramid level), and a parallax-cosine limit
-   (`max_parallax_cos` 0.99998). A rectified row search does not apply to
+2. `MatchStereo` is modelled on ORB-SLAM3 `ComputeStereoFishEyeMatches`:
+   brute-force descriptor matching (best < 0.7 x second best), one-to-one (the
+   closer claim wins), DLT triangulation of the undistorted normalized points,
+   then checks: positive depth in both cameras, per-image reprojection
+   chi-square (sigma scaled by pyramid level), and a parallax-cosine limit
+   (`max_parallax_cos` 0.99998). The reprojection test is done in undistorted
+   normalized coordinates (a deliberate simplification; ORB-SLAM3 tests in
+   distorted pixel space, see `docs/TODO.md`). A rectified row search does not apply to
    fisheye images; epipolar-guided search is a deferred optimization.
 3. `StereoMatches` (`right_indices`, `depths`, `num_matches`) lives in its own
    header (`features/stereo_matches.h`) so that `BinocularMeasurement` and the
@@ -702,7 +704,10 @@ stereo one; stereo keyframes store `depth` and `right_feature_index`
 both allows mixed mono/stereo sessions later (TODO).
 
 **Depth limit.** `max_parallax_cos = 0.99998` rejects rays closer than about
-0.64 degrees; with the 0.11 m baseline this caps stereo depth at about 17 m.
+0.36 degrees; with the 0.11 m baseline this caps stereo depth at about 17 m.
+ORB-SLAM3's `KannalaBrandt8::TriangulateMatches` is stricter: it rejects
+`cosParallaxRays > 0.9998` (about 1.15 degrees, a cap of about 5.5 m at
+0.11 m), so our default is more permissive; tuning comes last (TODO).
 
 **Smoke run** (TUM-VI `dataset-corridor1_1024_16`, Release, ORB):
 initialized on the first frame with 355 points; median point depth 1.96 m

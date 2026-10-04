@@ -115,7 +115,7 @@ TEST(StereoMatcherTest, RatioTestRejectsAmbiguous) {
 
 TEST(StereoMatcherTest, OneToOneKeepsCloserClaim) {
     // Left 0 and 1 both observe kPoint; right 0 is their best match (distances 9
-    // and 5), right 1 is far in descriptor space (distances 91 and 75).
+    // and 5), right 1 is far in descriptor space (distances 89 and 75).
     const geometry::TPoint2DF left = ProjectLeft(kPoint);
     const geometry::TPoint3DF other(-0.5, 0.4, 3.0);
     const Measurement m = Make({{.pixel = left, .bits = 11}, {.pixel = left, .bits = 25}},
@@ -143,6 +143,47 @@ TEST(StereoMatcherTest, RejectsPointBehindRightCamera) {
     const StereoMatches matches = MatchStereo<TestExtractor>(m, {});
     EXPECT_EQ(matches.num_matches, 0U);
     EXPECT_EQ(matches.right_indices[0], -1);
+}
+
+TEST(StereoMatcherTest, ToeInRigExactDepth) {
+    // Right camera yawed ~5 degrees about y: exact projections of a few points
+    // must triangulate to the true left-camera depth. Catches a wrong right
+    // centre (-t instead of -R^T t) or wrong rotation use.
+    StereoRig rig = SyntheticStereoRig();
+    const geometry::TMatrix33F R =
+        Eigen::AngleAxis<double>(5.0 * std::numbers::pi / 180.0, geometry::TVector3DF::UnitY())
+            .toRotationMatrix();
+    rig.T_rl = geometry::RigidTransformation(R, geometry::TVector3DF(-rig.baseline, 0.0, 0.0));
+    const std::vector<geometry::TPoint3DF> points = {
+        {0.3, -0.2, 4.0}, {-0.5, 0.4, 3.0}, {1.0, 0.5, 6.0}, {0.0, 0.0, 2.5}};
+    std::vector<Spec> left;
+    std::vector<Spec> right;
+    for (size_t i = 0; i < points.size(); ++i) {
+        ASSERT_GT(rig.T_rl.Transform(points[i]).z(), 0.0);
+        left.push_back({.pixel = ProjectLeft(points[i], rig), .seed = static_cast<int>(i)});
+        right.push_back({.pixel = ProjectRight(points[i], rig), .seed = static_cast<int>(i)});
+    }
+    const StereoMatches matches = MatchStereo<TestExtractor>(Make(left, right, rig), {});
+    ASSERT_EQ(matches.num_matches, points.size());
+    for (size_t i = 0; i < points.size(); ++i) {
+        EXPECT_EQ(matches.right_indices[i], static_cast<int>(i));
+        EXPECT_NEAR(matches.depths[i], points[i].z(), 1e-6);
+    }
+
+    // The right centre only enters the parallax test: put the threshold between
+    // the cosines from the true centre -R^T t and the wrong one, -t.
+    const geometry::TPoint3DF X = points[3];
+    auto parallax_cos = [&](const geometry::TVector3DF& centre) {
+        const geometry::TVector3DF ray_right = X - centre;
+        return X.dot(ray_right) / (X.norm() * ray_right.norm());
+    };
+    const double true_cos = parallax_cos(rig.T_rl.Inverse().translation());
+    const double wrong_cos = parallax_cos(-rig.T_rl.translation());
+    ASSERT_GT(std::abs(true_cos - wrong_cos), 1e-9);
+    const Measurement single = Make({left[3]}, {right[3]}, rig);
+    StereoMatcherOptions options;
+    options.max_parallax_cos = 0.5 * (true_cos + wrong_cos);
+    EXPECT_EQ(MatchStereo<TestExtractor>(single, options).num_matches, true_cos < wrong_cos ? 1U : 0U);
 }
 
 TEST(StereoMatcherTest, RejectsNegativeDisparity) {

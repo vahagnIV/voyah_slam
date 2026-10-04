@@ -74,7 +74,11 @@ root window).
 - [ ] Stereo-aware tracking: use depths and right observations in the
       `PoseEstimator`.
 - [ ] Tuning on TUM-VI 512, including the ~17 m stereo depth cap implied by
-      `max_parallax_cos` 0.99998 at the 0.11 m baseline.
+      `max_parallax_cos` 0.99998 at the 0.11 m baseline (ORB-SLAM3's KB
+      `TriangulateMatches` uses 0.9998, about 1.15 degrees / 5.5 m cap).
+- [ ] Stereo matcher: test reprojection in distorted pixel space (via
+      `Distort`) for fisheye, as ORB-SLAM3 `KannalaBrandt8::TriangulateMatches`
+      does; the normalized-plane chi-square rejects peripheral matches.
 - [ ] Tests to add (deferred review findings): stereo observation depth and
       right index are not read back by any test (add when a consumer exists);
       the initializer path for an unmatched measurement; Tracking-state stereo
