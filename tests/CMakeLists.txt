@@ -18,6 +18,7 @@ add_executable(voyahslam_tests
     features/image_features_test.cpp
     features/feature_extractor_levels_test.cpp
     features/keypoint_matches_test.cpp
+    features/feature_grid_test.cpp
     features/distortion_models/distortion_model_test.cpp
     features/distortion_models/kannala_brandt_distortion_model_test.cpp
     memory/object_pool_test.cpp

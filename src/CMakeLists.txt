@@ -8,6 +8,7 @@ add_library(voyahslam
     geometry/two_view_reconstruction.cpp
     io/read_image.cpp
     logging/logger.cpp
+    features/feature_grid.cpp
     features/orb_feature_extractor.cpp
     features/sift_feature_extractor.cpp
     features/distortion_models/dummy_distortion_model.cpp
