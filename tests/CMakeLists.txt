@@ -35,6 +35,7 @@ add_executable(voyahslam_tests
     slam/slam_test.cpp
     tracking/pose_estimator_test.cpp
     tracking/tracker_test.cpp
+    support/synthetic_sequence_test.cpp
     mapping/map_initializer_test.cpp
     mapping/mapper_test.cpp
     loop_closing/loop_closer_test.cpp
