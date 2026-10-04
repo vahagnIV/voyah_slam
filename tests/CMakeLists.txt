@@ -27,6 +27,7 @@ add_executable(voyahslam_tests
     map/id_types_test.cpp
     features/stereo_rig_test.cpp
     features/binocular_measurement_test.cpp
+    features/stereo_matcher_test.cpp
     map/map_point_storage_test.cpp
     map/frame_test.cpp
     map/observation_storage_test.cpp
