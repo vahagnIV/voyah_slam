@@ -512,8 +512,8 @@ Spec: `docs/superpowers/specs/2026-10-03-map-viewer-design.md`.
 
 Spec: `docs/superpowers/specs/2026-10-04-two-view-geometry-design.md` (part A of
 the real monocular initializer; matching and `MapInitializer` integration are
-spec B+C, now done: see "Monocular Initialization"). Pure math on **normalized, undistorted points** (z = 1), so the
-calibrated model is the essential matrix E, not F + K. Sigma is in normalized
+spec B+C, now done: see "Monocular Initialization"). Pure math on
+**normalized, undistorted points** (z = 1), so the calibrated model is the essential matrix E, not F + K. Sigma is in normalized
 units (σ_px / f). Verified on synthetic scenes only.
 
 | Component | Header | Summary |
@@ -726,7 +726,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-04 | Orientation histogram default: 12 bins of 30 degrees, not 30 bins of 12 degrees. | ORB-SLAM3's `HISTO_LENGTH = 30` is applied as factor `1/30` per degree, i.e. 30-degree bins; that is its effective resolution. |
 | 2026-10-04 | A failed reconstruction keeps the reference and the matcher's updated `last_matched` positions. | ORB-SLAM3 `mvbPrevMatched` behaviour: the next frame is matched against the tracked positions. |
 | 2026-10-04 | Zero triangulated points and a non-finite median depth count as initialization failure. | The Mapper uses the result's keyframes/points directly; an empty or unscalable map must not be created. |
-| 2026-10-04 | SIFT angles are converted to radians and SIFT keeps the strongest N keypoints. | Angles were degrees (the matcher's orientation test expects radians); over-detection left uninitialized columns. |
+| 2026-10-04 | SIFT radians / strongest-N fix: see the `ImageFeatures` level row above. | Same change; recorded there. |
 | 2026-10-04 | Monocular initialization: ORB-SLAM3 matcher + two-view reconstruction, scaled to median depth 1, published as `MapPointsAdded` -> `KeyFrameCreated` (with observations) -> `MapCreated`; per-map point ids; keyframes store `T_cw`. | Replicas need points before the keyframes that observe them; per-map ids keep storage compact and `(map_id, id)` unique. |
 
 ## 9. Open Questions

@@ -60,11 +60,11 @@ as soon as they come up.
       lock-in item under Geometry).
 - [ ] `OrbFeatureExtractor::Distance` returns `uint8_t`, so a 256-bit
       difference wraps to 0 — widen the return type.
-- [ ] Smoke run (2026-10-04, `dataset-corridor1_1024_16`, ORB, Release,
-      `--rate=0 --max-frames=200`): mono initialized at about frame 121
-      (`Initializing -> Mapping (map 1, 2 keyframes, 73 points)`, 73 points is
-      low; tuning deferred); binocular (stub) initialized immediately with
-      1 keyframe, 0 points.
+Smoke run note (2026-10-04, `dataset-corridor1_1024_16`, ORB, Release,
+`--rate=0 --max-frames=200`): mono initialized at about frame 121
+(`Initializing -> Mapping (map 1, 2 keyframes, 73 points)`; 73 points is low,
+tuning deferred); binocular (stub) initialized immediately with 1 keyframe,
+0 points.
 
 ## Map & events
 
@@ -222,4 +222,4 @@ Deferred minor findings from the per-task reviews.
 - [ ] Second dev machine: build OpenCV 5.x from source into `/usr/local` with
       `WITH_GTK=ON` (Conan no longer provides OpenCV).
 - [ ] Recurring: syntax-check all sources with clang-18 + libc++ (clean on
-      2026-10-04, 65 sources); later add an Android NDK arm64 cross-build.
+      2026-10-04, 81 sources); later add an Android NDK arm64 cross-build.
