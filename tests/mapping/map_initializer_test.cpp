@@ -194,22 +194,68 @@ TEST_F(MapInitializerTest, ResetDropsReference) {
     EXPECT_FALSE(initializer_.TryInitialize(sequence_.frames[success->index].measurement).has_value());
 }
 
-TEST_F(MapInitializerTest, StereoInitializesImmediately) {
-    auto result = initializer_.TryInitialize(test::MakeBinocular(200, 0.0));
+TEST_F(MapInitializerTest, StereoInitializesFromOneFrame) {
+    // Noise-free, so every point is within a few % of the truth (with 0.5 px
+    // noise the far points' depth error reaches ~10 %).
+    test::SyntheticStereoOptions options;
+    options.pixel_noise = 0.0;
+    const test::SyntheticStereoFrame frame = test::MakeMatchedSyntheticStereoFrame(options);
+    const Binocular& measurement = frame.measurement;
+    auto result = initializer_.TryInitialize(measurement);
     ASSERT_TRUE(result.has_value());
     ASSERT_EQ(result->keyframes.size(), 1u);
     EXPECT_TRUE(IsIdentity(result->keyframes[0].T_cw));
     EXPECT_TRUE(std::holds_alternative<Binocular>(result->keyframes[0].measurement));
-    EXPECT_TRUE(result->map_points.empty());
+
+    const auto num_valid = static_cast<size_t>((measurement.depths().array() > 0.0).count());
+    ASSERT_GE(num_valid, 100u);
+    EXPECT_EQ(result->map_points.size(), num_valid);
+    for (const InitialMapPoint& point : result->map_points) {
+        const Eigen::Index i = point.feature_in_first;
+        ASSERT_GE(i, 0);
+        ASSERT_LT(i, measurement.left().points().cols());
+        EXPECT_EQ(point.feature_in_second, -1);
+        ASSERT_GT(measurement.depth(static_cast<int>(i)), 0.0);
+        const geometry::TPoint3DF expected =
+            measurement.depth(static_cast<int>(i)) * measurement.left().normalized_point(static_cast<int>(i));
+        EXPECT_LT((point.position - expected).norm(), 1e-12) << "feature " << i;
+        const geometry::TPoint3DF truth = frame.points_left.col(i);
+        ASSERT_GT(frame.depth_of_left[i], 0.0) << "feature " << i << " is an extra";
+        EXPECT_LT((point.position - truth).norm(), 0.05 * truth.norm()) << "feature " << i;
+    }
+}
+
+TEST_F(MapInitializerTest, StereoTooFewFeatures) {
+    // Exactly stereo_min_features (500) left features, nearly all with a depth.
+    test::SyntheticStereoOptions options;
+    options.num_points = 500;
+    options.num_extra = 0;
+    const test::SyntheticStereoFrame frame = test::MakeMatchedSyntheticStereoFrame(options);
+    ASSERT_EQ(frame.measurement.left().points().cols(), 500);
+    ASSERT_GE((frame.measurement.depths().array() > 0.0).count(), 100);
+    EXPECT_FALSE(initializer_.TryInitialize(frame.measurement).has_value());
+}
+
+TEST_F(MapInitializerTest, StereoTooFewPoints) {
+    // Enough left features, but at most 50 can have a depth.
+    test::SyntheticStereoOptions options;
+    options.num_points = 50;
+    options.num_extra = 600;
+    const test::SyntheticStereoFrame frame = test::MakeMatchedSyntheticStereoFrame(options);
+    ASSERT_GT(frame.measurement.left().points().cols(), 500);
+    ASSERT_LT((frame.measurement.depths().array() > 0.0).count(), 100);
+    EXPECT_FALSE(initializer_.TryInitialize(frame.measurement).has_value());
 }
 
 TEST_F(MapInitializerTest, BinocularDropsMonoReference) {
     EXPECT_FALSE(initializer_.TryInitialize(sequence_.frames[0].measurement).has_value());
-    auto result = initializer_.TryInitialize(test::MakeBinocular(200, 0.1));
+    test::SyntheticStereoOptions options;
+    options.timestamp = 0.1;
+    auto result = initializer_.TryInitialize(test::MakeMatchedSyntheticStereoFrame(options).measurement);
     ASSERT_TRUE(result.has_value());
     ASSERT_EQ(result->keyframes.size(), 1u);
     EXPECT_TRUE(IsIdentity(result->keyframes[0].T_cw));
-    EXPECT_TRUE(result->map_points.empty());
+    EXPECT_GE(result->map_points.size(), 100u);
     EXPECT_FALSE(initializer_.TryInitialize(sequence_.frames[3].measurement).has_value());
 }
 

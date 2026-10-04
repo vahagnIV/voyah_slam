@@ -15,6 +15,7 @@
 
 #include <voyahslam/defs.h>
 #include <voyahslam/features/measurement.h>
+#include <voyahslam/features/stereo_matcher.h>
 #include <voyahslam/geometry/rigid_transformation.h>
 
 #include "support/test_measurements.h"
@@ -328,6 +329,16 @@ inline SyntheticStereoFrame MakeSyntheticStereoFrame(const SyntheticStereoOption
     assert(static_cast<size_t>(frame.measurement.left().points().cols()) ==
            frame.right_of_left.size());
     assert(static_cast<size_t>(frame.measurement.right().points().cols()) == right.size());
+    return frame;
+}
+
+/// MakeSyntheticStereoFrame with the Tracker's stereo matching applied, for
+/// tests that feed the MapInitializer or the Mapper directly.
+inline SyntheticStereoFrame MakeMatchedSyntheticStereoFrame(
+    const SyntheticStereoOptions& options = {}) {
+    SyntheticStereoFrame frame = MakeSyntheticStereoFrame(options);
+    frame.measurement.SetStereoMatches(
+        features::MatchStereo<TestExtractor>(frame.measurement, features::StereoMatcherOptions{}));
     return frame;
 }
 

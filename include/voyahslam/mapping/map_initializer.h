@@ -16,6 +16,8 @@ namespace voyahslam::mapping {
 struct MapInitializerOptions {
     size_t min_features = 100;  // a monocular frame needs more features than this
     size_t min_matches = 100;   // matches needed to attempt a two-view reconstruction
+    size_t stereo_min_features = 500;  // a binocular frame needs more left features than this
+    size_t stereo_min_points = 100;    // left features with a stereo depth needed
     double sigma_px = 1.0;      // keypoint noise std-dev, px
     features::InitializationMatcherOptions matcher;
     geometry::TwoViewOptions reconstruction;
@@ -28,20 +30,25 @@ struct InitialKeyFrame {
 };
 
 struct InitialMapPoint {
-    geometry::TPoint3DF position;    // world (= camera 1) frame, scaled
-    Eigen::Index feature_in_first;   // feature index in keyframes[0]'s measurement
-    Eigen::Index feature_in_second;  // feature index in keyframes[1]'s measurement
+    geometry::TPoint3DF position;    // world (= keyframes[0]'s camera) frame
+    Eigen::Index feature_in_first;   // feature index in keyframes[0]'s (left) image
+    // Feature index in keyframes[1]'s measurement; -1 = no second keyframe
+    // (stereo initialization).
+    Eigen::Index feature_in_second;
 };
 
 template <typename TFeatureExtractor>
 struct InitializationResult {
     std::vector<InitialKeyFrame<TFeatureExtractor>> keyframes;
-    std::vector<InitialMapPoint> map_points;  // empty for the stereo stub
+    std::vector<InitialMapPoint> map_points;
 };
 
-// Builds the first keyframes (and, for monocular input, map points) of a map.
-//   - binocular: initializes at once with one identity-pose keyframe and no
-//     map points (placeholder); also drops any monocular reference;
+// Builds the first keyframes and map points of a map.
+//   - binocular (ORB-SLAM3 StereoInitialization): drops any monocular
+//     reference. A stereo-matched frame with more than stereo_min_features
+//     left features and at least stereo_min_points stereo depths becomes the
+//     only keyframe (T_cw = identity); each depth gives a map point at
+//     depth * (left normalized ray), metric scale, feature_in_second = -1;
 //   - monocular (ORB-SLAM3 MonocularInitialization): the first frame with more
 //     than min_features features becomes the reference; each later frame is
 //     matched against it (MatchForInitialization) and, with at least
@@ -64,6 +71,9 @@ public:
     void Reset();
 
 private:
+    using TBinocularMeasurement = features::TBinocularMeasurement<TFeatureExtractor>;
+
+    std::optional<TResult> TryInitializeBinocular(TBinocularMeasurement measurement);
     std::optional<TResult> TryInitializeMonocular(TMonocularMeasurement measurement);
     void SetReference(TMonocularMeasurement measurement);
 
