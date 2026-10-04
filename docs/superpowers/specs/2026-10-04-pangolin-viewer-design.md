@@ -68,8 +68,8 @@ State:
 - Map points: `std::vector<geometry::TPoint3DF> point_positions` and
   `std::vector<bool> point_alive`, both indexed by `MapPointId::value`. Ids
   restart at 0 per map, so the storage is dense.
-- Keyframes: `std::map<uint32_t, geometry::RigidTransformation>` keyed by
-  `FrameId::value` (T_cw).
+- Keyframes: `std::map<map::FrameId, geometry::RigidTransformation>` (T_cw);
+  `FrameId` is ordered (`operator<=>`).
 - Current camera: `std::optional<geometry::RigidTransformation> current_pose`
   (T_cw), plus `TrackingStatus status` (`None`, `Tracking`, `Lost`).
 - Trajectory: `std::vector<geometry::TPoint3DF>` of camera centres for the
