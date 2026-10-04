@@ -86,5 +86,26 @@ TEST(HomographyEstimatorTest, HomographyScoreFiniteForPointMappedToInfinity) {
     EXPECT_FALSE(s.inliers(0));
 }
 
+TEST(HomographyEstimatorTest, ThreeCollinearSampleGivesNoModel) {
+    geometry::TwoViewCorrespondences c;
+    c.sigma = 0.01;
+    c.x1.resize(2, 4);
+    c.x1 << 0.0, 0.1, 0.2, 0.3, 0.0, 0.1, 0.2, -0.3;
+    c.x2.resize(2, 4);
+    c.x2 << 0.05, -0.12, 0.26, 0.31, 0.02, 0.2, -0.1, 0.3;
+    const std::array<Eigen::Index, 4> sample{0, 1, 2, 3};
+    EXPECT_TRUE(HomographyEstimator().Estimate(c, sample).empty());
+}
+
+TEST(HomographyEstimatorTest, SingularModelScoresZero) {
+    auto c = Identity2(0.0);
+    c.x2.colwise() = geometry::TPoint2DF(1.0, 0.5);  // all points map onto the rank-1 image v
+    const geometry::TVector3DF v(1.0, 0.5, 1.0), l(0.3, -0.2, 1.0);
+    const geometry::TMatrix33F H = v * l.transpose() + 1e-15 * geometry::TMatrix33F::Identity();
+    const auto s = HomographyEstimator().Score(H, c);
+    EXPECT_EQ(s.score, 0.0);
+    EXPECT_EQ(s.num_inliers, 0u);
+}
+
 } // namespace
 } // namespace voyahslam::estimators

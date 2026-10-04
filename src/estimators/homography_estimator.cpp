@@ -10,6 +10,7 @@ namespace {
 
 constexpr double kMinW = 1e-12;
 constexpr double kSingularRatio = 1e-10;
+constexpr double kMinConditionRatio = 1e-8;
 
 // Returns false if the points are (nearly) identical so no normalization exists.
 bool Normalize(const geometry::TPoints2DF& a_pts, geometry::TMatrix33F& out_T) {
@@ -27,6 +28,14 @@ bool TransferChi2(const geometry::TMatrix33F& a_M, const geometry::TPoint2DF& a_
     if (!(std::abs(p.z()) >= kMinW) || !p.allFinite()) return false;
     out_chi2 = (a_to - p.head<2>() / p.z()).squaredNorm() / a_sigma2;
     return std::isfinite(out_chi2);
+}
+
+// Scale-invariant conditioning: smallest/largest singular value of a 3x3 matrix.
+bool IsWellConditioned(const geometry::TMatrix33F& a_M) {
+    if (!a_M.allFinite()) return false;
+    const Eigen::JacobiSVD<geometry::TMatrix33F> svd(a_M);
+    const auto& s = svd.singularValues();
+    return s(0) > 0.0 && s(2) >= kMinConditionRatio * s(0);
 }
 
 } // namespace
@@ -64,6 +73,9 @@ std::vector<HomographyEstimator::TModel> HomographyEstimator::Estimate(
     geometry::TMatrix33F H_hat;
     H_hat << h(0), h(1), h(2), h(3), h(4), h(5), h(6), h(7), h(8);
 
+    // Three collinear points (plus one off the line) give a rank-1 solution with a rank-8 system.
+    if (!IsWellConditioned(H_hat)) return {};
+
     geometry::TMatrix33F H = T2.inverse() * H_hat * T1;
     if (std::abs(H(2, 2)) > 1e-12) H /= H(2, 2);
     if (!H.allFinite()) return {};
@@ -76,7 +88,7 @@ ModelScore HomographyEstimator::Score(const TModel& a_model,
     ModelScore result;
     result.inliers = Eigen::Array<bool, Eigen::Dynamic, 1>::Constant(n, false);
 
-    if (!a_model.allFinite() || std::abs(a_model.determinant()) < 1e-300) return result;
+    if (!IsWellConditioned(a_model)) return result;
     const geometry::TMatrix33F H_inv = a_model.inverse();
     if (!H_inv.allFinite()) return result;
 
