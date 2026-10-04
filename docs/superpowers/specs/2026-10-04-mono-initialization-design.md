@@ -149,8 +149,7 @@ from `TFeatureExtractor::Distance`:
    point.
 
 Points are the measurements' `points()` (undistorted pixel coordinates).
-Header-only template plus explicit `INSTANTIATE`-style instantiation is not
-needed (function template, header-only).
+The matcher is a header-only function template (no explicit instantiation).
 
 ## 3. `MapInitializer` and the result — `mapping/map_initializer.h`
 
