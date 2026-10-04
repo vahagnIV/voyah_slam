@@ -40,8 +40,8 @@ TEST(FrameTest, StereoFrameConstruction) {
     features::StereoRig rig{
         .K_left = geometry::TMatrix33F::Identity(),
         .K_right = geometry::TMatrix33F::Identity(),
-        .R_rl = geometry::TMatrix33F::Identity(),
-        .t_rl = geometry::TVector3DF(0.12, 0, 0),
+        .T_rl = geometry::RigidTransformation(geometry::TMatrix33F::Identity(),
+                                                      geometry::TVector3DF(-0.12, 0.0, 0.0)),
         .baseline = 0.12,
     };
 

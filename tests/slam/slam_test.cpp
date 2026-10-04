@@ -90,8 +90,9 @@ public:
     // Polls until `condition` holds or 30 s pass; returns the final result.
     // Generous: a two-view reconstruction takes ~0.5 s in a Debug build.
     template <typename TCondition>
-    bool WaitFor(TCondition condition) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    bool WaitFor(TCondition condition,
+                 std::chrono::milliseconds timeout = std::chrono::seconds(30)) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
         while (true) {
             Poll();
             if (condition()) {
@@ -118,6 +119,26 @@ private:
     events::Listener mapper_listener_ = mapper_events_.GetListener();
     events::Listener tracker_listener_ = tracker_events_.GetListener();
 };
+
+TEST(SlamTest, ForwardsTrackerOptions) {
+    // nn_ratio 0 fails every ratio test: no depths, so no stereo map. The same
+    // frame under default options does create a map.
+    const auto map_created_for = [](const tracking::TrackerOptions& tracker_options,
+                                    std::chrono::milliseconds wait) {
+        ProtocolRecorder recorder;
+        OrbSlam slam({}, tracker_options);
+        recorder.Attach(slam);
+        slam.Start();
+        slam.tracker().Track(test::MakeSyntheticStereoFrame().measurement);
+        const bool created = recorder.WaitFor([&] { return !recorder.map_created.empty(); }, wait);
+        slam.Stop();
+        return created;
+    };
+    tracking::TrackerOptions no_matches;
+    no_matches.stereo_matcher.nn_ratio = 0.0;
+    EXPECT_FALSE(map_created_for(no_matches, std::chrono::milliseconds(300)));
+    EXPECT_TRUE(map_created_for({}, std::chrono::seconds(30)));
+}
 
 TEST(SlamTest, EndToEndInitializeTrackLoseReinitialize) {
     // Map 1 from frames 0-14, tracking on frames 15-16, a featureless frame
@@ -195,6 +216,78 @@ TEST(SlamTest, EndToEndInitializeTrackLoseReinitialize) {
     EXPECT_EQ(mapper.current_map_id(), map::MapId{2});
 
     tracker.Track(test::MakeMonocular(200, frame(sequence.frames.size() - 1).timestamp() + 0.05));
+    ASSERT_TRUE(recorder.WaitFor([&] { return recorder.position_updated.back() == 2u; }));
+}
+
+TEST(SlamTest, EndToEndStereoInitializeTrackLoseReinitialize) {
+    // Map 1 from one synthetic stereo frame (the Tracker stereo-matches it),
+    // tracking on a second one, a featureless frame loses tracking, map 2 from
+    // another synthetic frame. Timestamps increase throughout.
+    const auto stereo_frame = [](double timestamp, uint32_t seed) {
+        test::SyntheticStereoOptions options;
+        options.timestamp = timestamp;
+        options.seed = seed;
+        return test::MakeSyntheticStereoFrame(options).measurement;
+    };
+
+    // Lifetimes as in EndToEndInitializeTrackLoseReinitialize.
+    ProtocolRecorder recorder;
+    OrbSlam slam;
+    recorder.Attach(slam);
+    struct StopAndDrain {
+        OrbSlam& slam;
+        ProtocolRecorder& recorder;
+        ~StopAndDrain() {
+            slam.Stop();
+            recorder.Poll();
+        }
+    } stop_and_drain{slam, recorder};
+    auto& tracker = slam.tracker();
+    auto& mapper = slam.mapper();
+    slam.Start();
+
+    // Stereo initialization from a single frame.
+    tracker.Track(stereo_frame(0.0, 1));
+    ASSERT_TRUE(recorder.WaitFor([&] { return !recorder.map_created.empty(); }));
+    EXPECT_EQ(recorder.map_created, std::vector<uint32_t>{1});
+    EXPECT_EQ(recorder.map_points_added, std::vector<uint32_t>{1});
+    EXPECT_EQ(recorder.map_points_added_before_map_created, std::vector<bool>{true});
+    EXPECT_GE(mapper.num_map_points(), 100u);
+    ASSERT_TRUE(recorder.WaitFor([&] {
+        return tracker.state() == tracking::TrackerState::Tracking &&
+               tracker.current_map_id() == map::MapId{1};
+    }));
+    EXPECT_EQ(mapper.state(), mapping::MapperState::Mapping);
+    EXPECT_EQ(mapper.current_map_id(), map::MapId{1});
+
+    // Tracking on map 1.
+    tracker.Track(stereo_frame(0.1, 2));
+    ASSERT_TRUE(recorder.WaitFor([&] { return !recorder.position_updated.empty(); }));
+    for (uint32_t map : recorder.position_updated) {
+        EXPECT_EQ(map, 1u);
+    }
+
+    // Too few features: tracking is lost, the Mapper drops map 1.
+    tracker.Track(test::MakeBinocular(0, 0.2));
+    ASSERT_TRUE(recorder.WaitFor([&] { return !recorder.tracking_lost.empty(); }));
+    EXPECT_EQ(recorder.tracking_lost, std::vector<uint32_t>{1});
+    EXPECT_EQ(tracker.state(), tracking::TrackerState::Lost);
+
+    // Re-initialization from a new stereo frame builds map 2.
+    tracker.Track(stereo_frame(0.3, 3));
+    ASSERT_TRUE(recorder.WaitFor([&] { return recorder.map_created.size() >= 2; }));
+    EXPECT_EQ(recorder.map_created, (std::vector<uint32_t>{1, 2}));
+    EXPECT_EQ(recorder.map_points_added, (std::vector<uint32_t>{1, 2}));
+    EXPECT_EQ(recorder.map_points_added_before_map_created, (std::vector<bool>{true, true}));
+    EXPECT_GE(mapper.num_map_points(), 100u);
+    ASSERT_TRUE(recorder.WaitFor([&] {
+        return tracker.state() == tracking::TrackerState::Tracking &&
+               tracker.current_map_id() == map::MapId{2};
+    }));
+    EXPECT_EQ(mapper.state(), mapping::MapperState::Mapping);
+    EXPECT_EQ(mapper.current_map_id(), map::MapId{2});
+
+    tracker.Track(stereo_frame(0.4, 4));
     ASSERT_TRUE(recorder.WaitFor([&] { return recorder.position_updated.back() == 2u; }));
 }
 

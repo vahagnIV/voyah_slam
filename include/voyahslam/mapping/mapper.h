@@ -76,7 +76,8 @@ private:
     void OnTrackingLost(const events::TrackingLost& event);
     void SetState(MapperState state);
 
-    // Stores the initial map points and their observations in both keyframes.
+    // Stores the initial map points and their observations: in both keyframes
+    // (monocular) or in the one stereo keyframe, with depth and right index.
     void AddInitialMapPoints(const std::vector<InitialMapPoint>& map_points);
 
     void PublishMapPointsAdded();
@@ -91,9 +92,12 @@ private:
     map::FrameId next_frame_id_{0};  // never reset: frame ids are unique across maps
     std::vector<TKeyFrame> keyframes_;
     std::atomic<size_t> num_keyframes_{0};  // keyframes_.size(), readable from any thread
-    // The current map's points (ids restart at 0 per map) and observations.
+    // The current map's points (ids restart at 0 per map) and observations:
+    // monocular keyframes' in observations_, binocular keyframes' (left
+    // feature, depth, right feature) in stereo_observations_.
     map::MapPointStorage<TFeatureExtractor> map_points_;
     map::ObservationStorage<map::ObservationType::Monocular> observations_;
+    map::ObservationStorage<map::ObservationType::Stereo> stereo_observations_;
     std::atomic<size_t> num_map_points_{0};  // map_points_.size(), readable from any thread
     MapInitializer<TFeatureExtractor> initializer_;
 

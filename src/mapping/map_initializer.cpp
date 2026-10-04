@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <utility>
@@ -34,9 +35,34 @@ MapInitializer<TFeatureExtractor>::TryInitialize(TMeasurement measurement) {
         return TryInitializeMonocular(std::move(*monocular));
     }
 
-    // Binocular placeholder: one identity-pose keyframe, no map points.
+    return TryInitializeBinocular(std::get<TBinocularMeasurement>(std::move(measurement)));
+}
+
+template <typename TFeatureExtractor>
+std::optional<InitializationResult<TFeatureExtractor>>
+MapInitializer<TFeatureExtractor>::TryInitializeBinocular(TBinocularMeasurement measurement) {
     Reset();
+    const Eigen::Index num_features = measurement.left().points().cols();
+    if (static_cast<size_t>(num_features) <= options_.stereo_min_features) {
+        return std::nullopt;
+    }
+    // The Tracker stereo-matches before forwarding; unmatched means no depths.
+    assert(measurement.stereo_matched());
+    if (!measurement.stereo_matched()) {
+        return std::nullopt;
+    }
+
     TResult result;
+    for (Eigen::Index i = 0; i < num_features; ++i) {
+        const precision_t depth = measurement.depth(static_cast<int>(i));
+        if (depth > 0.0) {
+            result.map_points.push_back(
+                {depth * measurement.left().normalized_point(static_cast<int>(i)), i, -1});
+        }
+    }
+    if (result.map_points.size() < options_.stereo_min_points) {
+        return std::nullopt;
+    }
     result.keyframes.push_back({geometry::RigidTransformation::Identity(), std::move(measurement)});
     return result;
 }

@@ -1,6 +1,8 @@
 #include <cassert>
+#include <cstdint>
 #include <utility>
 #include <variant>
+#include <vector>
 #include <voyahslam/features/instantiation.h>
 #include <voyahslam/mapping/mapper.h>
 
@@ -79,6 +81,7 @@ void Mapper<TFeatureExtractor>::OnInitializationMeasurement(
     }
     map_points_ = {};
     observations_ = {};
+    stereo_observations_ = {};
     AddInitialMapPoints(initial->map_points);
     num_keyframes_.store(keyframes_.size(), std::memory_order_release);
     num_map_points_.store(map_points_.size(), std::memory_order_release);
@@ -105,6 +108,7 @@ void Mapper<TFeatureExtractor>::OnTrackingLost(const events::TrackingLost& event
     keyframes_.clear();
     map_points_ = {};
     observations_ = {};
+    stereo_observations_ = {};
     num_keyframes_.store(0, std::memory_order_release);
     num_map_points_.store(0, std::memory_order_release);
     initializer_.Reset();
@@ -124,23 +128,43 @@ void Mapper<TFeatureExtractor>::AddInitialMapPoints(
     if (map_points.empty()) {
         return;
     }
-    // Map points come only from a monocular two-view initialization.
-    assert(keyframes_.size() == 2);
     using TMonocularMeasurement = features::TMonocularMeasurement<TFeatureExtractor>;
-    const auto& first = std::get<TMonocularMeasurement>(keyframes_[0].measurement());
-    const geometry::TVector3DF centre_first = keyframes_[0].pose().Inverse().translation();
-    const geometry::TVector3DF centre_second = keyframes_[1].pose().Inverse().translation();
+    using TBinocularMeasurement = features::TBinocularMeasurement<TFeatureExtractor>;
+    const TKeyFrame& first = keyframes_[0];
+    const auto* binocular = std::get_if<TBinocularMeasurement>(&first.measurement());
+    // Monocular: a two-view initialization; binocular: one stereo keyframe.
+    assert(keyframes_.size() == (binocular ? 1u : 2u));
+    const auto& descriptors = binocular
+                                  ? binocular->left().descriptors()
+                                  : std::get<TMonocularMeasurement>(first.measurement()).descriptors();
+    std::vector<geometry::TVector3DF> centres;
+    for (const TKeyFrame& keyframe : keyframes_) {
+        centres.push_back(keyframe.pose().Inverse().translation());
+    }
 
     for (const InitialMapPoint& point : map_points) {
         assert(point.feature_in_first >= 0 && point.feature_in_first < 65536);
-        assert(point.feature_in_second >= 0 && point.feature_in_second < 65536);
-        const geometry::TPoint3DF normal = ((point.position - centre_first).normalized() +
-                                            (point.position - centre_second).normalized())
-                                               .normalized();
+        // The normalized mean of the viewing directions of the keyframes.
+        geometry::TPoint3DF normal = geometry::TPoint3DF::Zero();
+        for (const geometry::TVector3DF& centre : centres) {
+            normal += (point.position - centre).normalized();
+        }
+        normal.normalize();
         const map::MapPointId id =
-            map_points_.Add(point.position, first.descriptors().col(point.feature_in_first), normal);
-        observations_.Add(id, keyframes_[0].id(), static_cast<uint16_t>(point.feature_in_first));
-        observations_.Add(id, keyframes_[1].id(), static_cast<uint16_t>(point.feature_in_second));
+            map_points_.Add(point.position, descriptors.col(point.feature_in_first), normal);
+        const auto feature = static_cast<uint16_t>(point.feature_in_first);
+        if (binocular) {
+            const auto i = static_cast<int>(point.feature_in_first);
+            const int right = binocular->right_indices()(i);
+            assert(right <= 32767);
+            stereo_observations_.Add(id, first.id(), feature, binocular->depth(i),
+                                     static_cast<int16_t>(right));
+        } else {
+            assert(point.feature_in_second >= 0 && point.feature_in_second < 65536);
+            observations_.Add(id, first.id(), feature);
+            observations_.Add(id, keyframes_[1].id(),
+                              static_cast<uint16_t>(point.feature_in_second));
+        }
     }
 }
 
@@ -168,12 +192,18 @@ void Mapper<TFeatureExtractor>::PublishKeyFrameCreated(const TKeyFrame& keyframe
     event->frame_id = keyframe.id();
     event->pose = keyframe.pose();
     event->measurement = keyframe.measurement();
-    for (size_t i = 0; i < observations_.size(); ++i) {
-        if (observations_.frame_id(i) == keyframe.id()) {
-            event->observed_features.push_back(observations_.feature_index(i));
-            event->observed_points.push_back(observations_.mappoint_id(i));
+    // (left) feature index, point id; a stereo keyframe's depths and right
+    // indices are in its measurement.
+    const auto add_observations = [&](const auto& observations) {
+        for (size_t i = 0; i < observations.size(); ++i) {
+            if (observations.frame_id(i) == keyframe.id()) {
+                event->observed_features.push_back(observations.feature_index(i));
+                event->observed_points.push_back(observations.mappoint_id(i));
+            }
         }
-    }
+    };
+    add_observations(observations_);
+    add_observations(stereo_observations_);
     observable_.Notify(event);
 }
 

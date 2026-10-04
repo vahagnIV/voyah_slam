@@ -23,8 +23,8 @@ StereoRig MakeRig() {
     return StereoRig{
         .K_left = geometry::TMatrix33F::Identity(),
         .K_right = geometry::TMatrix33F::Identity(),
-        .R_rl = geometry::TMatrix33F::Identity(),
-        .t_rl = geometry::TVector3DF(0.12, 0.0, 0.0),
+        .T_rl = geometry::RigidTransformation(geometry::TMatrix33F::Identity(),
+                                                      geometry::TVector3DF(-0.12, 0.0, 0.0)),
         .baseline = 0.12,
     };
 }
@@ -55,6 +55,36 @@ TEST(BinocularMeasurementTest, Accessors) {
     EXPECT_EQ(bcf.right_indices()(0), -1);
     EXPECT_EQ(bcf.left().points().cols(), 3);
     EXPECT_EQ(bcf.right().points().cols(), 4);
+}
+
+TEST(BinocularMeasurementTest, StoresRig) {
+    auto rig = MakeRig();
+    auto bcf = TestBinocular(MakeFeatures(3), MakeFeatures(3), rig, 1.0);
+    EXPECT_TRUE(bcf.rig().T_rl.ToMatrix34().isApprox(rig.T_rl.ToMatrix34()));
+    EXPECT_DOUBLE_EQ(bcf.rig().baseline, 0.12);
+}
+
+TEST(BinocularMeasurementTest, SetStereoMatches) {
+    auto rig = MakeRig();
+    auto bcf = TestBinocular(MakeFeatures(4), MakeFeatures(4), rig, 1.0);
+    EXPECT_FALSE(bcf.stereo_matched());
+    EXPECT_TRUE((bcf.depths().array() == -1.0).all());
+
+    StereoMatches matches;
+    matches.right_indices = Eigen::VectorXi::Constant(4, -1);
+    matches.right_indices(1) = 2;
+    matches.right_indices(3) = 0;
+    matches.depths = geometry::TRowVectorF::Constant(4, -1.0);
+    matches.depths(1) = 4.0;
+    matches.depths(3) = 7.5;
+    matches.num_matches = 2;
+    geometry::TRowVectorF expected_depths = matches.depths;
+    Eigen::VectorXi expected_indices = matches.right_indices;
+
+    bcf.SetStereoMatches(std::move(matches));
+    EXPECT_TRUE(bcf.stereo_matched());
+    EXPECT_TRUE(bcf.depths().isApprox(expected_depths));
+    EXPECT_EQ(bcf.right_indices(), expected_indices);
 }
 
 } // namespace

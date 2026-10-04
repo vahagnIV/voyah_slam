@@ -49,8 +49,8 @@ inline features::TBinocularMeasurement<TestExtractor> MakeBinocular(size_t num_f
     features::StereoRig rig{
         .K_left = TestIntrinsics(),
         .K_right = TestIntrinsics(),
-        .R_rl = geometry::TMatrix33F::Identity(),
-        .t_rl = geometry::TVector3DF(0.12, 0.0, 0.0),
+        .T_rl = geometry::RigidTransformation(geometry::TMatrix33F::Identity(),
+                                                      geometry::TVector3DF(-0.12, 0.0, 0.0)),
         .baseline = 0.12,
     };
     return features::TBinocularMeasurement<TestExtractor>(

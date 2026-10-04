@@ -21,7 +21,8 @@ public:
     using TMapper = mapping::Mapper<TFeatureExtractor>;
     using TLoopCloser = loop_closing::LoopCloser<TFeatureExtractor>;
 
-    explicit Slam(mapping::MapperOptions mapper_options = {});
+    explicit Slam(mapping::MapperOptions mapper_options = {},
+                  tracking::TrackerOptions tracker_options = {});
     // Stops every component thread before any component is destroyed.
     ~Slam();
     Slam(const Slam&) = delete;

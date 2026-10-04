@@ -1,8 +1,10 @@
 #include <gtest/gtest.h>
 #include <Eigen/Geometry>
+#include <support/synthetic_sequence.h>
 #include <support/test_measurements.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
+#include <voyahslam/features/stereo_matcher.h>
 #include <voyahslam/events/observable.h>
 #include <voyahslam/memory/object_pool.h>
 #include <voyahslam/tracking/tracker.h>
@@ -93,6 +95,28 @@ TEST_F(TrackerTest, ForwardsMeasurementsWhileWaitingForMap) {
     EXPECT_DOUBLE_EQ(mono.timestamp(), 0.0);
     EXPECT_EQ(NextCaptured(), nullptr);
     EXPECT_EQ(tracker_.state(), TrackerState::WaitingForMap);
+}
+
+TEST_F(TrackerTest, StereoMatchedBeforeForwarding) {
+    auto frame = test::MakeSyntheticStereoFrame();
+    ASSERT_FALSE(frame.measurement.stereo_matched());
+    const features::StereoMatches expected =
+        features::MatchStereo<Extractor>(frame.measurement, features::StereoMatcherOptions{});
+    tracker_.Track(std::move(frame.measurement));
+    Drain();
+
+    auto* event = NextCaptured();
+    ASSERT_NE(event, nullptr);
+    ASSERT_EQ(event->type, events::EventType::InitializationMeasurement);
+    const auto& init = *static_cast<TInitializationMeasurement*>(event);
+    ASSERT_TRUE(std::holds_alternative<TTracker::TBinocularMeasurement>(init.measurement));
+    const auto& binocular = std::get<TTracker::TBinocularMeasurement>(init.measurement);
+    EXPECT_TRUE(binocular.stereo_matched());
+    ASSERT_EQ(binocular.depths().size(), expected.depths.size());
+    EXPECT_TRUE(binocular.depths().isApprox(expected.depths));
+    ASSERT_EQ(binocular.right_indices().size(), expected.right_indices.size());
+    EXPECT_TRUE(binocular.right_indices() == expected.right_indices);
+    EXPECT_GT((binocular.depths().array() > 0).count(), 0);
 }
 
 TEST_F(TrackerTest, InitialMapEventsBeforeMapCreatedAreKept) {

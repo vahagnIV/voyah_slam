@@ -49,8 +49,6 @@ as soon as they come up.
       (Cauchy/Huber or a truncated-χ² loss matching the score; MSAC/MAGSAC-style
       LO). Bundle adjustment after initialization provides further accuracy.
 - [ ] Optional: run the H and E RANSACs in parallel.
-- [ ] Stereo matching in `BinocularMeasurement` (depths / right indices are
-      placeholders).
 
 ## Initialization (monocular, 2026-10-04)
 
@@ -64,8 +62,29 @@ as soon as they come up.
 Smoke run note (2026-10-04, `dataset-corridor1_1024_16`, ORB, Release,
 `--rate=0 --max-frames=200`): mono initialized at about frame 121
 (`Initializing -> Mapping (map 1, 2 keyframes, 73 points)`; 73 points is low,
-tuning deferred); binocular (stub) initialized immediately with 1 keyframe,
-0 points.
+tuning deferred). Binocular (`--max-frames=20`) initialized on the first frame
+(`Initializing -> Mapping (map 1, 1 keyframes, 355 points)`); median point
+depth 1.96 m (quartiles 1.50 / 2.13 m, range 0.25-9.50 m). The viewer run
+(`--viewer`) completed without errors; no screenshot (X_GetImage failed on the
+root window).
+
+## Stereo (2026-10-04)
+
+- [ ] Epipolar-guided stereo search (optimization of the brute-force matcher).
+- [ ] Stereo-aware tracking: use depths and right observations in the
+      `PoseEstimator`.
+- [ ] Tuning on TUM-VI 512, including the ~17 m stereo depth cap implied by
+      `max_parallax_cos` 0.99998 at the 0.11 m baseline (ORB-SLAM3's KB
+      `TriangulateMatches` uses 0.9998, about 1.15 degrees / 5.5 m cap).
+- [ ] Stereo matcher: test reprojection in distorted pixel space (via
+      `Distort`) for fisheye, as ORB-SLAM3 `KannalaBrandt8::TriangulateMatches`
+      does; the normalized-plane chi-square rejects peripheral matches.
+- [ ] Tests to add (deferred review findings): stereo observation depth and
+      right index are not read back by any test (add when a consumer exists);
+      the initializer path for an unmatched measurement; Tracking-state stereo
+      matching before `Estimate()`.
+- [ ] Matcher: the one-to-one drop loses a valid second candidate (ORB-SLAM3
+      behaviour); consider second-chance matching.
 
 ## Map & events
 
@@ -88,10 +107,13 @@ tuning deferred); binocular (stub) initialized immediately with 1 keyframe,
       processed after a restart, or destroyed with the Tracker. Decide whether
       Stop() should drain or discard them together with the measurement
       policy. (OQ 19)
+- [ ] **Future (not now): mixed mono/stereo sessions.** Mono and stereo
+      measurements may arrive in one session; Mapper and Tracker behaviour
+      depends on the sequence (mono then mono: today's two-view init; mono
+      then stereo, stereo then mono, …: to be designed). Keep both
+      observation storages and per-keyframe measurement types to allow it.
 - [ ] Real `PoseEstimator` (track with motion model / reference keyframe /
       local map; motion-only BA) — geometry spec; replaces the stub in place.
-- [ ] Real stereo initialization (needs stereo matching; the stereo
-      `MapInitializer` path is still a stub that creates one keyframe, 0 points).
 - [ ] Apply map diffs to the Tracker replica (currently a no-op).
 - [ ] Keyframe decision: Tracker publishes `NewKeyFrameCandidate`; Mapper
       handling (currently only acknowledged).

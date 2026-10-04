@@ -19,6 +19,7 @@ using TMapper = Mapper<Extractor>;
 using TKeyFrameCreated = events::KeyFrameCreated<Extractor>;
 using TInitializationMeasurement = events::InitializationMeasurement<Extractor>;
 using TMonocularMeasurement = features::TMonocularMeasurement<Extractor>;
+using TBinocularMeasurement = features::TBinocularMeasurement<Extractor>;
 using TMapPointsAdded = events::MapPointsAdded<Extractor>;
 using TDescriptors = typename Extractor::TDescriptors;
 
@@ -28,10 +29,12 @@ struct Published {
     map::FrameId frame_id;
     double timestamp = 0.0;  // of the keyframe's measurement (KeyFrameCreated only)
     geometry::RigidTransformation pose;  // KeyFrameCreated, MapCreated
-    // KeyFrameCreated: observations and the measurement's descriptors.
+    // KeyFrameCreated: observations and the measurement's (left image's)
+    // descriptors; per left feature stereo depths (binocular only).
     std::vector<uint32_t> observed_features;
     std::vector<map::MapPointId> observed_points;
     TDescriptors descriptors;
+    geometry::TRowVectorF depths;
     // MapPointsAdded.
     map::MapPointId start_id{};
     uint32_t count = 0;
@@ -84,6 +87,10 @@ protected:
                 p.observed_points = created->observed_points;
                 if (const auto* mono = std::get_if<TMonocularMeasurement>(&created->measurement)) {
                     p.descriptors = mono->descriptors();
+                } else if (const auto* binocular =
+                               std::get_if<TBinocularMeasurement>(&created->measurement)) {
+                    p.descriptors = binocular->left().descriptors();
+                    p.depths = binocular->depths();
                 }
             } else if (event->type == events::EventType::MapCreated) {
                 const auto* created = static_cast<events::MapCreated*>(event);
@@ -134,9 +141,21 @@ protected:
         return TakeCaptured();
     }
 
+    // A stereo-matched synthetic stereo measurement (the Tracker matches
+    // before forwarding).
+    static TBinocularMeasurement StereoMeasurement(double timestamp) {
+        test::SyntheticStereoOptions options;
+        options.timestamp = timestamp;
+        return test::MakeMatchedSyntheticStereoFrame(options).measurement;
+    }
+
+    static size_t NumDepths(const TBinocularMeasurement& measurement) {
+        return static_cast<size_t>((measurement.depths().array() > 0.0).count());
+    }
+
     // Initializes a map from one stereo measurement and discards the output.
     void InitializeStereo(double timestamp) {
-        PublishInitializationMeasurement(test::MakeBinocular(200, timestamp));
+        PublishInitializationMeasurement(StereoMeasurement(timestamp));
         Drain();
         ASSERT_EQ(mapper_.state(), MapperState::Mapping);
         TakeCaptured();
@@ -156,29 +175,114 @@ TEST_F(MapperTest, StereoInitializesFromOneMeasurement) {
     EXPECT_EQ(mapper_.state(), MapperState::Initializing);
     EXPECT_EQ(mapper_.current_map_id(), map::MapId{0});
 
-    PublishInitializationMeasurement(test::MakeBinocular(200, 0.0));
+    PublishInitializationMeasurement(StereoMeasurement(0.0));
     Drain();
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 2u);
-    ExpectPublished(published[0], events::EventType::KeyFrameCreated, 1, 0);
-    ExpectPublished(published[1], events::EventType::MapCreated, 1, 0);
+    ASSERT_EQ(published.size(), 3u);
+    ExpectPublished(published[0], events::EventType::MapPointsAdded, 1, 0);
+    ExpectPublished(published[1], events::EventType::KeyFrameCreated, 1, 0);
+    ExpectPublished(published[2], events::EventType::MapCreated, 1, 0);
     EXPECT_EQ(mapper_.state(), MapperState::Mapping);
     EXPECT_EQ(mapper_.current_map_id(), map::MapId{1});
     EXPECT_EQ(mapper_.num_keyframes(), 1u);
 }
 
-TEST_F(MapperTest, StereoPublishesNoMapPoints) {
-    PublishInitializationMeasurement(test::MakeBinocular(200, 0.0));
+TEST_F(MapperTest, StereoPublishesMapPoints) {
+    const TBinocularMeasurement measurement = StereoMeasurement(0.0);
+    const size_t num_depths = NumDepths(measurement);
+    PublishInitializationMeasurement(measurement);
     Drain();
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 2u);
-    EXPECT_EQ(published[0].type, events::EventType::KeyFrameCreated);
-    EXPECT_EQ(published[1].type, events::EventType::MapCreated);
-    EXPECT_TRUE(published[0].observed_features.empty());
-    EXPECT_TRUE(published[0].observed_points.empty());
-    EXPECT_EQ(mapper_.num_map_points(), 0u);
+    ASSERT_EQ(published.size(), 3u);
+    const Published& points = published[0];
+    const Published& keyframe = published[1];
+    ASSERT_EQ(points.type, events::EventType::MapPointsAdded);
+    ASSERT_EQ(keyframe.type, events::EventType::KeyFrameCreated);
+    EXPECT_EQ(points.start_id, map::MapPointId{0});
+    EXPECT_GE(points.count, 100u);
+    EXPECT_EQ(points.count, num_depths);
+    EXPECT_EQ(mapper_.num_map_points(), points.count);
+    ASSERT_EQ(keyframe.observed_features.size(), points.count);
+    ASSERT_EQ(keyframe.observed_points.size(), points.count);
+    // A point's descriptor is the left image's descriptor of its feature, and
+    // the feature has a stereo depth.
+    for (size_t o = 0; o < keyframe.observed_points.size(); ++o) {
+        ASSERT_LT(keyframe.observed_points[o].value, points.count);
+        ASSERT_LT(keyframe.observed_features[o], static_cast<uint32_t>(keyframe.descriptors.cols()));
+        EXPECT_EQ(points.point_descriptors.col(keyframe.observed_points[o].value),
+                  keyframe.descriptors.col(keyframe.observed_features[o]))
+            << "observation " << o;
+        EXPECT_GT(keyframe.depths(keyframe.observed_features[o]), 0.0) << "observation " << o;
+    }
+}
+
+TEST_F(MapperTest, StereoPublishesPointsKeyFrameThenMap) {
+    PublishInitializationMeasurement(StereoMeasurement(0.0));
+    Drain();
+
+    const auto published = TakeCaptured();
+    ASSERT_EQ(published.size(), 3u);
+    EXPECT_EQ(published[0].type, events::EventType::MapPointsAdded);
+    EXPECT_EQ(published[1].type, events::EventType::KeyFrameCreated);
+    EXPECT_EQ(published[2].type, events::EventType::MapCreated);
+    for (const Published& p : published) {
+        EXPECT_EQ(p.map_id, map::MapId{1});
+    }
+
+    const Published& points = published[0];
+    const Published& keyframe = published[1];
+    EXPECT_GE(points.count, 100u);
+    EXPECT_EQ(points.count, mapper_.num_map_points());
+    ASSERT_EQ(points.positions.cols(), points.count);
+    ASSERT_EQ(points.normals.cols(), points.count);
+
+    // Every point is observed exactly once, by a valid feature.
+    ASSERT_EQ(keyframe.observed_points.size(), points.count);
+    std::vector<int> times_observed(points.count, 0);
+    for (size_t o = 0; o < keyframe.observed_points.size(); ++o) {
+        ASSERT_LT(keyframe.observed_points[o].value, points.count);
+        ASSERT_LT(keyframe.observed_features[o], static_cast<uint32_t>(keyframe.descriptors.cols()));
+        ++times_observed[keyframe.observed_points[o].value];
+    }
+    for (uint32_t i = 0; i < points.count; ++i) {
+        EXPECT_EQ(times_observed[i], 1) << "point " << i;
+    }
+
+    const geometry::TVector3DF centre = keyframe.pose.Inverse().translation();
+    for (uint32_t i = 0; i < points.count; ++i) {
+        EXPECT_NEAR(points.normals.col(i).norm(), 1.0, 1e-5) << "point " << i;
+        const geometry::TVector3DF position = points.positions.col(i);
+        EXPECT_GT(points.normals.col(i).dot(position - centre), 0.0) << "point " << i;
+    }
+}
+
+TEST_F(MapperTest, StereoMapAfterMonoMap) {
+    const auto first = InitializeMono(0);
+    ASSERT_FALSE(first.empty());
+    ASSERT_GT(mapper_.num_map_points(), 0u);
+
+    const double timestamp = sequence_.frames.back().measurement.timestamp() + 1.0;
+    PublishTrackingLost(1, timestamp);
+    Drain();
+    ASSERT_EQ(mapper_.state(), MapperState::Initializing);
+
+    const TBinocularMeasurement measurement = StereoMeasurement(timestamp + 1.0);
+    const size_t num_depths = NumDepths(measurement);
+    PublishInitializationMeasurement(measurement);
+    Drain();
+
+    const auto second = TakeCaptured();
+    ASSERT_EQ(second.size(), 3u);
+    ExpectPublished(second[0], events::EventType::MapPointsAdded, 2, 0);
+    ExpectPublished(second[1], events::EventType::KeyFrameCreated, 2, 2);
+    ExpectPublished(second[2], events::EventType::MapCreated, 2, 2);
+    EXPECT_EQ(second[0].start_id, map::MapPointId{0});
+    EXPECT_EQ(second[0].count, num_depths);
+    EXPECT_EQ(mapper_.num_map_points(), num_depths);
+    EXPECT_EQ(second[1].observed_points.size(), num_depths);
+    EXPECT_EQ(mapper_.num_keyframes(), 1u);
 }
 
 TEST_F(MapperTest, MonoInitializesWithParallax) {
@@ -336,7 +440,7 @@ TEST_F(MapperTest, FewFeaturesReplacesReference) {
 TEST_F(MapperTest, IgnoresInitializationMeasurementWhileMapping) {
     InitializeStereo(0.0);
 
-    PublishInitializationMeasurement(test::MakeBinocular(200, 1.0));
+    PublishInitializationMeasurement(StereoMeasurement(1.0));
     Drain();
 
     EXPECT_TRUE(TakeCaptured().empty());
@@ -352,15 +456,20 @@ TEST_F(MapperTest, TrackingLostStartsNewMap) {
     Drain();
     EXPECT_EQ(mapper_.state(), MapperState::Initializing);
     EXPECT_EQ(mapper_.num_keyframes(), 0u);
+    EXPECT_EQ(mapper_.num_map_points(), 0u);
     EXPECT_TRUE(TakeCaptured().empty());
 
-    PublishInitializationMeasurement(test::MakeBinocular(200, 2.0));
+    PublishInitializationMeasurement(StereoMeasurement(2.0));
     Drain();
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 2u);
-    ExpectPublished(published[0], events::EventType::KeyFrameCreated, 2, 1);
-    ExpectPublished(published[1], events::EventType::MapCreated, 2, 1);
+    ASSERT_EQ(published.size(), 3u);
+    ExpectPublished(published[0], events::EventType::MapPointsAdded, 2, 0);
+    EXPECT_EQ(published[0].start_id, map::MapPointId{0});
+    EXPECT_GE(published[0].count, 100u);
+    EXPECT_EQ(published[0].count, mapper_.num_map_points());
+    ExpectPublished(published[1], events::EventType::KeyFrameCreated, 2, 1);
+    ExpectPublished(published[2], events::EventType::MapCreated, 2, 1);
     EXPECT_EQ(mapper_.state(), MapperState::Mapping);
     EXPECT_EQ(mapper_.current_map_id(), map::MapId{2});
     EXPECT_EQ(mapper_.num_keyframes(), 1u);
@@ -399,7 +508,7 @@ TEST_F(MapperTest, StateIsMappingWhenMapCreatedIsPublished) {
         },
         &probe);
 
-    PublishInitializationMeasurement(test::MakeBinocular(200, 0.0));
+    PublishInitializationMeasurement(StereoMeasurement(0.0));
     Drain();
 
     ASSERT_TRUE(probe.seen);
