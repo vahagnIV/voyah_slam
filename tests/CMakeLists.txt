@@ -4,6 +4,7 @@ add_executable(voyahslam_tests
     algebra/algebra_test.cpp
     geometry/geometry_test.cpp
     geometry/rigid_transformation_test.cpp
+    geometry/two_view_scene_test.cpp
     images/bilinear_interpolation_tests.cpp
     images/filter_tests.cpp
     images/gaussian_blur_tests.cpp
