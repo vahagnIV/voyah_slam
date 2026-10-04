@@ -109,13 +109,17 @@ world → camera. No behaviour change; all tests stay green.
 
 ## 2. `InitializationMatcher` — `features/initialization_matcher.h`
 
+(Amended during implementation, 2026-10-04: `max_distance` is `double` so SIFT
+float L2 distances can be configured; `histogram_bins` defaults to 12 of 30°,
+ORB-SLAM3's effective resolution. See DESIGN.md decisions log.)
+
 ```cpp
 struct InitializationMatcherOptions {
     double window_px = 100.0;     // square half-size around the last matched position
-    uint32_t max_distance = 50;   // descriptor distance threshold (ORB TH_LOW)
+    double max_distance = 50.0;   // descriptor distance threshold (ORB TH_LOW)
     double nn_ratio = 0.9;        // best < nn_ratio × second best
     bool check_orientation = true;
-    size_t histogram_bins = 30;
+    size_t histogram_bins = 12;   // 30-degree bins
     int max_reference_level = 0;  // only reference features with level <= this
 };
 
