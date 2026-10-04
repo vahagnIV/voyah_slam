@@ -27,6 +27,21 @@ double Residual(const geometry::TMatrix33F& a_E, const geometry::TwoViewCorrespo
         a_E * geometry::TVector3DF(a_c.x1(0, a_i), a_c.x1(1, a_i), 1.0)));
 }
 
+double SummedSampsonError(const geometry::TMatrix33F& a_E, const geometry::TwoViewCorrespondences& a_c,
+                          const Eigen::Array<bool, Eigen::Dynamic, 1>& a_mask) {
+    double sum = 0.0;
+    for (Eigen::Index i = 0; i < a_c.size(); ++i) {
+        if (!a_mask(i)) continue;
+        const geometry::TVector3DF x1(a_c.x1(0, i), a_c.x1(1, i), 1.0);
+        const geometry::TVector3DF x2(a_c.x2(0, i), a_c.x2(1, i), 1.0);
+        const geometry::TVector3DF l2 = a_E * x1;
+        const geometry::TVector3DF l1 = a_E.transpose() * x2;
+        const double d = x2.dot(l2);
+        sum += d * d / (l2.head<2>().squaredNorm() + l1.head<2>().squaredNorm());
+    }
+    return sum;
+}
+
 TEST(EssentialEstimatorTest, ExactFromEightPoints) {
     const auto scene = test::MakeGeneralScene(60, 0.0, 0.0, 3, test::DefaultTransform());
     const std::array<Eigen::Index, 8> sample{0, 7, 13, 21, 30, 38, 47, 55};
@@ -136,6 +151,35 @@ TEST(EssentialEstimatorTest, EssentialScoreFiniteForZeroEpipolarLine) {
     EXPECT_TRUE(std::isfinite(result.score));
     EXPECT_EQ(result.num_inliers, 0u);
     EXPECT_FALSE(result.inliers(0));
+}
+
+TEST(EssentialEstimatorTest, RefineLowersSampsonError) {
+    const auto scene = test::MakeGeneralScene(200, 0.0, test::NormalizedSigma(1.0), 21, test::DefaultTransform());
+    const std::array<Eigen::Index, 8> sample{0, 25, 50, 75, 100, 125, 150, 175};
+    const EssentialEstimator estimator;
+    const auto models = estimator.Estimate(scene.correspondences, sample);
+    ASSERT_EQ(models.size(), 1u);
+    const Eigen::Array<bool, Eigen::Dynamic, 1> inliers = !scene.is_outlier;
+
+    const geometry::TMatrix33F refined = estimator.Refine(models[0], scene.correspondences, inliers);
+    ASSERT_TRUE(refined.allFinite());
+    EXPECT_LT(SummedSampsonError(refined, scene.correspondences, inliers),
+              SummedSampsonError(models[0], scene.correspondences, inliers));
+    EXPECT_NEAR(refined.norm(), 1.0, 1e-9);
+    const Eigen::JacobiSVD<geometry::TMatrix33F> svd(refined);
+    const auto& s = svd.singularValues();
+    EXPECT_NEAR(s(0), s(1), 1e-9 * s(0));
+    EXPECT_LT(s(2), 1e-9 * s(0));
+}
+
+TEST(EssentialEstimatorTest, RefineKeepsModelOnDegenerateInput) {
+    const auto scene = test::MakeGeneralScene(50, 0.0, test::NormalizedSigma(1.0), 22, test::DefaultTransform());
+    const geometry::TMatrix33F E = GroundTruthE(scene);
+    const EssentialEstimator estimator;
+    Eigen::Array<bool, Eigen::Dynamic, 1> inliers = Eigen::Array<bool, Eigen::Dynamic, 1>::Constant(50, false);
+    EXPECT_EQ(estimator.Refine(E, scene.correspondences, inliers), E);
+    inliers.head(7).setConstant(true);  // fewer than kSampleSize
+    EXPECT_EQ(estimator.Refine(E, scene.correspondences, inliers), E);
 }
 
 } // namespace

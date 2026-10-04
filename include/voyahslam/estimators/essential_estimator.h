@@ -29,6 +29,12 @@ public:
 
     [[nodiscard]] ModelScore Score(const TModel& a_model,
                                    const geometry::TwoViewCorrespondences& a_correspondences) const;
+
+    /// Levenberg-Marquardt refinement of E = [t]x R over the inliers (5 dof: rotation and unit
+    /// translation direction), minimizing the Sampson error. Returns E with unit Frobenius norm,
+    /// or a_model unchanged if there are fewer than kSampleSize inliers or the result is non-finite.
+    [[nodiscard]] TModel Refine(const TModel& a_model, const geometry::TwoViewCorrespondences& a_correspondences,
+                                const Eigen::Array<bool, Eigen::Dynamic, 1>& a_inliers) const;
 };
 
 } // namespace voyahslam::estimators

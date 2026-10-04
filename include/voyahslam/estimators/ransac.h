@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <concepts>
 #include <cstddef>
 #include <cstdint>
 #include <numeric>
@@ -23,6 +24,8 @@ struct RansacOptions {
     size_t min_iterations = 50;
     double confidence = 0.99;
     uint32_t seed = 0;
+    /// Rounds of local refinement after sampling (only for estimators that provide Refine).
+    size_t refinement_rounds = 3;
 };
 
 template <typename TModel>
@@ -34,6 +37,10 @@ struct RansacResult {
 };
 
 /// Generic adaptive RANSAC over a minimal-sample two-view estimator.
+/// If the estimator also provides
+///   TModel Refine(const TModel&, const TwoViewCorrespondences&, const Eigen::Array<bool, Eigen::Dynamic, 1>&) const
+/// the best model is then refined on its inliers for up to RansacOptions::refinement_rounds
+/// rounds, each kept only if it scores strictly higher (local optimization).
 template <TwoViewEstimator TEstimator>
 class Ransac {
 public:
@@ -77,10 +84,34 @@ public:
                 required = RequiredIterations(result.score.num_inliers, n, kSampleSize, a_options);
             }
         }
+        if (result.success) {
+            RefineResult(a_correspondences, a_options, result);
+        }
         return result;
     }
 
 private:
+    static constexpr bool kHasRefine = requires(const TEstimator estimator,
+                                                const typename TEstimator::TModel& model,
+                                                const geometry::TwoViewCorrespondences& correspondences,
+                                                const Eigen::Array<bool, Eigen::Dynamic, 1>& inliers) {
+        { estimator.Refine(model, correspondences, inliers) } -> std::same_as<typename TEstimator::TModel>;
+    };
+
+    // Refine on the current inliers, re-score, keep only strict improvements.
+    void RefineResult(const geometry::TwoViewCorrespondences& a_correspondences, const RansacOptions& a_options,
+                      RansacResult<typename TEstimator::TModel>& out_result) const {
+        if constexpr (kHasRefine) {
+            for (size_t round = 0; round < a_options.refinement_rounds; ++round) {
+                auto model = estimator_.Refine(out_result.model, a_correspondences, out_result.score.inliers);
+                ModelScore score = estimator_.Score(model, a_correspondences);
+                if (!(score.score > out_result.score.score)) break;
+                out_result.model = std::move(model);
+                out_result.score = std::move(score);
+            }
+        }
+    }
+
     static size_t RequiredIterations(size_t a_num_inliers, size_t a_n, size_t a_k, const RansacOptions& a_options) {
         const double w = static_cast<double>(a_num_inliers) / static_cast<double>(a_n);
         if (w <= 0.0) {

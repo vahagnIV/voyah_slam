@@ -86,12 +86,16 @@ inline TwoViewScene FinishScene(const geometry::TPoints3DF& points, double outli
 
 } // namespace detail
 
-/// General 3D scene: depth uniform in [4, 8], within +-30 degrees of the optical axis.
+/// Default half field of view of MakeGeneralScene: tan(30 degrees).
+inline const double kGeneralHalfFovTan = std::tan(30.0 * M_PI / 180.0);
+
+/// General 3D scene: depth uniform in [4, 8]; normalized coordinates u, v of view 1 uniform in
+/// [-half_fov_tan, half_fov_tan] (default: within +-30 degrees of the optical axis).
 inline TwoViewScene MakeGeneralScene(size_t n, double outlier_fraction, double sigma,
-                                     uint32_t seed, const geometry::RigidTransformation& T_21) {
+                                     uint32_t seed, const geometry::RigidTransformation& T_21,
+                                     double half_fov_tan = kGeneralHalfFovTan) {
     std::mt19937 rng(seed);
-    const double limit = std::tan(30.0 * M_PI / 180.0);
-    std::uniform_real_distribution<double> direction(-limit, limit);
+    std::uniform_real_distribution<double> direction(-half_fov_tan, half_fov_tan);
     std::uniform_real_distribution<double> depth(4.0, 8.0);
     geometry::TPoints3DF points(3, static_cast<Eigen::Index>(n));
     for (Eigen::Index i = 0; i < points.cols(); ++i) {
@@ -102,12 +106,13 @@ inline TwoViewScene MakeGeneralScene(size_t n, double outlier_fraction, double s
 }
 
 /// Planar scene: points on the plane z = 5 in camera 1, optionally tilted about the y axis
-/// (through the point (0, 0, 5)) by tilt_deg.
+/// (through the point (0, 0, 5)) by tilt_deg; normalized coordinates u, v of view 1 uniform in
+/// [-half_fov_tan, half_fov_tan].
 inline TwoViewScene MakePlanarScene(size_t n, double outlier_fraction, double sigma,
                                     uint32_t seed, const geometry::RigidTransformation& T_21,
-                                    double tilt_deg = 0.0) {
+                                    double tilt_deg = 0.0, double half_fov_tan = 0.5) {
     std::mt19937 rng(seed);
-    std::uniform_real_distribution<double> direction(-0.5, 0.5);
+    std::uniform_real_distribution<double> direction(-half_fov_tan, half_fov_tan);
     const double tilt = tilt_deg * M_PI / 180.0;
     const geometry::TVector3DF normal(std::sin(tilt), 0.0, std::cos(tilt));
     const geometry::TVector3DF plane_point(0.0, 0.0, 5.0);

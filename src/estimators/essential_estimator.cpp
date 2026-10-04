@@ -1,9 +1,12 @@
 #include "voyahslam/estimators/essential_estimator.h"
 
 #include <cmath>
+#include <vector>
 
+#include "estimators/levenberg_marquardt.h"
 #include "estimators/two_view_normalization.h"
 #include "voyahslam/algebra/algebra.h"
+#include "voyahslam/geometry/two_view_decomposition.h"
 
 namespace voyahslam::estimators {
 
@@ -20,6 +23,43 @@ bool LineChi2(const geometry::TVector3DF& a_line, const geometry::TVector3DF& a_
     const double d = a_x.dot(a_line);
     out_chi2 = d * d / norm2 / a_sigma2;
     return std::isfinite(out_chi2);
+}
+
+geometry::TMatrix33F Skew(const geometry::TVector3DF& a_v) {
+    geometry::TMatrix33F S;
+    S << 0.0, -a_v.z(), a_v.y(), a_v.z(), 0.0, -a_v.x(), -a_v.y(), a_v.x(), 0.0;
+    return S;
+}
+
+// R <- exp([omega]x) R.
+geometry::TMatrix33F RotateBy(const geometry::TVector3DF& a_omega, const geometry::TMatrix33F& a_R) {
+    const double angle = a_omega.norm();
+    if (angle == 0.0) return a_R;
+    return Eigen::AngleAxis<double>(angle, a_omega / angle).toRotationMatrix() * a_R;
+}
+
+// t on the unit sphere moved by (a, b) in its tangent plane, renormalized.
+geometry::TVector3DF MoveOnSphere(const geometry::TVector3DF& a_t, double a_a, double a_b) {
+    const geometry::TVector3DF b1 = a_t.unitOrthogonal();
+    const geometry::TVector3DF b2 = a_t.cross(b1);
+    return (a_t + a_a * b1 + a_b * b2).normalized();
+}
+
+// Signed Sampson residuals of E over the given correspondences; false if any is undefined.
+bool SampsonResiduals(const geometry::TMatrix33F& a_E, const geometry::TwoViewCorrespondences& a_correspondences,
+                      const std::vector<Eigen::Index>& a_indices, Eigen::VectorXd& out_r) {
+    out_r.resize(static_cast<Eigen::Index>(a_indices.size()));
+    for (size_t k = 0; k < a_indices.size(); ++k) {
+        const Eigen::Index i = a_indices[k];
+        const geometry::TVector3DF x1(a_correspondences.x1(0, i), a_correspondences.x1(1, i), 1.0);
+        const geometry::TVector3DF x2(a_correspondences.x2(0, i), a_correspondences.x2(1, i), 1.0);
+        const geometry::TVector3DF l2 = a_E * x1;
+        const geometry::TVector3DF l1 = a_E.transpose() * x2;
+        const double denominator = l2.head<2>().squaredNorm() + l1.head<2>().squaredNorm();
+        if (!(denominator >= kMinLineNorm2)) return false;
+        out_r(static_cast<Eigen::Index>(k)) = x2.dot(l2) / std::sqrt(denominator);
+    }
+    return out_r.allFinite();
 }
 
 } // namespace
@@ -95,6 +135,42 @@ ModelScore EssentialEstimator::Score(const TModel& a_model,
         if (both) ++result.num_inliers;
     }
     return result;
+}
+
+EssentialEstimator::TModel EssentialEstimator::Refine(const TModel& a_model,
+                                                      const geometry::TwoViewCorrespondences& a_correspondences,
+                                                      const Eigen::Array<bool, Eigen::Dynamic, 1>& a_inliers) const {
+    if (a_inliers.size() != a_correspondences.size() || !a_model.allFinite()) return a_model;
+    std::vector<Eigen::Index> indices;
+    for (Eigen::Index i = 0; i < a_inliers.size(); ++i) {
+        if (a_inliers(i)) indices.push_back(i);
+    }
+    if (indices.size() < kSampleSize) return a_model;
+
+    // Any of the 4 decomposition candidates gives E up to sign, which the Sampson error ignores.
+    const geometry::RigidTransformation start = geometry::DecomposeEssential(a_model)[0];
+    geometry::TMatrix33F R = start.rotation();
+    geometry::TVector3DF t = start.translation().normalized();
+    if (!R.allFinite() || !t.allFinite()) return a_model;
+
+    using TParams = Eigen::Matrix<double, 5, 1>;
+    const auto moved = [&](const TParams& a_delta) -> geometry::TMatrix33F {
+        return Skew(MoveOnSphere(t, a_delta(3), a_delta(4))) * RotateBy(a_delta.head<3>(), R);
+    };
+    const bool started = internal::MinimizeLevenbergMarquardt<5>(
+        [&](const TParams& a_delta, Eigen::VectorXd& out_r) {
+            return SampsonResiduals(moved(a_delta), a_correspondences, indices, out_r);
+        },
+        [&](const TParams& a_delta) {
+            R = RotateBy(a_delta.head<3>(), R);
+            t = MoveOnSphere(t, a_delta(3), a_delta(4));
+        });
+    if (!started) return a_model;
+
+    const geometry::TMatrix33F E = Skew(t) * R;
+    const double norm = E.norm();
+    if (!(norm > 0.0) || !E.allFinite()) return a_model;
+    return E / norm;
 }
 
 } // namespace voyahslam::estimators

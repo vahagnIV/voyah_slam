@@ -57,5 +57,21 @@ TEST(TwoViewSceneTest, SameSeedSameScene) {
     EXPECT_NE(a.correspondences.x1, c.correspondences.x1);
 }
 
+TEST(TwoViewSceneTest, HalfFovScalesPointSpread) {
+    const auto max_abs = [](const TwoViewScene& a_scene) {
+        return a_scene.correspondences.x1.cwiseAbs().maxCoeff();
+    };
+    const TwoViewScene planar = MakePlanarScene(200, 0.0, 0.0, 4, DefaultTransform());
+    const TwoViewScene planar_wide = MakePlanarScene(200, 0.0, 0.0, 4, DefaultTransform(), 0.0, 1.0);
+    EXPECT_LE(max_abs(planar), 0.5);
+    EXPECT_LE(max_abs(planar_wide), 1.0);
+    EXPECT_GT(max_abs(planar_wide), 0.9);
+    EXPECT_NEAR(max_abs(planar_wide), 2.0 * max_abs(planar), 1e-12);  // same seed: u, v scale exactly
+
+    const TwoViewScene general_wide = MakeGeneralScene(200, 0.0, 0.0, 5, DefaultTransform(), 1.0);
+    EXPECT_LE(max_abs(general_wide), 1.0);
+    EXPECT_GT(max_abs(general_wide), 0.9);
+}
+
 } // namespace
 } // namespace voyahslam::test

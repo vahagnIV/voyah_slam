@@ -9,7 +9,12 @@
 namespace voyahslam::estimators {
 namespace {
 
-void ExpectRecovered(const test::TwoViewScene& a_scene, const ModelScore& a_score) {
+struct Recovery {
+    double inlier_fraction = 0.0;   ///< True inliers flagged / true inliers.
+    double outlier_fraction = 0.0;  ///< Outliers flagged / outliers.
+};
+
+Recovery MeasureRecovery(const test::TwoViewScene& a_scene, const ModelScore& a_score) {
     size_t true_inliers = 0, inliers_found = 0, outliers = 0, outliers_flagged = 0;
     for (Eigen::Index i = 0; i < a_scene.is_outlier.size(); ++i) {
         if (a_scene.is_outlier(i)) {
@@ -20,11 +25,22 @@ void ExpectRecovered(const test::TwoViewScene& a_scene, const ModelScore& a_scor
             inliers_found += a_score.inliers(i) ? 1 : 0;
         }
     }
-    EXPECT_GE(static_cast<double>(inliers_found), 0.50 * static_cast<double>(true_inliers));
-    EXPECT_LE(static_cast<double>(outliers_flagged), 0.05 * static_cast<double>(outliers));
+    Recovery recovery;
+    recovery.inlier_fraction = static_cast<double>(inliers_found) / static_cast<double>(true_inliers);
+    if (outliers > 0) {
+        recovery.outlier_fraction = static_cast<double>(outliers_flagged) / static_cast<double>(outliers);
+    }
+    return recovery;
 }
 
-// Bound is 50%: minimal-sample models overfit noise (no local optimization yet; TODO).
+void ExpectRecovered(const test::TwoViewScene& a_scene, const ModelScore& a_score) {
+    const Recovery recovery = MeasureRecovery(a_scene, a_score);
+    EXPECT_GE(recovery.inlier_fraction, 0.50);
+    EXPECT_LE(recovery.outlier_fraction, 0.05);
+}
+
+// Bound is 50% (ledger ruling, set before local refinement existed); refinement is now on by
+// default, and RefinementImprovesRecovery checks the tighter bound.
 void CheckEssentialRecovery(double a_outlier_fraction) {
     const auto scene = test::MakeGeneralScene(300, a_outlier_fraction, test::NormalizedSigma(1.0), 11,
                                               test::DefaultTransform());
@@ -33,9 +49,35 @@ void CheckEssentialRecovery(double a_outlier_fraction) {
     ExpectRecovered(scene, result.score);
 }
 
+// Refinement over all inliers removes the minimal-sample overfit (spec 3.5). Wide-FOV scene
+// (half_fov_tan = 1.0): in the default narrow scene, 8-point RANSAC often ends in a wrong basin
+// that refinement cannot leave (ledger ruling). Refined recovery must not fall below unrefined.
+void CheckRefinedEssentialRecovery(double a_outlier_fraction, double a_min_inlier_fraction) {
+    const auto scene = test::MakeGeneralScene(300, a_outlier_fraction, test::NormalizedSigma(1.0), 11,
+                                              test::DefaultTransform(), 1.0);
+    RansacOptions unrefined_options;
+    unrefined_options.refinement_rounds = 0;
+    const auto unrefined = Ransac<EssentialEstimator>().Run(scene.correspondences, unrefined_options);
+    const auto refined = Ransac<EssentialEstimator>().Run(scene.correspondences, RansacOptions{});
+    ASSERT_TRUE(unrefined.success);
+    ASSERT_TRUE(refined.success);
+
+    const Recovery before = MeasureRecovery(scene, unrefined.score);
+    const Recovery after = MeasureRecovery(scene, refined.score);
+    EXPECT_GE(after.inlier_fraction, a_min_inlier_fraction);
+    EXPECT_LE(after.outlier_fraction, 0.05);
+    EXPECT_GE(after.inlier_fraction, before.inlier_fraction);
+}
+
 TEST(RansacTest, RecoversEssentialWith30PercentOutliers) { CheckEssentialRecovery(0.3); }
 
 TEST(RansacTest, RecoversEssentialWith50PercentOutliers) { CheckEssentialRecovery(0.5); }
+
+TEST(RansacTest, RefinementImprovesRecoveryWith30PercentOutliers) { CheckRefinedEssentialRecovery(0.3, 0.75); }
+
+// Bound = minimum observed - 0.05. Refined recovery at seeds 11-18 (half_fov_tan = 1.0):
+// 0.793, 0.520, 0.793, 0.760, 0.807, 0.827, 0.827, 0.573 (seed 12 stays in a wrong basin).
+TEST(RansacTest, RefinementImprovesRecoveryWith50PercentOutliers) { CheckRefinedEssentialRecovery(0.5, 0.47); }
 
 TEST(RansacTest, RecoversHomographyOnPlanarScene) {
     const auto scene = test::MakePlanarScene(300, 0.3, test::NormalizedSigma(1.0), 12, test::DefaultTransform());

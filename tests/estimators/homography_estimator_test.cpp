@@ -21,6 +21,20 @@ geometry::TwoViewCorrespondences Identity2(double a_offset_x) {
     return c;
 }
 
+double SummedTransferError(const geometry::TMatrix33F& a_H, const geometry::TwoViewCorrespondences& a_c,
+                           const Eigen::Array<bool, Eigen::Dynamic, 1>& a_mask) {
+    const geometry::TMatrix33F H_inv = a_H.inverse();
+    double sum = 0.0;
+    for (Eigen::Index i = 0; i < a_c.size(); ++i) {
+        if (!a_mask(i)) continue;
+        const geometry::TVector3DF p2 = a_H * geometry::TVector3DF(a_c.x1(0, i), a_c.x1(1, i), 1.0);
+        const geometry::TVector3DF p1 = H_inv * geometry::TVector3DF(a_c.x2(0, i), a_c.x2(1, i), 1.0);
+        sum += (a_c.x2.col(i) - p2.head<2>() / p2.z()).squaredNorm() +
+               (a_c.x1.col(i) - p1.head<2>() / p1.z()).squaredNorm();
+    }
+    return sum;
+}
+
 TEST(HomographyEstimatorTest, ExactFromFourPlanarPoints) {
     const auto scene = test::MakePlanarScene(50, 0.0, 0.0, 1, test::DefaultTransform());
     const std::array<Eigen::Index, 4> sample{0, 10, 20, 30};
@@ -105,6 +119,34 @@ TEST(HomographyEstimatorTest, SingularModelScoresZero) {
     const auto s = HomographyEstimator().Score(H, c);
     EXPECT_EQ(s.score, 0.0);
     EXPECT_EQ(s.num_inliers, 0u);
+}
+
+TEST(HomographyEstimatorTest, RefineLowersTransferError) {
+    const auto scene = test::MakePlanarScene(200, 0.0, test::NormalizedSigma(1.0), 23, test::DefaultTransform());
+    const std::array<Eigen::Index, 4> sample{0, 50, 100, 150};
+    const HomographyEstimator estimator;
+    const auto models = estimator.Estimate(scene.correspondences, sample);
+    ASSERT_EQ(models.size(), 1u);
+    const Eigen::Array<bool, Eigen::Dynamic, 1> inliers = !scene.is_outlier;
+
+    const geometry::TMatrix33F refined = estimator.Refine(models[0], scene.correspondences, inliers);
+    ASSERT_TRUE(refined.allFinite());
+    EXPECT_LT(SummedTransferError(refined, scene.correspondences, inliers),
+              SummedTransferError(models[0], scene.correspondences, inliers));
+    const Eigen::JacobiSVD<geometry::TMatrix33F> svd(refined);
+    EXPECT_GT(svd.singularValues()(2), 1e-8 * svd.singularValues()(0));
+}
+
+TEST(HomographyEstimatorTest, RefineKeepsModelOnDegenerateInput) {
+    const auto scene = test::MakePlanarScene(50, 0.0, test::NormalizedSigma(1.0), 24, test::DefaultTransform());
+    const std::array<Eigen::Index, 4> sample{0, 10, 20, 30};
+    const HomographyEstimator estimator;
+    const auto models = estimator.Estimate(scene.correspondences, sample);
+    ASSERT_EQ(models.size(), 1u);
+    Eigen::Array<bool, Eigen::Dynamic, 1> inliers = Eigen::Array<bool, Eigen::Dynamic, 1>::Constant(50, false);
+    EXPECT_EQ(estimator.Refine(models[0], scene.correspondences, inliers), models[0]);
+    inliers.head(3).setConstant(true);  // fewer than kSampleSize
+    EXPECT_EQ(estimator.Refine(models[0], scene.correspondences, inliers), models[0]);
 }
 
 } // namespace
