@@ -1,4 +1,5 @@
 add_executable(voyahviz_tests
+    camera_frustum_test.cpp
     color_image_test.cpp
     keypoint_drawing_test.cpp
     scene_state_test.cpp

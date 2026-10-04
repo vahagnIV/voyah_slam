@@ -26,18 +26,20 @@ struct Options {
     double rate = 1.0;  // playback speed; 0 = as fast as possible
     size_t max_frames = std::numeric_limits<size_t>::max();
     bool show = false;  // display frames with keypoints (voyahviz)
+    bool viewer = false;  // open the 3D map viewer (Pangolin)
 };
 
 // True if the key returned by voyahviz::ImageWindow::WaitKey() asks to quit.
 inline bool IsQuitKey(int key) { return key == 'q' || key == 27; }
 
-// Usage: <program> <dataset_root> [--rate=R] [--max-frames=N] [--show]
+// Usage: <program> <dataset_root> [--rate=R] [--max-frames=N] [--show] [--viewer]
 inline Options ParseOptions(int argc, char** argv) {
     auto usage = [argv]() {
-        std::cerr << "Usage: " << argv[0] << " <dataset_root> [--rate=R] [--max-frames=N] [--show]\n"
+        std::cerr << "Usage: " << argv[0] << " <dataset_root> [--rate=R] [--max-frames=N] [--show] [--viewer]\n"
                   << "  --rate=R        playback speed (1 = real time, 0 = as fast as possible)\n"
                   << "  --max-frames=N  stop after N frames\n"
-                  << "  --show          show frames with keypoints (q / Esc to quit)\n";
+                  << "  --show          show frames with keypoints (q / Esc to quit)\n"
+                  << "  --viewer        open the 3D map viewer (Pangolin)\n";
         std::exit(EXIT_FAILURE);
     };
     Options options;
@@ -49,6 +51,8 @@ inline Options ParseOptions(int argc, char** argv) {
             options.max_frames = std::stoul(arg.substr(13));
         } else if (arg == "--show") {
             options.show = true;
+        } else if (arg == "--viewer") {
+            options.viewer = true;
         } else if (arg.rfind("--", 0) == 0 || !options.dataset.empty()) {
             usage();
         } else {

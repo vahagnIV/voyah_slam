@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <stdexcept>
 #include <thread>
@@ -43,7 +44,7 @@ bool WaitForProcessed(const TViewer& viewer, size_t expected) {
 
 TEST(MapViewerTest, ProcessesEventPublishedBeforeStart) {
     TPool pool(1);
-    TViewer viewer;
+    TViewer viewer(MapViewerOptions{.fps = 30.0});
     events::Observable producer;
     producer.ConnectAsync(viewer.inbox());
 
@@ -63,7 +64,7 @@ TEST(MapViewerTest, ProcessesEventPublishedBeforeStart) {
 
 TEST(MapViewerTest, StopDrainsQueuedEvents) {
     TPool pool(1);
-    TViewer viewer;
+    TViewer viewer(MapViewerOptions{.fps = 30.0});
     events::Observable producer;
     producer.ConnectAsync(viewer.inbox());
 
@@ -77,7 +78,7 @@ TEST(MapViewerTest, StopDrainsQueuedEvents) {
 
 TEST(MapViewerTest, StopWithoutStartDrains) {
     TPool pool(1);
-    TViewer viewer;
+    TViewer viewer(MapViewerOptions{.fps = 30.0});
     events::Observable producer;
     producer.ConnectAsync(viewer.inbox());
 
@@ -91,7 +92,7 @@ TEST(MapViewerTest, DestructorAcknowledgesEventsPublishedAfterStop) {
     TPool pool(1);
     events::Observable producer;
     {
-        TViewer viewer;
+        TViewer viewer(MapViewerOptions{.fps = 30.0});
         producer.ConnectAsync(viewer.inbox());
         viewer.Start();
         viewer.Stop();
@@ -104,7 +105,7 @@ TEST(MapViewerTest, ReceivesFromTwoProducers) {
     // The viewer drains at its frame rate, so the pool must cover the whole
     // backlog published between ticks (here: all 20 events).
     TPool pool(32);
-    TViewer viewer;
+    TViewer viewer(MapViewerOptions{.fps = 30.0});
     events::Observable tracker;
     events::Observable mapper;
     tracker.ConnectAsync(viewer.inbox());
@@ -131,7 +132,7 @@ TEST(MapViewerTest, DestructorStopsRunningViewerAndAcknowledges) {
     TPool pool(1);
     events::Observable producer;
     {
-        TViewer viewer;
+        TViewer viewer(MapViewerOptions{.fps = 30.0});
         producer.ConnectAsync(viewer.inbox());
         viewer.Start();
         Publish(producer, pool);
@@ -142,7 +143,7 @@ TEST(MapViewerTest, DestructorStopsRunningViewerAndAcknowledges) {
 
 TEST(MapViewerTest, StartTwiceAndRestart) {
     TPool pool(1);
-    TViewer viewer;
+    TViewer viewer(MapViewerOptions{.fps = 30.0});
     events::Observable producer;
     producer.ConnectAsync(viewer.inbox());
 
@@ -156,8 +157,139 @@ TEST(MapViewerTest, StartTwiceAndRestart) {
 }
 
 TEST(MapViewerTest, RejectsNonPositiveFps) {
-    EXPECT_THROW(TViewer(0.0), std::invalid_argument);
-    EXPECT_THROW(TViewer(-5.0), std::invalid_argument);
+    EXPECT_THROW(TViewer(MapViewerOptions{.fps = 0.0}), std::invalid_argument);
+    EXPECT_THROW(TViewer(MapViewerOptions{.fps = -5.0}), std::invalid_argument);
+}
+
+TEST(MapViewerTest, RunOnCurrentThreadStopsOnRequestStop) {
+    TPool pool(1);
+    TViewer viewer(MapViewerOptions{.fps = 100.0});
+    events::Observable producer;
+    producer.ConnectAsync(viewer.inbox());
+
+    std::thread runner([&viewer] { viewer.RunOnCurrentThread(); });
+    Publish(producer, pool);
+    EXPECT_TRUE(WaitForProcessed(viewer, 1));
+    viewer.RequestStop();
+    runner.join();
+    EXPECT_EQ(viewer.events_processed(), 1u);
+    EXPECT_TRUE(SlotReturned(pool));
+}
+
+TEST(MapViewerTest, StopEndsRunOnCurrentThread) {
+    TPool pool(2);
+    TViewer viewer(MapViewerOptions{.fps = 100.0});
+    events::Observable producer;
+    producer.ConnectAsync(viewer.inbox());
+
+    std::thread runner([&viewer] { viewer.RunOnCurrentThread(); });
+    Publish(producer, pool);
+    ASSERT_TRUE(WaitForProcessed(viewer, 1));
+    Publish(producer, pool);  // may still be queued when Stop() is called
+    viewer.Stop();
+    runner.join();
+    // RunOnCurrentThread()'s own final drain acknowledged everything.
+    EXPECT_EQ(viewer.events_processed(), 2u);
+    std::vector<events::PositionUpdated*> taken;
+    for (int i = 0; i < 2; ++i) {
+        taken.push_back(pool.TryCreate());
+        ASSERT_NE(taken.back(), nullptr) << "slot " << i << " not returned";
+    }
+    for (auto* event : taken) event->Recycle();
+}
+
+TEST(MapViewerTest, RunOnCurrentThreadWhileStartedThrows) {
+    TViewer viewer(MapViewerOptions{.fps = 30.0});
+    viewer.Start();
+    EXPECT_THROW(viewer.RunOnCurrentThread(), std::logic_error);
+    viewer.Stop();
+}
+
+TEST(MapViewerTest, StartWhileRunOnCurrentThreadIsNoOp) {
+    TPool pool(1);
+    TViewer viewer(MapViewerOptions{.fps = 100.0});
+    events::Observable producer;
+    producer.ConnectAsync(viewer.inbox());
+
+    std::thread runner([&viewer] { viewer.RunOnCurrentThread(); });
+    Publish(producer, pool);
+    ASSERT_TRUE(WaitForProcessed(viewer, 1));
+    viewer.Start();  // logs a warning, does nothing
+    viewer.RequestStop();
+    runner.join();
+    viewer.Stop();  // nothing to join: no thread was started
+    EXPECT_EQ(viewer.events_processed(), 1u);
+}
+
+TEST(MapViewerTest, RequestStopBeforeRunOnCurrentThreadReturns) {
+    TPool pool(1);
+    TViewer viewer(MapViewerOptions{.fps = 100.0});
+    events::Observable producer;
+    producer.ConnectAsync(viewer.inbox());
+
+    Publish(producer, pool);
+    viewer.RequestStop();  // e.g. the worker finished before the loop was entered
+    std::atomic<bool> returned{false};
+    std::thread runner([&] {
+        viewer.RunOnCurrentThread();
+        returned.store(true);
+    });
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!returned.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(returned.load()) << "RunOnCurrentThread() ignored the earlier RequestStop()";
+    if (!returned.load()) viewer.RequestStop();  // unblock so the test can finish
+    runner.join();
+    EXPECT_EQ(viewer.events_processed(), 1u);
+    EXPECT_TRUE(SlotReturned(pool));
+
+    // The request was consumed: a later run is not ended by it.
+    std::thread second([&viewer] { viewer.RunOnCurrentThread(); });
+    Publish(producer, pool);
+    EXPECT_TRUE(WaitForProcessed(viewer, 2));
+    viewer.RequestStop();
+    second.join();
+}
+
+TEST(MapViewerTest, RequestStopBeforeStartThenStopDrains) {
+    TPool pool(1);
+    TViewer viewer(MapViewerOptions{.fps = 100.0});
+    events::Observable producer;
+    producer.ConnectAsync(viewer.inbox());
+
+    Publish(producer, pool);
+    viewer.RequestStop();
+    viewer.Start();
+    viewer.Stop();
+    EXPECT_EQ(viewer.events_processed(), 1u);
+    EXPECT_TRUE(SlotReturned(pool));
+
+    // A later Start() runs normally.
+    viewer.Start();
+    Publish(producer, pool);
+    EXPECT_TRUE(WaitForProcessed(viewer, 2));
+    viewer.Stop();
+}
+
+TEST(MapViewerTest, WaitForWindowCloseReturnsWhenHeadless) {
+    TViewer never_started(MapViewerOptions{.fps = 30.0});
+    never_started.WaitForWindowClose();
+    EXPECT_FALSE(never_started.window_closed());
+
+    TViewer started(MapViewerOptions{.fps = 30.0, .show_window = false});
+    started.Start();
+    started.WaitForWindowClose();
+    EXPECT_FALSE(started.window_closed());
+    started.Stop();
+}
+
+TEST(MapViewerTest, WaitForWindowCloseReturnsWhenNoLoopRunning) {
+    // No loop running (never started): takes the !loop_running_ path and
+    // returns at once. show_window is set, but without Start() no window opens.
+    TViewer viewer(MapViewerOptions{.fps = 30.0, .show_window = true});
+    viewer.WaitForWindowClose();
+    EXPECT_FALSE(viewer.window_closed());
 }
 
 } // namespace

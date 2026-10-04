@@ -460,9 +460,9 @@ extractor is the bottleneck (Open Question 21).
 ## Visualization Library (`vizualization/`, `voyahviz`)
 
 Development tool, never part of the production build. Implemented with
-OpenCV (HighGUI, imgproc), but — like every library of ours — OpenCV is
-private: the public API uses only voyahslam types and OpenCV is linked
-`PRIVATE` (principle 8). Namespace / include prefix: `voyahviz`.
+OpenCV (HighGUI, imgproc) and Pangolin (3D map viewer), but — like every
+library of ours — both are private: the public API uses only voyahslam types
+and OpenCV and Pangolin are linked `PRIVATE` (principle 8). Namespace / include prefix: `voyahviz`.
 
 | Header | Contents |
 |---|---|
@@ -491,23 +491,62 @@ Spec: `docs/superpowers/specs/2026-10-03-map-viewer-design.md`.
 
 | Header | Contents |
 |---|---|
-| `scene_state.h` | `SceneState<FE>`: `Apply(const Event&)`, `applied_count(type)`, `total_applied()`. Built only from events; no threads/GUI. Now only counts per `EventType` (switch without `default`, so a new type warns); payload decoding comes with Pangolin |
-| `map_viewer.h` | `MapViewer<FE>(fps = 30)`: one `AsyncObserver` inbox, own thread, `Start()`/`Stop()`, `inbox()`, `events_processed()` (atomic). Empty `Render()` hook for Pangolin |
+| `scene_state.h` | `SceneState<FE>`: `Apply(const Event&)`, per-`EventType` counters, and the decoded scene: map points (dense, indexed by per-map point id), keyframe poses (`T_cw`), current camera pose, trajectory. Built only from events; no threads/GUI |
+| `camera_frustum.h` | Camera frustum geometry helper (corner points of a frustum of a given size) |
+| `map_viewer.h` | `MapViewer<FE>(MapViewerOptions{fps, show_window, width, height, camera_size})`: one `AsyncObserver` inbox, `Start()` / `Stop()` / `RunOnCurrentThread()` / `RequestStop()`, `inbox()`, `events_processed()`, `window_closed()`, `WaitForWindowClose()` |
+| `pangolin_renderer.h` (private, `src/`) | Pangolin window: points, keyframe frustums (blue), current camera (green), trajectory, control panel (toggles, map id, counts, status) |
 
-- Loop: drain inbox through a local `Listener` (acknowledges each event) →
-  `SceneState::Apply` → `Render()` → sleep to the next absolute deadline (no
-  catch-up when late). No busy-waiting, independent of OQ 20.
-- `Stop()`: joins, then drains once more so queued events return to their
-  pools; idempotent, safe without `Start()`; restart allowed; destructor stops.
-  `fps <= 0` throws.
+Specs: `docs/superpowers/specs/2026-10-04-pangolin-viewer-design.md`
+(Pangolin viewer), `docs/superpowers/specs/2026-10-03-map-viewer-design.md`.
+
+- **`SceneState` is the scene model.** It is rebuilt purely from events and
+  follows the multi-map rule: it shows the newest map seen; events of older
+  maps are ignored, an event of a newer map clears the scene and adopts it;
+  events with map 0 are counted only.
+- **Loop-thread invariant:** only the thread running the loop touches the
+  `SceneState`, the renderer and the GL context. The window is created at loop
+  entry and destroyed at loop exit (or on close), on that thread. Other threads
+  only use the atomics (`window_closed()`, `events_processed()`) and `inbox()`.
+- Loop: drain inbox through a local `Listener` (acknowledges each event) ->
+  `SceneState::Apply` -> render (if the window is open) -> sleep to the next
+  absolute deadline (no catch-up when late). No busy-waiting.
+- **`Start()` vs `RunOnCurrentThread()`:** `Start()` runs the loop on the
+  viewer's own thread (Linux). `RunOnCurrentThread()` runs it on the caller's
+  thread, because on macOS the GUI (Pangolin/Cocoa) must live on the main
+  thread; the app would then run playback on a worker thread. The apps use
+  `Start()` today; the macOS setup is in TODO.
+- **Stop semantics:** `Stop()` in `Start()` mode joins and drains once more so
+  queued events return to their pools; idempotent, safe without `Start()`,
+  restart allowed, destructor stops. During `RunOnCurrentThread()`, `Stop()`
+  only requests the stop and the loop drains itself on its own thread; other
+  threads end that run with `RequestStop()` only (a `Stop()` before the loop is
+  entered would consume the request and a later `RunOnCurrentThread()` would
+  block), and `Stop()` / the destructor belong on the loop's thread after it
+  returns. `Start()`/`Stop()` must be called from one controlling thread
+  (externally ordered). A
+  `RequestStop()` made before the loop is entered is kept (the run drains once
+  and returns). `fps <= 0` throws.
+- **Window close does not end the loop.** It keeps draining headless (so the
+  producers' event pools never stall); only `RequestStop()` / `Stop()` end it.
+  `window_closed()` is also true if the window could not be created (logged,
+  runs headless). Apps stop playback when it turns true and, after the last
+  frame, wait with `WaitForWindowClose()`.
+- **Wayland:** on Linux under Wayland with `PANGOLIN_WINDOW_URI` unset, the
+  `MapViewer` constructor sets it to `x11://` (XWayland): Pangolin's Wayland
+  backend blocks in `eglSwapBuffers` on GNOME, which would stall the drain and
+  the producers' pools. Construct the viewer before other threads start.
 - **Ordering:** connect with `AddObserver(viewer.inbox())` before the producers
   start; stop `Slam` before the viewer.
 - Pools feeding the viewer must cover the backlog published between two ticks
-  (≈ 33 ms at 30 fps) — relevant to OQ 14.
-- The full_slam apps always attach a `MapViewer` and print
-  `viewer: N events processed` (0 until Tracker/Mapper publish).
-- Pangolin (used by ORB-SLAM3, installed in `/usr/local`) will render 3D map
-  points, keyframes and the current pose.
+  (about 33 ms at 30 fps) - relevant to OQ 14.
+- **Pangolin is a private dependency:** linked `PRIVATE` via `pango_display`
+  (installed in `/usr/local`, 0.9); no Pangolin types in public headers
+  (principle 8).
+- The full_slam apps always attach a `MapViewer` (headless by default) and
+  print `viewer: N events processed`; `--viewer` opens the window (also stops
+  playback when the window is closed and, at the end of playback, waits for it
+  to be closed).
+- Verified with ThreadSanitizer (`MapViewer*:SceneState*`, 2026-10-04: clean).
 
 ## Geometry Toolkit (`estimators/`, `geometry/`)
 
@@ -729,6 +768,15 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-04 | Zero triangulated points and a non-finite median depth count as initialization failure. | The Mapper uses the result's keyframes/points directly; an empty or unscalable map must not be created. |
 | 2026-10-04 | SIFT radians / strongest-N fix: see the `ImageFeatures` level row above. | Same change; recorded there. |
 | 2026-10-04 | Monocular initialization: ORB-SLAM3 matcher + two-view reconstruction, scaled to median depth 1, published as `MapPointsAdded` -> `KeyFrameCreated` (with observations) -> `MapCreated`; per-map point ids; keyframes store `T_cw`. | Replicas need points before the keyframes that observe them; per-map ids keep storage compact and `(map_id, id)` unique. |
+| 2026-10-04 | Pangolin map viewer: `SceneState` decodes events into a scene model (newest map wins); `PangolinRenderer` is private to voyahviz. | Same code can later be fed by a deserializer on a remote machine; renderer stays swappable. |
+| 2026-10-04 | `Stop()` during `RunOnCurrentThread()` only requests the stop; the loop drains itself on its own thread. | Keeps the loop-thread invariant: the drain touches the scene/renderer, which only the loop thread may do. |
+| 2026-10-04 | Closing the window does not end the loop; only `RequestStop()` / `Stop()` do. The loop keeps draining headless. | Producers' event pools must never stall because a user closed a window. |
+| 2026-10-04 | A `RequestStop()` made before the loop is entered is preserved (never lost). | A producer finishing first must not leave `RunOnCurrentThread()` blocked forever. |
+| 2026-10-04 | On Linux under Wayland with `PANGOLIN_WINDOW_URI` unset, `MapViewer`'s constructor sets it to `x11://`. | Pangolin's Wayland backend blocks in `eglSwapBuffers` on GNOME, stalling the drain and the producers' pools. |
+| 2026-10-04 | Pangolin linked `PRIVATE` via `pango_display`. | No Pangolin headers/types for library users (principle 8). |
+| 2026-10-04 | Window-creation failure counts as `window_closed()`, so `--viewer` without a display stops playback after the first frame. | The viewer keeps draining headless; an app that asked for a window should not silently play on without one. |
+| 2026-10-04 | `MapViewer::RunOnCurrentThread()` besides `Start()` (macOS hedge). | Cocoa requires the GUI on the main thread; the app would then play back on a worker thread. Not used by the apps yet. In this mode other threads end the run with `RequestStop()` only. |
+| 2026-10-04 | Apps: `--viewer` opens the window; playback stops when it is closed; after the last frame the app waits for it to be closed. | The map is only worth inspecting once playback ends; closing the window is the user's exit. |
 
 ## 9. Open Questions
 
@@ -867,6 +915,10 @@ branch → review → merge to `master`. Update this document at the end.
   `MapInitializer`, Mapper stores and publishes the initial map with
   observations, `TPose` -> `RigidTransformation` migration (see "Monocular
   Initialization").
+
+- Pangolin 3D map viewer (branch `feat/pangolin-viewer`, merge pending):
+  `SceneState` decoding, `MapViewer` window lifecycle, `PangolinRenderer`,
+  apps `--viewer` (see "Map Viewer").
 
 - Tracker/Mapper state machines and initialization protocol (branch
   `feat/tracking-states`, merge pending): `MapId` + `Event::map_id` consumer
