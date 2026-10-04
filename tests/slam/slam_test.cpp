@@ -71,6 +71,11 @@ public:
         while (events::Event* event = mapper_listener_.GetNextEvent()) {
             if (event->type == events::EventType::MapCreated) {
                 map_created.push_back(event->map_id.value);
+            } else if (event->type == events::EventType::MapPointsAdded) {
+                map_points_added.push_back(event->map_id.value);
+                // Map points before the MapCreated that announces their map.
+                map_points_added_before_map_created.push_back(
+                    map_created.empty() || map_created.back() != event->map_id.value);
             }
         }
         while (events::Event* event = tracker_listener_.GetNextEvent()) {
@@ -100,6 +105,8 @@ public:
     }
 
     std::vector<uint32_t> map_created;
+    std::vector<uint32_t> map_points_added;
+    std::vector<bool> map_points_added_before_map_created;
     std::vector<uint32_t> position_updated;
     std::vector<uint32_t> tracking_lost;
 
@@ -147,6 +154,8 @@ TEST(SlamTest, EndToEndInitializeTrackLoseReinitialize) {
     }
     ASSERT_TRUE(recorder.WaitFor([&] { return !recorder.map_created.empty(); }));
     EXPECT_EQ(recorder.map_created, std::vector<uint32_t>{1});
+    EXPECT_EQ(recorder.map_points_added, std::vector<uint32_t>{1});
+    EXPECT_EQ(recorder.map_points_added_before_map_created, std::vector<bool>{true});
     ASSERT_TRUE(recorder.WaitFor([&] {
         return tracker.state() == tracking::TrackerState::Tracking &&
                tracker.current_map_id() == map::MapId{1};
@@ -176,6 +185,8 @@ TEST(SlamTest, EndToEndInitializeTrackLoseReinitialize) {
     }
     ASSERT_TRUE(recorder.WaitFor([&] { return recorder.map_created.size() >= 2; }));
     EXPECT_EQ(recorder.map_created, (std::vector<uint32_t>{1, 2}));
+    EXPECT_EQ(recorder.map_points_added, (std::vector<uint32_t>{1, 2}));
+    EXPECT_EQ(recorder.map_points_added_before_map_created, (std::vector<bool>{true, true}));
     ASSERT_TRUE(recorder.WaitFor([&] {
         return tracker.state() == tracking::TrackerState::Tracking &&
                tracker.current_map_id() == map::MapId{2};
