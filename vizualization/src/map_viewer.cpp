@@ -15,6 +15,9 @@ MapViewer<TFeatureExtractor>::MapViewer(MapViewerOptions options) : options_(opt
     }
     period_ = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
         std::chrono::duration<double>(1.0 / options_.fps));
+    if (options_.show_window) {
+        PreferX11BackendOnWayland();  // setenv: here, before the viewer thread exists
+    }
 }
 
 template <typename TFeatureExtractor>

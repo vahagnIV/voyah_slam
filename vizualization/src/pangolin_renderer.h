@@ -13,6 +13,12 @@
 
 namespace voyahviz {
 
+// On a Linux Wayland session with PANGOLIN_WINDOW_URI unset, sets it to
+// "x11://" (Pangolin's Wayland backend stalls; see the definition). Calls
+// setenv, so it must run before other threads start: MapViewer's constructor
+// calls it when show_window is set.
+void PreferX11BackendOnWayland();
+
 // Private to voyahviz: owns the Pangolin window and its GL context. Every call,
 // including construction and destruction, must happen on the viewer loop's
 // thread (the context is bound to it).
@@ -44,7 +50,9 @@ private:
     double camera_size_;
     pangolin::OpenGlMatrix initial_model_view_;
     pangolin::OpenGlRenderState render_state_;
-    std::unique_ptr<pangolin::Handler3D> handler_;  // outlives the views (window destroyed first)
+    // The map view points at it; the destructor body destroys the window (and
+    // with it the view) before members are destroyed.
+    std::unique_ptr<pangolin::Handler3D> handler_;
     pangolin::View* map_view_ = nullptr;            // owned by the window's context
 
     pangolin::Var<bool> show_points_;

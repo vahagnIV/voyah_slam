@@ -42,7 +42,8 @@ struct MapViewerOptions {
 template <typename TFeatureExtractor>
 class MapViewer {
 public:
-    // Throws std::invalid_argument if options.fps <= 0.
+    // Throws std::invalid_argument if options.fps <= 0. With show_window it may
+    // set PANGOLIN_WINDOW_URI (setenv), so construct it before other threads start.
     explicit MapViewer(MapViewerOptions options = {});
     // Calls Stop(). Must not run while RunOnCurrentThread() is still active.
     ~MapViewer();

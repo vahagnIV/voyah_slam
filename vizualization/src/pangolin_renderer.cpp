@@ -48,6 +48,19 @@ const char* StatusName(TrackingStatus status) {
 
 } // namespace
 
+void PreferX11BackendOnWayland() {
+#if defined(__linux__)
+    // Pangolin's Wayland backend (its default here) blocks in eglSwapBuffers on
+    // GNOME after the first frame, which would stall the viewer's inbox drain and
+    // with it the producers' event pools. On a Wayland session prefer X11
+    // (XWayland) unless the user chose a backend; if X11 is unavailable the
+    // renderer's constructor throws and the viewer runs headless.
+    if (std::getenv("WAYLAND_DISPLAY") != nullptr && std::getenv("PANGOLIN_WINDOW_URI") == nullptr) {
+        setenv("PANGOLIN_WINDOW_URI", "x11://", /*overwrite=*/0);
+    }
+#endif
+}
+
 template <typename TFeatureExtractor>
 PangolinRenderer<TFeatureExtractor>::PangolinRenderer(const MapViewerOptions& options)
     : window_name_("voyahslam map"),
@@ -67,12 +80,6 @@ PangolinRenderer<TFeatureExtractor>::PangolinRenderer(const MapViewerOptions& op
       keyframes_text_("menu.Keyframes", "", pangolin::META_FLAG_READONLY),
       status_text_("menu.Status", "", pangolin::META_FLAG_READONLY),
       events_text_("menu.Events", "", pangolin::META_FLAG_READONLY) {
-    // Pangolin's Wayland backend (its default here) blocks in eglSwapBuffers on
-    // GNOME after the first frame, which would stall the viewer's inbox drain and
-    // with it the producers' event pools. Prefer X11 (XWayland) unless the user
-    // chose a backend; if X11 is unavailable the constructor throws and the
-    // viewer runs headless.
-    setenv("PANGOLIN_WINDOW_URI", "x11://", /*overwrite=*/0);
     pangolin::CreateWindowAndBind(window_name_, options.width, options.height);
     glEnable(GL_DEPTH_TEST);
     pangolin::CreatePanel("menu").SetBounds(0.0, 1.0, 0.0, pangolin::Attach::Pix(kPanelWidthPx));
@@ -135,6 +142,10 @@ bool PangolinRenderer<TFeatureExtractor>::Draw(const SceneState<TFeatureExtracto
         glLineWidth(1);
     }
 
+    // Leave GL state as Pangolin's widgets expect it.
+    glPointSize(1);
+    glLineWidth(1);
+    glColor3f(1.0f, 1.0f, 1.0f);
     pangolin::FinishFrame();
     return !pangolin::ShouldQuit();
 }
