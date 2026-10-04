@@ -142,6 +142,7 @@ struct RansacOptions {
     size_t min_iterations = 50;
     double confidence = 0.99;
     uint32_t seed = 0;
+    size_t refinement_rounds = 5;   // amendment 2026-10-04 (implementation): default 5
 };
 
 template <typename TModel>
@@ -175,7 +176,8 @@ public:
   const Eigen::Array<bool, Eigen::Dynamic, 1>& inliers) const` (detected
   with a `requires` expression — optional, not part of the concept), then
   after the sampling loop: up to `RansacOptions::refinement_rounds` (default
-  3) rounds of refine on the current inliers → re-score → keep the refined
+  5; **amendment 2026-10-04 (implementation):** was 3 in the first draft,
+  raised to 5 together with the LM stopping change in §3.5) rounds of refine on the current inliers → re-score → keep the refined
   model only if its score is strictly higher, else stop. The result's
   `score`/`inliers` are those of the returned model.
 
@@ -183,9 +185,11 @@ public:
 
 Minimal-sample models overfit noise (measured: ~55 % of true inliers
 recovered, pose errors of several degrees at σ = 1 px). Both estimators get
-`Refine`, a Levenberg–Marquardt minimization over the inliers (at most 10
-iterations, stop early when the relative cost decrease < 1e-6; a numeric
-Jacobian is acceptable):
+`Refine`, a Levenberg–Marquardt minimization over the inliers (**amendment 2026-10-04
+(implementation):** at most 20 accepted steps / 40 trials — rejected trials do
+not consume the accepted-step budget — early stop at relative cost decrease
+< 1e-6, instead of the original "at most 10 iterations"; a numeric Jacobian is
+acceptable):
 
 - `EssentialEstimator::Refine`: parameterize E = [t]ₓR with R (3-dof
   rotation update, applied as R ← exp([δω]ₓ) R) and t on the unit sphere
@@ -336,10 +340,10 @@ replaced by uniform random normalized points within the field of view.
 | `RigidTransformation` | identity; `Inverse()` round trip; `(T_ab * T_bc).Transform(p) == T_ab.Transform(T_bc.Transform(p))`; matrix exports |
 | `HomographyEstimator` | exact H from 4 noise-free planar points; collinear sample → no model; true H outscores a perturbed H; score/inliers on a hand-computed 2-point case |
 | `EssentialEstimator` | exact E (up to scale, x2ᵀEx1 ≈ 0) from 8 noise-free points; singular values (s, s, 0); degenerate sample → no model; score on a hand-computed case |
-| `Ransac` | recovers E with 30 % and 50 % outliers (inliers match ground truth ≥ 95 %); clean data stops well below `max_iterations`; same seed → identical result; N < kSampleSize → `success = false` |
+| `Ransac` | recovers E with 30 % and 50 % outliers (**amendment 2026-10-04 (implementation):** ≥ 50 % of true inliers with ≤ 5 % outliers, narrow FOV, refinement on — noise in both views means only ~58 % of true inliers pass both χ² tests at σ = noise); clean data stops well below `max_iterations`; same seed → identical result; N < kSampleSize → `success = false` |
 | Decomposition | the true `T_21` (t up to sign/scale, R exact) is among E's 4 and H's candidates |
-| Refinement | `Refine` lowers the summed residual on noisy inliers; refined E/H stay finite and well-conditioned; Ransac with refinement recovers ≥ 75 % of true inliers (vs ≥ 50 % without) |
-| `SelectPose` / `Reconstruct` | general scene → Essential, rotation error < 1°, translation direction error < 2°; wide-FOV tilted planar scene → Homography, same tolerances; narrow near-frontal planar scene → rejected (ambiguity); pure rotation / 1 cm baseline → `success = false` (parallax); 30 correspondences → `success = false` (min_triangulated); deterministic for a fixed seed |
+| Refinement | `Refine` lowers the summed residual on noisy inliers; refined E/H stay finite and well-conditioned; Ransac with refinement recovers ≥ 75 % of true inliers (vs ≥ 50 % without) at 30 % outliers, wide FOV (**amendment 2026-10-04 (implementation):** wide-FOV scenes, half_fov_tan = 1.0; 50 % outliers: ≥ 0.47 = min observed over seeds 11–18 minus 0.05; refined ≥ unrefined at the chosen seed) |
+| `SelectPose` / `Reconstruct` | general scene → Essential, rotation error < 1°, translation direction error **< 10°** (**amendment 2026-10-04 (implementation):** wide-FOV scene; 10° is the observed maximum over 21 seeds (9.92°), about half the seeds are under 2°; refinement can stop in a local minimum — further accuracy comes from bundle adjustment after initialization), `num_triangulated ≥ 0.5 × true inliers`; wide-FOV tilted planar scene → Homography, rotation < 1°, translation direction < 2° (21/21 seeds); narrow near-frontal planar scene → rejected (ambiguity); pure rotation / 1 cm baseline → `success = false` (parallax); 30 correspondences → `success = false` (min_triangulated); deterministic for a fixed seed |
 
 All tests seeded; no images.
 

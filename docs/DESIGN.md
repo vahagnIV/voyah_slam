@@ -8,7 +8,7 @@
 > `docs/superpowers/specs/` and `docs/superpowers/plans/`. When they disagree
 > with this document, **this document wins** — fix the spec or note the change here.
 
-Last updated: 2026-10-03
+Last updated: 2026-10-04
 
 ---
 
@@ -508,6 +508,69 @@ Spec: `docs/superpowers/specs/2026-10-03-map-viewer-design.md`.
 - Pangolin (used by ORB-SLAM3, installed in `/usr/local`) will render 3D map
   points, keyframes and the current pose.
 
+## Geometry Toolkit (`estimators/`, `geometry/`)
+
+Spec: `docs/superpowers/specs/2026-10-04-two-view-geometry-design.md` (part A of
+the real monocular initializer; matching and `MapInitializer` integration are
+spec B+C). Pure math on **normalized, undistorted points** (z = 1), so the
+calibrated model is the essential matrix E, not F + K. Sigma is in normalized
+units (σ_px / f). Verified on synthetic scenes only.
+
+| Component | Header | Summary |
+|---|---|---|
+| `RigidTransformation` | `geometry/rigid_transformation.h` | Value type, hidden representation (R, t now). `T_ab` maps frame b to frame a: `p_a = T_ab * p_b`, `T_ac = T_ab * T_bc`. `Inverse()`, `Transform()`, `ToMatrix34/44()`. |
+| `TwoViewCorrespondences` | `geometry/two_view_correspondences.h` | `x1`, `x2` (2xN normalized) + `sigma`. |
+| `TwoViewEstimator` concept, `ModelScore` | `estimators/two_view_estimator.h` | `TModel`, `kSampleSize`, `Estimate(corr, sample)` -> 0..n candidates, `Score(model, corr)` -> score + inlier mask. |
+| `HomographyEstimator` | `estimators/homography_estimator.h` | 4-point DLT (Hartley-normalized), `H_21`; score = ORB-SLAM3 `CheckHomography` (symmetric transfer, χ² < 5.991). |
+| `EssentialEstimator` | `estimators/essential_estimator.h` | Normalized 8-point + projection to the essential manifold, `E_21`; score = ORB-SLAM3 `CheckFundamental` (χ² < 3.841 per direction, adds 5.991 - χ²). |
+| `Ransac<TEstimator>` | `estimators/ransac.h` | Generic, header-only, deterministic (own `mt19937` from `seed`). |
+| `DecomposeEssential`, `DecomposeHomography` | `geometry/two_view_decomposition.h` | 4 (R, ±t) poses from E; up to 8 Faugeras candidates (+ plane normal) from H. `‖t‖ = 1`, `det R = +1`. |
+| `SelectPose` | `geometry/two_view_reconstruction.h` | ORB-SLAM3 `CheckRT` + acceptance rules. |
+| `TwoViewReconstructor` | `geometry/two_view_reconstruction.h` | Fits H and E, picks the model, decomposes, selects the pose. |
+
+**Estimator contract.** `Estimate` and `Score` are required; scores of all
+estimators are on one scale (truncated χ², σ in normalized units). An estimator
+may also provide `Refine(model, corr, inliers)`; `Ransac` detects it with a
+`requires` expression (optional, not part of the concept). Both estimators
+implement it: Levenberg-Marquardt over the inliers (E: R update + t on the unit
+sphere, Sampson error; H: 8 parameters, symmetric transfer error); at most 20
+accepted steps / 40 trials, early stop at relative decrease < 1e-6; a non-finite
+or ill-conditioned result returns the input model.
+
+**Ransac.** Per iteration: sample `kSampleSize` distinct indices (partial
+Fisher-Yates), score every candidate, keep the best. Adaptive stop from the
+inlier ratio (`confidence`, clamped to `[min_iterations, max_iterations]`).
+Afterwards up to `refinement_rounds` (5) of local refinement: refine on the
+current inliers, re-score, keep only strict improvements. `success = false` for
+N < `kSampleSize` or no positive score.
+
+**SelectPose / CheckRT.** For every inlier, triangulate with `P1 = [I|0]`,
+`P2 = T_21`; skip non-finite points, points behind a camera (unless the point
+has almost no parallax) and points with reprojection error > 4σ² in either view.
+Accept the candidate with the most good points if it has
+`> max(0.9 x inliers, 50)` good points, no other candidate has more than
+`uniqueness x best` (E: 0.7, H: 0.75) and parallax >= 1° (50th-smallest
+parallax angle, as ORB-SLAM3). Far points count as good but are not returned as
+triangulated.
+
+**Model selection (COLMAP rule).** `Reconstruct` runs `Ransac` for H and for E
+(seeds `seed`, `seed + 1`) and picks H iff `inliers_H >= 0.8 x inliers_E`
+(a homography explains nearly everything E does: planar scene or near-pure
+rotation); otherwise E. ORB-SLAM3's score ratio `S_H / (S_H + S_E) > 0.4` does
+not transfer: it relies on the *uncalibrated* F degenerating on planes, whereas
+a calibrated E fits planar points as well as general ones (measured: even the
+ground-truth H vs E gives a ratio of about 0.41). Both scores are still
+reported. A non-positive sigma fails the reconstruction. The default narrow,
+near-frontal planar scene is rejected as ambiguous by design.
+
+**Measured accuracy limits.** Minimal-sample 8-point + LM refinement can stop in
+a local minimum: on a wide-FOV general scene the translation-direction error is
+0.3-1.7° from the true E but up to 9.9° from the refined estimate (about half of
+21 seeds under 2°); rotation < 1°. Only ~58 % of true inliers are flagged at
+σ = noise (noise in both views). Planar wide-FOV: 21/21 seeds < 1° / < 2°.
+Further accuracy is left to bundle adjustment right after initialization (as in
+ORB-SLAM3).
+
 ## 7. Coding Conventions
 
 **Naming (Google C++ style):**
@@ -602,6 +665,14 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-03 | Maps are identified by a monotonic `map_id` on every event; consumer rule: ignore older, reset-and-adopt newer, apply equal; 0 exempt. | Detects stale events across map restarts; the initial map's diffs precede `MapCreated`, so a newer id must adopt rather than drop. |
 | 2026-10-03 | A component changes its state (and `current_map_id_`) **before** publishing the event that announces it (`MapCreated` -> `Mapping`, `TrackingLost` -> `Lost`). | Whoever observes the event, on any thread, then also observes the new `state()`; publishing first let `state()` lag the protocol. |
 | 2026-10-03 | Monocular initialization needs many frames (reference + a later frame); stereo uses one measurement. | Mono needs parallax between views; stereo has depth from one pair. |
+| 2026-10-04 | Essential solver: normalized 8-point now, 5-point later (TODO, raised priority), behind an estimator interface that returns several candidates per sample. | 8-point is simple and verifiable; narrow-FOV scenes are ambiguous for it, which 5-point fixes. |
+| 2026-10-04 | One generic `Ransac<TEstimator>` per model (H, E), not ORB-SLAM3's shared sample loop. | Reusable for PnP, Sim3, stereo; the models are independent; cost is two sequential runs (parallel run optional, TODO). |
+| 2026-10-04 | ORB-SLAM3 truncated-χ² scores with σ in normalized units (σ_px / f). | Calibrated normalized points; keeps scores comparable across estimators and independent of the camera. |
+| 2026-10-04 | `RigidTransformation` with hidden representation and `T_ab` (b -> a) convention; replaces the empty placeholder; `TPose` users migrate later (TODO). | 4x4 or quaternion storage can be swapped without touching callers; `T_ac = T_ab * T_bc` reads naturally. |
+| 2026-10-04 | Local refinement: optional `Refine` (Levenberg-Marquardt over inliers) in each estimator, 5 rounds in `Ransac`; LM counts only accepted steps (20 accepted / 40 trials). | Minimal-sample models recovered only ~55 % of true inliers with errors of several degrees; counting rejected trials starved the budget. |
+| 2026-10-04 | H-vs-E selection uses the COLMAP rule (`inliers_H >= 0.8 x inliers_E`), not the ORB-SLAM3 score ratio. | A calibrated E fits planes as well as general scenes, so the ratio does not separate them (ground truth gave about 0.41). |
+| 2026-10-04 | Recovery/accuracy tests use wide-FOV scenes (`half_fov_tan = 1.0`, close to the TUM-VI fisheye); narrow-FOV and near-frontal planar scenes are tested as rejected/weak. | Narrow FOV is ambiguous for the 8-point solver; the weakness is tracked as 5-point priority rather than hidden by loose bounds. |
+| 2026-10-04 | Accepted accuracy limits: translation direction < 10° on general scenes (max 9.92° over 21 seeds), rotation < 1°, recovery >= 50 % (narrow) / >= 75 % (wide, 30 % outliers), `num_triangulated >= 0.5 x true inliers`. | Statistics of the scores (noise in both views) and local minima of the refinement; bundle adjustment after initialization provides the final accuracy. |
 
 ## 9. Open Questions
 
@@ -730,6 +801,11 @@ branch → review → merge to `master`. Update this document at the end.
   loop in `KannalaBrandtDistortionModel::PrecomputeInitialGuessLookup` for
   fisheye lenses wider than the image.
 
+- Two-view geometry toolkit (branch `feat/two-view-geometry`, merge pending):
+  `RigidTransformation`, homography/essential estimators with LM refinement,
+  generic `Ransac`, decomposition, `SelectPose`, `TwoViewReconstructor`
+  (see "Geometry Toolkit"). Not yet wired into `MapInitializer`.
+
 - Tracker/Mapper state machines and initialization protocol (branch
   `feat/tracking-states`, merge pending): `MapId` + `Event::map_id` consumer
   rule, `TMeasurement` variant in events, `InitializationMeasurement` /
@@ -750,8 +826,8 @@ branch → review → merge to `master`. Update this document at the end.
   rounding, keypoint level). Building OpenCV from source to link against
   (in progress, user).
 - Tracker measurement policy (19).
-- Real geometry behind the stubs: two-view initialization (`MapInitializer`)
-  and pose estimation (track-with-motion-model, track-reference-keyframe,
+- Real geometry behind the stubs: two-view initialization (`MapInitializer`;
+  toolkit done, matching + integration = spec B+C) and pose estimation (track-with-motion-model, track-reference-keyframe,
   track-local-map; `PoseEstimator`), applying map diffs to the Tracker replica,
   relocalization in `Lost`, keyframe decision (`NewKeyFrameCandidate`).
 - Event pool lifetime (Open Question 25).

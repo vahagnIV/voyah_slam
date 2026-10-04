@@ -39,6 +39,16 @@ as soon as they come up.
 
 - [ ] Bearing vectors instead of z = 1 normalized points (full fisheye FOV);
       interim 85° cut-off in place. Decide with the Tracker design. (OQ 22)
+- [ ] **5-point essential solver** (priority raised: narrow-FOV robustness; the
+      8-point solver is ambiguous on narrow FOV and wide-FOV tests are used).
+- [ ] Improve refinement convergence: LM can stop in a local minimum
+      (translation-direction error 3-10° on about half of the seeds vs
+      0.3-1.7° from the true E). Options: local optimization inside the RANSAC
+      loop, a better parameterization, or rely on bundle adjustment after
+      initialization.
+- [ ] Migrate `TPose` users (`Frame`, events, Tracker, Mapper) to
+      `RigidTransformation` before spec C.
+- [ ] Optional: run the H and E RANSACs in parallel.
 - [ ] Stereo matching in `BinocularMeasurement` (depths / right indices are
       placeholders).
 
@@ -140,7 +150,46 @@ Deferred minor findings from the per-task and final reviews.
       has no default initializer; `tracker.h` and `full_slam_common.h` pull in
       heavy headers.
 
+## Review follow-ups (two-view geometry, 2026-10-04)
+
+Deferred minor findings from the per-task reviews.
+
+- [ ] Robustness: `ransac.h` `std::clamp` is UB when `min_iterations >
+      max_iterations` (compute bounds once with `std::min/max`);
+      `SelectPose` lacks an `inliers.size() == correspondences.size()` guard
+      and counts a NaN reprojection error (z exactly 0) as good (use
+      `!(err <= max)`); estimator samples larger than `kSampleSize` are
+      silently truncated (document or assert); LM rejected-trial / Jacobian
+      failure on the first linearization returns `[t]xR` rather than the exact
+      input (doc mismatch, harmless).
+- [ ] Docs: `uniform_int_distribution` is not reproducible across
+      libstdc++/libc++ (seeded results differ per standard library); Ransac
+      confidence edge cases; `TwoViewCorrespondences::sigma` has no default
+      initializer; homography `Refine` doc should state the H(2,2) = 1 result;
+      `plane_normal` of non-selected candidates is flipped without t
+      (document "only meaningful for the selected candidate"); an essential
+      test comment says ~90 % expected, actual ~83 %.
+- [ ] Hygiene: `M_PI` / duplicated `kRadToDeg` (use `std::numbers::pi`);
+      repeated `1e-12` literal; Hartley centroid/spread duplicated in
+      `Normalize`; two SVDs per homography hypothesis;
+      `Transform(col expression)` is ambiguous between `TPoint3DF` /
+      `TPoints3DF` overloads (callers must wrap).
+- [ ] Tests to add: scene helper checks (planar x2 consistency, outlier range,
+      noisy-scene noise level); unseeded `Random()`/`UnitRandom()` in
+      `rigid_transformation_test`, point-level inverse round trip; infinity
+      and zero-epipolar-line scores pinned exactly (5.991);
+      `TrueModelOutscoresPerturbed` with the true H; Ransac exact
+      `min_iterations` early stop, `max_iterations` cap, no-positive-score path
+      (the 50 % test takes ~2.8 s in Debug); decomposition with negated H and
+      several poses, near-degenerate singular-value band; rejection tests
+      (`NarrowFrontalPlanar`, `PureRotation`, `TinyBaseline`) should assert the
+      reason, and the "H because E failed" branch is untested; wide-FOV scenes
+      still draw outliers from ±0.6 (scale with `half_fov_tan`) and the
+      refined >= unrefined check holds only at the chosen seed.
+
 ## Environment
 
 - [ ] Second dev machine: build OpenCV 5.x from source into `/usr/local` with
       `WITH_GTK=ON` (Conan no longer provides OpenCV).
+- [ ] Recurring: syntax-check all sources with clang-18 + libc++ (clean on
+      2026-10-04, 65 sources); later add an Android NDK arm64 cross-build.
