@@ -2,24 +2,18 @@
 
 #include <cmath>
 
+#include "estimators/two_view_normalization.h"
 #include "voyahslam/algebra/algebra.h"
 
 namespace voyahslam::estimators {
 
 namespace {
 
+using internal::Normalize;
+
 constexpr double kMinW = 1e-12;
 constexpr double kSingularRatio = 1e-10;
 constexpr double kMinConditionRatio = 1e-8;
-
-// Returns false if the points are (nearly) identical so no normalization exists.
-bool Normalize(const geometry::TPoints2DF& a_pts, geometry::TMatrix33F& out_T) {
-    const geometry::TPoint2DF centroid = a_pts.rowwise().mean();
-    const double spread = (a_pts.colwise() - centroid).colwise().squaredNorm().mean();
-    if (!std::isfinite(spread) || spread <= 0.0) return false;
-    out_T = algebra::GetHartleyNormalizationMatrix(a_pts);
-    return out_T.allFinite();
-}
 
 // Squared transfer error of x_from mapped by M, compared to x_to; false if mapped to infinity.
 bool TransferChi2(const geometry::TMatrix33F& a_M, const geometry::TPoint2DF& a_from,

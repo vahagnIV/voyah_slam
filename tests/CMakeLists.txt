@@ -2,6 +2,7 @@ add_executable(voyahslam_tests
     test_voyahslam.cpp
     utils_test.cpp
     algebra/algebra_test.cpp
+    estimators/essential_estimator_test.cpp
     estimators/homography_estimator_test.cpp
     geometry/geometry_test.cpp
     geometry/rigid_transformation_test.cpp
