@@ -7,6 +7,7 @@ add_executable(voyahslam_tests
     estimators/ransac_test.cpp
     geometry/geometry_test.cpp
     geometry/rigid_transformation_test.cpp
+    geometry/two_view_decomposition_test.cpp
     geometry/two_view_scene_test.cpp
     images/bilinear_interpolation_tests.cpp
     images/filter_tests.cpp
