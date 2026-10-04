@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <support/synthetic_sequence.h>
 #include <support/test_measurements.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
@@ -6,6 +7,7 @@
 #include <voyahslam/mapping/mapper.h>
 #include <voyahslam/memory/object_pool.h>
 
+#include <cstddef>
 #include <variant>
 #include <vector>
 
@@ -22,6 +24,7 @@ struct Published {
     events::EventType type;
     map::MapId map_id;
     map::FrameId frame_id;
+    double timestamp = 0.0;  // of the keyframe's measurement (KeyFrameCreated only)
 };
 
 // Feeds the Mapper's inbox from `tracker_` (stands in for the Tracker) and
@@ -59,7 +62,10 @@ protected:
         while (events::Event* event = listener_.GetNextEvent()) {
             Published p{event->type, event->map_id, map::FrameId{0}};
             if (event->type == events::EventType::KeyFrameCreated) {
-                p.frame_id = static_cast<TKeyFrameCreated*>(event)->frame_id;
+                const auto* created = static_cast<TKeyFrameCreated*>(event);
+                p.frame_id = created->frame_id;
+                p.timestamp = std::visit([](const auto& m) { return m.timestamp(); },
+                                         created->measurement);
             } else if (event->type == events::EventType::MapCreated) {
                 p.frame_id = static_cast<events::MapCreated*>(event)->frame_id;
             }
@@ -75,6 +81,19 @@ protected:
         EXPECT_EQ(actual.frame_id, map::FrameId{frame});
     }
 
+    // Index of the first frame that initializes against frame 0, measured with
+    // a standalone MapInitializer (default options, like the Mapper's).
+    size_t FirstSuccessIndex() const {
+        MapInitializer<Extractor> initializer;
+        for (size_t k = 0; k < sequence_.frames.size(); ++k) {
+            if (initializer.TryInitialize(sequence_.frames[k].measurement)) {
+                return k;
+            }
+        }
+        ADD_FAILURE() << "the synthetic sequence never initializes";
+        return sequence_.frames.size();
+    }
+
     // Initializes a map from one stereo measurement and discards the output.
     void InitializeStereo(double timestamp) {
         PublishInitializationMeasurement(test::MakeBinocular(200, timestamp));
@@ -87,7 +106,8 @@ protected:
         256};
     memory::ObjectPool<events::TrackingLost, memory::ThreadSafePolicy> tracking_lost_pool_{256};
     events::Observable tracker_;
-    TMapper mapper_{MapperOptions{.min_mono_init_interval = 1.0}};
+    test::SyntheticSequence sequence_ = test::MakeSyntheticSequence();
+    TMapper mapper_;
     events::AsyncObserver capture_;
     events::Listener listener_ = capture_.GetListener();
 };
@@ -108,14 +128,17 @@ TEST_F(MapperTest, StereoInitializesFromOneMeasurement) {
     EXPECT_EQ(mapper_.num_keyframes(), 1u);
 }
 
-TEST_F(MapperTest, MonoInitializesAfterInterval) {
-    PublishInitializationMeasurement(test::MakeMonocular(200, 0.0));
-    PublishInitializationMeasurement(test::MakeMonocular(200, 0.5));
+TEST_F(MapperTest, MonoInitializesWithParallax) {
+    const size_t k = FirstSuccessIndex();
+    ASSERT_LT(k, sequence_.frames.size());
+    for (size_t i = 0; i < k; ++i) {
+        PublishInitializationMeasurement(sequence_.frames[i].measurement);
+    }
     Drain();
     EXPECT_TRUE(TakeCaptured().empty());
     EXPECT_EQ(mapper_.state(), MapperState::Initializing);
 
-    PublishInitializationMeasurement(test::MakeMonocular(200, 1.0));
+    PublishInitializationMeasurement(sequence_.frames[k].measurement);
     Drain();
 
     const auto published = TakeCaptured();
@@ -128,18 +151,22 @@ TEST_F(MapperTest, MonoInitializesAfterInterval) {
 }
 
 TEST_F(MapperTest, FewFeaturesReplacesReference) {
-    PublishInitializationMeasurement(test::MakeMonocular(200, 0.0));
-    PublishInitializationMeasurement(test::MakeMonocular(50, 0.6));
-    PublishInitializationMeasurement(test::MakeMonocular(200, 1.2));
+    PublishInitializationMeasurement(sequence_.frames[0].measurement);
+    PublishInitializationMeasurement(test::MakeMonocular(50, 0.01));
+    PublishInitializationMeasurement(sequence_.frames[3].measurement);
     Drain();
     EXPECT_TRUE(TakeCaptured().empty());
     EXPECT_EQ(mapper_.state(), MapperState::Initializing);
 
-    PublishInitializationMeasurement(test::MakeMonocular(200, 2.2));
-    Drain();
+    for (size_t i = 4; i <= 25 && mapper_.state() == MapperState::Initializing; ++i) {
+        PublishInitializationMeasurement(sequence_.frames[i].measurement);
+        Drain();
+    }
 
     const auto published = TakeCaptured();
     ASSERT_EQ(published.size(), 3u);
+    EXPECT_EQ(published[0].type, events::EventType::KeyFrameCreated);
+    EXPECT_DOUBLE_EQ(published[0].timestamp, sequence_.frames[3].measurement.timestamp());
     EXPECT_EQ(published.back().type, events::EventType::MapCreated);
     EXPECT_EQ(mapper_.state(), MapperState::Mapping);
 }

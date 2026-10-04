@@ -17,7 +17,7 @@ const char* ToString(MapperState state) {
 
 template <typename TFeatureExtractor>
 Mapper<TFeatureExtractor>::Mapper(MapperOptions options)
-    : initializer_(options.min_mono_init_interval) {}
+    : initializer_(std::move(options.initializer)) {}
 
 template <typename TFeatureExtractor>
 Mapper<TFeatureExtractor>::~Mapper() {
@@ -67,11 +67,12 @@ void Mapper<TFeatureExtractor>::OnInitializationMeasurement(
     }
     // A copy: the event is shared with the other consumers.
     auto initial = initializer_.TryInitialize(TMeasurement(event.measurement));
-    if (!initial) {
+    if (!initial || initial->keyframes.empty()) {
         return;
     }
 
-    for (auto& keyframe : *initial) {
+    // initial->map_points are not stored yet: the Mapper has no map points.
+    for (auto& keyframe : initial->keyframes) {
         keyframes_.emplace_back(next_frame_id_, keyframe.T_cw, std::move(keyframe.measurement));
         ++next_frame_id_.value;
     }

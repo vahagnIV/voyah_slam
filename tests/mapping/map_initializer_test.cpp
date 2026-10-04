@@ -1,66 +1,193 @@
 #include <gtest/gtest.h>
+#include <support/synthetic_sequence.h>
 #include <support/test_measurements.h>
 #include <voyahslam/mapping/map_initializer.h>
+
+#include <algorithm>
+#include <cmath>
+#include <numbers>
+#include <optional>
+#include <variant>
+#include <vector>
 
 namespace voyahslam::mapping {
 namespace {
 
 using Extractor = test::TestExtractor;
 using Measurement = features::TMeasurement<Extractor>;
+using Monocular = features::TMonocularMeasurement<Extractor>;
 using Binocular = features::TBinocularMeasurement<Extractor>;
+using Result = InitializationResult<Extractor>;
 
 double Timestamp(const Measurement& m) {
     return std::visit([](const auto& v) { return v.timestamp(); }, m);
 }
 
-TEST(MapInitializerTest, StereoInitializesImmediately) {
-    MapInitializer<Extractor> initializer(1.0);
-    auto result = initializer.TryInitialize(test::MakeBinocular(200, 0.0));
-    ASSERT_TRUE(result.has_value());
-    ASSERT_EQ(result->size(), 1u);
-    EXPECT_TRUE((*result)[0].T_cw.ToMatrix34().isApprox(geometry::RigidTransformation::Identity().ToMatrix34()));
-    EXPECT_TRUE(std::holds_alternative<Binocular>((*result)[0].measurement));
+bool IsIdentity(const geometry::RigidTransformation& T) {
+    return T.ToMatrix34().isApprox(geometry::RigidTransformation::Identity().ToMatrix34());
 }
 
-TEST(MapInitializerTest, MonoWaitsForInterval) {
-    MapInitializer<Extractor> initializer(1.0);
-    EXPECT_FALSE(initializer.TryInitialize(test::MakeMonocular(200, 0.0)).has_value());
-    EXPECT_FALSE(initializer.TryInitialize(test::MakeMonocular(200, 0.5)).has_value());
-    auto result = initializer.TryInitialize(test::MakeMonocular(200, 1.0));
-    ASSERT_TRUE(result.has_value());
-    ASSERT_EQ(result->size(), 2u);
-    EXPECT_DOUBLE_EQ(Timestamp((*result)[0].measurement), 0.0);
-    EXPECT_DOUBLE_EQ(Timestamp((*result)[1].measurement), 1.0);
-    EXPECT_TRUE((*result)[0].T_cw.ToMatrix34().isApprox(geometry::RigidTransformation::Identity().ToMatrix34()));
-    EXPECT_TRUE((*result)[1].T_cw.ToMatrix34().isApprox(geometry::RigidTransformation::Identity().ToMatrix34()));
+double RadToDeg(double rad) { return rad * 180.0 / std::numbers::pi; }
+
+double RotationErrorDeg(const geometry::TMatrix33F& R, const geometry::TMatrix33F& R_true) {
+    return RadToDeg(Eigen::AngleAxis<double>(R.transpose() * R_true).angle());
 }
 
-TEST(MapInitializerTest, FewFeaturesReplacesReference) {
-    MapInitializer<Extractor> initializer(1.0);
-    EXPECT_FALSE(initializer.TryInitialize(test::MakeMonocular(200, 0.0)).has_value());
-    EXPECT_FALSE(initializer.TryInitialize(test::MakeMonocular(50, 0.6)).has_value());
-    EXPECT_FALSE(initializer.TryInitialize(test::MakeMonocular(200, 1.2)).has_value());
-    auto result = initializer.TryInitialize(test::MakeMonocular(200, 2.2));
-    ASSERT_TRUE(result.has_value());
-    ASSERT_EQ(result->size(), 2u);
-    EXPECT_DOUBLE_EQ(Timestamp((*result)[0].measurement), 1.2);
-    EXPECT_DOUBLE_EQ(Timestamp((*result)[1].measurement), 2.2);
+double AngleBetweenDeg(const geometry::TVector3DF& a, const geometry::TVector3DF& b) {
+    const double cos = std::clamp(a.normalized().dot(b.normalized()), -1.0, 1.0);
+    return RadToDeg(std::acos(cos));
 }
 
-TEST(MapInitializerTest, ResetDropsReference) {
-    MapInitializer<Extractor> initializer(1.0);
-    EXPECT_FALSE(initializer.TryInitialize(test::MakeMonocular(200, 0.0)).has_value());
-    initializer.Reset();
-    EXPECT_FALSE(initializer.TryInitialize(test::MakeMonocular(200, 1.0)).has_value());
+// Feeds frames [first, last] in order; returns the index of the first frame
+// that completes the initialization and the result.
+struct Success {
+    size_t index;
+    Result result;
+};
+std::optional<Success> FeedUntilSuccess(MapInitializer<Extractor>& initializer,
+                                        const test::SyntheticSequence& sequence, size_t first,
+                                        size_t last) {
+    for (size_t k = first; k <= last && k < sequence.frames.size(); ++k) {
+        auto result = initializer.TryInitialize(sequence.frames[k].measurement);
+        if (result) {
+            return Success{k, std::move(*result)};
+        }
+    }
+    return std::nullopt;
 }
 
-TEST(MapInitializerTest, StereoInitializesEvenWithMonoReference) {
-    MapInitializer<Extractor> initializer(1.0);
-    EXPECT_FALSE(initializer.TryInitialize(test::MakeMonocular(200, 0.0)).has_value());
-    auto result = initializer.TryInitialize(test::MakeBinocular(200, 0.1));
+class MapInitializerTest : public ::testing::Test {
+protected:
+    test::SyntheticSequence sequence_ = test::MakeSyntheticSequence();
+    MapInitializer<Extractor> initializer_;
+};
+
+TEST_F(MapInitializerTest, MonoInitializesOnceParallaxSuffices) {
+    EXPECT_FALSE(initializer_.TryInitialize(sequence_.frames[0].measurement).has_value());
+    EXPECT_FALSE(initializer_.TryInitialize(sequence_.frames[1].measurement).has_value());
+    auto success = FeedUntilSuccess(initializer_, sequence_, 2, 20);
+    ASSERT_TRUE(success.has_value());
+    const size_t k = success->index;
+    const Result& result = success->result;
+    RecordProperty("first_success_index", static_cast<int>(k));
+
+    ASSERT_EQ(result.keyframes.size(), 2u);
+    EXPECT_TRUE(IsIdentity(result.keyframes[0].T_cw));
+    EXPECT_DOUBLE_EQ(Timestamp(result.keyframes[0].measurement), sequence_.frames[0].measurement.timestamp());
+    EXPECT_DOUBLE_EQ(Timestamp(result.keyframes[1].measurement), sequence_.frames[k].measurement.timestamp());
+
+    // World = frame 0's camera, so frame k's T_cw is T_c_k,c_0.
+    const geometry::RigidTransformation& T_true = sequence_.frames[k].T_cw;
+    const geometry::RigidTransformation& T = result.keyframes[1].T_cw;
+    const double rotation_error = RotationErrorDeg(T.rotation(), T_true.rotation());
+    const double direction_error = AngleBetweenDeg(T.translation(), T_true.translation());
+    RecordProperty("rotation_error_deg", std::to_string(rotation_error));
+    RecordProperty("translation_direction_error_deg", std::to_string(direction_error));
+    EXPECT_LT(rotation_error, 1.0);
+    // Two-view inlier-set lock-in leaves a few degrees of direction error.
+    EXPECT_LT(direction_error, 10.0);
+}
+
+TEST_F(MapInitializerTest, MedianDepthIsOne) {
+    ASSERT_FALSE(initializer_.TryInitialize(sequence_.frames[0].measurement).has_value());
+    auto success = FeedUntilSuccess(initializer_, sequence_, 1, 20);
+    ASSERT_TRUE(success.has_value());
+    const Result& result = success->result;
+    const test::SyntheticFrame& first = sequence_.frames[0];
+    const test::SyntheticFrame& second = sequence_.frames[success->index];
+
+    ASSERT_GE(result.map_points.size(), 50u);
+    std::vector<double> depths;
+    for (const InitialMapPoint& point : result.map_points) {
+        depths.push_back(point.position.z());
+        ASSERT_GE(point.feature_in_first, 0);
+        ASSERT_LT(point.feature_in_first, first.measurement.points().cols());
+        ASSERT_GE(point.feature_in_second, 0);
+        ASSERT_LT(point.feature_in_second, second.measurement.points().cols());
+        EXPECT_EQ(first.point_of_feature[point.feature_in_first],
+                  second.point_of_feature[point.feature_in_second]);
+    }
+    std::nth_element(depths.begin(), depths.begin() + depths.size() / 2, depths.end());
+    EXPECT_NEAR(depths[depths.size() / 2], 1.0, 1e-9);
+}
+
+TEST_F(MapInitializerTest, FewFeaturesResetsReference) {
+    EXPECT_FALSE(initializer_.TryInitialize(sequence_.frames[0].measurement).has_value());
+    EXPECT_FALSE(initializer_.TryInitialize(test::MakeMonocular(50, 0.01)).has_value());
+    EXPECT_FALSE(initializer_.TryInitialize(sequence_.frames[3].measurement).has_value());
+
+    auto success = FeedUntilSuccess(initializer_, sequence_, 4, 25);
+    ASSERT_TRUE(success.has_value());
+    ASSERT_EQ(success->result.keyframes.size(), 2u);
+    EXPECT_DOUBLE_EQ(Timestamp(success->result.keyframes[0].measurement),
+                     sequence_.frames[3].measurement.timestamp());
+}
+
+TEST_F(MapInitializerTest, FewMatchesReplacesReference) {
+    test::SyntheticSequenceOptions unrelated_options;
+    unrelated_options.seed = 2;
+    const test::SyntheticSequence unrelated = test::MakeSyntheticSequence(unrelated_options);
+
+    EXPECT_FALSE(initializer_.TryInitialize(sequence_.frames[0].measurement).has_value());
+    EXPECT_FALSE(initializer_.TryInitialize(unrelated.frames[3].measurement).has_value());
+    // The reference is now the unrelated frame: nothing matches.
+    EXPECT_FALSE(initializer_.TryInitialize(sequence_.frames[3].measurement).has_value());
+}
+
+TEST_F(MapInitializerTest, FewMatchesReplacesReferenceEvenWithEnoughParallax) {
+    // The frame that initializes against frame 0 ...
+    MapInitializer<Extractor> probe;
+    ASSERT_FALSE(probe.TryInitialize(sequence_.frames[0].measurement).has_value());
+    auto success = FeedUntilSuccess(probe, sequence_, 1, 20);
+    ASSERT_TRUE(success.has_value());
+
+    test::SyntheticSequenceOptions unrelated_options;
+    unrelated_options.seed = 2;
+    const test::SyntheticSequence unrelated = test::MakeSyntheticSequence(unrelated_options);
+
+    // ... does not once an unrelated frame has replaced frame 0.
+    EXPECT_FALSE(initializer_.TryInitialize(sequence_.frames[0].measurement).has_value());
+    EXPECT_FALSE(initializer_.TryInitialize(unrelated.frames[3].measurement).has_value());
+    EXPECT_FALSE(initializer_.TryInitialize(sequence_.frames[success->index].measurement).has_value());
+}
+
+TEST_F(MapInitializerTest, PureRotationNeverInitializes) {
+    test::SyntheticSequenceOptions options;
+    options.step = 0.0;
+    options.yaw_step_deg = 0.5;
+    options.num_frames = 30;
+    const test::SyntheticSequence rotation = test::MakeSyntheticSequence(options);
+    EXPECT_FALSE(FeedUntilSuccess(initializer_, rotation, 0, 29).has_value());
+}
+
+TEST_F(MapInitializerTest, ResetDropsReference) {
+    MapInitializer<Extractor> probe;
+    ASSERT_FALSE(probe.TryInitialize(sequence_.frames[0].measurement).has_value());
+    auto success = FeedUntilSuccess(probe, sequence_, 1, 20);
+    ASSERT_TRUE(success.has_value());
+
+    EXPECT_FALSE(initializer_.TryInitialize(sequence_.frames[0].measurement).has_value());
+    initializer_.Reset();
+    EXPECT_FALSE(initializer_.TryInitialize(sequence_.frames[success->index].measurement).has_value());
+}
+
+TEST_F(MapInitializerTest, StereoInitializesImmediately) {
+    auto result = initializer_.TryInitialize(test::MakeBinocular(200, 0.0));
     ASSERT_TRUE(result.has_value());
-    EXPECT_EQ(result->size(), 1u);
-    EXPECT_FALSE(initializer.TryInitialize(test::MakeMonocular(200, 0.2)).has_value());
+    ASSERT_EQ(result->keyframes.size(), 1u);
+    EXPECT_TRUE(IsIdentity(result->keyframes[0].T_cw));
+    EXPECT_TRUE(std::holds_alternative<Binocular>(result->keyframes[0].measurement));
+    EXPECT_TRUE(result->map_points.empty());
+}
+
+TEST_F(MapInitializerTest, BinocularDropsMonoReference) {
+    EXPECT_FALSE(initializer_.TryInitialize(sequence_.frames[0].measurement).has_value());
+    auto result = initializer_.TryInitialize(test::MakeBinocular(200, 0.1));
+    ASSERT_TRUE(result.has_value());
+    ASSERT_EQ(result->keyframes.size(), 1u);
+    EXPECT_TRUE(IsIdentity(result->keyframes[0].T_cw));
+    EXPECT_TRUE(result->map_points.empty());
+    EXPECT_FALSE(initializer_.TryInitialize(sequence_.frames[3].measurement).has_value());
 }
 
 } // namespace

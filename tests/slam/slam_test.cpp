@@ -1,3 +1,4 @@
+#include <support/synthetic_sequence.h>
 #include <support/test_measurements.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
@@ -81,10 +82,11 @@ public:
         }
     }
 
-    // Polls until `condition` holds or 2 s pass; returns the final result.
+    // Polls until `condition` holds or 30 s pass; returns the final result.
+    // Generous: a two-view reconstruction takes ~0.5 s in a Debug build.
     template <typename TCondition>
     bool WaitFor(TCondition condition) {
-        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
         while (true) {
             Poll();
             if (condition()) {
@@ -111,12 +113,20 @@ private:
 };
 
 TEST(SlamTest, EndToEndInitializeTrackLoseReinitialize) {
+    // Map 1 from frames 0-14, tracking on frames 15-16, a featureless frame
+    // loses tracking, map 2 from frames 17-29. Timestamps increase throughout.
+    constexpr size_t kMap1End = 14;
+    constexpr size_t kMap2Begin = kMap1End + 3;
+    const test::SyntheticSequence sequence = test::MakeSyntheticSequence();
+    ASSERT_EQ(sequence.frames.size(), 30u);
+    const auto frame = [&](size_t i) { return sequence.frames[i].measurement; };
+
     // Lifetimes: the recorder outlives the Slam (nothing is published into a
     // destroyed queue), and `stop_and_drain` stops the Slam and releases every
     // queued event before the Slam's pools are destroyed, also when an
     // assertion returns early.
     ProtocolRecorder recorder;
-    OrbSlam slam(mapping::MapperOptions{.min_mono_init_interval = 0.2});
+    OrbSlam slam;
     recorder.Attach(slam);
     struct StopAndDrain {
         OrbSlam& slam;
@@ -130,9 +140,10 @@ TEST(SlamTest, EndToEndInitializeTrackLoseReinitialize) {
     auto& mapper = slam.mapper();
     slam.Start();
 
-    // Monocular initialization: reference at t = 0, map once 0.2 s have passed.
-    for (int i = 0; i <= 3; ++i) {
-        tracker.Track(test::MakeMonocular(200, 0.1 * i));
+    // Monocular initialization: frame 0 is the reference, the map is built
+    // once a later frame has enough parallax.
+    for (size_t i = 0; i <= kMap1End; ++i) {
+        tracker.Track(frame(i));
     }
     ASSERT_TRUE(recorder.WaitFor([&] { return !recorder.map_created.empty(); }));
     EXPECT_EQ(recorder.map_created, std::vector<uint32_t>{1});
@@ -144,22 +155,24 @@ TEST(SlamTest, EndToEndInitializeTrackLoseReinitialize) {
     EXPECT_EQ(mapper.current_map_id(), map::MapId{1});
 
     // Tracking on map 1.
-    tracker.Track(test::MakeMonocular(200, 0.4));
-    tracker.Track(test::MakeMonocular(200, 0.5));
+    tracker.Track(frame(kMap1End + 1));
+    tracker.Track(frame(kMap1End + 2));
     ASSERT_TRUE(recorder.WaitFor([&] { return !recorder.position_updated.empty(); }));
     for (uint32_t map : recorder.position_updated) {
         EXPECT_EQ(map, 1u);
     }
 
     // Too few features: tracking is lost, the Mapper drops map 1.
-    tracker.Track(test::MakeMonocular(0, 0.6));
+    const double lost_timestamp =
+        0.5 * (frame(kMap1End + 2).timestamp() + frame(kMap2Begin).timestamp());
+    tracker.Track(test::MakeMonocular(0, lost_timestamp));
     ASSERT_TRUE(recorder.WaitFor([&] { return !recorder.tracking_lost.empty(); }));
     EXPECT_EQ(recorder.tracking_lost, std::vector<uint32_t>{1});
     EXPECT_EQ(tracker.state(), tracking::TrackerState::Lost);
 
-    // Re-initialization over >= 0.2 s builds map 2.
-    for (int i = 0; i <= 4; ++i) {
-        tracker.Track(test::MakeMonocular(200, 1.0 + 0.1 * i));
+    // Re-initialization from the later frames builds map 2.
+    for (size_t i = kMap2Begin; i < sequence.frames.size(); ++i) {
+        tracker.Track(frame(i));
     }
     ASSERT_TRUE(recorder.WaitFor([&] { return recorder.map_created.size() >= 2; }));
     EXPECT_EQ(recorder.map_created, (std::vector<uint32_t>{1, 2}));
@@ -170,7 +183,7 @@ TEST(SlamTest, EndToEndInitializeTrackLoseReinitialize) {
     EXPECT_EQ(mapper.state(), mapping::MapperState::Mapping);
     EXPECT_EQ(mapper.current_map_id(), map::MapId{2});
 
-    tracker.Track(test::MakeMonocular(200, 2.0));
+    tracker.Track(test::MakeMonocular(200, frame(sequence.frames.size() - 1).timestamp() + 0.05));
     ASSERT_TRUE(recorder.WaitFor([&] { return recorder.position_updated.back() == 2u; }));
 }
 

@@ -23,8 +23,7 @@
 namespace voyahslam::mapping {
 
 struct MapperOptions {
-    // Minimum time (seconds) between the two monocular initialization frames.
-    double min_mono_init_interval = 1.0;
+    MapInitializerOptions initializer;
 };
 
 enum class MapperState : uint8_t {
