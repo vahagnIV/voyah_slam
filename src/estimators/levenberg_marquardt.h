@@ -7,7 +7,8 @@
 
 namespace voyahslam::estimators::internal {
 
-inline constexpr int kMaxLmIterations = 10;
+inline constexpr int kMaxLmAcceptedSteps = 20;
+inline constexpr int kMaxLmTrials = 40;  ///< Accepted plus rejected steps.
 inline constexpr double kMinRelativeDecrease = 1e-6;
 inline constexpr double kInitialLambda = 1e-3;
 inline constexpr double kJacobianStep = 1e-6;
@@ -19,8 +20,9 @@ inline constexpr double kJacobianStep = 1e-6;
 ///   current model); returns false when that model is invalid (e.g. non-finite).
 /// a_update(delta): moves the current model by delta (called only for accepted steps).
 ///
-/// At most kMaxLmIterations steps are attempted; stops early once an accepted step decreases
-/// the cost by less than kMinRelativeDecrease (relative). Returns false if the starting model
+/// Stops after kMaxLmAcceptedSteps accepted steps or kMaxLmTrials attempted steps (accepted plus
+/// rejected), whichever comes first, or early once an accepted step decreases the cost by less
+/// than kMinRelativeDecrease (relative). Returns false if the starting model
 /// is invalid (no update was made).
 template <int kDof, typename TResiduals, typename TUpdate>
 bool MinimizeLevenbergMarquardt(const TResiduals& a_residuals, const TUpdate& a_update) {
@@ -36,7 +38,8 @@ bool MinimizeLevenbergMarquardt(const TResiduals& a_residuals, const TUpdate& a_
     TNormal normal;
     TParams gradient;
     Eigen::VectorXd r_plus, r_minus, r_new;
-    for (int iteration = 0; iteration < kMaxLmIterations && cost > 0.0; ++iteration) {
+    int accepted = 0;
+    for (int trial = 0; trial < kMaxLmTrials && accepted < kMaxLmAcceptedSteps && cost > 0.0; ++trial) {
         if (linearize) {
             Eigen::MatrixXd J(r.size(), kDof);
             for (int k = 0; k < kDof; ++k) {
@@ -59,6 +62,7 @@ bool MinimizeLevenbergMarquardt(const TResiduals& a_residuals, const TUpdate& a_
             const double new_cost = r_new.squaredNorm();
             const double relative_decrease = (cost - new_cost) / cost;
             a_update(delta);
+            ++accepted;
             cost = new_cost;
             r.swap(r_new);
             lambda *= 0.1;

@@ -25,7 +25,7 @@ struct RansacOptions {
     double confidence = 0.99;
     uint32_t seed = 0;
     /// Rounds of local refinement after sampling (only for estimators that provide Refine).
-    size_t refinement_rounds = 3;
+    size_t refinement_rounds = 5;
 };
 
 template <typename TModel>
@@ -40,7 +40,8 @@ struct RansacResult {
 /// If the estimator also provides
 ///   TModel Refine(const TModel&, const TwoViewCorrespondences&, const Eigen::Array<bool, Eigen::Dynamic, 1>&) const
 /// the best model is then refined on its inliers for up to RansacOptions::refinement_rounds
-/// rounds, each kept only if it scores strictly higher (local optimization).
+/// rounds, each kept only if it scores strictly higher (local optimization); every round
+/// refines on the inliers re-collected from the previous round's model score.
 template <TwoViewEstimator TEstimator>
 class Ransac {
 public:
