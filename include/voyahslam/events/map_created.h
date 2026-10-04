@@ -13,7 +13,7 @@ struct MapCreated
     : Event
     , memory::Recyclable<MapCreated, memory::ThreadSafePolicy> {
     map::FrameId frame_id;
-    geometry::RigidTransformation pose;
+    geometry::RigidTransformation pose;  // T_cw (world -> camera)
 
     MapCreated()
         : Event(EventType::MapCreated,

@@ -13,7 +13,7 @@ struct KeyFramePoseUpdated
     : Event
     , memory::Recyclable<KeyFramePoseUpdated, memory::ThreadSafePolicy> {
     map::FrameId frame_id;
-    geometry::RigidTransformation pose;
+    geometry::RigidTransformation pose;  // T_cw (world -> camera)
 
     KeyFramePoseUpdated()
         : Event(EventType::KeyFramePoseUpdated,

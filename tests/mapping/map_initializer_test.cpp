@@ -104,11 +104,34 @@ TEST_F(MapInitializerTest, MedianDepthIsOne) {
         ASSERT_LT(point.feature_in_first, first.measurement.points().cols());
         ASSERT_GE(point.feature_in_second, 0);
         ASSERT_LT(point.feature_in_second, second.measurement.points().cols());
+        ASSERT_GE(first.point_of_feature[point.feature_in_first], 0);
         EXPECT_EQ(first.point_of_feature[point.feature_in_first],
                   second.point_of_feature[point.feature_in_second]);
     }
     std::nth_element(depths.begin(), depths.begin() + depths.size() / 2, depths.end());
     EXPECT_NEAR(depths[depths.size() / 2], 1.0, 1e-9);
+
+    // The scaled points and the scaled t_21 agree with the measurements: a
+    // missing or doubled 1/median_depth scale on t breaks the second view.
+    const geometry::TMatrix33F K = test::SyntheticIntrinsics();
+    const geometry::RigidTransformation& T_second = result.keyframes[1].T_cw;
+    double max_error_first = 0.0;
+    double max_error_second = 0.0;
+    for (const InitialMapPoint& point : result.map_points) {
+        const geometry::TVector3DF p1 = result.keyframes[0].T_cw.Transform(point.position);
+        const geometry::TVector3DF p2 = T_second.Transform(point.position);
+        const Eigen::Vector2d uv1 = (K * p1).hnormalized();
+        const Eigen::Vector2d uv2 = (K * p2).hnormalized();
+        max_error_first = std::max(
+            max_error_first, (uv1 - first.measurement.points().col(point.feature_in_first)).norm());
+        max_error_second = std::max(
+            max_error_second,
+            (uv2 - second.measurement.points().col(point.feature_in_second)).norm());
+    }
+    RecordProperty("max_reprojection_error_first_px", std::to_string(max_error_first));
+    RecordProperty("max_reprojection_error_second_px", std::to_string(max_error_second));
+    EXPECT_LT(max_error_first, 5.0);
+    EXPECT_LT(max_error_second, 5.0);
 }
 
 TEST_F(MapInitializerTest, FewFeaturesResetsReference) {

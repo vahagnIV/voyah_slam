@@ -60,6 +60,7 @@ as soon as they come up.
       lock-in item under Geometry).
 - [ ] `OrbFeatureExtractor::Distance` returns `uint8_t`, so a 256-bit
       difference wraps to 0 — widen the return type.
+
 Smoke run note (2026-10-04, `dataset-corridor1_1024_16`, ORB, Release,
 `--rate=0 --max-frames=200`): mono initialized at about frame 121
 (`Initializing -> Mapping (map 1, 2 keyframes, 73 points)`; 73 points is low,
@@ -213,9 +214,7 @@ Deferred minor findings from the per-task reviews.
 - [ ] Tests: Debug runtime of the mono-init tests (~0.5 s per two-view
       attempt; `PureRotationNeverInitializes` ~18 s) — use cheaper
       `TwoViewOptions` for tests or fewer frames.
-- [ ] Matcher: no asserts for `histogram_bins == 0` or
-      `out_last_matched.size() <` number of reference features; per-candidate
-      descriptor copy (matters for SIFT cost).
+- [ ] Matcher: per-candidate descriptor copy (matters for SIFT cost).
 
 ## Environment
 

@@ -2,6 +2,7 @@
 #define VOYAHSLAM_FEATURES_INITIALIZATION_MATCHER_H
 
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <limits>
@@ -73,6 +74,8 @@ template <typename TFeatureExtractor>
     const InitializationMatcherOptions& options) {
     const Eigen::Index num_reference = reference.points().cols();
     const Eigen::Index num_current = current.points().cols();
+    assert(options.histogram_bins > 0 || !options.check_orientation);
+    assert(static_cast<Eigen::Index>(out_last_matched.size()) == num_reference);
     std::vector<Eigen::Index> matches(num_reference, -1);
     constexpr double kInfinity = std::numeric_limits<double>::infinity();
     std::vector<double> matched_distance(num_current, kInfinity);

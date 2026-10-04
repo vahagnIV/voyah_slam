@@ -15,7 +15,7 @@ struct NewKeyFrameCandidate
     : Event
     , memory::Recyclable<NewKeyFrameCandidate<TFeatureExtractor>, memory::ThreadSafePolicy> {
     map::FrameId frame_id;
-    geometry::RigidTransformation pose;
+    geometry::RigidTransformation pose;  // T_cw (world -> camera)
     features::TMeasurement<TFeatureExtractor> measurement;  // carries the timestamp
 
     NewKeyFrameCandidate()

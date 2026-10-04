@@ -13,7 +13,7 @@ struct PositionUpdated
     : Event
     , memory::Recyclable<PositionUpdated, memory::ThreadSafePolicy> {
     map::FrameId frame_id;
-    geometry::RigidTransformation pose;
+    geometry::RigidTransformation pose;  // T_cw (world -> camera)
     double timestamp;
 
     PositionUpdated()

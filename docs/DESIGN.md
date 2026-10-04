@@ -43,9 +43,11 @@ keyframes of different types share the map is still open (Open Question 17).
 4. **Other threads are read-only on the map.** They may compute things *from*
    their replica (a pose, a loop candidate) and publish those as requests or
    facts, but they never mutate map objects themselves.
-5. **IDs are never reused.** A `MapPointId` / `FrameId` refers to one object for
-   the entire run. A stale ID in an event from a lagging replica is therefore
-   always detectable (the slot is invalid) and can never alias a newer object.
+5. **IDs are never reused.** A `FrameId` is unique for the entire run; a
+   `MapPointId` is unique within its map (point storage restarts per map), so
+   `(map_id, id)` identifies a point. Within a map a stale ID in an event from
+   a lagging replica is therefore always detectable (the slot is invalid) and
+   can never alias a newer object.
 6. **No virtual dispatch on hot paths.** Events dispatch on a type tag +
    `static_cast`; recycling goes through a function pointer. Mono/stereo is chosen
    at compile time via templates.
@@ -129,16 +131,13 @@ snapshot is already counted in `seen` and `Wait` would never return (spec
 amendment found during implementation). A `Notify()` between `Snapshot()` and
 `Wait()` changes the counter, so no wake-up is lost.
 
-**Stub geometry.** Real two-view initialization and pose estimation are not
-built yet; they sit behind `tracking::PoseEstimator<FE>`
-(`tracking/pose_estimator.h`: `Estimate()` succeeds iff the measurement has
->= `kMinTrackedFeatures` (50) features, pose = last pose) and
-`mapping::MapInitializer<FE>` (`mapping/map_initializer.h`: `TryInitialize()`,
-`Reset()`). Stub rules: binocular -> 1 identity keyframe at once; monocular ->
-first measurement becomes the reference, success when both have >=
-`kMinInitFeatures` (100) features and the timestamps are >=
-`MapperOptions::min_mono_init_interval` (1 s) apart (2 keyframes), else the
-reference is kept or replaced. A follow-up spec replaces the bodies in place.
+**Geometry status.** Monocular initialization is real (see "Monocular
+Initialization"): `mapping::MapInitializer<FE>` (`mapping/map_initializer.h`:
+`TryInitialize()`, `Reset()`) matches, reconstructs and scales the two views.
+Stereo initialization (binocular -> 1 identity keyframe at once) and
+`tracking::PoseEstimator<FE>` (`tracking/pose_estimator.h`: `Estimate()`
+succeeds iff the measurement has >= `kMinTrackedFeatures` (50) features, pose =
+last pose) remain stubs; a follow-up spec replaces their bodies in place.
 
 ### Tracker
 - **State machine** (`TrackerState`, readable from any thread via `state()`):
@@ -198,10 +197,12 @@ reference is kept or replaced. A follow-up spec replaces the bodies in place.
   (reference + a later frame), stereo one measurement. On success the Mapper
   creates a `Frame` per initial keyframe (ids from a monotonic counter, never
   reused across maps), takes `current_map_id_ = next_map_id_++`, moves to
-  `Mapping`, then publishes `KeyFrameCreated` for each keyframe and then
+  `Mapping`, then publishes `MapPointsAdded` first (monocular only), then
+  `KeyFrameCreated` for each keyframe and then
   `MapCreated(map_id, frame id, pose)`; the Tracker switches to `Tracking` on
   `MapCreated`. `InitializationMeasurement` is ignored while `Mapping`.
-  `TrackingLost` for the current map (in `Mapping`) clears keyframes, resets
+  `TrackingLost` for the current map (in `Mapping`) clears keyframes and the
+  map-point and observation storage, resets
   the initializer and returns to `Initializing`, so the next success starts
   map n+1 (relocalization / multi-map later). A stale `TrackingLost` is ignored.
   `NewKeyFrameCandidate` / `LoopDetected` are only acknowledged for now.
@@ -300,8 +301,8 @@ Rules:
   `PositionUpdated`, `TrackingLost`) or 0 (`InitializationMeasurement`).
   **Consumer rule** (`map_id == 0` exempt): `< current` -> stale, acknowledge
   and ignore; `> current` -> first event of a newer map: reset the replica,
-  adopt `current = map_id`, apply (the initial map's `KeyFrameCreated` events
-  arrive *before* its `MapCreated`, so they must not be dropped); `== current`
+  adopt `current = map_id`, apply (the initial map's `MapPointsAdded` and
+  `KeyFrameCreated` events arrive *before* its `MapCreated`, so they must not be dropped); `== current`
   -> apply. The Mapper builds map n+1 only after `TrackingLost(n)`, so a newer
   map never appears while the Tracker tracks an older one.
 - **No subscription filtering:** an `Observable` delivers every event to every
@@ -628,7 +629,7 @@ were left uninitialized when over-detecting).
 - Member variables: `snake_case_` with trailing underscore.
 - Parameters passed by non-const reference (outputs): `out_` prefix — `TPoint3DF& out_triangulated`.
 - Constants: `kPascalCase` — `kInitialCapacity`, `kDescSize`.
-- Template parameters and type aliases: `T` prefix — `TFeatureExtractor`, `TDescriptors`, `TPose`.
+- Template parameters and type aliases: `T` prefix — `TFeatureExtractor`, `TDescriptors`, `TMeasurement`.
 - Enums: `enum class` with `PascalCase` values.
 - Namespaces: `voyahslam::<module>` (`map`, `events`, `memory`, `features`, `geometry`, …).
 
@@ -795,8 +796,8 @@ branch → review → merge to `master`. Update this document at the end.
       we truncate (`cast<int>`) → descriptors differ bit-wise (matters for using
       ORB-SLAM3 DBoW2 vocabularies).
     - ORB-SLAM3 keeps each keypoint's pyramid level (`octave`) and size;
-      `ImageFeatures` loses the level — Tracker/Mapper need it (scale-aware
-      search radius, BA weighting).
+      ~~`ImageFeatures` loses the level~~ — done: `ImageFeatures` carries
+      `levels()` (used by the initialization matcher).
     - ORB-SLAM3 pads levels with a 19-px reflected border; we have none.
     - ORB-SLAM3 blurs into `uint8` with `cv::GaussianBlur`; our blurred image
       is float. Unused `cv::minMaxLoc` per cell in ours.

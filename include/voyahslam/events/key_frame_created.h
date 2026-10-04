@@ -18,7 +18,7 @@ struct KeyFrameCreated
     : Event
     , memory::Recyclable<KeyFrameCreated<TFeatureExtractor>, memory::ThreadSafePolicy> {
     map::FrameId frame_id;
-    geometry::RigidTransformation pose;
+    geometry::RigidTransformation pose;  // T_cw (world -> camera)
     features::TMeasurement<TFeatureExtractor> measurement;  // carries the timestamp
     // Observations as pairs: feature observed_features[i] of `measurement`
     // observes map point observed_points[i] of map `map_id`.

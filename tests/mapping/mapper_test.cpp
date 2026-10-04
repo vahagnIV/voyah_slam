@@ -225,6 +225,13 @@ TEST_F(MapperTest, MonoPublishesPointsKeyFramesThenMap) {
     ASSERT_EQ(points.normals.cols(), points.count);
     for (uint32_t i = 0; i < points.count; ++i) {
         EXPECT_NEAR(points.normals.col(i).norm(), 1.0, 1e-5) << "point " << i;
+        // The normal points from the scene towards both camera centres.
+        for (size_t k = 1; k <= 2; ++k) {
+            const geometry::TVector3DF centre = published[k].pose.Inverse().translation();
+            const geometry::TVector3DF position = points.positions.col(i);
+            EXPECT_GT(points.normals.col(i).dot(position - centre), 0.0)
+                << "point " << i << " keyframe " << k;
+        }
     }
 
     for (size_t k = 1; k <= 2; ++k) {
@@ -236,6 +243,23 @@ TEST_F(MapperTest, MonoPublishesPointsKeyFramesThenMap) {
             EXPECT_LT(keyframe.observed_features[o],
                       static_cast<uint32_t>(keyframe.descriptors.cols()));
         }
+    }
+
+    // Per point id, the two observed features are the same synthetic point.
+    const size_t second_index = FirstSuccessIndex();
+    ASSERT_LT(second_index, sequence_.frames.size());
+    const auto& first_of_feature = sequence_.frames[0].point_of_feature;
+    const auto& second_of_feature = sequence_.frames[second_index].point_of_feature;
+    std::vector<int64_t> scene_point_in_first(points.count, -2);
+    for (size_t o = 0; o < published[1].observed_points.size(); ++o) {
+        scene_point_in_first[published[1].observed_points[o].value] =
+            first_of_feature[published[1].observed_features[o]];
+    }
+    for (size_t o = 0; o < published[2].observed_points.size(); ++o) {
+        const int64_t in_second = second_of_feature[published[2].observed_features[o]];
+        const int64_t in_first = scene_point_in_first[published[2].observed_points[o].value];
+        EXPECT_GE(in_first, 0) << "observation " << o;
+        EXPECT_EQ(in_first, in_second) << "observation " << o;
     }
 
     // A point's descriptor is the first keyframe's descriptor of its feature.

@@ -132,7 +132,8 @@ void Mapper<TFeatureExtractor>::AddInitialMapPoints(
     const geometry::TVector3DF centre_second = keyframes_[1].pose().Inverse().translation();
 
     for (const InitialMapPoint& point : map_points) {
-        assert(point.feature_in_first < 65536 && point.feature_in_second < 65536);
+        assert(point.feature_in_first >= 0 && point.feature_in_first < 65536);
+        assert(point.feature_in_second >= 0 && point.feature_in_second < 65536);
         const geometry::TPoint3DF normal = ((point.position - centre_first).normalized() +
                                             (point.position - centre_second).normalized())
                                                .normalized();
