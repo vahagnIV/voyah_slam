@@ -287,6 +287,12 @@ OrbFeatureExtractor::OrbFeatureExtractor(precision_t scale_factor,
   Initialize();
 }
 
+double OrbFeatureExtractor::ScaleFactor(uint8_t level) const {
+  return scale_factors_[level];
+}
+
+size_t OrbFeatureExtractor::num_levels() const { return scale_factors_.size(); }
+
 OrbFeatureExtractor::TFeatures
 OrbFeatureExtractor::DetectAndExtract(const images::TWorkingImage &image,
                                       size_t number_of_features) const {
@@ -464,6 +470,7 @@ OrbFeatureExtractor::ComputeKeyPointsOctTree(size_t features) const {
   strengths.resize(total_features);
   angles.resize(total_features);
   descriptors.resize(DescriptorSize, total_features);
+  TLevels levels(total_features);
 
   size_t c = 0;
   for (size_t level = 0; level < pts.size(); level++) {
@@ -476,13 +483,14 @@ OrbFeatureExtractor::ComputeKeyPointsOctTree(size_t features) const {
       points(1, c) = pt_stack(1, j) * scale_factors_[level];
       angles(c) = ng_stack(j);
       strengths(c) = st_stack(j);
+      levels(c) = static_cast<uint8_t>(level);
       descriptors.col(c) = dscrptrs[level].col(j);
       ++c;
     }
   }
 
   return TFeatures(std::move(points), std::move(strengths), std::move(angles),
-                   std::move(descriptors));
+                   std::move(descriptors), std::move(levels));
 }
 
 float OrbFeatureExtractor::ComputeOrientationSinglePoint(

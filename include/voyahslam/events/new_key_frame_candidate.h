@@ -4,6 +4,7 @@
 #include <voyahslam/defs.h>
 #include <voyahslam/events/event_types.h>
 #include <voyahslam/features/measurement.h>
+#include <voyahslam/geometry/rigid_transformation.h>
 #include <voyahslam/map/frame_id.h>
 #include <voyahslam/memory/recyclable.h>
 
@@ -14,7 +15,7 @@ struct NewKeyFrameCandidate
     : Event
     , memory::Recyclable<NewKeyFrameCandidate<TFeatureExtractor>, memory::ThreadSafePolicy> {
     map::FrameId frame_id;
-    geometry::TPose pose;
+    geometry::RigidTransformation pose;  // T_cw (world -> camera)
     features::TMeasurement<TFeatureExtractor> measurement;  // carries the timestamp
 
     NewKeyFrameCandidate()

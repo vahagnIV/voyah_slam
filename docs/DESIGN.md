@@ -43,9 +43,11 @@ keyframes of different types share the map is still open (Open Question 17).
 4. **Other threads are read-only on the map.** They may compute things *from*
    their replica (a pose, a loop candidate) and publish those as requests or
    facts, but they never mutate map objects themselves.
-5. **IDs are never reused.** A `MapPointId` / `FrameId` refers to one object for
-   the entire run. A stale ID in an event from a lagging replica is therefore
-   always detectable (the slot is invalid) and can never alias a newer object.
+5. **IDs are never reused.** A `FrameId` is unique for the entire run; a
+   `MapPointId` is unique within its map (point storage restarts per map), so
+   `(map_id, id)` identifies a point. Within a map a stale ID in an event from
+   a lagging replica is therefore always detectable (the slot is invalid) and
+   can never alias a newer object.
 6. **No virtual dispatch on hot paths.** Events dispatch on a type tag +
    `static_cast`; recycling goes through a function pointer. Mono/stereo is chosen
    at compile time via templates.
@@ -129,16 +131,13 @@ snapshot is already counted in `seen` and `Wait` would never return (spec
 amendment found during implementation). A `Notify()` between `Snapshot()` and
 `Wait()` changes the counter, so no wake-up is lost.
 
-**Stub geometry.** Real two-view initialization and pose estimation are not
-built yet; they sit behind `tracking::PoseEstimator<FE>`
-(`tracking/pose_estimator.h`: `Estimate()` succeeds iff the measurement has
->= `kMinTrackedFeatures` (50) features, pose = last pose) and
-`mapping::MapInitializer<FE>` (`mapping/map_initializer.h`: `TryInitialize()`,
-`Reset()`). Stub rules: binocular -> 1 identity keyframe at once; monocular ->
-first measurement becomes the reference, success when both have >=
-`kMinInitFeatures` (100) features and the timestamps are >=
-`MapperOptions::min_mono_init_interval` (1 s) apart (2 keyframes), else the
-reference is kept or replaced. A follow-up spec replaces the bodies in place.
+**Geometry status.** Monocular initialization is real (see "Monocular
+Initialization"): `mapping::MapInitializer<FE>` (`mapping/map_initializer.h`:
+`TryInitialize()`, `Reset()`) matches, reconstructs and scales the two views.
+Stereo initialization (binocular -> 1 identity keyframe at once) and
+`tracking::PoseEstimator<FE>` (`tracking/pose_estimator.h`: `Estimate()`
+succeeds iff the measurement has >= `kMinTrackedFeatures` (50) features, pose =
+last pose) remain stubs; a follow-up spec replaces their bodies in place.
 
 ### Tracker
 - **State machine** (`TrackerState`, readable from any thread via `state()`):
@@ -198,10 +197,12 @@ reference is kept or replaced. A follow-up spec replaces the bodies in place.
   (reference + a later frame), stereo one measurement. On success the Mapper
   creates a `Frame` per initial keyframe (ids from a monotonic counter, never
   reused across maps), takes `current_map_id_ = next_map_id_++`, moves to
-  `Mapping`, then publishes `KeyFrameCreated` for each keyframe and then
+  `Mapping`, then publishes `MapPointsAdded` first (monocular only), then
+  `KeyFrameCreated` for each keyframe and then
   `MapCreated(map_id, frame id, pose)`; the Tracker switches to `Tracking` on
   `MapCreated`. `InitializationMeasurement` is ignored while `Mapping`.
-  `TrackingLost` for the current map (in `Mapping`) clears keyframes, resets
+  `TrackingLost` for the current map (in `Mapping`) clears keyframes and the
+  map-point and observation storage, resets
   the initializer and returns to `Initializing`, so the next success starts
   map n+1 (relocalization / multi-map later). A stale `TrackingLost` is ignored.
   `NewKeyFrameCandidate` / `LoopDetected` are only acknowledged for now.
@@ -267,7 +268,7 @@ Ported from slamlab2: `images/`, `io/`, `algebra/`, `geometry/`, `features/`
 | `MapPointsAdded<FE>` | Mapper → all | start_id, positions, descriptors, normals (`Resize(n)`, `count()`) |
 | `MapPointsUpdated<FE>` | Mapper → all | ids, positions, descriptors, normals (`Resize(n)`, `count()`) |
 | `MapPointsRemoved` | Mapper → all | ids |
-| `KeyFrameCreated<FE>` | Mapper → all | frame_id, pose, measurement (`features::TMeasurement<FE>`) |
+| `KeyFrameCreated<FE>` | Mapper → all | frame_id, pose (`T_cw`), measurement (`features::TMeasurement<FE>`), observations as parallel vectors `observed_features[i]` -> `observed_points[i]` (map point of `map_id`) |
 | `KeyFramePoseUpdated` | Mapper → all | frame_id, pose |
 | `LoopDetected` | LoopCloser → Mapper | query/match frames + verification data (TBD) |
 | `InitializationMeasurement<FE>` | Tracker → Mapper (+ other Tracker observers) | `features::TMeasurement<FE>` (`map_id` 0) |
@@ -300,8 +301,8 @@ Rules:
   `PositionUpdated`, `TrackingLost`) or 0 (`InitializationMeasurement`).
   **Consumer rule** (`map_id == 0` exempt): `< current` -> stale, acknowledge
   and ignore; `> current` -> first event of a newer map: reset the replica,
-  adopt `current = map_id`, apply (the initial map's `KeyFrameCreated` events
-  arrive *before* its `MapCreated`, so they must not be dropped); `== current`
+  adopt `current = map_id`, apply (the initial map's `MapPointsAdded` and
+  `KeyFrameCreated` events arrive *before* its `MapCreated`, so they must not be dropped); `== current`
   -> apply. The Mapper builds map n+1 only after `TrackingLost(n)`, so a newer
   map never appears while the Tracker tracks an older one.
 - **No subscription filtering:** an `Observable` delivers every event to every
@@ -512,8 +513,8 @@ Spec: `docs/superpowers/specs/2026-10-03-map-viewer-design.md`.
 
 Spec: `docs/superpowers/specs/2026-10-04-two-view-geometry-design.md` (part A of
 the real monocular initializer; matching and `MapInitializer` integration are
-spec B+C). Pure math on **normalized, undistorted points** (z = 1), so the
-calibrated model is the essential matrix E, not F + K. Sigma is in normalized
+spec B+C, now done: see "Monocular Initialization"). Pure math on
+**normalized, undistorted points** (z = 1), so the calibrated model is the essential matrix E, not F + K. Sigma is in normalized
 units (σ_px / f). Verified on synthetic scenes only.
 
 | Component | Header | Summary |
@@ -577,6 +578,48 @@ looser re-collection threshold do not fix it. Only ~58 % of true inliers are fla
 Further accuracy is left to bundle adjustment right after initialization (as in
 ORB-SLAM3).
 
+## Monocular Initialization (Mapper, `MapInitializer`, `InitializationMatcher`)
+
+Spec: `docs/superpowers/specs/2026-10-04-mono-initialization-design.md`.
+Verified on synthetic sequences; the app smoke run is recorded in `docs/TODO.md`.
+
+**Pipeline** (ORB-SLAM3 `MonocularInitialization`). The Mapper feeds each
+`InitializationMeasurement` to `MapInitializer::TryInitialize`:
+1. A frame with more than `min_features` features becomes the **reference**
+   (`last_matched` = its points).
+2. Each later frame: `FeatureGrid` over the current frame, then
+   `MatchForInitialization` (ORB-SLAM3 `SearchForInitialization`: window around
+   the last matched position, level restriction, best/second-best ratio,
+   one-to-one with replacement, orientation histogram keeping the three largest
+   bins). Fewer than `min_matches` matches: the current frame becomes the
+   reference.
+3. `TwoViewReconstructor` on the normalized matched points. On failure the
+   reference **and** the matcher's updated `last_matched` positions are kept
+   (ORB-SLAM3 `mvbPrevMatched`). Zero triangulated points or a non-finite /
+   non-positive median depth also count as failure.
+4. **Scaling:** positions and the translation of `T_21` are divided by the median
+   depth of the triangulated points in camera 1, so the median depth is 1.
+5. **Publication order** (the Mapper sets state and map id first): one
+   `MapPointsAdded` (`start_id` 0) -> `KeyFrameCreated` per keyframe (with
+   observations) -> `MapCreated`. Replicas therefore have the points before the
+   keyframes that observe them.
+
+**Conventions.** Keyframe/frame poses are `T_cw` (world -> camera,
+`RigidTransformation`); the world frame is camera 1 (first keyframe =
+identity). Observations travel on `KeyFrameCreated` as parallel
+`observed_features` / `observed_points` vectors. Map point ids restart at 0
+**per map**; `(map_id, MapPointId)` identifies a point. Frame ids stay
+monotonic across maps.
+
+**Keypoint levels.** `ImageFeatures` stores a pyramid level per keypoint
+(`levels()`); each extractor defines `ScaleFactor(level)`: ORB `scale_factor^level`
+(1.2), SIFT `2^(level/3)/2` with the level decoded from OpenCV's packed
+octave/layer. The matcher restricts candidates to the reference level
+(`max_reference_level`, ORB default 0).
+SIFT keypoints are sorted by response and truncated to `number_of_features`,
+and **SIFT angles are converted to radians** (they were degrees, and columns
+were left uninitialized when over-detecting).
+
 ## 7. Coding Conventions
 
 **Naming (Google C++ style):**
@@ -586,7 +629,7 @@ ORB-SLAM3).
 - Member variables: `snake_case_` with trailing underscore.
 - Parameters passed by non-const reference (outputs): `out_` prefix — `TPoint3DF& out_triangulated`.
 - Constants: `kPascalCase` — `kInitialCapacity`, `kDescSize`.
-- Template parameters and type aliases: `T` prefix — `TFeatureExtractor`, `TDescriptors`, `TPose`.
+- Template parameters and type aliases: `T` prefix — `TFeatureExtractor`, `TDescriptors`, `TMeasurement`.
 - Enums: `enum class` with `PascalCase` values.
 - Namespaces: `voyahslam::<module>` (`map`, `events`, `memory`, `features`, `geometry`, …).
 
@@ -679,6 +722,13 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-04 | H-vs-E selection uses the COLMAP rule (`inliers_H >= 0.8 x inliers_E`), not the ORB-SLAM3 score ratio. | A calibrated E fits planes as well as general scenes, so the ratio does not separate them (ground truth gave about 0.41). |
 | 2026-10-04 | Recovery/accuracy tests use wide-FOV scenes (`half_fov_tan = 1.0`, close to the TUM-VI fisheye); narrow-FOV and near-frontal planar scenes are tested as rejected/weak. | Narrow FOV is ambiguous for the 8-point solver; the weakness is tracked as 5-point priority rather than hidden by loose bounds. |
 | 2026-10-04 | Accepted accuracy limits: translation direction < 10° on general scenes (max 9.92° over 21 seeds), rotation < 1°, recovery >= 50 % (narrow) / >= 75 % (wide, 30 % outliers), `num_triangulated >= 0.5 x true inliers`. | Statistics of the scores (noise in both views) and inlier-set lock-in of the refinement (least squares over a hard-thresholded, self-selected inlier set; LM itself converges); bundle adjustment after initialization provides the final accuracy. |
+| 2026-10-04 | `ImageFeatures` stores the pyramid level per keypoint (`TLevels`, uint8); each extractor exposes `ScaleFactor(level)` (ORB `scale^level`, SIFT `2^(level/3)/2`). SIFT keypoints are sorted by response, truncated to `number_of_features`, angles in radians. | Scale-aware matching and initialization need the level; SIFT previously returned degrees and uninitialized columns when over-detecting. |
+| 2026-10-04 | Matcher `max_distance` is `double` (spec said `uint32`). | SIFT float L2 distances must be configurable; ORB distances convert exactly. |
+| 2026-10-04 | Orientation histogram default: 12 bins of 30 degrees, not 30 bins of 12 degrees. | ORB-SLAM3's `HISTO_LENGTH = 30` is applied as factor `1/30` per degree, i.e. 30-degree bins; that is its effective resolution. |
+| 2026-10-04 | A failed reconstruction keeps the reference and the matcher's updated `last_matched` positions. | ORB-SLAM3 `mvbPrevMatched` behaviour: the next frame is matched against the tracked positions. |
+| 2026-10-04 | Zero triangulated points and a non-finite median depth count as initialization failure. | The Mapper uses the result's keyframes/points directly; an empty or unscalable map must not be created. |
+| 2026-10-04 | SIFT radians / strongest-N fix: see the `ImageFeatures` level row above. | Same change; recorded there. |
+| 2026-10-04 | Monocular initialization: ORB-SLAM3 matcher + two-view reconstruction, scaled to median depth 1, published as `MapPointsAdded` -> `KeyFrameCreated` (with observations) -> `MapCreated`; per-map point ids; keyframes store `T_cw`. | Replicas need points before the keyframes that observe them; per-map ids keep storage compact and `(map_id, id)` unique. |
 
 ## 9. Open Questions
 
@@ -746,8 +796,8 @@ branch → review → merge to `master`. Update this document at the end.
       we truncate (`cast<int>`) → descriptors differ bit-wise (matters for using
       ORB-SLAM3 DBoW2 vocabularies).
     - ORB-SLAM3 keeps each keypoint's pyramid level (`octave`) and size;
-      `ImageFeatures` loses the level — Tracker/Mapper need it (scale-aware
-      search radius, BA weighting).
+      ~~`ImageFeatures` loses the level~~ — done: `ImageFeatures` carries
+      `levels()` (used by the initialization matcher).
     - ORB-SLAM3 pads levels with a 19-px reflected border; we have none.
     - ORB-SLAM3 blurs into `uint8` with `cv::GaussianBlur`; our blurred image
       is float. Unused `cv::minMaxLoc` per cell in ours.
@@ -810,7 +860,13 @@ branch → review → merge to `master`. Update this document at the end.
 - Two-view geometry toolkit (branch `feat/two-view-geometry`, merge pending):
   `RigidTransformation`, homography/essential estimators with LM refinement,
   generic `Ransac`, decomposition, `SelectPose`, `TwoViewReconstructor`
-  (see "Geometry Toolkit"). Not yet wired into `MapInitializer`.
+  (see "Geometry Toolkit"). Now wired into `MapInitializer`.
+
+- Monocular map initialization (branch `feat/mono-initialization`, merge
+  pending): keypoint levels, `FeatureGrid`, `InitializationMatcher`, real mono
+  `MapInitializer`, Mapper stores and publishes the initial map with
+  observations, `TPose` -> `RigidTransformation` migration (see "Monocular
+  Initialization").
 
 - Tracker/Mapper state machines and initialization protocol (branch
   `feat/tracking-states`, merge pending): `MapId` + `Event::map_id` consumer
@@ -829,11 +885,11 @@ branch → review → merge to `master`. Update this document at the end.
 
 **Next:**
 - ORB extractor plan in Open Question 21 (own FAST, buffers, descriptor
-  rounding, keypoint level). Building OpenCV from source to link against
+  rounding). Building OpenCV from source to link against
   (in progress, user).
 - Tracker measurement policy (19).
 - Real geometry behind the stubs: two-view initialization (`MapInitializer`;
-  toolkit done, matching + integration = spec B+C) and pose estimation (track-with-motion-model, track-reference-keyframe,
+  mono done; stereo initialization still a stub) and pose estimation (track-with-motion-model, track-reference-keyframe,
   track-local-map; `PoseEstimator`), applying map diffs to the Tracker replica,
   relocalization in `Lost`, keyframe decision (`NewKeyFrameCandidate`).
 - Event pool lifetime (Open Question 25).

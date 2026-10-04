@@ -2,6 +2,7 @@
 #include <voyahslam/map/frame.h>
 
 #include <gtest/gtest.h>
+#include <Eigen/Geometry>
 
 namespace voyahslam::map {
 namespace {
@@ -16,11 +17,12 @@ OrbFeatures MakeFeatures(int n) {
     geometry::TRowVectorF angles = geometry::TRowVectorF::Random(n);
     OrbFeatures::TDescriptors descs = OrbFeatures::TDescriptors::Random(32, n);
     return OrbFeatures(std::move(points), std::move(strengths),
-                       std::move(angles), std::move(descs));
+                       std::move(angles), std::move(descs),
+                       features::TLevels::Zero(n));
 }
 
 TEST(FrameTest, MonoFrameConstruction) {
-    geometry::TPose pose = geometry::TPose::Identity();
+    geometry::RigidTransformation pose = geometry::RigidTransformation::Identity();
     geometry::TMatrix33F K = geometry::TMatrix33F::Identity();
     auto measurement = OrbMonocularMeasurement(MakeFeatures(10), K, nullptr, 1.0);
 
@@ -28,13 +30,13 @@ TEST(FrameTest, MonoFrameConstruction) {
         FrameId{0}, pose, std::move(measurement));
 
     EXPECT_EQ(frame.id(), FrameId{0});
-    EXPECT_TRUE(frame.pose().isApprox(geometry::TPose::Identity()));
+    EXPECT_TRUE(frame.pose().ToMatrix34().isApprox(geometry::RigidTransformation::Identity().ToMatrix34()));
     EXPECT_EQ(frame.measurement().points().cols(), 10);
     EXPECT_DOUBLE_EQ(frame.timestamp(), 1.0);
 }
 
 TEST(FrameTest, StereoFrameConstruction) {
-    geometry::TPose pose = geometry::TPose::Identity();
+    geometry::RigidTransformation pose = geometry::RigidTransformation::Identity();
     features::StereoRig rig{
         .K_left = geometry::TMatrix33F::Identity(),
         .K_right = geometry::TMatrix33F::Identity(),
@@ -55,15 +57,20 @@ TEST(FrameTest, StereoFrameConstruction) {
 }
 
 TEST(FrameTest, MutablePose) {
-    geometry::TPose pose = geometry::TPose::Identity();
+    geometry::RigidTransformation pose = geometry::RigidTransformation::Identity();
     geometry::TMatrix33F K = geometry::TMatrix33F::Identity();
     auto measurement = OrbMonocularMeasurement(MakeFeatures(3), K, nullptr, 0.0);
 
     MonoFrame<features::OrbFeatureExtractor> frame(
         FrameId{0}, pose, std::move(measurement));
 
-    frame.mutable_pose()(0, 3) = 5.0;
-    EXPECT_DOUBLE_EQ(frame.pose()(0, 3), 5.0);
+    // Non-trivial rotation: 0.2 radians around X axis
+    Eigen::AngleAxis<voyahslam::precision_t> angle_axis(0.2, geometry::TVector3DF::UnitX());
+    geometry::TMatrix33F new_rotation = angle_axis.toRotationMatrix();
+    geometry::TVector3DF new_translation(1.0, 2.0, 5.0);
+    frame.mutable_pose() = geometry::RigidTransformation(new_rotation, new_translation);
+    EXPECT_DOUBLE_EQ(frame.pose().translation()(2), 5.0);
+    EXPECT_FALSE(frame.pose().rotation().isApprox(geometry::TMatrix33F::Identity()));
 }
 
 } // namespace

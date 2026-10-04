@@ -4,12 +4,13 @@
 #include <cstddef>
 #include <voyahslam/defs.h>
 #include <voyahslam/features/measurement.h>
+#include <voyahslam/geometry/rigid_transformation.h>
 
 namespace voyahslam::tracking {
 
 struct PoseEstimate {
     bool success;
-    geometry::TPose pose;
+    geometry::RigidTransformation pose;
 };
 
 // Rule-based placeholder; the geometry spec replaces the body in place.
@@ -21,7 +22,7 @@ public:
     static constexpr size_t kMinTrackedFeatures = 50;
 
     [[nodiscard]] PoseEstimate Estimate(const features::TMeasurement<TFeatureExtractor>& measurement,
-                                        const geometry::TPose& last_pose) const;
+                                        const geometry::RigidTransformation& last_pose) const;
 };
 
 } // namespace voyahslam::tracking

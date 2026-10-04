@@ -19,6 +19,12 @@ public:
 
     [[nodiscard]] TFeatures DetectAndExtract(const images::TWorkingImage& image, size_t number_of_features) const;
 
+    // Level = 3 * (octave + 1) + layer, decoded from cv::KeyPoint::octave
+    // (octave in the low byte as int8, layer in the next byte).
+    static uint8_t LevelFromOctave(int packed_octave);
+    // Keypoint scale relative to the full-resolution image: 2^(level/3) / 2.
+    [[nodiscard]] double ScaleFactor(uint8_t level) const;
+
     static TDescriptorScalarType Distance(const TDescriptor& desc1, const TDescriptor& desc2);
 };
 

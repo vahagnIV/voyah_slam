@@ -24,7 +24,6 @@ as soon as they come up.
 - [ ] Preallocate blur and pyramid buffers (no per-frame image allocations).
 - [ ] Round rotated descriptor pattern offsets (ORB-SLAM3 uses `cvRound`; we
       truncate).
-- [ ] Keep each keypoint's pyramid level (and size) in `ImageFeatures`.
 - [ ] Check border handling (ORB-SLAM3 pads levels by 19 px).
 - [ ] Remove the unused `cv::minMaxLoc` per cell.
 - [ ] Parallel left/right extraction for stereo.
@@ -49,11 +48,24 @@ as soon as they come up.
       Remedy: robust-loss local optimization over all correspondences
       (Cauchy/Huber or a truncated-χ² loss matching the score; MSAC/MAGSAC-style
       LO). Bundle adjustment after initialization provides further accuracy.
-- [ ] Migrate `TPose` users (`Frame`, events, Tracker, Mapper) to
-      `RigidTransformation` before spec C.
 - [ ] Optional: run the H and E RANSACs in parallel.
 - [ ] Stereo matching in `BinocularMeasurement` (depths / right indices are
       placeholders).
+
+## Initialization (monocular, 2026-10-04)
+
+- [ ] Tuning on TUM-VI 512 (`dataset-corridor1_512_16`) after the Pangolin
+      viewer, plus a per-frame "dropped by the 85° rule" statistic.
+- [ ] Bundle adjustment after initialization (accuracy; see the refinement
+      lock-in item under Geometry).
+- [ ] `OrbFeatureExtractor::Distance` returns `uint8_t`, so a 256-bit
+      difference wraps to 0 — widen the return type.
+
+Smoke run note (2026-10-04, `dataset-corridor1_1024_16`, ORB, Release,
+`--rate=0 --max-frames=200`): mono initialized at about frame 121
+(`Initializing -> Mapping (map 1, 2 keyframes, 73 points)`; 73 points is low,
+tuning deferred); binocular (stub) initialized immediately with 1 keyframe,
+0 points.
 
 ## Map & events
 
@@ -62,6 +74,12 @@ as soon as they come up.
 - [ ] Size event pools per event type. (OQ 14)
 - [ ] `NewKeyFrameCandidate`: add the tracked `(map_point_id, feature_idx)`
       observations.
+- [ ] Mapper: `PublishKeyFrameCreated` scans all observations per keyframe
+      (O(obs x keyframes)) — add a per-frame observation index before
+      keyframes are created during Mapping.
+- [ ] Mapper: `PublishMapPointsAdded` assumes point ids are `[0, size())`;
+      breaks once points are removed (`MapPointStorage` still reuses freed
+      slots; see the item above, OQ 2).
 
 ## Threads
 
@@ -72,9 +90,8 @@ as soon as they come up.
       policy. (OQ 19)
 - [ ] Real `PoseEstimator` (track with motion model / reference keyframe /
       local map; motion-only BA) — geometry spec; replaces the stub in place.
-- [ ] Real `MapInitializer` (two-view mono init, stereo init, map points) —
-      geometry spec. Treat an engaged-but-empty result as failure (`Mapper`
-      uses `keyframes_.back()`).
+- [ ] Real stereo initialization (needs stereo matching; the stereo
+      `MapInitializer` path is still a stub that creates one keyframe, 0 points).
 - [ ] Apply map diffs to the Tracker replica (currently a no-op).
 - [ ] Keyframe decision: Tracker publishes `NewKeyFrameCandidate`; Mapper
       handling (currently only acknowledged).
@@ -84,8 +101,10 @@ as soon as they come up.
 
 ## Visualization
 
-- [ ] Pangolin renderer in `MapViewer::Render()`; decode event payloads in
-      `SceneState` (map points, keyframe poses, current pose, trajectory).
+- [ ] **Next, before tuning:** Pangolin renderer in `MapViewer::Render()`
+      (needed to check monocular initialization visually); decode event
+      payloads in `SceneState` (map points, keyframe poses, current pose,
+      trajectory).
 - [ ] Event serialization + transport (HTTP or ROS) for a remote viewer: a
       serializing async observer on the SLAM side, a receiver feeding
       `SceneState` on the viewer side.
@@ -190,9 +209,16 @@ Deferred minor findings from the per-task reviews.
       still draw outliers from ±0.6 (scale with `half_fov_tan`) and the
       refined >= unrefined check holds only at the chosen seed.
 
+## Review follow-ups (monocular initialization, 2026-10-04)
+
+- [ ] Tests: Debug runtime of the mono-init tests (~0.5 s per two-view
+      attempt; `PureRotationNeverInitializes` ~18 s) — use cheaper
+      `TwoViewOptions` for tests or fewer frames.
+- [ ] Matcher: per-candidate descriptor copy (matters for SIFT cost).
+
 ## Environment
 
 - [ ] Second dev machine: build OpenCV 5.x from source into `/usr/local` with
       `WITH_GTK=ON` (Conan no longer provides OpenCV).
 - [ ] Recurring: syntax-check all sources with clang-18 + libc++ (clean on
-      2026-10-04, 65 sources); later add an Android NDK arm64 cross-build.
+      2026-10-04, 81 sources); later add an Android NDK arm64 cross-build.

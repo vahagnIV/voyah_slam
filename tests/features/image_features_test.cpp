@@ -16,12 +16,15 @@ protected:
         strengths_ = TRowVectorF::Random(3);
         angles_ = TRowVectorF::Random( 3);
         descriptors_ = FeatureExtractor::TDescriptors::Random(FeatureExtractor::DescriptorSize, 3);
+        levels_.resize(3);
+        levels_ << 0, 2, 5;
     }
 
     TPoints2DF points_;
     TRowVectorF strengths_;
     TRowVectorF angles_;
     FeatureExtractor::TDescriptors descriptors_;
+    TLevels levels_;
 };
 
 TEST_F(ImageFeaturesTest, ConstructorAndGetters) {
@@ -36,7 +39,8 @@ TEST_F(ImageFeaturesTest, ConstructorAndGetters) {
         std::move(points_),
         std::move(strengths_),
         std::move(angles_),
-        std::move(descriptors_)
+        std::move(descriptors_),
+        TLevels(levels_)
     );
 
     // Verify that the data was moved correctly
@@ -55,6 +59,11 @@ TEST_F(ImageFeaturesTest, ConstructorAndGetters) {
     EXPECT_EQ(features.descriptors().rows(), FeatureExtractor::DescriptorSize);
     EXPECT_EQ(features.descriptors().cols(), 3);
     EXPECT_TRUE(features.descriptors().isApprox(descriptors_copy));
+
+    ASSERT_EQ(features.levels().cols(), 3);
+    EXPECT_EQ(features.levels()(0), 0);
+    EXPECT_EQ(features.levels()(1), 2);
+    EXPECT_EQ(features.levels()(2), 5);
 }
 
 TEST_F(ImageFeaturesTest, ConstCorrectness) {
@@ -62,7 +71,8 @@ TEST_F(ImageFeaturesTest, ConstCorrectness) {
         std::move(points_),
         std::move(strengths_),
         std::move(angles_),
-        std::move(descriptors_)
+        std::move(descriptors_),
+        TLevels(levels_)
     );
 
     // Verify that getters return const references

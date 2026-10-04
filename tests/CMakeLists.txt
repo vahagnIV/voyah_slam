@@ -16,7 +16,10 @@ add_executable(voyahslam_tests
     images/resizer_tests.cpp
     features/monocular_measurement_test.cpp
     features/image_features_test.cpp
+    features/feature_extractor_levels_test.cpp
     features/keypoint_matches_test.cpp
+    features/feature_grid_test.cpp
+    features/initialization_matcher_test.cpp
     features/distortion_models/distortion_model_test.cpp
     features/distortion_models/kannala_brandt_distortion_model_test.cpp
     memory/object_pool_test.cpp
@@ -33,6 +36,7 @@ add_executable(voyahslam_tests
     slam/slam_test.cpp
     tracking/pose_estimator_test.cpp
     tracking/tracker_test.cpp
+    support/synthetic_sequence_test.cpp
     mapping/map_initializer_test.cpp
     mapping/mapper_test.cpp
     loop_closing/loop_closer_test.cpp

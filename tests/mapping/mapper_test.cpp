@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <support/synthetic_sequence.h>
 #include <support/test_measurements.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
@@ -6,6 +7,7 @@
 #include <voyahslam/mapping/mapper.h>
 #include <voyahslam/memory/object_pool.h>
 
+#include <cstddef>
 #include <variant>
 #include <vector>
 
@@ -17,11 +19,25 @@ using TMapper = Mapper<Extractor>;
 using TKeyFrameCreated = events::KeyFrameCreated<Extractor>;
 using TInitializationMeasurement = events::InitializationMeasurement<Extractor>;
 using TMonocularMeasurement = features::TMonocularMeasurement<Extractor>;
+using TMapPointsAdded = events::MapPointsAdded<Extractor>;
+using TDescriptors = typename Extractor::TDescriptors;
 
 struct Published {
     events::EventType type;
     map::MapId map_id;
     map::FrameId frame_id;
+    double timestamp = 0.0;  // of the keyframe's measurement (KeyFrameCreated only)
+    geometry::RigidTransformation pose;  // KeyFrameCreated, MapCreated
+    // KeyFrameCreated: observations and the measurement's descriptors.
+    std::vector<uint32_t> observed_features;
+    std::vector<map::MapPointId> observed_points;
+    TDescriptors descriptors;
+    // MapPointsAdded.
+    map::MapPointId start_id{};
+    uint32_t count = 0;
+    geometry::TPoints3DF positions;
+    TDescriptors point_descriptors;
+    geometry::TPoints3DF normals;
 };
 
 // Feeds the Mapper's inbox from `tracker_` (stands in for the Tracker) and
@@ -59,9 +75,27 @@ protected:
         while (events::Event* event = listener_.GetNextEvent()) {
             Published p{event->type, event->map_id, map::FrameId{0}};
             if (event->type == events::EventType::KeyFrameCreated) {
-                p.frame_id = static_cast<TKeyFrameCreated*>(event)->frame_id;
+                const auto* created = static_cast<TKeyFrameCreated*>(event);
+                p.frame_id = created->frame_id;
+                p.pose = created->pose;
+                p.timestamp = std::visit([](const auto& m) { return m.timestamp(); },
+                                         created->measurement);
+                p.observed_features = created->observed_features;
+                p.observed_points = created->observed_points;
+                if (const auto* mono = std::get_if<TMonocularMeasurement>(&created->measurement)) {
+                    p.descriptors = mono->descriptors();
+                }
             } else if (event->type == events::EventType::MapCreated) {
-                p.frame_id = static_cast<events::MapCreated*>(event)->frame_id;
+                const auto* created = static_cast<events::MapCreated*>(event);
+                p.frame_id = created->frame_id;
+                p.pose = created->pose;
+            } else if (event->type == events::EventType::MapPointsAdded) {
+                const auto* added = static_cast<TMapPointsAdded*>(event);
+                p.start_id = added->start_id;
+                p.count = added->count();
+                p.positions = added->positions.matrix();
+                p.point_descriptors = added->descriptors.matrix();
+                p.normals = added->normals.matrix();
             }
             published.push_back(p);
         }
@@ -73,6 +107,31 @@ protected:
         EXPECT_EQ(actual.type, type);
         EXPECT_EQ(actual.map_id, map::MapId{map});
         EXPECT_EQ(actual.frame_id, map::FrameId{frame});
+    }
+
+    // Index of the first frame that initializes against frame 0, measured with
+    // a standalone MapInitializer (default options, like the Mapper's).
+    size_t FirstSuccessIndex() const {
+        MapInitializer<Extractor> initializer;
+        for (size_t k = 0; k < sequence_.frames.size(); ++k) {
+            if (initializer.TryInitialize(sequence_.frames[k].measurement)) {
+                return k;
+            }
+        }
+        ADD_FAILURE() << "the synthetic sequence never initializes";
+        return sequence_.frames.size();
+    }
+
+    // Feeds frames [begin, ...) until the Mapper leaves Initializing (frame 0
+    // of the run becomes the reference); returns everything published.
+    std::vector<Published> InitializeMono(size_t begin) {
+        for (size_t i = begin;
+             i < sequence_.frames.size() && mapper_.state() == MapperState::Initializing; ++i) {
+            PublishInitializationMeasurement(sequence_.frames[i].measurement);
+            Drain();
+        }
+        EXPECT_EQ(mapper_.state(), MapperState::Mapping);
+        return TakeCaptured();
     }
 
     // Initializes a map from one stereo measurement and discards the output.
@@ -87,7 +146,8 @@ protected:
         256};
     memory::ObjectPool<events::TrackingLost, memory::ThreadSafePolicy> tracking_lost_pool_{256};
     events::Observable tracker_;
-    TMapper mapper_{MapperOptions{.min_mono_init_interval = 1.0}};
+    test::SyntheticSequence sequence_ = test::MakeSyntheticSequence();
+    TMapper mapper_;
     events::AsyncObserver capture_;
     events::Listener listener_ = capture_.GetListener();
 };
@@ -108,38 +168,167 @@ TEST_F(MapperTest, StereoInitializesFromOneMeasurement) {
     EXPECT_EQ(mapper_.num_keyframes(), 1u);
 }
 
-TEST_F(MapperTest, MonoInitializesAfterInterval) {
-    PublishInitializationMeasurement(test::MakeMonocular(200, 0.0));
-    PublishInitializationMeasurement(test::MakeMonocular(200, 0.5));
+TEST_F(MapperTest, StereoPublishesNoMapPoints) {
+    PublishInitializationMeasurement(test::MakeBinocular(200, 0.0));
+    Drain();
+
+    const auto published = TakeCaptured();
+    ASSERT_EQ(published.size(), 2u);
+    EXPECT_EQ(published[0].type, events::EventType::KeyFrameCreated);
+    EXPECT_EQ(published[1].type, events::EventType::MapCreated);
+    EXPECT_TRUE(published[0].observed_features.empty());
+    EXPECT_TRUE(published[0].observed_points.empty());
+    EXPECT_EQ(mapper_.num_map_points(), 0u);
+}
+
+TEST_F(MapperTest, MonoInitializesWithParallax) {
+    const size_t k = FirstSuccessIndex();
+    ASSERT_LT(k, sequence_.frames.size());
+    for (size_t i = 0; i < k; ++i) {
+        PublishInitializationMeasurement(sequence_.frames[i].measurement);
+    }
     Drain();
     EXPECT_TRUE(TakeCaptured().empty());
     EXPECT_EQ(mapper_.state(), MapperState::Initializing);
 
-    PublishInitializationMeasurement(test::MakeMonocular(200, 1.0));
+    PublishInitializationMeasurement(sequence_.frames[k].measurement);
     Drain();
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 3u);
-    ExpectPublished(published[0], events::EventType::KeyFrameCreated, 1, 0);
-    ExpectPublished(published[1], events::EventType::KeyFrameCreated, 1, 1);
-    ExpectPublished(published[2], events::EventType::MapCreated, 1, 1);
+    ASSERT_EQ(published.size(), 4u);
+    EXPECT_EQ(published[0].type, events::EventType::MapPointsAdded);
+    ExpectPublished(published[1], events::EventType::KeyFrameCreated, 1, 0);
+    ExpectPublished(published[2], events::EventType::KeyFrameCreated, 1, 1);
+    ExpectPublished(published[3], events::EventType::MapCreated, 1, 1);
     EXPECT_EQ(mapper_.state(), MapperState::Mapping);
     EXPECT_EQ(mapper_.num_keyframes(), 2u);
 }
 
+TEST_F(MapperTest, MonoPublishesPointsKeyFramesThenMap) {
+    const auto published = InitializeMono(0);
+
+    ASSERT_EQ(published.size(), 4u);
+    EXPECT_EQ(published[0].type, events::EventType::MapPointsAdded);
+    EXPECT_EQ(published[1].type, events::EventType::KeyFrameCreated);
+    EXPECT_EQ(published[2].type, events::EventType::KeyFrameCreated);
+    EXPECT_EQ(published[3].type, events::EventType::MapCreated);
+    for (const Published& p : published) {
+        EXPECT_EQ(p.map_id, map::MapId{1});
+    }
+
+    const Published& points = published[0];
+    EXPECT_EQ(points.start_id, map::MapPointId{0});
+    EXPECT_GT(points.count, 0u);
+    EXPECT_EQ(points.count, mapper_.num_map_points());
+    ASSERT_EQ(points.positions.cols(), points.count);
+    ASSERT_EQ(points.point_descriptors.cols(), points.count);
+    ASSERT_EQ(points.normals.cols(), points.count);
+    for (uint32_t i = 0; i < points.count; ++i) {
+        EXPECT_NEAR(points.normals.col(i).norm(), 1.0, 1e-5) << "point " << i;
+        // The normal points from the scene towards both camera centres.
+        for (size_t k = 1; k <= 2; ++k) {
+            const geometry::TVector3DF centre = published[k].pose.Inverse().translation();
+            const geometry::TVector3DF position = points.positions.col(i);
+            EXPECT_GT(points.normals.col(i).dot(position - centre), 0.0)
+                << "point " << i << " keyframe " << k;
+        }
+    }
+
+    for (size_t k = 1; k <= 2; ++k) {
+        const Published& keyframe = published[k];
+        ASSERT_EQ(keyframe.observed_features.size(), points.count);
+        ASSERT_EQ(keyframe.observed_points.size(), points.count);
+        for (size_t o = 0; o < keyframe.observed_points.size(); ++o) {
+            EXPECT_LT(keyframe.observed_points[o].value, points.count);
+            EXPECT_LT(keyframe.observed_features[o],
+                      static_cast<uint32_t>(keyframe.descriptors.cols()));
+        }
+    }
+
+    // Per point id, the two observed features are the same synthetic point.
+    const size_t second_index = FirstSuccessIndex();
+    ASSERT_LT(second_index, sequence_.frames.size());
+    const auto& first_of_feature = sequence_.frames[0].point_of_feature;
+    const auto& second_of_feature = sequence_.frames[second_index].point_of_feature;
+    std::vector<int64_t> scene_point_in_first(points.count, -2);
+    for (size_t o = 0; o < published[1].observed_points.size(); ++o) {
+        scene_point_in_first[published[1].observed_points[o].value] =
+            first_of_feature[published[1].observed_features[o]];
+    }
+    for (size_t o = 0; o < published[2].observed_points.size(); ++o) {
+        const int64_t in_second = second_of_feature[published[2].observed_features[o]];
+        const int64_t in_first = scene_point_in_first[published[2].observed_points[o].value];
+        EXPECT_GE(in_first, 0) << "observation " << o;
+        EXPECT_EQ(in_first, in_second) << "observation " << o;
+    }
+
+    // A point's descriptor is the first keyframe's descriptor of its feature.
+    const Published& first = published[1];
+    for (size_t o = 0; o < first.observed_points.size(); ++o) {
+        EXPECT_EQ(points.point_descriptors.col(first.observed_points[o].value),
+                  first.descriptors.col(first.observed_features[o]))
+            << "observation " << o;
+    }
+}
+
+TEST_F(MapperTest, MapCreatedCarriesSecondKeyFramePose) {
+    const auto published = InitializeMono(0);
+
+    ASSERT_EQ(published.size(), 4u);
+    EXPECT_EQ(published[3].frame_id, published[2].frame_id);
+    EXPECT_TRUE(published[3].pose.ToMatrix34().isApprox(published[2].pose.ToMatrix34()));
+}
+
+TEST_F(MapperTest, PointIdsRestartAfterTrackingLost) {
+    const auto first = InitializeMono(0);
+    ASSERT_FALSE(first.empty());
+    ASSERT_GT(mapper_.num_map_points(), 0u);
+
+    PublishTrackingLost(1, sequence_.frames.back().measurement.timestamp());
+    Drain();
+    EXPECT_EQ(mapper_.num_map_points(), 0u);
+
+    // A later stretch of the sequence, its first frame the new reference.
+    const auto second = InitializeMono(17);
+    ASSERT_FALSE(second.empty());
+    EXPECT_EQ(second[0].type, events::EventType::MapPointsAdded);
+    EXPECT_EQ(second[0].map_id, map::MapId{2});
+    EXPECT_EQ(second[0].start_id, map::MapPointId{0});
+    EXPECT_EQ(second[0].count, mapper_.num_map_points());
+}
+
+TEST_F(MapperTest, PooledKeyFrameCreatedIsReset) {
+    memory::ObjectPool<TKeyFrameCreated, memory::ThreadSafePolicy> pool(1);
+    auto* event = pool.Create();
+    event->observed_features = {1, 2, 3};
+    event->observed_points = {map::MapPointId{0}, map::MapPointId{1}, map::MapPointId{2}};
+    event->Recycle();
+
+    auto* reused = pool.Create();
+    ASSERT_EQ(reused, event);  // the same slot
+    EXPECT_TRUE(reused->observed_features.empty());
+    EXPECT_TRUE(reused->observed_points.empty());
+    reused->Recycle();
+}
+
 TEST_F(MapperTest, FewFeaturesReplacesReference) {
-    PublishInitializationMeasurement(test::MakeMonocular(200, 0.0));
-    PublishInitializationMeasurement(test::MakeMonocular(50, 0.6));
-    PublishInitializationMeasurement(test::MakeMonocular(200, 1.2));
+    PublishInitializationMeasurement(sequence_.frames[0].measurement);
+    PublishInitializationMeasurement(test::MakeMonocular(50, 0.01));
+    PublishInitializationMeasurement(sequence_.frames[3].measurement);
     Drain();
     EXPECT_TRUE(TakeCaptured().empty());
     EXPECT_EQ(mapper_.state(), MapperState::Initializing);
 
-    PublishInitializationMeasurement(test::MakeMonocular(200, 2.2));
-    Drain();
+    for (size_t i = 4; i <= 25 && mapper_.state() == MapperState::Initializing; ++i) {
+        PublishInitializationMeasurement(sequence_.frames[i].measurement);
+        Drain();
+    }
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 3u);
+    ASSERT_EQ(published.size(), 4u);
+    EXPECT_EQ(published[0].type, events::EventType::MapPointsAdded);
+    EXPECT_EQ(published[1].type, events::EventType::KeyFrameCreated);
+    EXPECT_DOUBLE_EQ(published[1].timestamp, sequence_.frames[3].measurement.timestamp());
     EXPECT_EQ(published.back().type, events::EventType::MapCreated);
     EXPECT_EQ(mapper_.state(), MapperState::Mapping);
 }

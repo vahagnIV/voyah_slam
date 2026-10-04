@@ -5,14 +5,17 @@
 #include <voyahslam/defs.h>
 #include <voyahslam/features/binocular_measurement.h>
 #include <voyahslam/features/monocular_measurement.h>
+#include <voyahslam/geometry/rigid_transformation.h>
 #include <voyahslam/map/frame_id.h>
 
 namespace voyahslam::map {
 
+/// Represents a camera frame.
+/// pose = T_cw (world → camera)
 template <typename TFeatureExtractor, typename TMeasurement>
 class Frame {
 public:
-    Frame(FrameId id, const geometry::TPose& pose, TMeasurement&& measurement)
+    Frame(FrameId id, const geometry::RigidTransformation& pose, TMeasurement&& measurement)
         : id_(id)
         , pose_(pose)
         , measurement_(std::move(measurement)) {}
@@ -23,14 +26,14 @@ public:
     Frame& operator=(Frame&&) = default;
 
     [[nodiscard]] FrameId id() const { return id_; }
-    [[nodiscard]] const geometry::TPose& pose() const { return pose_; }
-    geometry::TPose& mutable_pose() { return pose_; }
+    [[nodiscard]] const geometry::RigidTransformation& pose() const { return pose_; }
+    geometry::RigidTransformation& mutable_pose() { return pose_; }
     [[nodiscard]] const TMeasurement& measurement() const { return measurement_; }
     [[nodiscard]] double timestamp() const { return measurement_.timestamp(); }
 
 private:
     FrameId id_;
-    geometry::TPose pose_;
+    geometry::RigidTransformation pose_;
     TMeasurement measurement_;
 };
 

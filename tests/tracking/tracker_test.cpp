@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <Eigen/Geometry>
 #include <support/test_measurements.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
@@ -19,11 +20,12 @@ using TKeyFrameCreated = events::KeyFrameCreated<Extractor>;
 using TInitializationMeasurement = events::InitializationMeasurement<Extractor>;
 using Clock = std::chrono::steady_clock;
 
-geometry::TPose NonIdentityPose() {
-    geometry::TPose pose = geometry::TPose::Identity();
-    pose(0, 3) = 1.5F;
-    pose(2, 3) = -0.5F;
-    return pose;
+geometry::RigidTransformation NonIdentityPose() {
+    // Non-trivial rotation: 0.3 radians around Z axis
+    Eigen::AngleAxis<voyahslam::precision_t> angle_axis(0.3, geometry::TVector3DF::UnitZ());
+    geometry::TMatrix33F rotation = angle_axis.toRotationMatrix();
+    geometry::TVector3DF translation(1.5F, 0.0F, -0.5F);
+    return geometry::RigidTransformation(rotation, translation);
 }
 
 // Feeds the Tracker's inbox from `mapper_` (stands in for the Mapper) and
@@ -44,11 +46,11 @@ protected:
         auto* event = key_frame_pool_.Create();
         event->map_id = map::MapId{map};
         event->frame_id = map::FrameId{frame};
-        event->pose = geometry::TPose::Identity();
+        event->pose = geometry::RigidTransformation::Identity();
         mapper_.Notify(event);
     }
 
-    void PublishMapCreated(uint32_t map, uint32_t frame, const geometry::TPose& pose) {
+    void PublishMapCreated(uint32_t map, uint32_t frame, const geometry::RigidTransformation& pose) {
         auto* event = map_created_pool_.Create();
         event->map_id = map::MapId{map};
         event->frame_id = map::FrameId{frame};
@@ -57,7 +59,7 @@ protected:
     }
 
     // Brings the Tracker to Tracking on `map` from keyframe `frame` at `pose`.
-    void EnterTracking(uint32_t map, uint32_t frame, const geometry::TPose& pose) {
+    void EnterTracking(uint32_t map, uint32_t frame, const geometry::RigidTransformation& pose) {
         PublishKeyFrameCreated(map, frame);
         PublishMapCreated(map, frame, pose);
         Drain();
@@ -105,7 +107,7 @@ TEST_F(TrackerTest, InitialMapEventsBeforeMapCreatedAreKept) {
 }
 
 TEST_F(TrackerTest, TracksAndPublishesPosition) {
-    const geometry::TPose pose = NonIdentityPose();
+    const geometry::RigidTransformation pose = NonIdentityPose();
     EnterTracking(1, 1, pose);
 
     tracker_.Track(test::MakeMonocular(200, 2.0));
@@ -117,7 +119,7 @@ TEST_F(TrackerTest, TracksAndPublishesPosition) {
     const auto& position = *static_cast<events::PositionUpdated*>(event);
     EXPECT_EQ(position.map_id, map::MapId{1});
     EXPECT_EQ(position.frame_id, map::FrameId{1});
-    EXPECT_TRUE(position.pose.isApprox(pose));
+    EXPECT_TRUE(position.pose.ToMatrix34().isApprox(pose.ToMatrix34()));
     EXPECT_DOUBLE_EQ(position.timestamp, 2.0);
     EXPECT_EQ(NextCaptured(), nullptr);
     EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
@@ -176,7 +178,7 @@ TEST_F(TrackerTest, StateIsLostWhenTrackingLostIsPublished) {
 TEST_F(TrackerTest, IgnoresStaleMapCreated) {
     EnterTracking(2, 5, NonIdentityPose());
 
-    PublishMapCreated(1, 1, geometry::TPose::Identity());
+    PublishMapCreated(1, 1, geometry::RigidTransformation::Identity());
     Drain();
 
     EXPECT_EQ(tracker_.current_map_id(), map::MapId{2});
@@ -191,11 +193,11 @@ TEST_F(TrackerTest, IgnoresStaleMapCreated) {
     const auto& position = *static_cast<events::PositionUpdated*>(event);
     EXPECT_EQ(position.map_id, map::MapId{2});
     EXPECT_EQ(position.frame_id, map::FrameId{5});
-    EXPECT_TRUE(position.pose.isApprox(NonIdentityPose()));
+    EXPECT_TRUE(position.pose.ToMatrix34().isApprox(NonIdentityPose().ToMatrix34()));
 }
 
 TEST_F(TrackerTest, NewMapAfterLoss) {
-    EnterTracking(1, 1, geometry::TPose::Identity());
+    EnterTracking(1, 1, geometry::RigidTransformation::Identity());
     tracker_.Track(test::MakeMonocular(0, 3.0));
     Drain();
     ASSERT_EQ(tracker_.state(), TrackerState::Lost);

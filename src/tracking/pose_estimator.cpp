@@ -7,7 +7,7 @@ namespace voyahslam::tracking {
 template <typename TFeatureExtractor>
 PoseEstimate PoseEstimator<TFeatureExtractor>::Estimate(
     const features::TMeasurement<TFeatureExtractor>& measurement,
-    const geometry::TPose& last_pose) const {
+    const geometry::RigidTransformation& last_pose) const {
     const size_t num_features = std::visit(
         [](const auto& m) -> size_t {
             if constexpr (std::is_same_v<std::decay_t<decltype(m)>,

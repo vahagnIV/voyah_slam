@@ -10,6 +10,7 @@
 #include <voyahslam/events/key_frame_created.h>
 #include <voyahslam/events/listener.h>
 #include <voyahslam/events/map_created.h>
+#include <voyahslam/events/map_points_added.h>
 #include <voyahslam/events/tracking_lost.h>
 #include <voyahslam/events/worker_thread.h>
 #include <voyahslam/features/measurement.h>
@@ -17,14 +18,15 @@
 #include <voyahslam/map/frame.h>
 #include <voyahslam/map/frame_id.h>
 #include <voyahslam/map/map_id.h>
+#include <voyahslam/map/map_point_storage.h>
+#include <voyahslam/map/observation_storage.h>
 #include <voyahslam/mapping/map_initializer.h>
 #include <voyahslam/memory/object_pool.h>
 
 namespace voyahslam::mapping {
 
 struct MapperOptions {
-    // Minimum time (seconds) between the two monocular initialization frames.
-    double min_mono_init_interval = 1.0;
+    MapInitializerOptions initializer;
 };
 
 enum class MapperState : uint8_t {
@@ -64,6 +66,9 @@ public:
     [[nodiscard]] size_t num_keyframes() const {
         return num_keyframes_.load(std::memory_order_acquire);
     }
+    [[nodiscard]] size_t num_map_points() const {
+        return num_map_points_.load(std::memory_order_acquire);
+    }
 
 private:
     void ApplyEvent(const events::Event& event);
@@ -71,6 +76,10 @@ private:
     void OnTrackingLost(const events::TrackingLost& event);
     void SetState(MapperState state);
 
+    // Stores the initial map points and their observations in both keyframes.
+    void AddInitialMapPoints(const std::vector<InitialMapPoint>& map_points);
+
+    void PublishMapPointsAdded();
     void PublishKeyFrameCreated(const TKeyFrame& keyframe);
     void PublishMapCreated(const TKeyFrame& keyframe);
 
@@ -82,11 +91,17 @@ private:
     map::FrameId next_frame_id_{0};  // never reset: frame ids are unique across maps
     std::vector<TKeyFrame> keyframes_;
     std::atomic<size_t> num_keyframes_{0};  // keyframes_.size(), readable from any thread
+    // The current map's points (ids restart at 0 per map) and observations.
+    map::MapPointStorage<TFeatureExtractor> map_points_;
+    map::ObservationStorage<map::ObservationType::Monocular> observations_;
+    std::atomic<size_t> num_map_points_{0};  // map_points_.size(), readable from any thread
     MapInitializer<TFeatureExtractor> initializer_;
 
     memory::ObjectPool<events::KeyFrameCreated<TFeatureExtractor>, memory::ThreadSafePolicy>
         key_frame_created_pool_{256};
     memory::ObjectPool<events::MapCreated, memory::ThreadSafePolicy> map_created_pool_{256};
+    memory::ObjectPool<events::MapPointsAdded<TFeatureExtractor>, memory::ThreadSafePolicy>
+        map_points_added_pool_{256};
 
     CLASS_LOGGER(Mapper);
 
