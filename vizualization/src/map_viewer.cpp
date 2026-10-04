@@ -27,7 +27,7 @@ uint32_t MapViewer<TFeatureExtractor>::TryEnterMode(uint32_t mode) {
     uint32_t state = state_.load();
     do {
         if ((state & kModeMask) != kIdle) return state & kModeMask;
-    } while (!state_.compare_exchange_weak(state, mode));
+    } while (!state_.compare_exchange_weak(state, mode | (state & kStopRequested)));
     return kIdle;
 }
 

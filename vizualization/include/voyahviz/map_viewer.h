@@ -64,7 +64,10 @@ public:
     // does not return (see window_closed()). Throws std::logic_error if Start()
     // or another RunOnCurrentThread() is active.
     void RunOnCurrentThread();
-    // Ends either loop at its next iteration; does not join. Thread-safe.
+    // Ends either loop at its next iteration; does not join. Thread-safe. A
+    // request made before the loop is entered is kept: that run drains once and
+    // returns (so a producer finishing first can't leave RunOnCurrentThread()
+    // blocked). Stop() and the end of a run consume it.
     void RequestStop();
 
     // True once the window was closed by the user or could not be created.
@@ -90,8 +93,10 @@ private:
     static constexpr uint32_t kModeMask = 3;
     static constexpr uint32_t kStopRequested = 4;
 
-    // Moves state_ from idle to `mode` (clearing a stale stop request);
-    // returns the mode found instead if not idle (kIdle on success).
+    // Moves state_ from idle to `mode`, keeping a stop request made while idle
+    // (that run then only does its final drain); returns the mode found instead
+    // if not idle (kIdle on success). Every exit path resets state_ to exactly
+    // kIdle, so a request never reaches a later run.
     uint32_t TryEnterMode(uint32_t mode);
     // The loop shared by both modes: Step() paced to fps until stopped, then a
     // final drain. Runs on the loop thread.

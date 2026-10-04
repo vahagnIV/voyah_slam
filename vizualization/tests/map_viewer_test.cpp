@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <chrono>
 #include <stdexcept>
 #include <thread>
@@ -218,6 +219,57 @@ TEST(MapViewerTest, StartWhileRunOnCurrentThreadIsNoOp) {
     runner.join();
     viewer.Stop();  // nothing to join: no thread was started
     EXPECT_EQ(viewer.events_processed(), 1u);
+}
+
+TEST(MapViewerTest, RequestStopBeforeRunOnCurrentThreadReturns) {
+    TPool pool(1);
+    TViewer viewer(MapViewerOptions{.fps = 100.0});
+    events::Observable producer;
+    producer.ConnectAsync(viewer.inbox());
+
+    Publish(producer, pool);
+    viewer.RequestStop();  // e.g. the worker finished before the loop was entered
+    std::atomic<bool> returned{false};
+    std::thread runner([&] {
+        viewer.RunOnCurrentThread();
+        returned.store(true);
+    });
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!returned.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    EXPECT_TRUE(returned.load()) << "RunOnCurrentThread() ignored the earlier RequestStop()";
+    if (!returned.load()) viewer.RequestStop();  // unblock so the test can finish
+    runner.join();
+    EXPECT_EQ(viewer.events_processed(), 1u);
+    EXPECT_TRUE(SlotReturned(pool));
+
+    // The request was consumed: a later run is not ended by it.
+    std::thread second([&viewer] { viewer.RunOnCurrentThread(); });
+    Publish(producer, pool);
+    EXPECT_TRUE(WaitForProcessed(viewer, 2));
+    viewer.RequestStop();
+    second.join();
+}
+
+TEST(MapViewerTest, RequestStopBeforeStartThenStopDrains) {
+    TPool pool(1);
+    TViewer viewer(MapViewerOptions{.fps = 100.0});
+    events::Observable producer;
+    producer.ConnectAsync(viewer.inbox());
+
+    Publish(producer, pool);
+    viewer.RequestStop();
+    viewer.Start();
+    viewer.Stop();
+    EXPECT_EQ(viewer.events_processed(), 1u);
+    EXPECT_TRUE(SlotReturned(pool));
+
+    // A later Start() runs normally.
+    viewer.Start();
+    Publish(producer, pool);
+    EXPECT_TRUE(WaitForProcessed(viewer, 2));
+    viewer.Stop();
 }
 
 TEST(MapViewerTest, WaitForWindowCloseReturnsWhenHeadless) {

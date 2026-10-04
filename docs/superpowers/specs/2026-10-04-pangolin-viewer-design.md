@@ -120,8 +120,7 @@ struct MapViewerOptions {
 explicit MapViewer(MapViewerOptions options = {});
 void Start();                    // the loop on the viewer's own thread (Linux default); no-op if running
 void Stop();                     // RequestStop, join, drain (unchanged semantics)
-void RunOnCurrentThread();       // the same loop on the caller's thread; blocks until window
-                                 // close or RequestStop(); throws std::logic_error if Start() is active
+void RunOnCurrentThread();  // the same loop on the caller's thread; blocks until RequestStop() or Stop() (closing the window does not end it); throws std::logic_error if Start() is active
 void RequestStop();              // thread-safe; ends either loop
 [[nodiscard]] bool window_closed() const;  // thread-safe
 void WaitForWindowClose();       // blocks until closed; returns immediately when headless
