@@ -9,9 +9,9 @@ namespace voyahslam::geometry {
 
 /// Matched points between two views, in normalized image coordinates (z = 1).
 struct TwoViewCorrespondences {
-    TPoints2DF x1;  ///< 2xN normalized coordinates in view 1.
-    TPoints2DF x2;  ///< 2xN normalized coordinates in view 2 (column i matches x1 column i).
-    double sigma;   ///< Measurement noise std-dev in normalized units (sigma_px / f).
+    TPoints2DF x1;       ///< 2xN normalized coordinates in view 1.
+    TPoints2DF x2;       ///< 2xN normalized coordinates in view 2 (column i matches x1 column i).
+    double sigma = 0.0;  ///< Measurement noise std-dev in normalized units (sigma_px / f).
 
     [[nodiscard]] Eigen::Index size() const { return x1.cols(); }
 };

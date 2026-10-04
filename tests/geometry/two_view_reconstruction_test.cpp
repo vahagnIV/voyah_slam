@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <vector>
 
 #include <voyahslam/geometry/two_view_reconstruction.h>
@@ -51,6 +52,9 @@ TEST(TwoViewReconstructionTest, GeneralSceneSelectsEssential) {
     // Translation direction errors (deg) observed for seeds 21, 100..119 with this scene:
     // 3.15 1.34 1.61 3.82 3.00 1.63 1.09 6.13 3.79 8.56 3.62 1.47 0.25 3.76 9.92 3.94 0.68 8.49
     // 1.99 1.96 1.24 — the bound is their maximum rounded up to the next whole degree.
+    // The scenes come from std random distributions, whose output differs between standard
+    // libraries (libstdc++ vs libc++/Android): these observed maxima (and the 1° rotation bound)
+    // are libstdc++-specific and leave little margin.
     // Further accuracy comes from bundle adjustment after initialization.
     constexpr double kMaxTranslationErrorDeg = 10.0;
     ExpectRecovered(scene, result, kMaxTranslationErrorDeg);
@@ -111,6 +115,26 @@ TEST(TwoViewReconstructionTest, NonPositiveSigmaFails) {
     EXPECT_FALSE(TwoViewReconstructor().Reconstruct(scene.correspondences).success);
 }
 
+TEST(TwoViewReconstructionTest, InfiniteSigmaFails) {
+    auto scene = test::MakeGeneralScene(300, 0.0, test::NormalizedSigma(1.0), 27, test::DefaultTransform());
+    scene.correspondences.sigma = std::numeric_limits<double>::infinity();
+    // Rejected up front: with sigma = inf every chi-square is 0, so RANSAC would run and score
+    // every correspondence as an inlier.
+    const TwoViewReconstruction result = TwoViewReconstructor().Reconstruct(scene.correspondences);
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.homography_score, 0.0);
+    EXPECT_EQ(result.essential_score, 0.0);
+}
+
+TEST(TwoViewReconstructionTest, DefaultSigmaFails) {
+    const auto scene = test::MakeGeneralScene(300, 0.0, test::NormalizedSigma(1.0), 27, test::DefaultTransform());
+    TwoViewCorrespondences correspondences;
+    correspondences.x1 = scene.correspondences.x1;
+    correspondences.x2 = scene.correspondences.x2;
+    EXPECT_EQ(correspondences.sigma, 0.0);
+    EXPECT_FALSE(TwoViewReconstructor().Reconstruct(correspondences).success);
+}
+
 TEST(TwoViewReconstructionTest, IdenticalCorrespondencesAreNotTriangulated) {
     // Noise-free scene, every point an inlier, scored with sigma = 1 px; the true pose is the only
     // candidate so the selection result is directly comparable.
@@ -153,6 +177,22 @@ TEST(SelectPoseTest, AmbiguousCandidatesRejected) {
     const PoseSelection selection =
         SelectPose(duplicated, correspondences, inliers, options.essential_uniqueness, options);
     EXPECT_FALSE(selection.success);
+}
+
+TEST(SelectPoseTest, MismatchedInlierMaskFails) {
+    const auto scene = test::MakeGeneralScene(300, 0.0, 0.0, 29, test::DefaultTransform());
+    auto correspondences = scene.correspondences;
+    correspondences.sigma = test::NormalizedSigma(1.0);
+    const RigidTransformation T_21(scene.T_21.rotation(), scene.T_21.translation().normalized());
+    const std::array<RigidTransformation, 1> candidates{T_21};
+    const TwoViewOptions options;
+
+    const Eigen::Array<bool, Eigen::Dynamic, 1> longer =
+        Eigen::Array<bool, Eigen::Dynamic, 1>::Constant(correspondences.size() + 1, true);
+    EXPECT_FALSE(SelectPose(candidates, correspondences, longer, options.essential_uniqueness, options).success);
+    const Eigen::Array<bool, Eigen::Dynamic, 1> shorter =
+        Eigen::Array<bool, Eigen::Dynamic, 1>::Constant(correspondences.size() - 1, true);
+    EXPECT_FALSE(SelectPose(candidates, correspondences, shorter, options.essential_uniqueness, options).success);
 }
 
 } // namespace

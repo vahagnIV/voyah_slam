@@ -50,7 +50,8 @@ struct PoseSelection {
 /// Picks the motion candidate (camera 1 -> camera 2) that places the most inliers in front of
 /// both cameras with a reprojection error within 4σ² (ORB-SLAM3 CheckRT), and accepts it when it
 /// explains enough inliers, is unambiguous (no other candidate has more than
-/// a_uniqueness_ratio x its good count) and has enough parallax.
+/// a_uniqueness_ratio x its good count) and has enough parallax. Fails when a_inliers does not
+/// have one entry per correspondence.
 [[nodiscard]] PoseSelection SelectPose(std::span<const RigidTransformation> a_candidates,
                                        const TwoViewCorrespondences& a_correspondences,
                                        const Eigen::Array<bool, Eigen::Dynamic, 1>& a_inliers,
@@ -63,7 +64,7 @@ class TwoViewReconstructor {
 public:
     explicit TwoViewReconstructor(TwoViewOptions a_options = {});
 
-    /// Fails for a non-positive sigma, when both RANSAC runs fail, or when pose selection fails.
+    /// Fails for a non-positive or non-finite sigma, when both RANSAC runs fail, or when pose selection fails.
     [[nodiscard]] TwoViewReconstruction Reconstruct(const TwoViewCorrespondences& a_correspondences) const;
 
 private:

@@ -60,8 +60,11 @@ public:
         std::vector<Eigen::Index> indices(n);
         std::iota(indices.begin(), indices.end(), Eigen::Index{0});
 
-        size_t required = a_options.max_iterations;
-        while (result.iterations < std::clamp(required, a_options.min_iterations, a_options.max_iterations)) {
+        // std::clamp requires lo <= hi; RansacOptions does not enforce min <= max, so max wins.
+        const size_t max_iterations = a_options.max_iterations;
+        const size_t min_iterations = std::min(a_options.min_iterations, max_iterations);
+        size_t required = max_iterations;
+        while (result.iterations < std::clamp(required, min_iterations, max_iterations)) {
             ++result.iterations;
 
             // Partial Fisher-Yates: the first kSampleSize entries are a uniform distinct sample.
@@ -122,7 +125,12 @@ private:
         if (all_inliers >= 1.0) {
             return a_options.min_iterations;
         }
-        const double required = std::ceil(std::log(1.0 - a_options.confidence) / std::log(1.0 - all_inliers));
+        // log1p keeps a tiny w^k from rounding 1 - w^k to 1 (log = 0, required = -inf).
+        const double log_no_all_inlier_sample = std::log1p(-all_inliers);
+        if (!(std::isfinite(log_no_all_inlier_sample) && log_no_all_inlier_sample < 0.0)) {
+            return a_options.max_iterations;
+        }
+        const double required = std::ceil(std::log(1.0 - a_options.confidence) / log_no_all_inlier_sample);
         if (!(required < static_cast<double>(a_options.max_iterations))) {
             return a_options.max_iterations;
         }

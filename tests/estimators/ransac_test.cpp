@@ -1,5 +1,9 @@
 #include <gtest/gtest.h>
 
+#include <cstddef>
+#include <span>
+#include <vector>
+
 #include <voyahslam/estimators/essential_estimator.h>
 #include <voyahslam/estimators/homography_estimator.h>
 #include <voyahslam/estimators/ransac.h>
@@ -67,6 +71,54 @@ void CheckRefinedEssentialRecovery(double a_outlier_fraction, double a_min_inlie
     EXPECT_GE(after.inlier_fraction, a_min_inlier_fraction);
     EXPECT_LE(after.outlier_fraction, 0.05);
     EXPECT_GE(after.inlier_fraction, before.inlier_fraction);
+}
+
+// Every model scores exactly one inlier, so the all-inlier sample probability w^k underflows.
+struct OneInlierEstimator {
+    using TModel = int;
+    static constexpr size_t kSampleSize = 8;
+
+    [[nodiscard]] std::vector<TModel> Estimate(const geometry::TwoViewCorrespondences& /*a_correspondences*/,
+                                               std::span<const Eigen::Index> /*a_sample*/) const {
+        return {0};
+    }
+
+    [[nodiscard]] ModelScore Score(const TModel& /*a_model*/,
+                                   const geometry::TwoViewCorrespondences& a_correspondences) const {
+        ModelScore score;
+        score.inliers = Eigen::Array<bool, Eigen::Dynamic, 1>::Constant(a_correspondences.size(), false);
+        score.inliers(0) = true;
+        score.num_inliers = 1;
+        score.score = 1.0;
+        return score;
+    }
+};
+
+static_assert(TwoViewEstimator<OneInlierEstimator>);
+
+geometry::TwoViewCorrespondences MakeZeroCorrespondences(Eigen::Index a_n) {
+    geometry::TwoViewCorrespondences correspondences;
+    correspondences.x1 = geometry::TPoints2DF::Zero(2, a_n);
+    correspondences.x2 = geometry::TPoints2DF::Zero(2, a_n);
+    correspondences.sigma = 0.01;
+    return correspondences;
+}
+
+TEST(RansacTest, TinyInlierRatioRunsMaxIterations) {
+    // (1/300)^8 ~ 1.5e-20: 1 - w^k rounds to 1, which must not end the run at min_iterations.
+    const RansacOptions options;
+    const auto result = Ransac<OneInlierEstimator>().Run(MakeZeroCorrespondences(300), options);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.iterations, options.max_iterations);
+}
+
+TEST(RansacTest, MinIterationsAboveMaxIsBoundedByMax) {
+    RansacOptions options;
+    options.max_iterations = 10;
+    options.min_iterations = 50;
+    const auto result = Ransac<OneInlierEstimator>().Run(MakeZeroCorrespondences(300), options);
+    ASSERT_TRUE(result.success);
+    EXPECT_LE(result.iterations, options.max_iterations);
 }
 
 TEST(RansacTest, RecoversEssentialWith30PercentOutliers) { CheckEssentialRecovery(0.3); }

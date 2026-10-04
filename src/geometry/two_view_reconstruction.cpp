@@ -59,8 +59,9 @@ CandidateCheck CheckCandidate(const RigidTransformation& a_T_21, const TwoViewCo
         if ((p1.z() <= 0.0 || p2.z() <= 0.0) && near) {
             continue;
         }
-        if ((p1.hnormalized() - x1).squaredNorm() > max_squared_error ||
-            (p2.hnormalized() - x2).squaredNorm() > max_squared_error) {
+        // Written as !(err <= max) so a NaN error is rejected.
+        if (!((p1.hnormalized() - x1).squaredNorm() <= max_squared_error) ||
+            !((p2.hnormalized() - x2).squaredNorm() <= max_squared_error)) {
             continue;
         }
 
@@ -87,7 +88,7 @@ PoseSelection SelectPose(std::span<const RigidTransformation> a_candidates,
                          const Eigen::Array<bool, Eigen::Dynamic, 1>& a_inliers, double a_uniqueness_ratio,
                          const TwoViewOptions& a_options) {
     PoseSelection selection;
-    if (a_candidates.empty()) {
+    if (a_candidates.empty() || a_inliers.size() != a_correspondences.size()) {
         return selection;
     }
 
@@ -126,8 +127,9 @@ TwoViewReconstructor::TwoViewReconstructor(TwoViewOptions a_options) : options_(
 
 TwoViewReconstruction TwoViewReconstructor::Reconstruct(const TwoViewCorrespondences& a_correspondences) const {
     TwoViewReconstruction reconstruction;
-    // The estimators' scores and the reprojection gate divide by sigma.
-    if (!(a_correspondences.sigma > 0.0)) {
+    // The estimators' scores and the reprojection gate divide by sigma; an infinite sigma would
+    // make every chi-square 0 and every correspondence an inlier.
+    if (!(std::isfinite(a_correspondences.sigma) && a_correspondences.sigma > 0.0)) {
         return reconstruction;
     }
 
