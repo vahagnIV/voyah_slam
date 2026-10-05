@@ -20,6 +20,7 @@
 namespace voyahslam::optimization {
 namespace {
 
+using geometry::Camera;
 using geometry::RigidTransformation;
 using geometry::TPoint2DF;
 using geometry::TPoint3DF;
@@ -36,23 +37,23 @@ bool IsFinite(const RigidTransformation& pose) {
     return pose.rotation().allFinite() && pose.translation().allFinite();
 }
 
-/// Left-camera normalized reprojection error of a fixed world point seen by the T_cw pose
-/// vertex: e = pi(T_cw X) - left.
+/// Left-camera raw-pixel reprojection error of a fixed world point seen by the T_cw pose
+/// vertex: e = left.Project(T_cw X) - left measurement.
 class EdgeMonoPose : public g2o::BaseUnaryEdge<2, Eigen::Vector2d, g2o::VertexSE3Expmap> {
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-    explicit EdgeMonoPose(const TPoint3DF& point) : point_(point) {}
+    EdgeMonoPose(const TPoint3DF& point, const Camera& camera) : point_(point), camera_(camera) {}
 
     bool read(std::istream& /*is*/) override { return false; }
     bool write(std::ostream& /*os*/) const override { return false; }
 
-    void computeError() override { _error = ProjectNormalized(Pose(), point_) - _measurement; }
+    void computeError() override { _error = ProjectPixel(camera_, Pose(), point_) - _measurement; }
 
     void linearizeOplus() override {
         Eigen::Matrix<precision_t, 2, 6> pose_jacobian;
         Eigen::Matrix<precision_t, 2, 3> point_jacobian;
-        ProjectionJacobians(Pose(), point_, pose_jacobian, point_jacobian);
+        PixelJacobians(camera_, Pose(), point_, pose_jacobian, point_jacobian);
         _jacobianOplusXi = pose_jacobian;
     }
 
@@ -65,24 +66,25 @@ private:
     }
 
     TPoint3DF point_;
+    Camera camera_;
 };
 
 /// Stereo error of a fixed world point: the left rows of EdgeMonoPose stacked over the
-/// right-camera rows pi(T_rl T_cw X) - right; measurement = (left, right).
+/// right-camera rows right.Project(T_rl T_cw X) - right; measurement = (left, right), raw px.
 class EdgeStereoPose : public g2o::BaseUnaryEdge<4, Eigen::Vector4d, g2o::VertexSE3Expmap> {
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
-    EdgeStereoPose(const TPoint3DF& point, const RigidTransformation& T_rl)
-        : point_(point), T_rl_(T_rl) {}
+    EdgeStereoPose(const TPoint3DF& point, const Camera& left, const StereoCameras& stereo)
+        : point_(point), left_(left), right_(stereo.right), T_rl_(stereo.T_rl) {}
 
     bool read(std::istream& /*is*/) override { return false; }
     bool write(std::ostream& /*os*/) const override { return false; }
 
     void computeError() override {
         const RigidTransformation pose = Pose();
-        _error.head<2>() = ProjectNormalized(pose, point_) - _measurement.head<2>();
-        _error.tail<2>() = ProjectNormalizedRight(pose, T_rl_, point_) - _measurement.tail<2>();
+        _error.head<2>() = ProjectPixel(left_, pose, point_) - _measurement.head<2>();
+        _error.tail<2>() = ProjectPixelRight(right_, pose, T_rl_, point_) - _measurement.tail<2>();
     }
 
     void linearizeOplus() override {
@@ -90,8 +92,8 @@ public:
         Eigen::Matrix<precision_t, 2, 6> left_jacobian;
         Eigen::Matrix<precision_t, 2, 3> point_jacobian;
         Eigen::Matrix<precision_t, 2, 6> right_jacobian;
-        ProjectionJacobians(pose, point_, left_jacobian, point_jacobian);
-        ProjectionJacobianRightPose(pose, T_rl_, point_, right_jacobian);
+        PixelJacobians(left_, pose, point_, left_jacobian, point_jacobian);
+        PixelJacobianRightPose(right_, pose, T_rl_, point_, right_jacobian);
         _jacobianOplusXi.topRows<2>() = left_jacobian;
         _jacobianOplusXi.bottomRows<2>() = right_jacobian;
     }
@@ -108,17 +110,19 @@ private:
     }
 
     TPoint3DF point_;
+    Camera left_;
+    Camera right_;
     RigidTransformation T_rl_;
 };
 
-bool IsValid(const std::optional<RigidTransformation>& T_rl,
+bool IsValid(const Camera& left, const std::optional<StereoCameras>& stereo,
              const std::vector<PoseObservation>& observations,
              const PoseOptimizationOptions& options) {
     if (observations.empty() || options.rounds <= 0 || options.iterations_per_round <= 0 ||
-        !(options.mono_chi2 > 0.0) || !(options.stereo_chi2 > 0.0)) {
+        !(options.mono_chi2 > 0.0) || !(options.stereo_chi2 > 0.0) || !left.K.allFinite()) {
         return false;
     }
-    if (T_rl && !IsFinite(*T_rl)) {
+    if (stereo && (!IsFinite(stereo->T_rl) || !stereo->right.K.allFinite())) {
         return false;
     }
     for (const PoseObservation& observation : observations) {
@@ -126,7 +130,7 @@ bool IsValid(const std::optional<RigidTransformation>& T_rl,
             !std::isfinite(observation.sigma) || observation.sigma <= 0.0) {
             return false;
         }
-        if (observation.right && (!T_rl || !observation.right->allFinite())) {
+        if (observation.right && (!stereo || !observation.right->allFinite())) {
             return false;
         }
     }
@@ -142,13 +146,14 @@ const std::shared_ptr<spdlog::logger>& Log() {
 }  // namespace
 
 PoseOptimizationResult OptimizePose(const RigidTransformation& initial_T_cw,
-                                    const std::optional<RigidTransformation>& T_rl,
+                                    const Camera& left,
+                                    const std::optional<StereoCameras>& stereo,
                                     const std::vector<PoseObservation>& observations,
                                     const PoseOptimizationOptions& options) {
     PoseOptimizationResult result;
     result.T_cw = initial_T_cw;
     result.inlier.assign(observations.size(), false);
-    if (!IsFinite(initial_T_cw) || !IsValid(T_rl, observations, options)) {
+    if (!IsFinite(initial_T_cw) || !IsValid(left, stereo, observations, options)) {
         Log()->debug("Pose optimization skipped: invalid input or options ({} observations)",
                      observations.size());
         return result;
@@ -182,16 +187,16 @@ PoseOptimizationResult OptimizePose(const RigidTransformation& initial_T_cw,
         g2o::OptimizableGraph::Edge* edge = nullptr;
         double chi2 = options.mono_chi2;
         if (observation.right) {
-            auto* stereo = new EdgeStereoPose(observation.point, *T_rl);
-            stereo->setMeasurement(
+            auto* stereo_edge = new EdgeStereoPose(observation.point, left, *stereo);
+            stereo_edge->setMeasurement(
                 (Eigen::Vector4d() << observation.left, *observation.right).finished());
-            stereo->setInformation(Eigen::Matrix4d::Identity() * information);
-            stereo_edges[i] = stereo;
-            edge = stereo;
+            stereo_edge->setInformation(Eigen::Matrix4d::Identity() * information);
+            stereo_edges[i] = stereo_edge;
+            edge = stereo_edge;
             chi2 = options.stereo_chi2;
             ++num_stereo;
         } else {
-            auto* mono = new EdgeMonoPose(observation.point);
+            auto* mono = new EdgeMonoPose(observation.point, left);
             mono->setMeasurement(observation.left);
             mono->setInformation(Eigen::Matrix2d::Identity() * information);
             mono_edges[i] = mono;
