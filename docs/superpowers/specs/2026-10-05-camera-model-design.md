@@ -123,7 +123,7 @@ and gate in the library.
 - `KannalaBrandtDistortionModel` uses the analytic form:
   - r = ‖p‖, θ = atan r, d(θ) = θ(1 + k1θ² + k2θ⁴ + k3θ⁶ + k4θ⁸), and the
     distorted point is (d/r)·p.
-  - J = (d/r)·I + (d′(θ)·θ′(r) − d/r)/r · p̂p̂ᵀ, with p̂ = p/r,
+  - J = (d/r)·I + (d′(θ)·θ′(r) − d/r)·p̂p̂ᵀ, with p̂ = p/r (corrected during implementation, Ruling U),
     θ′(r) = 1/(1 + r²), and
     d′(θ) = 1 + 3k1θ² + 5k2θ⁴ + 7k3θ⁶ + 9k4θ⁸.
   - For r < 1e-8, J = I (the limit).
