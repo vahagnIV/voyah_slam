@@ -5,6 +5,7 @@ add_executable(voyahslam_tests
     estimators/essential_estimator_test.cpp
     estimators/homography_estimator_test.cpp
     estimators/ransac_test.cpp
+    geometry/camera_test.cpp
     geometry/geometry_test.cpp
     geometry/rigid_transformation_test.cpp
     geometry/two_view_decomposition_test.cpp

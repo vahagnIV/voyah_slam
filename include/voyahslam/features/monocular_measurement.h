@@ -4,6 +4,7 @@
 #include <cmath>
 #include <numbers>
 #include <vector>
+#include <voyahslam/geometry/camera.h>
 #include <voyahslam/geometry/distortion_models/distortion_model.h>
 #include <voyahslam/features/image_features.h>
 #include <voyahslam/defs.h>
@@ -31,6 +32,9 @@ public:
     MonocularMeasurement& operator=(MonocularMeasurement&&) = default;
 
     [[nodiscard]] const geometry::TMatrix33F& K() const;
+    // Raw keypoints as passed to the constructor (compacted with the 85 degree drop).
+    [[nodiscard]] const geometry::TPoints2DF& distorted_points() const { return distorted_points_; }
+    [[nodiscard]] const geometry::Camera& camera() const { return camera_; }
     [[nodiscard]] const geometry::THomogenousPointsF& normalized_points() const;
     [[nodiscard]] geometry::THomogenousPointF normalized_point(int idx) const;
     [[nodiscard]] geometry::TPoint2DF point(int idx) const;
@@ -43,6 +47,8 @@ private:
     void DropFeaturesBeyondMaxRayAngle(const geometry::distortion_models::DistortionModel* distortion_model);
 
     geometry::TMatrix33F K_;
+    geometry::Camera camera_;
+    geometry::TPoints2DF distorted_points_;
     geometry::THomogenousPointsF normalized_points_;
     double timestamp_ = 0.0;
 };
@@ -53,7 +59,8 @@ MonocularMeasurement<TScalar, Length>::MonocularMeasurement(
     const geometry::TMatrix33F& K,
     const geometry::distortion_models::DistortionModel* distortion_model,
     double timestamp)
-    : ImageFeatures<TScalar, Length>(std::move(features)), K_(K), timestamp_(timestamp) {
+    : ImageFeatures<TScalar, Length>(std::move(features)), K_(K), camera_{K, distortion_model}, distorted_points_(this->points_),
+      timestamp_(timestamp) {
     geometry::THomogenousPointsF homogeneous_points = this->points_.colwise().homogeneous();
     normalized_points_ = K_.inverse() * homogeneous_points;
     DropFeaturesBeyondMaxRayAngle(distortion_model);
@@ -85,6 +92,7 @@ void MonocularMeasurement<TScalar, Length>::DropFeaturesBeyondMaxRayAngle(
     }
     this->KeepFeatures(kept);
     normalized_points_ = normalized_points_(Eigen::all, kept).eval();
+    distorted_points_ = distorted_points_(Eigen::all, kept).eval();
 }
 
 template <typename TScalar, unsigned int Length>

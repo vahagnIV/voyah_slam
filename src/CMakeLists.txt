@@ -5,6 +5,7 @@ add_library(voyahslam
     algebra/algebra.cpp
     estimators/essential_estimator.cpp
     estimators/homography_estimator.cpp
+    geometry/camera.cpp
     geometry/geometry.cpp
     geometry/two_view_decomposition.cpp
     geometry/two_view_reconstruction.cpp
