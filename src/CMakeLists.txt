@@ -1,3 +1,5 @@
+find_package(g2o REQUIRED)
+
 add_library(voyahslam
     voyahslam.cpp
     algebra/algebra.cpp
@@ -21,6 +23,7 @@ add_library(voyahslam
     mapping/mapper.cpp
     mapping/map_initializer.cpp
     loop_closing/loop_closer.cpp
+    optimization/bundle_adjustment.cpp
     events/worker_thread.cpp
     slam/slam.cpp
 )
@@ -33,9 +36,10 @@ target_include_directories(voyahslam
 target_link_libraries(voyahslam
     PUBLIC Eigen3::Eigen
     PUBLIC spdlog::spdlog
-    PUBLIC moodycamel::concurrentqueue
+    PUBLIC ${VOYAHSLAM_CONCURRENTQUEUE_TARGET}
     PRIVATE stb::stb
     PRIVATE opencv_core
     PRIVATE opencv_imgproc
     PRIVATE opencv_features
+    PRIVATE g2o::core g2o::stuff g2o::types_sba g2o::types_slam3d g2o::solver_eigen
 )

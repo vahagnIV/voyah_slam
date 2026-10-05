@@ -39,12 +39,16 @@ add_executable(voyahslam_tests
     tracking/tracker_test.cpp
     support/synthetic_sequence_test.cpp
     mapping/map_initializer_test.cpp
+    mapping/paired_inliers_test.cpp
     mapping/mapper_test.cpp
     loop_closing/loop_closer_test.cpp
+    optimization/projection_test.cpp
+    optimization/bundle_adjustment_test.cpp
 )
 
 target_include_directories(voyahslam_tests
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    PRIVATE ${PROJECT_SOURCE_DIR}/src
 )
 
 target_link_libraries(voyahslam_tests
