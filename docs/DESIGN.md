@@ -778,6 +778,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-02 | Mapper is the only map writer, including all loop closure logic. LoopCloser only detects. | Single writer keeps replicas consistent by construction. |
 | 2026-10-02 | Tracker optimizes only its own pose; never mutates map objects. Its replica changes only via Mapper diffs. | Same. |
 | 2026-10-02 | `MapPointId` / `FrameId` are never reused. | Stale IDs from lagging replicas are detectable and can't alias new objects; replicas share slot layout. |
+| 2026-10-05 | Scope of the id rule made precise: `FrameId` unique per run; `MapPointId` unique within a map and append-only (`MapPointStorage::Remove` only marks a point dead, the free-list slot reuse is removed; `num_ids()` = next id); point ids restart per map and `(map_id, id)` identifies a point. CLAUDE.md updated to match. | The free list could hand a removed id to a new point (aliasing for lagging replicas, non-contiguous `MapPointsAdded` ranges); restarting per map is safe because every event carries `map_id`. |
 | 2026-10-02 | Tracker lag between `NewKeyFrameCandidate` and resulting diffs is accepted. | Matches ORB-SLAM3 behaviour; Tracker keeps tracking with its current replica. |
 | 2026-10-02 | `ObjectPool` free-list is a lock-free Treiber stack with tagged head; links in a separate index array. | Removes the last mutex from the event path; slot memory never read concurrently with construction. Verified with ThreadSanitizer. |
 | 2026-10-02 | `Observable::Notify()` always takes ownership of the event. | One rule for producers regardless of how observers are wired. |
@@ -996,8 +997,8 @@ branch → review → merge to `master`. Update this document at the end.
   states.
 
 **Required follow-up:**
-- Remove free-list reuse from `MapPointStorage` (ids are never reused); decide
-  storage-growth strategy (Open Question 2).
+- Decide `MapPointStorage` growth / compaction (Open Question 2); ids are
+  append-only since 2026-10-05.
 - Decide on Open Question 14 (pool sizing per event type).
 - `NewKeyFrameCandidate` doesn't carry the tracked `(map_point_id, feature_idx)`
   observations yet (§6 says it should) — add when designing the Tracker.

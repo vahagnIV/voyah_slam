@@ -170,8 +170,8 @@ void Mapper<TFeatureExtractor>::AddInitialMapPoints(
 
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::PublishMapPointsAdded() {
-    // Fresh storage: the ids are exactly [0, size()).
-    const uint32_t count = map_points_.size();
+    // Fresh storage of a new map: the ids are exactly [0, num_ids()).
+    const uint32_t count = map_points_.num_ids();
     auto* event = map_points_added_pool_.Create();
     event->map_id = current_map_id();
     event->start_id = map::MapPointId{0};
