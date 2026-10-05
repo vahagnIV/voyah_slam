@@ -47,11 +47,14 @@ MapInitializer<TFeatureExtractor>::TryInitializeBinocular(TBinocularMeasurement 
     Reset();
     const Eigen::Index num_features = measurement.left().points().cols();
     if (static_cast<size_t>(num_features) <= options_.stereo_min_features) {
+        log_->debug("Stereo initialization: {} features (need > {})", num_features,
+                    options_.stereo_min_features);
         return std::nullopt;
     }
     // The Tracker stereo-matches before forwarding; unmatched means no depths.
     assert(measurement.stereo_matched());
     if (!measurement.stereo_matched()) {
+        log_->debug("Stereo initialization: measurement is not stereo-matched");
         return std::nullopt;
     }
 
@@ -64,6 +67,8 @@ MapInitializer<TFeatureExtractor>::TryInitializeBinocular(TBinocularMeasurement 
         }
     }
     if (result.map_points.size() < options_.stereo_min_points) {
+        log_->debug("Stereo initialization: {} stereo points (need {})", result.map_points.size(),
+                    options_.stereo_min_points);
         return std::nullopt;
     }
     result.keyframes.push_back({geometry::RigidTransformation::Identity(), std::move(measurement)});
@@ -74,10 +79,13 @@ template <typename TFeatureExtractor>
 std::optional<InitializationResult<TFeatureExtractor>>
 MapInitializer<TFeatureExtractor>::TryInitializeMonocular(TMonocularMeasurement measurement) {
     if (static_cast<size_t>(measurement.points().cols()) <= options_.min_features) {
+        log_->debug("Mono initialization: {} features (need > {}); reference dropped",
+                    measurement.points().cols(), options_.min_features);
         Reset();
         return std::nullopt;
     }
     if (!reference_) {
+        log_->debug("Mono initialization: new reference ({} features)", measurement.points().cols());
         SetReference(std::move(measurement));
         return std::nullopt;
     }
@@ -96,6 +104,8 @@ MapInitializer<TFeatureExtractor>::TryInitializeMonocular(TMonocularMeasurement 
         }
     }
     if (first.size() < options_.min_matches) {
+        log_->debug("Mono initialization: {} matches (need {}); current frame becomes the reference",
+                    first.size(), options_.min_matches);
         SetReference(std::move(measurement));
         return std::nullopt;
     }
@@ -107,6 +117,8 @@ MapInitializer<TFeatureExtractor>::TryInitializeMonocular(TMonocularMeasurement 
     const geometry::TwoViewReconstruction reconstruction =
         geometry::TwoViewReconstructor(options_.reconstruction).Reconstruct(correspondences);
     if (!reconstruction.success) {
+        log_->debug("Mono initialization: two-view reconstruction failed ({} matches); keeping the reference",
+                    first.size());
         return std::nullopt;
     }
 
@@ -117,6 +129,7 @@ MapInitializer<TFeatureExtractor>::TryInitializeMonocular(TMonocularMeasurement 
         }
     }
     if (triangulated.empty()) {
+        log_->debug("Mono initialization: no triangulated points");
         return std::nullopt;
     }
     // Unscaled; camera 1 (the reference) is the world frame.
