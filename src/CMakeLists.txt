@@ -19,7 +19,6 @@ add_library(voyahslam
     features/orb/extract_node.cpp
     features/orb/quad_tree_distributor.cpp
     tracking/tracker.cpp
-    tracking/pose_estimator.cpp
     mapping/mapper.cpp
     mapping/map_initializer.cpp
     loop_closing/loop_closer.cpp

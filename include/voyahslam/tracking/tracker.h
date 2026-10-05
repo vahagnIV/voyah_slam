@@ -2,24 +2,30 @@
 #define VOYAHSLAM_TRACKING_TRACKER_H
 
 #include <atomic>
+#include <chrono>
 #include <concurrentqueue.h>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <vector>
 #include <voyahslam/defs.h>
 #include <voyahslam/events/event_node.h>
 #include <voyahslam/events/initialization_measurement.h>
 #include <voyahslam/events/listener.h>
+#include <voyahslam/events/map_created.h>
 #include <voyahslam/events/position_updated.h>
 #include <voyahslam/events/tracking_lost.h>
 #include <voyahslam/events/worker_thread.h>
 #include <voyahslam/features/measurement.h>
+#include <voyahslam/features/projection_matcher.h>
 #include <voyahslam/features/stereo_matcher.h>
 #include <voyahslam/geometry/rigid_transformation.h>
 #include <voyahslam/logging/logger.h>
 #include <voyahslam/map/frame_id.h>
 #include <voyahslam/map/map_id.h>
 #include <voyahslam/memory/object_pool.h>
-#include <voyahslam/tracking/pose_estimator.h>
+#include <voyahslam/optimization/pose_optimization.h>
+#include <voyahslam/tracking/map_replica.h>
 
 namespace voyahslam::tracking {
 
@@ -29,8 +35,27 @@ enum class TrackerState : uint8_t {
     Lost,           // tracking failed: behaves like WaitingForMap (relocalization later)
 };
 
+// Frame-to-map tracking thresholds (ORB-SLAM3 TrackWithMotionModel /
+// TrackLocalMap).
+struct TrackingOptions {
+    double window_mono_px = 15.0;       // last-frame search window, monocular
+    double window_stereo_px = 7.0;      // last-frame search window, binocular
+    size_t min_motion_matches = 20;     // below: retry with the window x2; still below: fail
+    size_t min_motion_inliers = 10;     // after pose optimization
+    double fallback_window_scale = 4.0; // zero-motion fallback window factor
+    double local_map_th = 1.0;          // local-map search window factor
+    size_t min_local_map_inliers = 30;
+};
+
 struct TrackerOptions {
     features::StereoMatcherOptions stereo_matcher;
+    TrackingOptions tracking;
+    features::ProjectionMatcherOptions matcher;
+    optimization::PoseOptimizationOptions pose_optimization;
+    double sigma_px = 1.0;     // keypoint noise std-dev at level 0, px
+    // sigma_level = sigma_px * level_scale^level. Separate from
+    // StereoMatcherOptions::level_scale on purpose; both default to 1.2.
+    double level_scale = 1.2;
 };
 
 // Estimates the camera pose of every incoming measurement against its own
@@ -39,8 +64,15 @@ struct TrackerOptions {
 //   - measurements_:  monocular / binocular measurements from Track().
 // Each ProcessPending() pass first applies all pending map diffs, then tracks
 // one measurement, so the replica is never modified while it is being tracked
-// against. Binocular measurements are stereo-matched on dequeue. Publishes InitializationMeasurement, PositionUpdated and
-// TrackingLost; never modifies map objects.
+// against. Binocular measurements are stereo-matched on dequeue. Publishes
+// InitializationMeasurement, PositionUpdated and TrackingLost; never modifies
+// map objects.
+//
+// Tracking (ORB-SLAM3 Track without BoW): the motion model (projection search
+// from the last frame at velocity * T_last, pose optimization), else a
+// wide-window search at zero motion, then the local map (every visible replica
+// point) and a final pose optimization. PositionUpdated::frame_id is the
+// keyframe of the current map's MapCreated.
 template <typename TFeatureExtractor>
 class Tracker : public events::EventNode {
 public:
@@ -77,11 +109,46 @@ public:
     // Approximate number of measurements waiting to be tracked.
     [[nodiscard]] size_t pending_measurements() const { return measurements_.size_approx(); }
 
+    // Tracker-thread state, for tests that drive ProcessPending()
+    // synchronously: never read while the worker runs.
+    [[nodiscard]] const MapReplica<TFeatureExtractor>& replica() const { return replica_; }
+    // The last tracked frame's inlier matches: per (left) feature, the
+    // MapPointId value or -1.
+    [[nodiscard]] const std::vector<int64_t>& last_matches() const { return last_frame_.matches; }
+
 private:
+    struct LastFrame {
+        TMeasurement measurement;
+        geometry::RigidTransformation T_cw;
+        std::vector<int64_t> matches;  // per (left) feature: MapPointId value or -1
+    };
+
+    // A pose with its matches, after outliers are dropped.
+    struct PoseResult {
+        geometry::RigidTransformation T_cw;
+        std::vector<int64_t> matches;
+        size_t num_matches = 0;   // before the optimization
+        size_t num_inliers = 0;
+    };
+
     // Applies the consumer rule; returns false if the event is stale.
     bool AdoptMapOf(const events::Event& event);
     void ApplyEvent(const events::Event& event);
+    void OnMapCreated(const events::MapCreated& created);
     void ProcessMeasurement(TMeasurement& measurement);
+    // Steps 1-3 of the tracking flow; on success T_cw and the inlier matches.
+    std::optional<PoseResult> TrackFrame(const TMeasurement& measurement);
+    // Projection search from the last frame at `predicted` (retried with the
+    // window x2 below min_motion_matches), then pose optimization.
+    std::optional<PoseResult> TrackFromLastFrame(const TMeasurement& measurement,
+                                                 const geometry::RigidTransformation& predicted,
+                                                 double window_px, const char* step);
+    std::optional<PoseResult> TrackLocalMap(const TMeasurement& measurement, PoseResult pose);
+    // Optimizes `initial_T_cw` against the matches and drops the outliers from
+    // them; on an optimization failure every match is dropped.
+    PoseResult OptimizeAndDropOutliers(const TMeasurement& measurement,
+                                       const geometry::RigidTransformation& initial_T_cw,
+                                       std::vector<int64_t> matches) const;
     void SetState(TrackerState state);
 
     void PublishInitializationMeasurement(TMeasurement& measurement);
@@ -95,8 +162,13 @@ private:
     std::atomic<TrackerState> state_{TrackerState::WaitingForMap};
     std::atomic<map::MapId> current_map_id_{map::MapId{0}};
     map::FrameId map_frame_id_{0};  // keyframe of the current map's MapCreated
-    geometry::RigidTransformation last_pose_ = geometry::RigidTransformation::Identity();
-    PoseEstimator<TFeatureExtractor> pose_estimator_;
+
+    // Tracker-thread state.
+    MapReplica<TFeatureExtractor> replica_;
+    LastFrame last_frame_;
+    std::optional<geometry::RigidTransformation> velocity_;  // T_cur_last
+    size_t tracked_frames_ = 0;  // in the current map
+    std::chrono::steady_clock::time_point last_info_log_{};
 
     memory::ObjectPool<events::InitializationMeasurement<TFeatureExtractor>,
                        memory::ThreadSafePolicy>

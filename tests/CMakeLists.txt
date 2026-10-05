@@ -36,7 +36,6 @@ add_executable(voyahslam_tests
     events/wake_signal_test.cpp
     events/worker_thread_test.cpp
     slam/slam_test.cpp
-    tracking/pose_estimator_test.cpp
     tracking/tracker_test.cpp
     tracking/map_replica_test.cpp
     support/synthetic_sequence_test.cpp

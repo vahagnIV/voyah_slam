@@ -49,6 +49,11 @@ map's points stay in view. This is expected.
    - Mono: compared after aligning the map's scale. Rotation < 0.5°;
      translation < 2 % of the travelled distance.
    - Stereo: metric. Rotation < 0.5°; translation < 2 cm.
+
+   *Amended during implementation (Ruling T):* mono accuracy is measured on a
+   well-conditioned initial map (min parallax 4°). With the default 1° init,
+   the noise-limited map's depth error (~12 %) dominates translation error;
+   rotation stays < 0.5°.
 2. **Loss.** A frame with no features, or with a pose far from the map
    (e.g. a teleport), gives `TrackingLost`. Re-initialization then works
    end to end.
