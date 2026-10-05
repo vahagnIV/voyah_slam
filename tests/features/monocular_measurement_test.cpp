@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "voyahslam/features/monocular_measurement.h"
-#include "voyahslam/features/distortion_models/dummy_distortion_model.h"
-#include "voyahslam/features/distortion_models/kannala_brandt_distortion_model.h"
+#include "voyahslam/geometry/distortion_models/dummy_distortion_model.h"
+#include "voyahslam/geometry/distortion_models/kannala_brandt_distortion_model.h"
 #include <cmath>
 #include "voyahslam/defs.h"
 
@@ -9,7 +9,7 @@ using voyahslam::features::ImageFeatures;
 using namespace voyahslam::geometry;
 using namespace voyahslam::features;
 using voyahslam::features::MonocularMeasurement;
-using voyahslam::features::distortion_models::DummyDistortionModel;
+using voyahslam::geometry::distortion_models::DummyDistortionModel;
 using voyahslam::precision_t;
 
 class MonocularMeasurementTest : public ::testing::Test {
@@ -114,7 +114,7 @@ TEST_F(MonocularMeasurementTest, MoveSemantics) {
 
 namespace {
 
-using voyahslam::features::distortion_models::KannalaBrandtDistortionModel;
+using voyahslam::geometry::distortion_models::KannalaBrandtDistortionModel;
 
 constexpr precision_t kDeg = 3.14159265358979323846 / 180.0;
 

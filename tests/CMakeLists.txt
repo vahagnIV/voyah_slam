@@ -21,8 +21,8 @@ add_executable(voyahslam_tests
     features/feature_grid_test.cpp
     features/initialization_matcher_test.cpp
     features/projection_matcher_test.cpp
-    features/distortion_models/distortion_model_test.cpp
-    features/distortion_models/kannala_brandt_distortion_model_test.cpp
+    geometry/distortion_models/distortion_model_test.cpp
+    geometry/distortion_models/kannala_brandt_distortion_model_test.cpp
     memory/object_pool_test.cpp
     memory/column_buffer_test.cpp
     map/id_types_test.cpp

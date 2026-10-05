@@ -3,7 +3,7 @@
 
 #include <opencv2/calib3d.hpp>
 
-using namespace voyahslam::features::distortion_models;
+using namespace voyahslam::geometry::distortion_models;
 
 namespace voyahslam::test::features {
 

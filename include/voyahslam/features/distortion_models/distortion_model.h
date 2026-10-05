@@ -1,17 +1,11 @@
 #ifndef VOYAHSLAM_FEATURES_DISTORTION_MODELS_DISTORTION_MODEL_H
 #define VOYAHSLAM_FEATURES_DISTORTION_MODELS_DISTORTION_MODEL_H
 
-#include <voyahslam/defs.h>
+// Forwarding header: the distortion models live in geometry/distortion_models/.
+#include <voyahslam/geometry/distortion_models/distortion_model.h>
 
-namespace voyahslam::features::distortion_models {
-
-class DistortionModel {
-public:
-    virtual ~DistortionModel() = default;
-    virtual void Undistort(geometry::THomogenousPointsF &points) const = 0;
-    virtual void Distort(geometry::THomogenousPointsF &points) const = 0;
-};
-
-} // namespace voyahslam::features::distortion_models
+namespace voyahslam::features {
+namespace distortion_models = geometry::distortion_models;
+} // namespace voyahslam::features
 
 #endif // VOYAHSLAM_FEATURES_DISTORTION_MODELS_DISTORTION_MODEL_H

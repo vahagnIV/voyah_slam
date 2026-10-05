@@ -2,7 +2,7 @@
 #define VOYAHVIZ_KEYPOINT_DRAWING_H
 
 #include <voyahslam/defs.h>
-#include <voyahslam/features/distortion_models/distortion_model.h>
+#include <voyahslam/geometry/distortion_models/distortion_model.h>
 #include <voyahslam/features/image_features.h>
 #include <voyahslam/features/monocular_measurement.h>
 #include <voyahslam/images/image.h>
@@ -51,7 +51,7 @@ TColorImage DrawFeatures(const voyahslam::images::TImageU8Gray&,
 template <typename TScalar, unsigned int Length>
 [[nodiscard]] voyahslam::geometry::TPoints2DF ProjectToImage(
     const voyahslam::features::MonocularMeasurement<TScalar, Length>& measurement,
-    const voyahslam::features::distortion_models::DistortionModel* distortion_model) {
+    const voyahslam::geometry::distortion_models::DistortionModel* distortion_model) {
     voyahslam::geometry::THomogenousPointsF points = measurement.normalized_points();
     if (distortion_model != nullptr) {
         distortion_model->Distort(points);
@@ -64,7 +64,7 @@ template <typename TScalar, unsigned int Length>
 [[nodiscard]] TColorImage DrawMeasurement(
     const voyahslam::images::TImageU8Gray& image,
     const voyahslam::features::MonocularMeasurement<TScalar, Length>& measurement,
-    const voyahslam::features::distortion_models::DistortionModel* distortion_model,
+    const voyahslam::geometry::distortion_models::DistortionModel* distortion_model,
     const KeypointStyle& style = {}) {
     return DrawKeypoints(image, ProjectToImage(measurement, distortion_model), &measurement.angles(), style);
 }

@@ -1,9 +1,9 @@
-#include "voyahslam/features/distortion_models/kannala_brandt_distortion_model.h"
+#include "voyahslam/geometry/distortion_models/kannala_brandt_distortion_model.h"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 
-namespace voyahslam::features::distortion_models {
+namespace voyahslam::geometry::distortion_models {
 
 KannalaBrandtDistortionModel::KannalaBrandtDistortionModel(
     const std::vector<precision_t> &coefficients)
@@ -215,4 +215,4 @@ void KannalaBrandtDistortionModel::Distort(
   }
 }
 
-} // namespace voyahslam::features::distortion_models
+} // namespace voyahslam::geometry::distortion_models

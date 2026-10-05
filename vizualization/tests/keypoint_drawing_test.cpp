@@ -2,7 +2,7 @@
 
 #include <gtest/gtest.h>
 
-#include <voyahslam/features/distortion_models/kannala_brandt_distortion_model.h>
+#include <voyahslam/geometry/distortion_models/kannala_brandt_distortion_model.h>
 
 namespace voyahviz {
 namespace {
@@ -75,7 +75,7 @@ TEST(KeypointDrawingTest, DrawsOrientationTick) {
 
 TEST(KeypointDrawingTest, ProjectToImageRecoversRawFisheyePixels) {
     // TUM-VI cam0 Kannala-Brandt calibration.
-    features::distortion_models::KannalaBrandtDistortionModel model(
+    geometry::distortion_models::KannalaBrandtDistortionModel model(
         0.010171079892421483, -0.010816440029919381, 0.005942781769412756, -0.001662284667857643);
     geometry::TMatrix33F K;
     K << 380.81, 0, 510.29, 0, 380.81, 514.33, 0, 0, 1;

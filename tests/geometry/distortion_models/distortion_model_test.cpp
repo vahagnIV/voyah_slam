@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
-#include "voyahslam/features/distortion_models/distortion_model.h"
-#include "voyahslam/features/distortion_models/dummy_distortion_model.h"
+#include "voyahslam/geometry/distortion_models/distortion_model.h"
+#include "voyahslam/geometry/distortion_models/dummy_distortion_model.h"
 
-using namespace voyahslam::features::distortion_models;
+using namespace voyahslam::geometry::distortion_models;
 using voyahslam::precision_t;
 
 class DistortionModelTest : public ::testing::Test {
