@@ -55,8 +55,8 @@ adds that step, using g2o.
 - **Residual:** on the undistorted normalized plane (z = 1). The Jacobian has
   no K and no lens model. σ is `sigma_px · level_scale^level / f`, the same
   simplification as the stereo matcher.
-- **Scope:** mono initialization only. ORB-SLAM3 settings: 20 iterations,
-  Huber kernel, first keyframe fixed, bundle adjustment before rescaling, and a
+- **Scope:** mono initialization only. ORB-SLAM3 settings: two stages like
+  its local BA (5 Huber iterations, deactivate outliers, 10 plain iterations), first keyframe fixed, bundle adjustment before rescaling, and a
   reset if fewer than 50 points survive.
 
 ## 1. Vendored g2o, recipe, build
@@ -119,8 +119,9 @@ g2o:
 namespace voyahslam::optimization {
 
 struct BundleAdjustmentOptions {
-    int iterations = 20;
-    bool robust = true;           // Huber kernel
+    int robust_iterations = 5;    // stage 1, Huber kernel
+    int iterations = 10;          // stage 2, no kernel, outlier edges deactivated
+    bool robust = true;           // false: one plain pass of robust_iterations + iterations
     double huber_chi2 = 5.991;    // δ² of the kernel and the outlier test (2 dof, 95 %)
 };
 
@@ -142,11 +143,11 @@ struct BaResult {
     bool success = false;
     std::vector<geometry::RigidTransformation> keyframe_poses;
     geometry::TPoints3DF points;
-    std::vector<double> chi2;      // per observation, after optimization, without kernel
+    std::vector<double> chi2;      // per observation (deactivated ones too), final, without kernel
     std::vector<bool> inlier;      // chi2 <= huber_chi2 && camera-frame depth > 0
-    double initial_cost = 0.0;
-    double final_cost = 0.0;
-    int iterations = 0;
+    double initial_cost = 0.0;     // plain chi2 sum over all observations at the start
+    double final_cost = 0.0;       // plain chi2 sum over the edges active in the last pass
+    int iterations = 0;            // total over both stages
 };
 
 [[nodiscard]] BaResult BundleAdjust(const BaProblem& problem,
@@ -178,15 +179,24 @@ user):
   `EdgeNormalizedProjection` (`BaseBinaryEdge<2, Vector2, VertexPointXYZ,
   VertexSE3Expmap>`) uses the helper above for `computeError` and
   `linearizeOplus`.
-- **Solver.** Huber kernel with δ = √`huber_chi2` when `robust`. Solver:
-  `BlockSolver_6_3` + `LinearSolverEigen` + `OptimizationAlgorithmLevenberg`.
-  Run `iterations`.
+- **Solver.** `BlockSolver_6_3` + `LinearSolverEigen` +
+  `OptimizationAlgorithmLevenberg`.
+- **Two stages** (like ORB-SLAM3's `LocalBundleAdjustment`). Stage 1:
+  `robust_iterations` with the Huber kernel, δ = √`huber_chi2`. Then every edge
+  with plain χ² > `huber_chi2` or camera-frame depth ≤ 0 is deactivated
+  (`setLevel(1)`). Stage 2: `iterations` on the remaining level-0 edges with
+  no kernel. With `robust == false`: a single plain pass of
+  `robust_iterations + iterations`, nothing deactivated.
+  *Amended during implementation (Ruling N): two-stage like ORB-SLAM3 LocalBA;
+  a single robust pass drifted with gross outliers.*
 - **Empty problem.** No keyframes, no points or no observations →
   `success = false`. An optimizer that fails to initialize or to run →
   `success = false`.
-- **After optimization.** Read back the poses and points. Per edge, compute
-  the plain χ² and the camera-frame depth, then fill `chi2` and `inlier`.
-  Costs are the sums of the plain χ² before and after.
+- **After optimization.** Read back the poses and points. For every edge,
+  deactivated ones included, compute the plain χ² and the camera-frame depth
+  at the final estimate, then fill `chi2` and `inlier`. `initial_cost` is the
+  plain χ² sum over all edges at the start; `final_cost` the plain χ² sum over
+  the edges active in the last pass. `iterations` is the total performed.
 
 ## 3. Integration into mono initialization
 
@@ -210,7 +220,8 @@ and behaviour is exactly as today.
    - Two observations per point. `measurement` = the matched feature's
      normalized point (first two rows). `sigma = sigma_px ·
      level_scale^level / K(0,0)` of that view.
-2. **`BundleAdjust`.** If `success == false`, treat it as a reconstruction
+2. **`BundleAdjust`** (the same two-stage call as §2, with
+   `bundle_adjustment` options). If `success == false`, treat it as a reconstruction
    failure: keep the reference and return nullopt.
 3. **Drop outliers.** Drop every point with a non-inlier observation in either
    view.
@@ -231,7 +242,7 @@ unchanged.
 |---|---|
 | Projection helper | `ProjectNormalized` is correct at known points. `ProjectionJacobians` equals central finite differences (pose via the left-multiplied exponential map in g2o order, point directly), within 1e-6, at 10 random (pose, point) pairs. The test target adds `src/` as a private include directory. |
 | `BundleAdjust`, clean | Two-view scene from `tests/support/two_view_scene.h`, noise-free normalized measurements. Keyframe 1 is perturbed (2° rotation, 10 % translation) and the points by 5 %. After adjustment, with poses and points aligned by the scale `s = ‖t_true‖/‖t_est‖`: rotation error < 1e-6 rad, translation within 1e-6, points within 1e-6. The fixed keyframe is unchanged (exact). |
-| `BundleAdjust`, noise + outliers | 0.5 px noise (in normalized units via f), plus 10 % of observations replaced by random positions. ≥ 95 % of the corrupted observations come back `inlier == false`. Translation-direction error < 0.5°. `final_cost < initial_cost`. |
+| `BundleAdjust`, noise + outliers | 0.5 px noise (in normalized units via f), plus 10 % of observations replaced by random positions. ≥ 95 % of the corrupted points have an observation with `inlier == false`. Oracle: the same call (same start, same options) on the inlier observations only; translation-direction error ≤ oracle error + 0.5° and < 2°. `final_cost < initial_cost`. (Amended, Ruling N: the absolute 0.5° bound was below the ML error of this geometry.) |
 | `BundleAdjust`, edges | An empty problem → `success == false`. A point seen only by the fixed keyframe stays finite. `robust = false` changes `final_cost` relative to the robust run on the outlier scene. |
 | `MapInitializer` | Synthetic sequence, seeds 1–5, `bundle_adjust` on vs off. Direction error with ≤ without + 1e-3°, and < 1° for every seed. Median depth == 1 (1e-9). Points ≥ `min_points_after_ba`. With `min_points_after_ba = 100000` there is no initialization. Existing initializer, Mapper and Slam tests stay green with the default (on). |
 | ThreadSanitizer | `Mapper*:Slam*`. |

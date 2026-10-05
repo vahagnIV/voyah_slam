@@ -42,6 +42,7 @@ add_executable(voyahslam_tests
     mapping/mapper_test.cpp
     loop_closing/loop_closer_test.cpp
     optimization/projection_test.cpp
+    optimization/bundle_adjustment_test.cpp
 )
 
 target_include_directories(voyahslam_tests
