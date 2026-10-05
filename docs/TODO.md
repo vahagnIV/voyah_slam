@@ -88,17 +88,19 @@ root window).
 
 ## Map & events
 
-- [ ] `MapPointStorage`: stop reusing freed slots (ids are never reused);
-      decide storage-growth strategy. (OQ 2)
+- [ ] `MapPointStorage` growth (OQ 2): ids are append-only (removal only marks
+      a point dead), so storage grows with every point ever created in a map;
+      decide whether/when to compact (a compaction would need an id remap
+      event for the replicas).
 - [ ] Size event pools per event type. (OQ 14)
 - [ ] `NewKeyFrameCandidate`: add the tracked `(map_point_id, feature_idx)`
       observations.
 - [ ] Mapper: `PublishKeyFrameCreated` scans all observations per keyframe
       (O(obs x keyframes)) — add a per-frame observation index before
       keyframes are created during Mapping.
-- [ ] Mapper: `PublishMapPointsAdded` assumes point ids are `[0, size())`;
-      breaks once points are removed (`MapPointStorage` still reuses freed
-      slots; see the item above, OQ 2).
+- [ ] Mapper: `PublishMapPointsAdded` publishes `[0, num_ids())` of a fresh
+      map; points added later during Mapping need a `start_id = num_ids()`
+      before the additions (ids are append-only, so the range is contiguous).
 
 ## Threads
 

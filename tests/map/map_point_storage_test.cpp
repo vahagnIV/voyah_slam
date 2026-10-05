@@ -51,18 +51,41 @@ TEST(MapPointStorageTest, Remove) {
     EXPECT_DOUBLE_EQ(storage.Position(id1).x(), 4.0);
 }
 
-TEST(MapPointStorageTest, ReuseSlot) {
+TEST(MapPointStorageTest, RemovedIdIsNeverReused) {
     Storage storage;
 
     auto id0 = storage.Add(MakePoint(1, 2, 3), MakeDescriptor(10), MakePoint(0, 0, 1));
     storage.Remove(id0);
 
-    auto id_new = storage.Add(MakePoint(99, 88, 77), MakeDescriptor(50), MakePoint(1, 1, 1));
+    auto id1 = storage.Add(MakePoint(99, 88, 77), MakeDescriptor(50), MakePoint(1, 1, 1));
 
-    EXPECT_EQ(id_new.value, id0.value);
-    EXPECT_DOUBLE_EQ(storage.Position(id_new).x(), 99.0);
-    EXPECT_EQ(storage.Descriptor(id_new)(0), 50);
-    EXPECT_TRUE(storage.IsValid(id_new));
+    EXPECT_EQ(id1.value, 1u);
+    EXPECT_FALSE(storage.IsValid(id0));
+    EXPECT_TRUE(storage.IsValid(id1));
+    EXPECT_DOUBLE_EQ(storage.Position(id1).x(), 99.0);
+    EXPECT_EQ(storage.Descriptor(id1)(0), 50);
+    EXPECT_EQ(storage.size(), 1u);
+    EXPECT_EQ(storage.num_ids(), 2u);
+}
+
+TEST(MapPointStorageTest, IdsAreIssuedInOrderAcrossRemovals) {
+    Storage storage;
+
+    for (uint32_t i = 0; i < 5; ++i) {
+        storage.Add(MakePoint(i, 0, 1), MakeDescriptor(i), MakePoint(0, 0, 1));
+    }
+    storage.Remove(MapPointId{1});
+    storage.Remove(MapPointId{3});
+
+    for (uint32_t expected = 5; expected < 300; ++expected) {  // crosses a Grow()
+        EXPECT_EQ(storage.Add(MakePoint(expected, 0, 1), MakeDescriptor(1), MakePoint(0, 0, 1)).value,
+                  expected);
+    }
+    EXPECT_FALSE(storage.IsValid(MapPointId{1}));
+    EXPECT_FALSE(storage.IsValid(MapPointId{3}));
+    EXPECT_DOUBLE_EQ(storage.Position(MapPointId{4}).x(), 4.0);
+    EXPECT_EQ(storage.num_ids(), 300u);
+    EXPECT_EQ(storage.size(), 298u);
 }
 
 TEST(MapPointStorageTest, BulkAccess) {

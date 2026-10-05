@@ -9,6 +9,9 @@
 
 namespace voyahslam::map {
 
+// Points of one map. Ids are append-only: Add() issues 0, 1, 2, ... in order and
+// Remove() only marks a point dead, so an id never refers to two points. Ids
+// restart only with a fresh storage (a new map); (map_id, id) identifies a point.
 template <typename TFeatureExtractor>
 class MapPointStorage {
 public:
@@ -32,7 +35,10 @@ public:
     [[nodiscard]] auto Normal(MapPointId id) const { return normals_.col(id.value); }
 
     [[nodiscard]] bool IsValid(MapPointId id) const;
+    // Number of live (not removed) points.
     [[nodiscard]] uint32_t size() const { return size_; }
+    // Number of ids ever issued; the next Add() returns MapPointId{num_ids()}.
+    [[nodiscard]] uint32_t num_ids() const { return num_ids_; }
     [[nodiscard]] const geometry::TPoints3DF& positions() const { return positions_; }
     [[nodiscard]] const TDescriptors& descriptors() const { return descriptors_; }
 
@@ -45,8 +51,8 @@ private:
     Eigen::VectorXi num_observations_;
     std::vector<bool> valid_;
     uint32_t size_ = 0;
+    uint32_t num_ids_ = 0;
     uint32_t capacity_ = 0;
-    std::vector<uint32_t> free_list_;
 
     void Grow();
 };
@@ -56,16 +62,10 @@ MapPointId MapPointStorage<TFeatureExtractor>::Add(
     const geometry::TPoint3DF& pos,
     const TDescriptor& desc,
     const geometry::TPoint3DF& normal) {
-    uint32_t slot;
-    if (!free_list_.empty()) {
-        slot = free_list_.back();
-        free_list_.pop_back();
-    } else {
-        if (size_ == capacity_) {
-            Grow();
-        }
-        slot = size_;
+    if (num_ids_ == capacity_) {
+        Grow();
     }
+    const uint32_t slot = num_ids_++;
 
     positions_.col(slot) = pos;
     descriptors_.col(slot) = desc;
@@ -82,7 +82,6 @@ void MapPointStorage<TFeatureExtractor>::Remove(MapPointId id) {
     assert(id.value < capacity_ && "MapPointId out of range");
     if (!valid_[id.value]) return;
     valid_[id.value] = false;
-    free_list_.push_back(id.value);
     --size_;
 }
 

@@ -13,6 +13,7 @@ relevant section) in the same change.
 Key rules (details in DESIGN.md):
 - No locks on map data. Threads communicate only via events; each thread owns a map replica.
 - Mapper is the only map writer. Tracker and LoopCloser never mutate map objects.
-- Map point / frame IDs are never reused.
+- Frame IDs are never reused within a run. Map point IDs are never reused within a
+  map (append-only); they restart per map, and `(map_id, id)` identifies a point.
 - Google style naming: `PascalCase` types/functions, `snake_case` variables,
   `snake_case_` members, `out_` prefix for non-const reference parameters.
