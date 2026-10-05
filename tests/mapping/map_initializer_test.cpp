@@ -5,9 +5,9 @@
 
 #include <algorithm>
 #include <cmath>
-#include <iostream>
 #include <numbers>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <variant>
 #include <vector>
@@ -305,10 +305,11 @@ TEST_F(MapInitializerTest, BundleAdjustmentReachesOptimum) {
         ASSERT_EQ(plain_survivors.map_points.size(), ba_result.map_points.size());
         const double cost_plain = Chi2(plain_survivors, ba_options);
         const double cost_ba = Chi2(ba_result, ba_options);
-        std::cout << "seed " << seed << " (frame " << ba_success->index << "): dir_err plain " << dir_err_plain
-                  << " deg, BA " << dir_err_ba << " deg, oracle " << dir_err_oracle << " deg; chi2 plain "
-                  << cost_plain << ", BA " << cost_ba << "; points " << plain_result.map_points.size() << " -> "
-                  << ba_result.map_points.size() << "\n";
+        std::ostringstream summary;
+        summary << "frame " << ba_success->index << ": dir_err plain " << dir_err_plain << " deg, BA " << dir_err_ba
+                << " deg, oracle " << dir_err_oracle << " deg; chi2 plain " << cost_plain << ", BA " << cost_ba
+                << "; points " << plain_result.map_points.size() << " -> " << ba_result.map_points.size();
+        RecordProperty("seed_" + std::to_string(seed), summary.str());
 
         EXPECT_NEAR(dir_err_ba, dir_err_oracle, 0.1);
         EXPECT_LT(cost_ba, cost_plain);

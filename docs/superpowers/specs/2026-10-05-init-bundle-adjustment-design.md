@@ -1,7 +1,7 @@
 # Bundle Adjustment After Monocular Initialization (g2o) — Design Spec
 
 Date: 2026-10-05
-Status: approved in conversation, pending spec review
+Status: implemented; amended during implementation (Rulings N, O, O′)
 
 ## Context and Scope
 

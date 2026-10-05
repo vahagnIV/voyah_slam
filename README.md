@@ -5,7 +5,7 @@ Architecture and conventions: `docs/DESIGN.md`; pending work: `docs/TODO.md`.
 
 ## Prerequisites
 
-- gcc 13 or clang 18, CMake >= 3.28 (4.0 used), Conan 2 (`pip install conan`, then
+- gcc 13 or clang 18, CMake >= 3.23 (Conan presets; 4.0 used), Conan 2 (`pip install conan`, then
   `conan profile detect` once), Linux (Ubuntu 24.04 tested).
 - System packages for the GUI/GL parts: GTK2 dev files (`libgtk2.0-dev`), OpenGL/GLEW/X11
   dev files (`libgl1-mesa-dev libglew-dev libx11-dev libwayland-dev libxkbcommon-dev
@@ -36,7 +36,7 @@ CMake finds them as `OpenCV 5` (`/usr/local/lib/cmake/opencv5`) and `Pangolin 0.
 
 g2o 20241228 is vendored in `third_party/g2o/src/` and packaged by a local recipe as
 `g2o/20241228@voyah/stable`. It must be in your local Conan cache before the project's
-`conan install`, otherwise Conan fails with "Package 'g2o/20241228@voyah/stable' not found".
+`conan install`, otherwise Conan fails with `ERROR: Package 'g2o/20241228@voyah/stable' not resolved: Unable to find 'g2o/20241228@voyah/stable' in remotes.`
 Create both build types (about two minutes each):
 
 ```

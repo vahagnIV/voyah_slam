@@ -10,6 +10,7 @@ class G2oConan(ConanFile):
     version = "20241228"
     user = "voyah"
     channel = "stable"
+    package_type = "library"
     license = "BSD-2-Clause"
     url = "https://github.com/RainerKuemmerle/g2o"
     description = "g2o: general framework for graph optimization (vendored, tag 20241228_git)"

@@ -87,10 +87,6 @@ root window).
 - [ ] Tuning on TUM-VI 512, including the ~17 m stereo depth cap implied by
       `max_parallax_cos` 0.99998 at the 0.11 m baseline (ORB-SLAM3's KB
       `TriangulateMatches` uses 0.9998, about 1.15 degrees / 5.5 m cap).
-- [ ] Stereo matcher: test reprojection in distorted pixel space (via
-      `Distort`) for fisheye, as ORB-SLAM3 `KannalaBrandt8::TriangulateMatches`
-      does; the normalized-plane chi-square rejects peripheral matches.
-      (Merged with the same item for `BundleAdjust` under Environment.)
 - [ ] Tests to add (deferred review findings): stereo observation depth and
       right index are not read back by any test (add when a consumer exists);
       the initializer path for an unmatched measurement; Tracking-state stereo
@@ -280,9 +276,10 @@ Deferred minor findings from the per-task reviews.
       package (`lib/cmake`); remove them (`rmdir`) since the recipe declares the
       components itself.
 - [ ] Pixel-space residuals: both the stereo matcher's reprojection test
-      (distorted pixel space via `Distort`, see Stereo) and `BundleAdjust` (now
+      (distorted pixel space via `Distort`) and `BundleAdjust` (now
       normalized-plane chi-square) could use pixel-space residuals for fisheye.
-
+      ORB-SLAM3's `KannalaBrandt8::TriangulateMatches` tests in distorted pixel
+      space; the normalized-plane chi-square rejects peripheral matches.
 - [ ] Second dev machine: build OpenCV 5.x from source into `/usr/local` with
       `WITH_GTK=ON` (Conan no longer provides OpenCV).
 - [ ] Recurring: syntax-check all sources with clang-18 + libc++ (clean on

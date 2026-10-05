@@ -12,6 +12,8 @@
 #include <voyahslam/mapping/map_initializer.h>
 #include <voyahslam/optimization/bundle_adjustment.h>
 
+#include "mapping/paired_inliers.h"
+
 namespace voyahslam::mapping {
 
 namespace {
@@ -146,13 +148,11 @@ MapInitializer<TFeatureExtractor>::TryInitializeMonocular(TMonocularMeasurement 
         }
 
         // Observations are pushed in pairs: point p owns 2p (view 1) and 2p + 1 (view 2).
-        std::vector<Eigen::Index> survivors;
+        const std::vector<Eigen::Index> survivors = PairedInliers(adjusted.inlier, triangulated.size());
         std::vector<Eigen::Index> kept;
-        for (size_t p = 0; p < triangulated.size(); ++p) {
-            if (adjusted.inlier[2 * p] && adjusted.inlier[2 * p + 1]) {
-                survivors.push_back(static_cast<Eigen::Index>(p));
-                kept.push_back(triangulated[p]);
-            }
+        kept.reserve(survivors.size());
+        for (const Eigen::Index p : survivors) {
+            kept.push_back(triangulated[static_cast<size_t>(p)]);
         }
         log_->debug("Initialization BA: cost {:.4g} -> {:.4g} in {} iterations, "
                     "{} outliers removed, {} points survive",
