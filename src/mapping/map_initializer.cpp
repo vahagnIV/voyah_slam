@@ -144,6 +144,7 @@ MapInitializer<TFeatureExtractor>::TryInitializeMonocular(TMonocularMeasurement 
         const optimization::BaResult adjusted =
             optimization::BundleAdjust(problem, options_.bundle_adjustment);
         if (!adjusted.success) {
+            log_->debug("Initialization BA failed; keeping the reference");
             return std::nullopt;
         }
 
@@ -162,6 +163,7 @@ MapInitializer<TFeatureExtractor>::TryInitializeMonocular(TMonocularMeasurement 
         T_21 = adjusted.keyframe_poses[1];
         triangulated = std::move(kept);
         if (triangulated.empty()) {
+            log_->debug("Initialization rejected: no points survive BA");
             return std::nullopt;
         }
     }
@@ -171,9 +173,12 @@ MapInitializer<TFeatureExtractor>::TryInitializeMonocular(TMonocularMeasurement 
     std::nth_element(depths.begin(), median, depths.end());
     const double median_depth = *median;
     if (!std::isfinite(median_depth) || median_depth <= 0.0) {
+        log_->debug("Initialization rejected: invalid median depth {}", median_depth);
         return std::nullopt;
     }
     if (options_.bundle_adjust && triangulated.size() < options_.min_points_after_ba) {
+        log_->debug("Initialization rejected: {} points after BA, {} required", triangulated.size(),
+                    options_.min_points_after_ba);
         return std::nullopt;
     }
     const double scale = 1.0 / median_depth;

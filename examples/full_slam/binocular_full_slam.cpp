@@ -9,6 +9,7 @@
 #include <voyahviz/image_window.h>
 #include <voyahviz/keypoint_drawing.h>
 #include <voyahviz/map_viewer.h>
+#include <voyahslam/logging/logger.h>
 #include <voyahslam/features/orb_feature_extractor.h>
 #include <voyahslam/slam/slam.h>
 
@@ -21,6 +22,8 @@ using TSlam = slam::Slam<TFeatureExtractor>;
 using TBinocularMeasurement = TSlam::TTracker::TBinocularMeasurement;
 
 int main(int argc, char** argv) {
+    // Debug logs (e.g. initialization and bundle adjustment) are shown by the examples.
+    voyahslam::Logger::SetLevel(spdlog::level::debug);
     full_slam::Options options = full_slam::ParseOptions(argc, argv);
     try {
         dataset_reader::EurocDatasetReader reader(options.dataset);
