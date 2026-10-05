@@ -10,6 +10,7 @@
 #include <voyahslam/geometry/two_view_correspondences.h>
 #include <voyahslam/geometry/two_view_reconstruction.h>
 #include <voyahslam/mapping/map_initializer.h>
+#include <voyahslam/optimization/bundle_adjustment.h>
 
 namespace voyahslam::mapping {
 
@@ -108,31 +109,83 @@ MapInitializer<TFeatureExtractor>::TryInitializeMonocular(TMonocularMeasurement 
     }
 
     std::vector<Eigen::Index> triangulated;
-    std::vector<double> depths;
     for (Eigen::Index c = 0; c < correspondences.size(); ++c) {
         if (reconstruction.triangulated(c)) {
             triangulated.push_back(c);
-            depths.push_back(reconstruction.points(2, c));
         }
     }
-    if (depths.empty()) {
+    if (triangulated.empty()) {
         return std::nullopt;
     }
+    // Unscaled; camera 1 (the reference) is the world frame.
+    geometry::TPoints3DF points = reconstruction.points(Eigen::all, triangulated);
+    geometry::RigidTransformation T_21 = reconstruction.T_21;
+
+    if (options_.bundle_adjust) {
+        const auto sigma = [this](const TMonocularMeasurement& view, Eigen::Index feature) {
+            return options_.sigma_px *
+                   std::pow(options_.level_scale, static_cast<double>(view.levels()(feature))) /
+                   view.K()(0, 0);
+        };
+        optimization::BaProblem problem;
+        problem.keyframe_poses = {geometry::RigidTransformation::Identity(), T_21};
+        problem.keyframe_fixed = {true, false};
+        problem.points = points;
+        problem.observations.reserve(2 * triangulated.size());
+        for (size_t p = 0; p < triangulated.size(); ++p) {
+            const Eigen::Index c = triangulated[p];
+            problem.observations.push_back(
+                {0, p, correspondences.x1.col(c), sigma(*reference_, first[c])});
+            problem.observations.push_back(
+                {1, p, correspondences.x2.col(c), sigma(measurement, second[c])});
+        }
+        const optimization::BaResult adjusted =
+            optimization::BundleAdjust(problem, options_.bundle_adjustment);
+        if (!adjusted.success) {
+            return std::nullopt;
+        }
+
+        // Observations are pushed in pairs: point p owns 2p (view 1) and 2p + 1 (view 2).
+        std::vector<Eigen::Index> survivors;
+        std::vector<Eigen::Index> kept;
+        for (size_t p = 0; p < triangulated.size(); ++p) {
+            if (adjusted.inlier[2 * p] && adjusted.inlier[2 * p + 1]) {
+                survivors.push_back(static_cast<Eigen::Index>(p));
+                kept.push_back(triangulated[p]);
+            }
+        }
+        log_->debug("Initialization BA: cost {:.4g} -> {:.4g} in {} iterations, "
+                    "{} outliers removed, {} points survive",
+                    adjusted.initial_cost, adjusted.final_cost, adjusted.iterations,
+                    triangulated.size() - kept.size(), kept.size());
+        points = adjusted.points(Eigen::all, survivors);
+        T_21 = adjusted.keyframe_poses[1];
+        triangulated = std::move(kept);
+        if (triangulated.empty()) {
+            return std::nullopt;
+        }
+    }
+
+    std::vector<double> depths(points.row(2).begin(), points.row(2).end());
     const auto median = depths.begin() + static_cast<std::ptrdiff_t>(depths.size() / 2);
     std::nth_element(depths.begin(), median, depths.end());
     const double median_depth = *median;
     if (!std::isfinite(median_depth) || median_depth <= 0.0) {
         return std::nullopt;
     }
+    if (options_.bundle_adjust && triangulated.size() < options_.min_points_after_ba) {
+        return std::nullopt;
+    }
     const double scale = 1.0 / median_depth;
 
     TResult result;
     result.map_points.reserve(triangulated.size());
-    for (const Eigen::Index c : triangulated) {
-        result.map_points.push_back({scale * reconstruction.points.col(c), first[c], second[c]});
+    for (size_t p = 0; p < triangulated.size(); ++p) {
+        const Eigen::Index c = triangulated[p];
+        result.map_points.push_back(
+            {scale * points.col(static_cast<Eigen::Index>(p)), first[c], second[c]});
     }
-    const geometry::RigidTransformation T_21(reconstruction.T_21.rotation(),
-                                             scale * reconstruction.T_21.translation());
+    T_21 = geometry::RigidTransformation(T_21.rotation(), scale * T_21.translation());
     result.keyframes.push_back({geometry::RigidTransformation::Identity(), std::move(*reference_)});
     result.keyframes.push_back({T_21, std::move(measurement)});
     Reset();

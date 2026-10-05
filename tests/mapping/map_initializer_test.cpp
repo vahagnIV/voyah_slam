@@ -5,8 +5,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <numbers>
 #include <optional>
+#include <string>
 #include <variant>
 #include <vector>
 
@@ -192,6 +194,137 @@ TEST_F(MapInitializerTest, ResetDropsReference) {
     EXPECT_FALSE(initializer_.TryInitialize(sequence_.frames[0].measurement).has_value());
     initializer_.Reset();
     EXPECT_FALSE(initializer_.TryInitialize(sequence_.frames[success->index].measurement).has_value());
+}
+
+// Translation direction error of the second keyframe against the truth.
+double DirectionErrorDeg(const test::SyntheticSequence& sequence, const Success& success) {
+    return AngleBetweenDeg(success.result.keyframes[1].T_cw.translation(),
+                           sequence.frames[success.index].T_cw.translation());
+}
+
+double MedianDepth(const Result& result) {
+    std::vector<double> depths;
+    for (const InitialMapPoint& point : result.map_points) {
+        depths.push_back(point.position.z());
+    }
+    std::nth_element(depths.begin(), depths.begin() + depths.size() / 2, depths.end());
+    return depths[depths.size() / 2];
+}
+
+// The initializer's bundle adjustment problem for the correspondences of an
+// initialization (its two keyframes and map points): normalized measurements
+// and level-scaled sigmas, starting from poses and points supplied later.
+optimization::BaProblem InitializationProblem(const Result& result, const MapInitializerOptions& options) {
+    const auto& view1 = std::get<Monocular>(result.keyframes[0].measurement);
+    const auto& view2 = std::get<Monocular>(result.keyframes[1].measurement);
+    const auto sigma = [&options](const Monocular& view, Eigen::Index feature) {
+        return options.sigma_px * std::pow(options.level_scale, static_cast<double>(view.levels()(feature))) /
+               view.K()(0, 0);
+    };
+    optimization::BaProblem problem;
+    problem.keyframe_fixed = {true, false};
+    problem.points.resize(3, static_cast<Eigen::Index>(result.map_points.size()));
+    for (size_t p = 0; p < result.map_points.size(); ++p) {
+        const InitialMapPoint& point = result.map_points[p];
+        problem.observations.push_back({0, p, view1.normalized_points().col(point.feature_in_first).head<2>(),
+                                        sigma(view1, point.feature_in_first)});
+        problem.observations.push_back({1, p, view2.normalized_points().col(point.feature_in_second).head<2>(),
+                                        sigma(view2, point.feature_in_second)});
+    }
+    return problem;
+}
+
+// Plain chi2 of the initialization's own estimate on its observations.
+double Chi2(const Result& result, const MapInitializerOptions& options) {
+    const optimization::BaProblem problem = InitializationProblem(result, options);
+    const geometry::RigidTransformation T[2] = {result.keyframes[0].T_cw, result.keyframes[1].T_cw};
+    double chi2 = 0.0;
+    for (const optimization::BaObservation& observation : problem.observations) {
+        const geometry::TVector3DF p_c =
+            T[observation.keyframe].Transform(result.map_points[observation.point].position);
+        chi2 += ((p_c.hnormalized() - observation.measurement) / observation.sigma).squaredNorm();
+    }
+    return chi2;
+}
+
+TEST_F(MapInitializerTest, BundleAdjustmentReachesOptimum) {
+    // At the initializing frame's low parallax the direction error is limited by
+    // the noise, not by the solver: the BA must reach the ML optimum, found by
+    // the same adjustment started from the ground truth (the oracle).
+    const MapInitializerOptions ba_options;
+    double sum_plain = 0.0;
+    double sum_ba = 0.0;
+    for (unsigned seed = 1; seed <= 5; ++seed) {
+        SCOPED_TRACE("seed " + std::to_string(seed));
+        test::SyntheticSequenceOptions sequence_options;
+        sequence_options.seed = seed;
+        const test::SyntheticSequence sequence = test::MakeSyntheticSequence(sequence_options);
+
+        MapInitializerOptions plain_options;
+        plain_options.bundle_adjust = false;
+        MapInitializer<Extractor> plain(plain_options);
+        MapInitializer<Extractor> adjusted(ba_options);
+        const auto plain_success = FeedUntilSuccess(plain, sequence, 0, 20);
+        const auto ba_success = FeedUntilSuccess(adjusted, sequence, 0, 20);
+        ASSERT_TRUE(plain_success.has_value());
+        ASSERT_TRUE(ba_success.has_value());
+        ASSERT_EQ(plain_success->index, ba_success->index);
+        const Result& plain_result = plain_success->result;
+        const Result& ba_result = ba_success->result;
+
+        // Oracle: the plain initialization's problem (all triangulated points),
+        // started from the truth with the unscaled two-view baseline (|t| = 1).
+        const geometry::RigidTransformation& T_true = sequence.frames[plain_success->index].T_cw;
+        const double to_unit_baseline = 1.0 / T_true.translation().norm();
+        optimization::BaProblem oracle_problem = InitializationProblem(plain_result, ba_options);
+        oracle_problem.keyframe_poses = {
+            geometry::RigidTransformation::Identity(),
+            geometry::RigidTransformation(T_true.rotation(), to_unit_baseline * T_true.translation())};
+        const std::vector<Eigen::Index>& point_of_feature = sequence.frames[0].point_of_feature;
+        for (size_t p = 0; p < plain_result.map_points.size(); ++p) {
+            const Eigen::Index point = point_of_feature[plain_result.map_points[p].feature_in_first];
+            ASSERT_GE(point, 0);
+            oracle_problem.points.col(static_cast<Eigen::Index>(p)) =
+                to_unit_baseline * sequence.points_w.col(point);
+        }
+        const optimization::BaResult oracle =
+            optimization::BundleAdjust(oracle_problem, ba_options.bundle_adjustment);
+        ASSERT_TRUE(oracle.success);
+
+        const double dir_err_plain = DirectionErrorDeg(sequence, *plain_success);
+        const double dir_err_ba = DirectionErrorDeg(sequence, *ba_success);
+        const double dir_err_oracle = AngleBetweenDeg(oracle.keyframe_poses[1].translation(), T_true.translation());
+        // Both costs over the observations of the BA's survivors.
+        Result plain_survivors = plain_result;
+        std::erase_if(plain_survivors.map_points, [&ba_result](const InitialMapPoint& point) {
+            return std::none_of(ba_result.map_points.begin(), ba_result.map_points.end(),
+                                [&point](const InitialMapPoint& survivor) {
+                                    return survivor.feature_in_first == point.feature_in_first;
+                                });
+        });
+        ASSERT_EQ(plain_survivors.map_points.size(), ba_result.map_points.size());
+        const double cost_plain = Chi2(plain_survivors, ba_options);
+        const double cost_ba = Chi2(ba_result, ba_options);
+        std::cout << "seed " << seed << " (frame " << ba_success->index << "): dir_err plain " << dir_err_plain
+                  << " deg, BA " << dir_err_ba << " deg, oracle " << dir_err_oracle << " deg; chi2 plain "
+                  << cost_plain << ", BA " << cost_ba << "; points " << plain_result.map_points.size() << " -> "
+                  << ba_result.map_points.size() << "\n";
+
+        EXPECT_NEAR(dir_err_ba, dir_err_oracle, 0.1);
+        EXPECT_LT(cost_ba, cost_plain);
+        EXPECT_NEAR(MedianDepth(ba_result), 1.0, 1e-9);
+        EXPECT_GE(ba_result.map_points.size(), 50u);
+        sum_plain += dir_err_plain;
+        sum_ba += dir_err_ba;
+    }
+    EXPECT_LE(sum_ba / 5.0, sum_plain / 5.0);
+}
+
+TEST_F(MapInitializerTest, TooFewPointsAfterBaFails) {
+    MapInitializerOptions options;
+    options.min_points_after_ba = 100000;
+    MapInitializer<Extractor> initializer(options);
+    EXPECT_FALSE(FeedUntilSuccess(initializer, sequence_, 0, 10).has_value());
 }
 
 TEST_F(MapInitializerTest, StereoInitializesFromOneFrame) {

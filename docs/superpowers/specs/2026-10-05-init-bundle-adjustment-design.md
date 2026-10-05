@@ -35,9 +35,15 @@ adds that step, using g2o.
 
 **Success criteria**
 
-1. Synthetic sequence, seeds 1–5: after the bundle adjustment the
-   translation-direction error is ≤ the error without it, and < 1° on every
-   seed. The map is still median-depth-1 scaled.
+1. Synthetic sequence, seeds 1–5: the bundle adjustment reaches the ML
+   optimum — its translation-direction error is within 0.1° of an oracle (the
+   same adjustment started from the ground truth) on every seed, its χ² is
+   below the two-view estimate's, and the mean direction error over the seeds
+   is ≤ the mean without it. The map is still median-depth-1 scaled.
+   *Amended during implementation (Ruling O): init error at low parallax is
+   noise-limited; tests check convergence to the ML optimum. BA runs on the
+   unscaled problem (baseline 1, depths ~40), so it needs ~40 plain iterations to
+   converge; rescaling first would converge faster (left for tuning).*
 2. `BundleAdjust` recovers a perturbed noise-free two-view problem exactly, up
    to the free scale, and flags gross outliers.
 3. A clean machine can follow `README.md` to build g2o through Conan, then the
@@ -204,10 +210,16 @@ user):
 
 ```cpp
 bool bundle_adjust = true;
-optimization::BundleAdjustmentOptions bundle_adjustment;
+optimization::BundleAdjustmentOptions bundle_adjustment{.robust_iterations = 5,
+                                                        .iterations = 40};
 double level_scale = 1.2;          // σ_level = sigma_px · level_scale^level
 size_t min_points_after_ba = 50;
 ```
+
+*Amended during implementation (Ruling O): init error at low parallax is
+noise-limited; tests check convergence to the ML optimum. BA runs on the
+unscaled problem (baseline 1, depths ~40), so it needs ~40 plain iterations to
+converge; rescaling first would converge faster (left for tuning).*
 
 Mono `TryInitialize`, after `TwoViewReconstructor` succeeds and before the
 current scaling step. When `bundle_adjust == false`, all of this is skipped
@@ -244,7 +256,7 @@ unchanged.
 | `BundleAdjust`, clean | Two-view scene from `tests/support/two_view_scene.h`, noise-free normalized measurements. Keyframe 1 is perturbed (2° rotation, 10 % translation) and the points by 5 %. After adjustment, with poses and points aligned by the scale `s = ‖t_true‖/‖t_est‖`: rotation error < 1e-6 rad, translation within 1e-6, points within 1e-6. The fixed keyframe is unchanged (exact). |
 | `BundleAdjust`, noise + outliers | 0.5 px noise (in normalized units via f), plus 10 % of observations replaced by random positions. ≥ 95 % of the corrupted points have an observation with `inlier == false`. Oracle: the same call (same start, same options) on the inlier observations only; translation-direction error ≤ oracle error + 0.5° and < 2°. `final_cost < initial_cost`. (Amended, Ruling N: the absolute 0.5° bound was below the ML error of this geometry.) |
 | `BundleAdjust`, edges | An empty problem → `success == false`. A point seen only by the fixed keyframe stays finite. `robust = false` changes `final_cost` relative to the robust run on the outlier scene. |
-| `MapInitializer` | Synthetic sequence, seeds 1–5, `bundle_adjust` on vs off. Direction error with ≤ without + 1e-3°, and < 1° for every seed. Median depth == 1 (1e-9). Points ≥ `min_points_after_ba`. With `min_points_after_ba = 100000` there is no initialization. Existing initializer, Mapper and Slam tests stay green with the default (on). |
+| `MapInitializer` | Synthetic sequence, seeds 1–5, `bundle_adjust` on vs off (same initializing frame). Per seed: direction error within 0.1° of the oracle (the same `BundleAdjust` problem and options started from the ground truth, unscaled baseline 1); χ² of the BA estimate < χ² of the two-view estimate on the same observations. Mean direction error with ≤ without. (Amended, Ruling O: low-parallax error is noise-limited; the test checks convergence to the ML optimum.) Median depth == 1 (1e-9). Points ≥ `min_points_after_ba`. With `min_points_after_ba = 100000` there is no initialization (frames 0–10). Existing initializer, Mapper and Slam tests stay green with the default (on). |
 | ThreadSanitizer | `Mapper*:Slam*`. |
 | Clean-machine build | Follow `README.md` with a fresh `CONAN_HOME` (scratch directory): `conan create third_party/g2o` (Debug and Release), the project build, `ctest`. Record it in the report. |
 | Smoke runs | `monocular_full_slam` on corridor1_1024 `--rate=0 --max-frames=200`: init frame, points before/after the adjustment, cost reduction and outliers from the debug line (run with debug logging enabled if needed), versus the baseline (~frame 121, 73 points). `binocular_full_slam --max-frames=20` unchanged (355 points). |

@@ -10,6 +10,8 @@
 #include <voyahslam/features/measurement.h>
 #include <voyahslam/geometry/rigid_transformation.h>
 #include <voyahslam/geometry/two_view_reconstruction.h>
+#include <voyahslam/logging/logger.h>
+#include <voyahslam/optimization/bundle_adjustment.h>
 
 namespace voyahslam::mapping {
 
@@ -21,6 +23,15 @@ struct MapInitializerOptions {
     double sigma_px = 1.0;      // keypoint noise std-dev, px
     features::InitializationMatcherOptions matcher;
     geometry::TwoViewOptions reconstruction;
+    // Monocular: bundle adjustment of the two-view reconstruction (before the
+    // median-depth scaling); points with an outlier observation are dropped.
+    bool bundle_adjust = true;
+    // 5 + 40: the problem is unscaled (baseline 1, depths ~40), so the plain
+    // stage needs ~40 iterations to converge.
+    optimization::BundleAdjustmentOptions bundle_adjustment{.robust_iterations = 5,
+                                                            .iterations = 40};
+    double level_scale = 1.2;          // sigma_level = sigma_px * level_scale^level
+    size_t min_points_after_ba = 50;   // survivors of the adjustment needed
 };
 
 template <typename TFeatureExtractor>
@@ -52,10 +63,14 @@ struct InitializationResult {
 //   - monocular (ORB-SLAM3 MonocularInitialization): the first frame with more
 //     than min_features features becomes the reference; each later frame is
 //     matched against it (MatchForInitialization) and, with at least
-//     min_matches matches, reconstructed from two views. On success the
-//     reference becomes the world frame (T_cw = identity), the scene is scaled
-//     to median depth 1, and both frames become keyframes. A frame with too
-//     few features drops the reference; one with too few matches replaces it.
+//     min_matches matches, reconstructed from two views. With bundle_adjust,
+//     the reconstruction is refined by a two-keyframe bundle adjustment
+//     (reference fixed), points with an outlier observation are dropped, and
+//     fewer than min_points_after_ba survivors fail (the reference is kept).
+//     On success the reference becomes the world frame (T_cw = identity), the
+//     scene is scaled to median depth 1, and both frames become keyframes. A
+//     frame with too few features drops the reference; one with too few
+//     matches replaces it.
 template <typename TFeatureExtractor>
 class MapInitializer {
 public:
@@ -82,6 +97,7 @@ private:
     // Per reference feature: where its match was last seen (seeds the search
     // windows); the reference's own points until a match moves it.
     std::vector<geometry::TPoint2DF> last_matched_;
+    CLASS_LOGGER(MapInitializer);
 };
 
 } // namespace voyahslam::mapping
