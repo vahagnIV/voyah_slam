@@ -24,6 +24,7 @@ add_library(voyahslam
     mapping/map_initializer.cpp
     loop_closing/loop_closer.cpp
     optimization/bundle_adjustment.cpp
+    optimization/pose_optimization.cpp
     events/worker_thread.cpp
     slam/slam.cpp
 )

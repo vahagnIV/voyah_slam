@@ -45,6 +45,7 @@ add_executable(voyahslam_tests
     loop_closing/loop_closer_test.cpp
     optimization/projection_test.cpp
     optimization/bundle_adjustment_test.cpp
+    optimization/pose_optimization_test.cpp
 )
 
 target_include_directories(voyahslam_tests
