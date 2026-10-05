@@ -31,3 +31,9 @@ TEST_F(DistortionModelTest, InterfaceIsPureVirtual) {
     // The following line should not compile:
     // DistortionModel model; // This should cause a compilation error
 }
+
+TEST_F(DistortionModelTest, DummyDistortJacobianIsIdentity) {
+    DummyDistortionModel model;
+    const voyahslam::geometry::TMatrix22F j = model.DistortJacobian({0.3, -0.2});
+    EXPECT_TRUE(j.isApprox(voyahslam::geometry::TMatrix22F::Identity(), 1e-15));
+}

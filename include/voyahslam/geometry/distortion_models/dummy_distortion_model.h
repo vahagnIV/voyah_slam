@@ -11,6 +11,7 @@ public:
     virtual ~DummyDistortionModel() = default;
     void Undistort(geometry::THomogenousPointsF& points) const override;
     void Distort(geometry::THomogenousPointsF& points) const override;
+    [[nodiscard]] geometry::TMatrix22F DistortJacobian(const geometry::TPoint2DF& undistorted) const override;
 };
 
 } // namespace voyahslam::geometry::distortion_models
