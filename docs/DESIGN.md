@@ -134,23 +134,23 @@ amendment found during implementation). A `Notify()` between `Snapshot()` and
 **Geometry status.** Monocular initialization is real (see "Monocular
 Initialization"): `mapping::MapInitializer<FE>` (`mapping/map_initializer.h`:
 `TryInitialize()`, `Reset()`) matches, reconstructs and scales the two views.
-Stereo initialization is real too (see "Stereo Initialization");
-`tracking::PoseEstimator<FE>` (`tracking/pose_estimator.h`: `Estimate()`
-succeeds iff the measurement has >= `kMinTrackedFeatures` (50) features, pose =
-last pose) remain stubs; a follow-up spec replaces their bodies in place.
+Stereo initialization is real too (see "Stereo Initialization"). Tracking
+against the map is real (see "Tracking Against the Map"); the `PoseEstimator`
+stub was deleted on 2026-10-05.
 
 ### Tracker
 - **State machine** (`TrackerState`, readable from any thread via `state()`):
   `WaitingForMap` -> `Tracking` -> `Lost` -> `Tracking`...
   One `ProcessPending()` pass: (1) drain the whole inbox applying the `map_id`
-  consumer rule (§6) — `MapCreated` sets `last_pose_`, the map's frame id and
-  moves `WaitingForMap`/`Lost` to `Tracking`; other diffs of the current map
-  update the replica (no-op yet); (2) take **one** measurement: in
-  `WaitingForMap`/`Lost` publish it as `InitializationMeasurement`
-  (`map_id` 0); in `Tracking` run `PoseEstimator::Estimate()` — success
-  publishes `PositionUpdated`, failure moves to `Lost` and then publishes
+  consumer rule (§6) — every Mapper diff of the current map is applied to the
+  Tracker's `tracking::MapReplica`; `MapCreated` sets `last_pose_`, the map's
+  frame id and moves `WaitingForMap`/`Lost` to `Tracking`; (2) take **one**
+  measurement: in `WaitingForMap`/`Lost` publish it as
+  `InitializationMeasurement` (`map_id` 0); in `Tracking` run the frame-to-map
+  tracking described in "Tracking Against the Map" — success publishes
+  `PositionUpdated`, failure moves to `Lost` and then publishes
   `TrackingLost(current map)`. `Lost` currently behaves like `WaitingForMap`
-  (relocalization will live there).
+  (relocalization will live there; deferred, TODO).
 - Runs its **own thread with two input queues**:
   - `inbox()` — map diffs from the Mapper (events),
   - `measurements_` — `std::variant<TMonocularMeasurement, TBinocularMeasurement>`
@@ -750,6 +750,77 @@ ORB-SLAM3's `KannalaBrandt8::TriangulateMatches` is stricter: it rejects
 initialized on the first frame with 355 points; median point depth 1.96 m
 (quartiles 1.50 / 2.13 m, range 0.25-9.50 m).
 
+## Tracking Against the Map (Tracker, `MapReplica`, `ProjectionMatcher`, `OptimizePose`)
+
+Spec: `docs/superpowers/specs/2026-10-05-tracking-design.md` (sub-project 1 of
+4; keyframe creation / map growth, local BA and culling, relocalization are
+sub-projects 2-4, deferred; the user has their own designs for them).
+
+**Replica.** `tracking::MapReplica<FE>` (`tracking/map_replica.h`) is the
+Tracker's private copy of the map, touched only on the Tracker thread and fed
+by the Mapper's events with the `map_id` rule (0 exempt, older ignored, newer
+clears and adopts). It stores point position/descriptor/normal/alive,
+keyframes (`T_cw`, measurement copy, observations) and, per point, the first
+keyframe observation as a `map::PointReference` (keyframe, feature, pyramid
+level, distance to the camera centre). It does not count events (decision R).
+
+**Flow per measurement in `Tracking`** (stereo matching has run on dequeue):
+1. **Motion model** (when a velocity exists): predict `T_cw = velocity * T_last`,
+   `SearchFromLastFrame` with a 15 px (mono) / 7 px (binocular) window scaled
+   by `level_scale^level` of the last-frame feature; fewer than 20 matches
+   retries with the window x2; `OptimizePose`; the step needs >= 10 inliers.
+2. **Zero-motion fallback** when step 1 failed or there is no velocity: same
+   with the predicted pose = `T_last` and the window x4 (the BoW-less stand-in
+   for ORB-SLAM3's `TrackReferenceKeyFrame`; see limitation below).
+3. **Local map**: `SearchFromLocalMap` over every alive, unmatched, visible
+   point (`th` = 1), then `OptimizePose` on all matches; success needs >= 30
+   inliers.
+4. **Success**: `PositionUpdated` (frame id stays the `MapCreated` keyframe id),
+   `velocity_ = T_cur * T_last^-1`, `last_frame_` = this frame with its inlier
+   matches; info log at most 1 Hz ("Tracking: frame N, M inliers"), debug log
+   per step. **Failure**: `TrackingLost`; the debug log names the step and counts.
+No `NewKeyFrameCandidate` yet, so the map never grows during Tracking
+(sub-project 2): the local map is the initialization map.
+
+**Thresholds** (`TrackingOptions`): window 15 px mono / 7 px stereo; motion
+model needs 20 matches (else x2 retry) and 10 inliers; zero-motion window x4;
+local-map `th` 1.0; 30 local-map inliers.
+
+**Projection matching** (`features/projection_matcher.h`, header-only
+template on the extractor; undistorted pixel space). `SearchFromLastFrame`:
+project the last frame's matched points, candidates within the level-scaled
+window on levels [l-1, l+1], best descriptor <= 100, one-to-one claims
+(closer wins), rotation-consistency histogram (12 bins, three maxima). 
+`SearchFromLocalMap`: visibility (z > 0, within 85 deg, view/normal cosine >
+0.5), predicted level from the reference observation, radius `th * (cos > 0.998
+? 2.5 : 4.0) * level_scale^l`, levels [l-1, l], ratio test 0.8 unless the two
+best are on different levels. Deviations from ORB-SLAM3: the histogram is built
+from the final claims; points without a reference observation are skipped by
+the local-map search; there is no scale-invariance distance check (the level is
+clamped instead).
+
+**`OptimizePose`** (`optimization/pose_optimization.h`, g2o private). Unary
+edges on one `VertexSE3Expmap`: mono (2 rows, normalized plane) and stereo (4
+rows: left and right via `T_rl`, with `ProjectionJacobianRightCamera`).
+Schedule as ORB-SLAM3: 4 rounds x 10 iterations, every round restarts from the
+initial pose, Huber kernel in rounds 0-1 and plain after, edges classified per
+round by chi2 > 5.991 (mono) / 9.488 (stereo, 4 dof) or depth <= 0; success
+needs >= 3 inliers (decision S). `sigma = sigma_px * level_scale^level / f`.
+
+**BoW-less fallback limitation.** There is no vocabulary / place recognition,
+so a lost frame cannot be tracked against the reference keyframe; the wide
+zero-motion projection search replaces it. It recovers only small
+frame-to-frame motion; real recovery is relocalization (sub-project 4).
+
+**Measured behaviour** (TUM-VI `dataset-corridor1_1024_16`, Release, ORB,
+2026-10-05; details in `docs/TODO.md` smoke note): binocular tracks all 200
+frames of the smoke run (median 189 inliers). Monocular initializes at about
+frame 120 but is lost within 1-11 frames, repeatedly (8 maps in 400 frames):
+the initialization map has 67-94 points, so the local map drops below 30
+inliers quickly, and without map growth (sub-project 2) there is nothing to
+refill it. Mono translation accuracy is also limited by the initial map
+(decision T).
+
 ## 7. Coding Conventions
 
 **Naming (Google C++ style):**
@@ -890,6 +961,13 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-05 | Init-time error at low parallax is noise-limited (synthetic seeds initialize at frame 3, baseline 0.15 vs depth 4-8; ML optimum 0.3-2.7 degrees), so tests check convergence to the maximum-likelihood optimum (oracle from ground truth) rather than an absolute error bound. Mean error 2.11 -> 1.34 degrees with BA. | An absolute bound would test the noise, not the optimizer. |
 | 2026-10-05 | Init BA uses 5 + 40 iterations and runs on the unscaled problem (baseline 1, depths ~40), before the median-depth rescale (ORB-SLAM3 order). | The plain stage needs about 40 iterations to converge there; LM stops at convergence so runtime is barely affected. Rescaling first would converge faster (TODO, tuning). |
 | 2026-10-05 | The root `CMakeLists.txt` picks the concurrentqueue target (`VOYAHSLAM_CONCURRENTQUEUE_TARGET`); `src/CMakeLists.txt` only uses it. The choice is between `moodycamel::concurrentqueue` and `concurrentqueue::concurrentqueue`. | Found by the clean-machine build: the revision of concurrentqueue/1.0.4 that Conan Center serves today declares only `concurrentqueue::concurrentqueue`. |
+| 2026-10-05 | Tracking against the map (sub-project 1): `MapReplica` fed by Mapper events; motion model -> zero-motion fallback (window x4) -> local map -> `OptimizePose`; the `PoseEstimator` stub is deleted. | Spec `2026-10-05-tracking-design.md`; keyframes, local BA, relocalization are sub-projects 2-4. |
+| 2026-10-05 | (Q) The projection matcher takes the point source as a template parameter; `features/` does not depend on `tracking/`. `PointReference` lives in `map/point_reference.h`; the rotation histogram is shared in `features/rotation_histogram.h`. | No dependency cycle between features and tracking; one histogram implementation for the initialization and projection matchers. |
+| 2026-10-05 | (R) The replica does not count events (spec said it would, as `SceneState`). | Nothing consumes the counters; the replica stays a pure map copy. |
+| 2026-10-05 | (S) `OptimizePose`: 4 rounds x 10 iterations; every round restarts from the initial pose (ORB-SLAM3); Huber in rounds 0-1; chi2 5.991 mono / 9.488 stereo (4 dof); success >= 3 inliers. | ORB-SLAM3 `PoseOptimization` schedule; the stereo edge has 4 rows (left + right normalized). |
+| 2026-10-05 | (T) Mono accuracy is limited by the noise-limited initial map at the default 1 deg parallax (about 12 % depth error, about 10 % translation error). Tests use 4 deg parallax for the accuracy bound and a separate default-init robustness test. | Same cause as the init-accuracy row above; tuning is deferred (TODO). |
+| 2026-10-05 | Matcher deviations from ORB-SLAM3: the orientation histogram is built from the final claims; points without a reference observation are skipped by the local-map search; no scale-invariance distance check (the predicted level is clamped). | Simpler; the distance check is a TODO. |
+| 2026-10-05 | BoW-less fallback: a wide-window (x4) zero-motion projection search replaces `TrackReferenceKeyFrame`. | No vocabulary yet; relocalization / place recognition is sub-project 4. |
 
 ## 9. Open Questions
 
@@ -1046,6 +1124,10 @@ branch → review → merge to `master`. Update this document at the end.
   `MapInitializer`, end-to-end `Slam` protocol test; apps print component
   states.
 
+- Tracking against the map (branch `feat/tracking`, merge pending):
+  `MapReplica`, `OptimizePose`, projection matching, frame-to-map Tracker, the
+  `PoseEstimator` stub removed (see "Tracking Against the Map").
+
 **Required follow-up:**
 - Decide `MapPointStorage` growth / compaction (Open Question 2); ids are
   append-only since 2026-10-05.
@@ -1058,9 +1140,8 @@ branch → review → merge to `master`. Update this document at the end.
   rounding). Building OpenCV from source to link against
   (in progress, user).
 - Tracker measurement policy (19).
-- Real geometry behind the stubs: two-view initialization (`MapInitializer`;
-  mono and stereo done) and pose estimation (track-with-motion-model, track-reference-keyframe,
-  track-local-map; `PoseEstimator`), applying map diffs to the Tracker replica,
-  relocalization in `Lost`, keyframe decision (`NewKeyFrameCandidate`).
+- Sub-projects 2-4 of tracking (the user has their own designs; ask before
+  designing): keyframe decision and map growth, local BA and culling,
+  relocalization / reference-keyframe tracking via place recognition.
 - Event pool lifetime (Open Question 25).
 - Then the Mapper, then the LoopCloser.

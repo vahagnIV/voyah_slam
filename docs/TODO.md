@@ -79,11 +79,20 @@ depth 1.96 m (quartiles 1.50 / 2.13 m, range 0.25-9.50 m). The viewer run
 (`--viewer`) completed without errors; no screenshot (X_GetImage failed on the
 root window).
 
+Smoke run note (2026-10-05, tracking, Release, apps at debug level,
+`dataset-corridor1_1024_16`): binocular `--rate=0 --max-frames=200`: init on the
+first frame (355 points), tracked all frames (198 local-map successes, median
+189 inliers, range 38-243), no loss, 1 map. Monocular `--rate=0
+--max-frames=400`: init at about frame 120, then repeated loss after 1-11
+tracked frames (first loss after 2: `local map failed: 28 matches (11 new), 26
+inliers (< 30)`), re-initialization each time, 8 maps (67-94 points each),
+median 36 local-map inliers. Cause: the initialization map is small and never
+grows (no keyframes yet, sub-project 2). `--viewer` screenshot capture failed
+again (xwd/import on the Wayland session).
+
 ## Stereo (2026-10-04)
 
 - [ ] Epipolar-guided stereo search (optimization of the brute-force matcher).
-- [ ] Stereo-aware tracking: use depths and right observations in the
-      `PoseEstimator`.
 - [ ] Tuning on TUM-VI 512, including the ~17 m stereo depth cap implied by
       `max_parallax_cos` 0.99998 at the 0.11 m baseline (ORB-SLAM3's KB
       `TriangulateMatches` uses 0.9998, about 1.15 degrees / 5.5 m cap).
@@ -122,9 +131,24 @@ root window).
       depends on the sequence (mono then mono: today's two-view init; mono
       then stereo, stereo then mono, …: to be designed). Keep both
       observation storages and per-keyframe measurement types to allow it.
-- [ ] Real `PoseEstimator` (track with motion model / reference keyframe /
-      local map; motion-only BA) — geometry spec; replaces the stub in place.
-- [ ] Apply map diffs to the Tracker replica (currently a no-op).
+- [ ] **Tracking sub-projects 2-4 (deferred; the user has their own designs for
+      them, ask before designing):** (2) keyframe decision and map growth
+      (`NewKeyFrameCandidate`, Mapper keyframe creation); (3) local BA and
+      culling; (4) relocalization / reference-keyframe tracking via place
+      recognition (BoW).
+- [ ] BoW-less fallback limitation: a wide-window (x4) zero-motion projection
+      search replaces `TrackReferenceKeyFrame`; it recovers only small motion.
+- [ ] Local-map search: add ORB-SLAM3's scale-invariance distance check (now
+      only the predicted level is clamped).
+- [ ] Debug `OptimizePose` costs about 0.5 s per call with about 500 stereo
+      edges (Release is fine): profile.
+- [ ] Stereo tracking test margin: 1.79 cm error against the 2 cm bound.
+- [ ] Tracking test helpers assume 2 (mono) / 1 (stereo) keyframes per map;
+      revisit with sub-project 2.
+- [ ] A newer `MapCreated` while `Tracking` leaves an empty `last_frame_`
+      (unreachable today); handle before multi-map / relocalization.
+- [ ] Mono translation accuracy at default init (about 10 % at 1 deg parallax,
+      decision T): tuning.
 - [ ] Keyframe decision: Tracker publishes `NewKeyFrameCandidate`; Mapper
       handling (currently only acknowledged).
 - [ ] Relocalization in `TrackerState::Lost` (now it behaves like
