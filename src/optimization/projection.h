@@ -41,6 +41,41 @@ inline void ProjectionJacobians(const geometry::RigidTransformation& T_cw,
     out_point = projection_jacobian * T_cw.rotation();
 }
 
+/// Projects the world point X into the right camera of a stereo rig: pi(T_rl * T_cw * X), with
+/// T_rl mapping left-camera to right-camera coordinates. The right-camera depth must be non-zero.
+[[nodiscard]] inline geometry::TPoint2DF ProjectNormalizedRight(
+    const geometry::RigidTransformation& T_cw, const geometry::RigidTransformation& T_rl,
+    const geometry::TPoint3DF& X) {
+    const geometry::TPoint3DF xr = T_rl.Transform(T_cw.Transform(X));
+    return geometry::TPoint2DF(xr.x() / xr.z(), xr.y() / xr.z());
+}
+
+/// Jacobian of ProjectNormalizedRight w.r.t. the left perturbation T_cw <- exp(xi) * T_cw,
+/// xi = (omega, upsilon) as in ProjectionJacobians: with Xc = T_cw X and Xr = T_rl Xc it is
+/// d pi(Xr) * R_rl * [-[Xc]x | I].
+inline void ProjectionJacobianRightPose(const geometry::RigidTransformation& T_cw,
+                                        const geometry::RigidTransformation& T_rl,
+                                        const geometry::TPoint3DF& X,
+                                        Eigen::Matrix<precision_t, 2, 6>& out_pose) {
+    const geometry::TPoint3DF xc = T_cw.Transform(X);
+    const geometry::TPoint3DF xr = T_rl.Transform(xc);
+    const precision_t inv_z = 1.0 / xr.z();
+    const precision_t inv_z2 = inv_z * inv_z;
+
+    Eigen::Matrix<precision_t, 2, 3> projection_jacobian;
+    projection_jacobian << inv_z, 0.0, -xr.x() * inv_z2,
+                           0.0, inv_z, -xr.y() * inv_z2;
+    const Eigen::Matrix<precision_t, 2, 3> chained = projection_jacobian * T_rl.rotation();
+
+    geometry::TMatrix33F skew;
+    skew << 0.0, -xc.z(), xc.y(),
+            xc.z(), 0.0, -xc.x(),
+            -xc.y(), xc.x(), 0.0;
+
+    out_pose.leftCols<3>() = chained * (-skew);
+    out_pose.rightCols<3>() = chained;
+}
+
 }  // namespace voyahslam::optimization
 
 #endif  // VOYAHSLAM_OPTIMIZATION_PROJECTION_H

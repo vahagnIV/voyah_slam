@@ -332,6 +332,159 @@ inline SyntheticStereoFrame MakeSyntheticStereoFrame(const SyntheticStereoOption
     return frame;
 }
 
+inline SyntheticSequenceOptions SyntheticStereoTrajectoryDefaults() {
+    SyntheticSequenceOptions options;
+    options.min_depth = 2.0;  // Stereo needs short depths at fx = 380.
+    options.max_depth = 6.0;
+    return options;
+}
+
+struct SyntheticStereoSequenceOptions {
+    /// Trajectory, scene size, noise, flips and extras (per image), as in the mono sequence.
+    SyntheticSequenceOptions trajectory = SyntheticStereoTrajectoryDefaults();
+    double baseline = 0.11;  ///< Right camera at +x of the left camera.
+};
+
+struct SyntheticStereoSequenceFrame {
+    /// Unmatched stereo measurement; the Tracker matches on dequeue.
+    features::TBinocularMeasurement<TestExtractor> measurement;
+    geometry::RigidTransformation T_cw;  ///< World (frame 0's left camera) to this left camera.
+    /// Per left feature (measurement order): scene point index, -1 for extras.
+    std::vector<Eigen::Index> point_of_feature;
+    /// Per left feature: true right feature index, -1 = extra / not visible in right.
+    std::vector<Eigen::Index> right_of_left;
+};
+
+struct SyntheticStereoSequence {
+    geometry::TPoints3DF points_w;  ///< World frame = frame 0's left camera.
+    std::vector<SyntheticStereoSequenceFrame> frames;
+};
+
+inline SyntheticStereoSequence MakeSyntheticStereoSequence(
+    const SyntheticStereoSequenceOptions& options = {}) {
+    const SyntheticSequenceOptions& traj = options.trajectory;
+    constexpr double kImageSize = 1024.0;
+    std::mt19937 rng(traj.seed);
+    std::uniform_real_distribution<double> pixel(20.0, kImageSize - 20.0);
+    std::uniform_real_distribution<double> depth(traj.min_depth, traj.max_depth);
+    std::uniform_real_distribution<double> angle(0.0, 2.0 * std::numbers::pi);
+    std::uniform_real_distribution<double> any_pixel(0.0, kImageSize);
+    std::normal_distribution<double> unit_normal(0.0, 1.0);
+
+    const features::StereoRig rig = SyntheticStereoRig(options.baseline);
+    const geometry::TMatrix33F K = SyntheticStereoIntrinsics();
+    const geometry::TMatrix33F K_inverse = K.inverse();
+    const auto n = static_cast<Eigen::Index>(traj.num_points);
+
+    SyntheticStereoSequence sequence;
+    sequence.points_w.resize(3, n);
+    std::vector<detail::SyntheticDescriptor> base_descriptors;
+    std::vector<double> base_angles;
+    for (Eigen::Index i = 0; i < n; ++i) {
+        const geometry::TVector3DF ray(pixel(rng), pixel(rng), 1.0);
+        sequence.points_w.col(i) = depth(rng) * (K_inverse * ray);
+        base_descriptors.push_back(detail::RandomDescriptor(rng));
+        base_angles.push_back(angle(rng));
+    }
+
+    struct Record {
+        geometry::TPoint2DF pixel;
+        detail::SyntheticDescriptor descriptor;
+        double angle;
+        Eigen::Index point;  // scene point index or -1
+    };
+    auto in_image = [&](const geometry::TPoint2DF& p) {
+        return p.x() >= 0.0 && p.x() < kImageSize && p.y() >= 0.0 && p.y() < kImageSize;
+    };
+
+    const double yaw_step = traj.yaw_step_deg * std::numbers::pi / 180.0;
+    for (size_t k = 0; k < traj.num_frames; ++k) {
+        const geometry::TMatrix33F R_cw =
+            Eigen::AngleAxis<double>(static_cast<double>(k) * yaw_step,
+                                     geometry::TVector3DF::UnitY())
+                .toRotationMatrix();
+        const geometry::TVector3DF centre(static_cast<double>(k) * traj.step, 0.0, 0.0);
+        const geometry::RigidTransformation T_cw(R_cw, -R_cw * centre);
+        const geometry::TPoints3DF points_c = T_cw.Transform(sequence.points_w);
+
+        std::vector<Record> left, right;
+        for (Eigen::Index i = 0; i < n; ++i) {
+            const geometry::TVector3DF X = points_c.col(i);
+            if (X.z() <= 0.0) {
+                continue;
+            }
+            const geometry::TPoint2DF exact_left = (K * X).hnormalized();
+            if (!in_image(exact_left)) {
+                continue;
+            }
+            left.push_back(
+                {exact_left + traj.pixel_noise * geometry::TPoint2DF(unit_normal(rng), unit_normal(rng)),
+                 detail::FlipBits(base_descriptors[i], traj.bit_flips, rng),
+                 base_angles[i] + traj.angle_noise * unit_normal(rng), i});
+
+            const geometry::TVector3DF X_r = rig.T_rl.Transform(geometry::TPoint3DF(X));
+            if (X_r.z() <= 0.0) {
+                continue;
+            }
+            const geometry::TPoint2DF exact_right = (K * X_r).hnormalized();
+            if (!in_image(exact_right)) {
+                continue;
+            }
+            right.push_back(
+                {exact_right + traj.pixel_noise * geometry::TPoint2DF(unit_normal(rng), unit_normal(rng)),
+                 detail::FlipBits(base_descriptors[i], traj.bit_flips, rng),
+                 base_angles[i] + traj.angle_noise * unit_normal(rng), i});
+        }
+        for (std::vector<Record>* image : {&left, &right}) {
+            for (size_t e = 0; e < traj.num_extra; ++e) {
+                image->push_back({geometry::TPoint2DF(any_pixel(rng), any_pixel(rng)),
+                                  detail::RandomDescriptor(rng), angle(rng), -1});
+            }
+        }
+
+        auto build = [&](std::vector<Record>& records) {
+            std::shuffle(records.begin(), records.end(), rng);
+            const auto count = static_cast<Eigen::Index>(records.size());
+            geometry::TPoints2DF image_points(2, count);
+            geometry::TRowVectorF strengths = geometry::TRowVectorF::Ones(count);
+            geometry::TRowVectorF feature_angles(count);
+            TestImageFeatures::TDescriptors feature_descriptors(TestExtractor::DescriptorSize,
+                                                                count);
+            for (Eigen::Index j = 0; j < count; ++j) {
+                image_points.col(j) = records[j].pixel;
+                feature_angles[j] = records[j].angle;
+                feature_descriptors.col(j) = records[j].descriptor;
+            }
+            return TestImageFeatures(std::move(image_points), std::move(strengths),
+                                     std::move(feature_angles), std::move(feature_descriptors),
+                                     features::TLevels::Zero(count));
+        };
+        TestImageFeatures left_features = build(left);
+        TestImageFeatures right_features = build(right);
+
+        std::vector<Eigen::Index> right_of_point(n, -1);
+        for (size_t j = 0; j < right.size(); ++j) {
+            if (right[j].point >= 0) {
+                right_of_point[right[j].point] = static_cast<Eigen::Index>(j);
+            }
+        }
+        SyntheticStereoSequenceFrame frame;
+        frame.T_cw = T_cw;
+        for (const Record& record : left) {
+            frame.point_of_feature.push_back(record.point);
+            frame.right_of_left.push_back(record.point >= 0 ? right_of_point[record.point] : -1);
+        }
+        frame.measurement = features::TBinocularMeasurement<TestExtractor>(
+            std::move(left_features), std::move(right_features), rig,
+            static_cast<double>(k) * traj.frame_interval);
+        assert(static_cast<size_t>(frame.measurement.left().points().cols()) ==
+               frame.point_of_feature.size());
+        assert(static_cast<size_t>(frame.measurement.right().points().cols()) == right.size());
+        sequence.frames.push_back(std::move(frame));
+    }
+    return sequence;
+}
+
 /// MakeSyntheticStereoFrame with the Tracker's stereo matching applied, for
 /// tests that feed the MapInitializer or the Mapper directly.
 inline SyntheticStereoFrame MakeMatchedSyntheticStereoFrame(

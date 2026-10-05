@@ -80,5 +80,52 @@ TEST(ProjectionTest, JacobiansMatchFiniteDifferences) {
     }
 }
 
+TEST(ProjectionTest, RightJacobianMatchesFiniteDifferences) {
+    std::mt19937 rng(7);
+    std::uniform_real_distribution<double> unit(-1.0, 1.0);
+    const double h = 1e-6;
+    // A rig with a 5 degree yaw between the cameras and a 0.11 m baseline.
+    const RigidTransformation T_rl(
+        TMatrix33F(Eigen::AngleAxisd(5.0 * M_PI / 180.0, Eigen::Vector3d::UnitY())),
+        TVector3DF(-0.11, 0.0, 0.0));
+
+    for (int trial = 0; trial < 10; ++trial) {
+        const Eigen::Vector3d axis = Eigen::Vector3d(unit(rng), unit(rng), unit(rng)).normalized();
+        const TMatrix33F rotation = Eigen::AngleAxisd(0.5 * unit(rng), axis).toRotationMatrix();
+        const RigidTransformation pose(rotation, TVector3DF(unit(rng), unit(rng), unit(rng)));
+        const double depth = 2.0 + 8.0 * (0.5 * (unit(rng) + 1.0));
+        const TPoint3DF xc(unit(rng), unit(rng), depth);
+        const TPoint3DF x = pose.Inverse().Transform(xc);
+
+        const geometry::TPoint2DF projected = ProjectNormalizedRight(pose, T_rl, x);
+        const TPoint3DF xr = (T_rl * pose).Transform(x);
+        EXPECT_NEAR(projected.x(), xr.x() / xr.z(), 1e-12);
+        EXPECT_NEAR(projected.y(), xr.y() / xr.z(), 1e-12);
+
+        Eigen::Matrix<precision_t, 2, 6> pose_jacobian;
+        ProjectionJacobianRightPose(pose, T_rl, x, pose_jacobian);
+
+        Eigen::Matrix<precision_t, 2, 6> pose_numeric;
+        for (int k = 0; k < 6; ++k) {
+            auto perturbed = [&](double step) {
+                Eigen::Matrix<double, 6, 1> delta = Eigen::Matrix<double, 6, 1>::Zero();
+                delta[k] = step;
+                const TMatrix33F dr =
+                    delta.head<3>().norm() == 0.0
+                        ? TMatrix33F(TMatrix33F::Identity())
+                        : TMatrix33F(Eigen::AngleAxisd(delta.head<3>().norm(),
+                                                       delta.head<3>().normalized()));
+                // exp(delta) * T_cw, then through the rig.
+                const RigidTransformation p(dr * pose.rotation(),
+                                            dr * pose.translation() + delta.tail<3>());
+                return ProjectNormalizedRight(p, T_rl, x);
+            };
+            pose_numeric.col(k) = (perturbed(h) - perturbed(-h)) / (2.0 * h);
+        }
+
+        EXPECT_LT((pose_jacobian - pose_numeric).cwiseAbs().maxCoeff(), 1e-6);
+    }
+}
+
 }  // namespace
 }  // namespace voyahslam::optimization

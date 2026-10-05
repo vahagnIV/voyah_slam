@@ -20,6 +20,7 @@ add_executable(voyahslam_tests
     features/keypoint_matches_test.cpp
     features/feature_grid_test.cpp
     features/initialization_matcher_test.cpp
+    features/projection_matcher_test.cpp
     features/distortion_models/distortion_model_test.cpp
     features/distortion_models/kannala_brandt_distortion_model_test.cpp
     memory/object_pool_test.cpp
@@ -35,8 +36,8 @@ add_executable(voyahslam_tests
     events/wake_signal_test.cpp
     events/worker_thread_test.cpp
     slam/slam_test.cpp
-    tracking/pose_estimator_test.cpp
     tracking/tracker_test.cpp
+    tracking/map_replica_test.cpp
     support/synthetic_sequence_test.cpp
     mapping/map_initializer_test.cpp
     mapping/paired_inliers_test.cpp
@@ -44,6 +45,7 @@ add_executable(voyahslam_tests
     loop_closing/loop_closer_test.cpp
     optimization/projection_test.cpp
     optimization/bundle_adjustment_test.cpp
+    optimization/pose_optimization_test.cpp
 )
 
 target_include_directories(voyahslam_tests

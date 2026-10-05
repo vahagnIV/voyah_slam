@@ -1,3 +1,5 @@
+#include <bit>
+
 #include <gtest/gtest.h>
 
 #include "support/synthetic_sequence.h"
@@ -102,6 +104,72 @@ TEST(SyntheticStereoTest, EnoughFeaturesForInit) {
         pairs += j >= 0 ? 1 : 0;
     }
     EXPECT_GE(pairs, 400U);
+}
+
+TEST(SyntheticStereoSequenceTest, ProjectionsMatchPoses) {
+    SyntheticStereoSequenceOptions options;
+    options.trajectory.pixel_noise = 0.0;
+    const SyntheticStereoSequence sequence = MakeSyntheticStereoSequence(options);
+    const features::StereoRig rig = SyntheticStereoRig(options.baseline);
+    ASSERT_EQ(sequence.frames.size(), options.trajectory.num_frames);
+    size_t pairs = 0;
+    for (const SyntheticStereoSequenceFrame& frame : sequence.frames) {
+        const auto& left = frame.measurement.left().points();
+        const auto& right = frame.measurement.right().points();
+        ASSERT_EQ(static_cast<size_t>(left.cols()), frame.point_of_feature.size());
+        ASSERT_EQ(static_cast<size_t>(left.cols()), frame.right_of_left.size());
+        for (size_t j = 0; j < frame.point_of_feature.size(); ++j) {
+            const Eigen::Index p = frame.point_of_feature[j];
+            if (p < 0) {
+                EXPECT_EQ(frame.right_of_left[j], -1);
+                continue;
+            }
+            const geometry::TVector3DF X_c =
+                frame.T_cw.Transform(geometry::TPoint3DF(sequence.points_w.col(p)));
+            EXPECT_NEAR((left.col(j) - (rig.K_left * X_c).hnormalized()).norm(), 0.0, 1e-9);
+            const Eigen::Index r = frame.right_of_left[j];
+            if (r < 0) {
+                continue;
+            }
+            ASSERT_LT(r, right.cols());
+            const geometry::TVector3DF X_r = rig.T_rl.Transform(geometry::TPoint3DF(X_c));
+            EXPECT_NEAR((right.col(r) - (rig.K_right * X_r).hnormalized()).norm(), 0.0, 1e-9);
+            ++pairs;
+        }
+    }
+    EXPECT_GT(pairs, 0U);
+}
+
+TEST(SyntheticStereoSequenceTest, DescriptorsPersistAcrossFrames) {
+    SyntheticStereoSequenceOptions options;
+    const SyntheticStereoSequence sequence = MakeSyntheticStereoSequence(options);
+    const auto& f0 = sequence.frames[0];
+    const auto& f5 = sequence.frames[5];
+    const auto hamming = [](const auto& a, const auto& b) {
+        int bits = 0;
+        for (Eigen::Index i = 0; i < a.size(); ++i) {
+            bits += std::popcount(static_cast<unsigned>(a[i] ^ b[i]));
+        }
+        return bits;
+    };
+    const auto& d0 = f0.measurement.left().descriptors();
+    const auto& d5 = f5.measurement.left().descriptors();
+    size_t checked = 0;
+    for (size_t i = 0; i < f0.point_of_feature.size(); ++i) {
+        if (f0.point_of_feature[i] < 0) {
+            continue;
+        }
+        for (size_t j = 0; j < f5.point_of_feature.size(); ++j) {
+            if (f5.point_of_feature[j] != f0.point_of_feature[i]) {
+                continue;
+            }
+            EXPECT_LE(hamming(d0.col(static_cast<Eigen::Index>(i)),
+                              d5.col(static_cast<Eigen::Index>(j))),
+                      2 * options.trajectory.bit_flips);
+            ++checked;
+        }
+    }
+    EXPECT_GT(checked, 100U);
 }
 
 }  // namespace
