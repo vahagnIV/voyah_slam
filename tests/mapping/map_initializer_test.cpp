@@ -212,23 +212,24 @@ double MedianDepth(const Result& result) {
 }
 
 // The initializer's bundle adjustment problem for the correspondences of an
-// initialization (its two keyframes and map points): normalized measurements
-// and level-scaled sigmas, starting from poses and points supplied later.
+// initialization (its two keyframes and map points): raw-pixel measurements,
+// each view's camera and level-scaled pixel sigmas, starting from poses and
+// points supplied later.
 optimization::BaProblem InitializationProblem(const Result& result, const MapInitializerOptions& options) {
     const auto& view1 = std::get<Monocular>(result.keyframes[0].measurement);
     const auto& view2 = std::get<Monocular>(result.keyframes[1].measurement);
     const auto sigma = [&options](const Monocular& view, Eigen::Index feature) {
-        return options.sigma_px * std::pow(options.level_scale, static_cast<double>(view.levels()(feature))) /
-               view.K()(0, 0);
+        return options.sigma_px * std::pow(options.level_scale, static_cast<double>(view.levels()(feature)));
     };
     optimization::BaProblem problem;
     problem.keyframe_fixed = {true, false};
+    problem.keyframe_cameras = {view1.camera(), view2.camera()};
     problem.points.resize(3, static_cast<Eigen::Index>(result.map_points.size()));
     for (size_t p = 0; p < result.map_points.size(); ++p) {
         const InitialMapPoint& point = result.map_points[p];
-        problem.observations.push_back({0, p, view1.normalized_points().col(point.feature_in_first).head<2>(),
+        problem.observations.push_back({0, p, view1.distorted_points().col(point.feature_in_first),
                                         sigma(view1, point.feature_in_first)});
-        problem.observations.push_back({1, p, view2.normalized_points().col(point.feature_in_second).head<2>(),
+        problem.observations.push_back({1, p, view2.distorted_points().col(point.feature_in_second),
                                         sigma(view2, point.feature_in_second)});
     }
     return problem;
@@ -242,7 +243,8 @@ double Chi2(const Result& result, const MapInitializerOptions& options) {
     for (const optimization::BaObservation& observation : problem.observations) {
         const geometry::TVector3DF p_c =
             T[observation.keyframe].Transform(result.map_points[observation.point].position);
-        chi2 += ((p_c.hnormalized() - observation.measurement) / observation.sigma).squaredNorm();
+        const geometry::TPoint2DF projected = problem.keyframe_cameras[observation.keyframe].Project(p_c);
+        chi2 += ((projected - observation.measurement) / observation.sigma).squaredNorm();
     }
     return chi2;
 }

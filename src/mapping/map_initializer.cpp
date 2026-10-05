@@ -137,22 +137,23 @@ MapInitializer<TFeatureExtractor>::TryInitializeMonocular(TMonocularMeasurement 
     geometry::RigidTransformation T_21 = reconstruction.T_21;
 
     if (options_.bundle_adjust) {
+        // Raw pixels through each view's camera; sigma in pixels.
         const auto sigma = [this](const TMonocularMeasurement& view, Eigen::Index feature) {
             return options_.sigma_px *
-                   std::pow(options_.level_scale, static_cast<double>(view.levels()(feature))) /
-                   view.K()(0, 0);
+                   std::pow(options_.level_scale, static_cast<double>(view.levels()(feature)));
         };
         optimization::BaProblem problem;
         problem.keyframe_poses = {geometry::RigidTransformation::Identity(), T_21};
         problem.keyframe_fixed = {true, false};
+        problem.keyframe_cameras = {reference_->camera(), measurement.camera()};
         problem.points = points;
         problem.observations.reserve(2 * triangulated.size());
         for (size_t p = 0; p < triangulated.size(); ++p) {
             const Eigen::Index c = triangulated[p];
             problem.observations.push_back(
-                {0, p, correspondences.x1.col(c), sigma(*reference_, first[c])});
+                {0, p, reference_->distorted_points().col(first[c]), sigma(*reference_, first[c])});
             problem.observations.push_back(
-                {1, p, correspondences.x2.col(c), sigma(measurement, second[c])});
+                {1, p, measurement.distorted_points().col(second[c]), sigma(measurement, second[c])});
         }
         const optimization::BaResult adjusted =
             optimization::BundleAdjust(problem, options_.bundle_adjustment);
