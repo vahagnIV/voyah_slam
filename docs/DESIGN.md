@@ -247,7 +247,7 @@ Detailed spec: `docs/superpowers/specs/2026-09-30-core-slam-data-structures-desi
 | `ColumnBuffer<TScalar, Rows>` | `memory/column_buffer.h` | Grow-only `Rows × N` Eigen buffer; `Resize(n)` allocates only beyond capacity. |
 | `MapPointId`, `FrameId` | `map/*_id.h` | Strong ID wrappers. |
 | `MapPointStorage<FE>` | `map/map_point_storage.h` | SoA: positions, descriptors, normals, num observations, valid flags. |
-| `MonocularMeasurement<T, L>` | `features/monocular_measurement.h` | `ImageFeatures` + K, undistorted & normalized points, `timestamp()`. |
+| `MonocularMeasurement<T, L>` | `features/monocular_measurement.h` | `ImageFeatures` + K, raw keypoints (`distorted_points()`), undistorted & normalized points, `camera()` (`geometry::Camera`: K + distortion pointer), `timestamp()`. |
 | `Frame<FE, TMeasurement>` | `map/frame.h` | Keyframe: id, pose, measurement; `timestamp()` comes from the measurement. `MonoFrame<FE>`, `StereoFrame<FE>` aliases. |
 | `ObservationStorage<Type>` | `map/observation_storage.h` | SoA observation table; stereo fields compiled out for mono. |
 | `StereoRig` | `features/stereo_rig.h` | K left/right, `T_rl` (left → right: `p_r = T_rl p_l`), baseline, distortion models. |
@@ -260,6 +260,8 @@ Detailed spec: `docs/superpowers/specs/2026-09-30-core-slam-data-structures-desi
 
 Ported from slamlab2: `images/`, `io/`, `algebra/`, `geometry/`, `features/`
 (ORB + SIFT extractors, brute-force matcher, Kannala-Brandt distortion), `logging/`.
+The distortion models now live in `geometry/distortion_models/` (moved from
+`features/` on 2026-10-05; forwarding headers remain at the old path).
 
 ## 6. Events
 
@@ -287,7 +289,10 @@ Rules:
   `[start_id, start_id + count)` and every replica stores point `i` at the same slot.
 - **Pointer rule:** an event may point only at data that never changes and lives
   for the whole run (calibration and configuration, e.g. a `DistortionModel` or
-  `StereoRig`). A serializer turns such references into values (inline, or sent
+  `StereoRig`). Measurements and every `geometry::Camera` copy hold the
+  app-owned `DistortionModel` pointer, so the model must outlive every
+  measurement, event and `Camera` copy (the app's calibration objects live for
+  the whole run). A serializer turns such references into values (inline, or sent
   once and referenced). Everything mutable or short-lived travels by value —
   e.g. a pointer to a reused Tracker buffer is never allowed.
 - **Measurement variant (resolves OQ 24).** `features/measurement.h` defines
@@ -478,7 +483,9 @@ copying (channels interleaved, stride in pixels).
 **Pitfall:** `MonocularMeasurement::points()` are *undistorted* pixel
 coordinates — on a fisheye they don't line up with the raw image.
 `DrawFeatures()` is deleted for measurements; use `DrawMeasurement()`, which
-maps features back via `K · Distort(normalized)`.
+maps features back via `K · Distort(normalized)`. Since 2026-10-05 measurements
+also keep the raw keypoints (`distorted_points()`), which line up with the raw
+image directly.
 
 **Threading:** HighGUI isn't thread-safe; create the window and call
 `Show()`/`WaitKey()` from one thread (the apps' main thread). A future live
@@ -556,10 +563,15 @@ Spec: `docs/superpowers/specs/2026-10-04-two-view-geometry-design.md` (part A of
 the real monocular initializer; matching and `MapInitializer` integration are
 spec B+C, now done: see "Monocular Initialization"). Pure math on
 **normalized, undistorted points** (z = 1), so the calibrated model is the essential matrix E, not F + K. Sigma is in normalized
-units (σ_px / f). Verified on synthetic scenes only.
+units (σ_px / f). Verified on synthetic scenes only. This is the "rays stay
+rays" half of the residual-space rule (see "Camera Model and Raw-Pixel
+Residuals"): two-view RANSAC, triangulation and the 85° ray test work on rays;
+every reprojection residual and gate after them is in raw pixels.
 
 | Component | Header | Summary |
 |---|---|---|
+| `Camera` | `geometry/camera.h` | K + `const DistortionModel*` (null = pinhole); `Project` (camera point → raw pixel), `ProjectJacobian` (2×3), `Unproject` (raw pixel → z = 1 ray). See "Camera Model and Raw-Pixel Residuals". |
+| `DistortionModel` (+ Dummy, Kannala-Brandt) | `geometry/distortion_models/*.h` | `Distort` / `Undistort` on normalized points, analytic `DistortJacobian`. Forwarding headers at `features/distortion_models/`. |
 | `RigidTransformation` | `geometry/rigid_transformation.h` | Value type, hidden representation (R, t now). `T_ab` maps frame b to frame a: `p_a = T_ab * p_b`, `T_ac = T_ab * T_bc`. `Inverse()`, `Transform()`, `ToMatrix34/44()`. |
 | `TwoViewCorrespondences` | `geometry/two_view_correspondences.h` | `x1`, `x2` (2xN normalized) + `sigma`. |
 | `TwoViewEstimator` concept, `ModelScore` | `estimators/two_view_estimator.h` | `TModel`, `kSampleSize`, `Estimate(corr, sample)` -> 0..n candidates, `Score(model, corr)` -> score + inlier mask. |
@@ -619,6 +631,134 @@ looser re-collection threshold do not fix it. Only ~58 % of true inliers are fla
 Further accuracy is left to bundle adjustment right after initialization (as in
 ORB-SLAM3).
 
+## Camera Model and Raw-Pixel Residuals (`geometry::Camera`)
+
+Spec: `docs/superpowers/specs/2026-10-05-camera-model-design.md` (branch
+`feat/camera-model`).
+
+**Why.** Two diagnostic spikes on corridor1 (2026-10-05, branch
+`spike/mono-tracking-diag`, not merged) found that mono tracking lost its map
+because search windows and noise models lived in *undistorted* pixel or
+normalized space, where the fisheye periphery is stretched (median 5.8× at
+60–85°). Only 29 % of findable points landed in the 2.5 px window, and at
+60–85° `OptimizePose` rejected about half of the correct matches. ORB-SLAM3
+projects, searches and measures residuals in the raw image through its camera
+model; we now do the same.
+
+**Residual-space rule.** Every reprojection residual and gate compares **raw
+(distorted) pixels**, with σ = `sigma_px · 1.2^level` pixels (the extractor's
+level scale); the χ² thresholds are unchanged (5.991 for 2 dof, 9.488 for
+4 dof). **Rays stay rays:** two-view RANSAC, triangulation and the 85° ray
+test work on undistorted normalized points (z = 1) as before.
+
+**`geometry::Camera`** (`geometry/camera.h`, approach A: a small value type,
+not camera-model classes and not free functions):
+- `K` plus `const distortion_models::DistortionModel* distortion` (null =
+  pinhole).
+- `Project(Xc)`: camera-frame point → raw pixel, `K · [Distort(Xc.xy / Xc.z); 1]`.
+  Precondition `Xc.z() > 0`.
+- `ProjectJacobian(Xc)` (2×3): `K₂ₓ₂ · DistortJacobian(Xc.xy / Xc.z) ·
+  [[1/z, 0, −x/z²], [0, 1/z, −y/z²]]`; `K₂ₓ₂` includes the skew.
+- `Unproject(pixel)`: raw pixel → undistorted normalized ray via K⁻¹ and
+  `Undistort`.
+
+**`DistortionModel` in `geometry/`.** The models moved from
+`features/distortion_models/` to `include/voyahslam/geometry/distortion_models/`
+(namespace `voyahslam::geometry::distortion_models`, sources in
+`src/geometry/distortion_models/`, tests in `tests/geometry/distortion_models/`),
+so `geometry` stays at the bottom of the dependency stack. The old headers are
+forwarding headers (`namespace features { namespace distortion_models =
+geometry::distortion_models; }`), so old includes and qualified names still
+compile; in-repo users use the new path. New pure virtual `DistortJacobian(p)`
+= d(distorted normalized) / d(undistorted normalized):
+- Dummy: identity.
+- Kannala-Brandt: with r = ‖p‖, θ = atan r, d(θ) = θ(1 + k1θ² + k2θ⁴ + k3θ⁶ +
+  k4θ⁸) and p̂ = p / r, **J = (d/r)·I + (d′(θ)·θ′(r) − d/r)·p̂p̂ᵀ**, θ′(r) =
+  1 / (1 + r²), d′(θ) = 1 + 3k1θ² + 5k2θ⁴ + 7k3θ⁶ + 9k4θ⁸; J = I for r < 1e-8
+  (the limit). Verified against central finite differences (Ruling U: the
+  first spec draft had an extra 1/r).
+
+**Measurements keep both** the distortion model pointer and the raw keypoints:
+`MonocularMeasurement::distorted_points()` are the keypoints as passed to the
+constructor (compacted with every other array when features beyond 85° are
+dropped), and `camera()` returns `{K, distortion_model}`. `points()`
+(undistorted pixels) and `normalized_points()` are unchanged.
+`BinocularMeasurement` uses `left().camera()`, `right().camera()` and
+`rig().T_rl`. The pointer rule (§6) covers the model: it must outlive every
+measurement, event and `Camera` copy.
+
+**The five consumers** (all in raw pixels):
+1. Projection matcher: projects with `current.camera().Project(Xc)`; the
+   bounding box and `FeatureGrid` use `distorted_points()`; window values
+   unchanged (now raw px).
+2. `OptimizePose`: `OptimizePose(initial_T_cw, left Camera,
+   optional<StereoCameras{right, T_rl}>, observations, options)`;
+   `PoseObservation::left/right` are raw pixels and `sigma` is in pixels. Mono
+   e = `left.Project(T_cw·X) − z`, J = `left.ProjectJacobian(Xc)·[−[Xc]× | I]`;
+   stereo rows through `right.Project(T_rl·Xc)`. A `right` observation without
+   `stereo` → `success = false`. The helpers in `src/optimization/projection.h`
+   (`ProjectPixel`, `PixelJacobians`, `ProjectPixelRight`,
+   `PixelJacobianRightPose`) take a `Camera`; the normalized-plane helpers were
+   removed.
+3. `BundleAdjust`: `BaProblem::keyframe_cameras` (one per keyframe,
+   validated); `BaObservation::measurement` in raw pixels, `sigma` in pixels;
+   point block `ProjectJacobian · R`. Two-stage logic and rulings N, O, O′
+   unchanged. `MapInitializer` builds observations from `distorted_points()`
+   and each view's `camera()`.
+4. Stereo matcher gate: triangulation stays on rays; the gate projects the
+   triangulated point with each image's `camera()` and compares it with
+   `distorted_points()` (`PixelChi2`, σ = `sigma_px · level_scale^level`).
+5. Initialization matcher: grid on the current frame's `distorted_points()`;
+   `last_matched` starts as the reference's `distorted_points()` and is updated
+   in raw pixels; the 100 px window is ORB-SLAM3's raw-pixel value.
+
+The Tracker builds `PoseObservation`s from `distorted_points()` and passes
+`left().camera()` (plus `StereoCameras{right().camera(), rig().T_rl}` for
+stereo); `TrackerOptions::sigma_px` keeps its meaning, now in raw pixels.
+
+**Pinhole invariance (Ruling V).** With a null distortion every consumer's
+χ², inlier decisions and results equal the old normalized code (1e-9) **only
+for fx = fy**: the old code divided σ by a single f, while `OptimizePose`,
+`BundleAdjust` and the stereo gate now weight x and y separately (σ in pixels
+on each axis). On fx ≠ fy rigs (e.g. EuRoC) χ² changes slightly; this is the
+intended behaviour.
+
+**Spike numbers** (corridor1, mono, 400 frames, tracked frames /
+re-initializations; spike code, not this branch):
+
+| Variant | Result |
+|---|---|
+| Baseline (undistorted windows and σ) | 32 / 7 |
+| Window and σ scaled by the Kannala-Brandt stretch | 53 / 5 |
+| …plus local-map gate 20 | 108 / 5 |
+| Angle-only allowance σ·1.5·(1 + r²), window ×(1 + r²) | 85 tracked |
+| …plus local-map gate 20 | 99 tracked |
+| Uniform σ 3 | effectively disables outlier rejection |
+
+The calibration-free angle allowance (within 0.6 % of the Kannala-Brandt
+stretch up to 60°) is recorded as a fallback for lenses without a model; it is
+not implemented (TODO).
+
+**Smoke runs on this branch** (2026-10-06, Release, `dataset-corridor1_1024_16`,
+ORB, `--rate=0`, apps at debug level):
+
+| Run | Result |
+|---|---|
+| Mono, 400 frames (default gate 30) | **82 tracked / 18 re-initializations** (19 maps; per map 0–14, median 4); median local-map inliers 41 (30–61); 16 losses at the local-map gate (23–29 inliers), 3 in the zero-motion step. Repeat run identical. |
+| Mono, 400 frames, local-map gate 20 (temporary, measurement only) | 137 tracked / 14 re-initializations (15 maps) |
+| Mono initialization | first map at about frame 118 with 71 points; the 19 maps have 62–109 points |
+| Stereo, 200 frames | initialized on frame 1 with 358 points; 197 local-map successes, no loss, 1 map; median 232 inliers (68–269), was 189 |
+
+Against the success criterion (≥ 53 tracked and ≤ 5 re-initializations) mono
+passes on tracked frames and **misses on re-initializations**. Each map is
+still tracked for only a few frames (82 / 19 ≈ 4.3, baseline 32 / 8 = 4.0,
+spike KB 53 / 6 ≈ 8.8): the 62–109-point initial map cannot keep 30
+local-map inliers without map growth (sub-project 2). Re-initialization is
+fast (a new map follows a loss after a median of about 5 frames, by log order;
+the first map still needs about 118), so short-lived maps turn into many
+re-initializations. No parameter was tuned (gate and init-map tuning are in
+TODO).
+
 ## Optimization (`optimization/`, g2o behind Eigen types)
 
 Spec: `docs/superpowers/specs/2026-10-05-init-bundle-adjustment-design.md`
@@ -626,11 +766,14 @@ Spec: `docs/superpowers/specs/2026-10-05-init-bundle-adjustment-design.md`
 
 `optimization::BundleAdjust(BaProblem, BundleAdjustmentOptions) -> BaResult`
 (`include/voyahslam/optimization/bundle_adjustment.h`) jointly refines keyframe
-poses (`T_cw`, some may be fixed) and world points from **undistorted normalized
-observations** (z = 1; per-observation sigma in normalized units). The public
+poses (`T_cw`, some may be fixed) and world points from **raw (distorted)
+pixel observations**, each projected through its keyframe's `geometry::Camera`
+(`BaProblem::keyframe_cameras`, one per keyframe; per-observation sigma in
+pixels; normalized-plane residuals until 2026-10-05). The public
 header uses only our types and Eigen; g2o is linked `PRIVATE` and never appears
 in `include/` (principle 8 applies to g2o as well). Internals: `src/optimization/`
-(`projection.h` has the normalized projection and analytic Jacobians; the g2o
+(`projection.h` has the pixel projection helpers and analytic Jacobians through
+`Camera::ProjectJacobian`; the g2o
 edge/vertex glue lives in `bundle_adjustment.cpp`). Levenberg-Marquardt with
 `BlockSolver_6_3` + `LinearSolverEigen`, points marginalized.
 
@@ -657,10 +800,10 @@ Verified on synthetic sequences; the app smoke run is recorded in `docs/TODO.md`
 **Pipeline** (ORB-SLAM3 `MonocularInitialization`). The Mapper feeds each
 `InitializationMeasurement` to `MapInitializer::TryInitialize`:
 1. A frame with more than `min_features` features becomes the **reference**
-   (`last_matched` = its points).
-2. Each later frame: `FeatureGrid` over the current frame, then
+   (`last_matched` = its raw keypoints, `distorted_points()`).
+2. Each later frame: `FeatureGrid` over the current frame's raw keypoints, then
    `MatchForInitialization` (ORB-SLAM3 `SearchForInitialization`: window around
-   the last matched position, level restriction, best/second-best ratio,
+   the last matched position (100 px, raw pixels), level restriction, best/second-best ratio,
    one-to-one with replacement, orientation histogram keeping the three largest
    bins). Fewer than `min_matches` matches: the current frame becomes the
    reference.
@@ -670,7 +813,8 @@ Verified on synthetic sequences; the app smoke run is recorded in `docs/TODO.md`
    non-positive median depth also count as failure.
 4. **Bundle adjustment** (`bundle_adjust`, default on): a two-keyframe
    `BundleAdjust` on the *unscaled* reconstruction (keyframe 1 fixed at identity,
-   keyframe 2 and the points free, sigma = `sigma_px * level_scale^level / f` per
+   keyframe 2 and the points free; observations are `distorted_points()` through
+   each view's `camera()`, sigma = `sigma_px * level_scale^level` pixels per
    observation). 5 + 40 iterations (baseline 1, depths ~40, so the plain stage
    needs ~40 iterations; LM stops at convergence). Points with any outlier
    observation are dropped; fewer than `min_points_after_ba` (50) survivors, or an
@@ -714,9 +858,9 @@ Verified on synthetic stereo frames and a TUM-VI smoke run (see `docs/TODO.md`).
    closer claim wins), DLT triangulation of the undistorted normalized points,
    then checks: positive depth in both cameras, per-image reprojection
    chi-square (sigma scaled by pyramid level), and a parallax-cosine limit
-   (`max_parallax_cos` 0.99998). The reprojection test is done in undistorted
-   normalized coordinates (a deliberate simplification; ORB-SLAM3 tests in
-   distorted pixel space, see `docs/TODO.md`). A rectified row search does not apply to
+   (`max_parallax_cos` 0.99998). The reprojection test projects the point with
+   each image's `camera()` and compares raw pixels with `distorted_points()`, as
+   ORB-SLAM3 does (undistorted normalized coordinates until 2026-10-05). A rectified row search does not apply to
    fisheye images; epipolar-guided search is a deferred optimization.
 3. `StereoMatches` (`right_indices`, `depths`, `num_matches`) lives in its own
    header (`features/stereo_matches.h`) so that `BinocularMeasurement` and the
@@ -789,7 +933,8 @@ model needs 20 matches (else x2 retry) and 10 inliers; zero-motion window x4;
 local-map `th` 1.0; 30 local-map inliers.
 
 **Projection matching** (`features/projection_matcher.h`, header-only
-template on the extractor; undistorted pixel space). `SearchFromLastFrame`:
+template on the extractor; raw (distorted) pixel space: projection through
+`current.camera()`, grid and bounding box on `distorted_points()`). `SearchFromLastFrame`:
 project the last frame's matched points, candidates within the level-scaled
 window on levels [l-1, l+1], best descriptor <= 100, one-to-one claims
 (closer wins), rotation-consistency histogram (12 bins, three maxima).
@@ -802,12 +947,13 @@ the local-map search; there is no scale-invariance distance check (the level is
 clamped instead).
 
 **`OptimizePose`** (`optimization/pose_optimization.h`, g2o private). Unary
-edges on one `VertexSE3Expmap`: mono (2 rows, normalized plane) and stereo (4
-rows: left and right via `T_rl`, with `ProjectionJacobianRightPose`).
+edges on one `VertexSE3Expmap`: mono (2 rows, raw pixels through the left
+`Camera`) and stereo (4 rows: left and right via `StereoCameras{right, T_rl}`,
+with `PixelJacobianRightPose`).
 Schedule as ORB-SLAM3: 4 rounds x 10 iterations, every round restarts from the
 initial pose, Huber kernel in rounds 0-1 and plain after, edges classified per
 round by chi2 > 5.991 (mono) / 9.488 (stereo, 4 dof) or depth <= 0; success
-needs >= 3 inliers (decision S). `sigma = sigma_px * level_scale^level / f`.
+needs >= 3 inliers (decision S). `sigma = sigma_px * level_scale^level` pixels.
 
 **BoW-less fallback limitation.** There is no vocabulary / place recognition,
 so a lost frame cannot be tracked against the reference keyframe; the wide
@@ -822,6 +968,12 @@ the initialization map has 67-94 points, so the local map drops below 30
 inliers quickly, and without map growth (sub-project 2) there is nothing to
 refill it. Mono translation accuracy is also limited by the initial map
 (decision T).
+
+After the camera-model change (raw-pixel residuals, 2026-10-06 smoke run; see
+"Camera Model and Raw-Pixel Residuals"): binocular still tracks the whole run
+(median 232 inliers); monocular tracks 82 frames in 400 with 18
+re-initializations (19 maps, 62-109 points each, median 41 local-map inliers).
+Maps are still short-lived for the same reason (no map growth).
 
 ## 7. Coding Conventions
 
@@ -957,7 +1109,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-04 | Stereo depth is capped at about 17 m by `max_parallax_cos = 0.99998` at the 0.11 m baseline. | Accepted for now; the limit is a matcher option, tune later. |
 | 2026-10-05 | g2o is vendored pristine in `third_party/g2o/src/` and packaged by a local Conan recipe; linked `PRIVATE`; the public API stays on Eigen types. | Reproducible build across machines (no system g2o), no g2o in public headers (principle 8), adaptations live in the recipe so upstream updates are a directory swap. |
 | 2026-10-05 | Local Conan package `g2o/20241228@voyah/stable`: `user`/`channel` set in the recipe (not passed on the command line). | A plain `conan create third_party/g2o` yields the reference `conanfile.txt` requires; a missing package gives Conan's "ERROR: Package 'g2o/20241228@voyah/stable' not resolved: Unable to find 'g2o/20241228@voyah/stable' in remotes." error, which the README explains. |
-| 2026-10-05 | BundleAdjust works on undistorted normalized points (z = 1) with sigma in normalized units; poses are `T_cw`; analytic Jacobians. | Same convention as the geometry toolkit (no camera model inside the optimizer; works for pinhole and fisheye). Pixel-space residuals deferred (TODO). |
+| 2026-10-05 | BundleAdjust works on undistorted normalized points (z = 1) with sigma in normalized units; poses are `T_cw`; analytic Jacobians. | Same convention as the geometry toolkit (no camera model inside the optimizer; works for pinhole and fisheye). Pixel-space residuals deferred (TODO). Superseded later on 2026-10-05: raw-pixel residuals (camera-model rows below). |
 | 2026-10-05 | BundleAdjust is two-stage like ORB-SLAM3 LocalBA: Huber pass (5 iterations), deactivate edges with chi2 > 5.991 or depth <= 0, plain pass (default 10 iterations). | A single robust pass drifted (baseline collapse, free scale) with 10 % gross outliers; deactivating outliers and re-converging fixed it. |
 | 2026-10-05 | Monocular initialization runs a two-keyframe BA after the two-view reconstruction; outlier points are dropped; fewer than 50 survivors fail the attempt. | Accuracy (the reconstruction is limited by the RANSAC models; see TODO "refinement lock-in"); ORB-SLAM3 does the same (`Optimizer::GlobalBundleAdjustemnt` in `CreateInitialMapMonocular`). |
 | 2026-10-05 | Init-time error at low parallax is noise-limited (synthetic seeds initialize at frame 3, baseline 0.15 vs depth 4-8; ML optimum 0.3-2.7 degrees), so tests check convergence to the maximum-likelihood optimum (oracle from ground truth) rather than an absolute error bound. Mean error 2.11 -> 1.34 degrees with BA. | An absolute bound would test the noise, not the optimizer. |
@@ -966,10 +1118,18 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-05 | Tracking against the map (sub-project 1): `MapReplica` fed by Mapper events; motion model -> zero-motion fallback (window x4) -> local map -> `OptimizePose`; the `PoseEstimator` stub is deleted. | Spec `2026-10-05-tracking-design.md`; keyframes, local BA, relocalization are sub-projects 2-4. |
 | 2026-10-05 | (Q) The projection matcher takes the point source as a template parameter; `features/` does not depend on `tracking/`. `PointReference` lives in `map/point_reference.h`; the rotation histogram is shared in `features/rotation_histogram.h`. | No dependency cycle between features and tracking; one histogram implementation for the initialization and projection matchers. |
 | 2026-10-05 | (R) The replica does not count events (spec said it would, as `SceneState`). | Nothing consumes the counters; the replica stays a pure map copy. |
-| 2026-10-05 | (S) `OptimizePose`: 4 rounds x 10 iterations; every round restarts from the initial pose (ORB-SLAM3); Huber in rounds 0-1; chi2 5.991 mono / 9.488 stereo (4 dof); success >= 3 inliers. | ORB-SLAM3 `PoseOptimization` schedule; the stereo edge has 4 rows (left + right normalized). |
+| 2026-10-05 | (S) `OptimizePose`: 4 rounds x 10 iterations; every round restarts from the initial pose (ORB-SLAM3); Huber in rounds 0-1; chi2 5.991 mono / 9.488 stereo (4 dof); success >= 3 inliers. | ORB-SLAM3 `PoseOptimization` schedule; the stereo edge has 4 rows (left + right normalized; raw pixels since the camera-model change below). |
 | 2026-10-05 | (T) Mono accuracy is limited by the noise-limited initial map at the default 1 deg parallax (about 12 % depth error, about 10 % translation error). Tests use 4 deg parallax for the accuracy bound and a separate default-init robustness test. | Same cause as the init-accuracy row above; tuning is deferred (TODO). |
 | 2026-10-05 | Matcher deviations from ORB-SLAM3: the orientation histogram is built from the final claims; points without a reference observation are skipped by the local-map search; no scale-invariance distance check (the predicted level is clamped). | Simpler; the distance check is a TODO. |
 | 2026-10-05 | BoW-less fallback: a wide-window (x4) zero-motion projection search replaces `TrackReferenceKeyFrame`. | No vocabulary yet; relocalization / place recognition is sub-project 4. |
+| 2026-10-05 | Camera model, approach A: a `geometry::Camera{K, distortion}` value type (`Project`, `ProjectJacobian`, `Unproject`); not camera-model classes (approach B, TODO if ever needed) and not free functions. | Smallest change that gives every consumer one projection; ORB-SLAM3's `GeometricCamera` hierarchy is not needed for one lens model. |
+| 2026-10-05 | All five consumers (projection matcher, `OptimizePose`, `BundleAdjust`, stereo matcher gate, initialization matcher windows) compare **raw (distorted) pixels** with σ = `sigma_px · 1.2^level` px; χ² thresholds unchanged (5.991 / 9.488). Rays stay rays (two-view RANSAC, triangulation, the 85° test). Replaces the normalized-plane residual space of the BA row, (S) and the stereo gate (their schedules and thresholds stand). | Spikes on corridor1 (mono, 400 frames, tracked / re-initializations): baseline 32 / 7; KB window + σ 53 / 5; + local-map gate 20 108 / 5; angle-only allowance σ·1.5·(1 + r²) with window ×(1 + r²) 85 tracked, 99 with gate 20; uniform σ 3 effectively disables outlier rejection. One noise model for the library, as ORB-SLAM3. |
+| 2026-10-05 | Measurements keep both the distortion model pointer (`camera()`) and the raw keypoints (`distorted_points()`). The model is app-owned and must outlive every measurement, event and `Camera` copy (pointer rule, §6). | Consumers need raw pixels and the model; recomputing raw pixels from undistorted ones would lose precision and cost a `Distort` per use. |
+| 2026-10-05 | `DistortionModel` (Dummy, Kannala-Brandt) moved from `features/distortion_models/` to `geometry/distortion_models/` (namespace `geometry::distortion_models`); forwarding headers (with a namespace alias) remain at the old path. | `geometry::Camera` needs the model and `geometry` must stay at the bottom of the dependency stack. |
+| 2026-10-05 | (U) `DistortJacobian` for Kannala-Brandt: J = (d/r)·I + (d′(θ)·θ′(r) − d/r)·p̂p̂ᵀ, θ′(r) = 1/(1 + r²), identity for r < 1e-8. | Analytic; verified against central finite differences (the spec draft had an extra 1/r). |
+| 2026-10-05 | (V) Pinhole invariance with the old normalized code holds exactly (1e-9) only for fx = fy. `OptimizePose`, `BundleAdjust` and the stereo gate now weight x and y separately in pixels, so χ² changes slightly on fx ≠ fy rigs (e.g. EuRoC). | The old code divided σ by one f; per-axis pixel weighting is the intended behaviour. |
+| 2026-10-05 | The calibration-free angle allowance (σ · 1.5 · (1 + r²), window · (1 + r²)) is recorded as a fallback for lenses without a model, not implemented. | Spike 2 measured it within 0.6 % of the KB stretch up to 60° (85 tracked frames vs 53 for KB window + σ); not needed while every lens has a model (TODO). |
+| 2026-10-05 | Smoke result of the camera-model branch (run 2026-10-06, corridor1, Release): mono 82 tracked / 18 re-initializations (gate 20: 137 / 14, measurement only); stereo tracks the run, median 232 inliers. The ≤ 5 re-initializations criterion is missed; nothing was tuned. | Maps still die after a few frames (62-109-point initial map, no map growth); re-initialization is fast, so short maps become many re-initializations. Gate / init map size tuning and map growth (sub-project 2) are next (TODO). |
 
 ## 9. Open Questions
 
@@ -1054,7 +1214,9 @@ branch → review → merge to `master`. Update this document at the end.
     ray is more than `MonocularMeasurement::kMaxRayAngle` = 85° off-axis are
     dropped at construction. **Long term:** store unit bearing vectors instead of
     z = 1 points (needed for full fisheye FOV and mixed cameras) — decide with
-    the Tracker design.
+    the Tracker design. Since 2026-10-05 residuals and gates are in raw pixels
+    (only the geometry stays on z = 1 rays), so keeping features beyond 85°
+    needs bearing vectors only on the ray side (TODO).
 23. **Radial-tangential distortion** (EuRoC MAV) is not implemented; the reader
     rejects such calibrations.
 24. ~~Mono/stereo variants share an event tag~~ — resolved 2026-10-03:
@@ -1129,6 +1291,11 @@ branch → review → merge to `master`. Update this document at the end.
 - Tracking against the map (branch `feat/tracking`, merge pending):
   `MapReplica`, `OptimizePose`, projection matching, frame-to-map Tracker, the
   `PoseEstimator` stub removed (see "Tracking Against the Map").
+
+- Camera model (branch `feat/camera-model`, merge pending): `DistortionModel`
+  moved to `geometry/` with `DistortJacobian`, `geometry::Camera`, measurements
+  keep raw keypoints and `camera()`, all five residual / gate consumers in raw
+  pixels (see "Camera Model and Raw-Pixel Residuals").
 
 **Required follow-up:**
 - Decide `MapPointStorage` growth / compaction (Open Question 2); ids are
