@@ -19,6 +19,8 @@
 #include <voyahslam/events/events.h>
 #include <voyahslam/events/observable.h>
 #include <voyahslam/features/projection_matcher.h>
+#include <voyahslam/geometry/camera.h>
+#include <voyahslam/geometry/distortion_models/kannala_brandt_distortion_model.h>
 #include <voyahslam/mapping/mapper.h>
 #include <voyahslam/memory/object_pool.h>
 #include <voyahslam/tracking/map_replica.h>
@@ -68,11 +70,28 @@ struct Feature {
     double angle = 0.0;
 };
 
-// Features in order, then two stretchers so the point bounding box spans
-// [0, 640] x [0, 480] (or `stretch` when given).
+// TUM-VI cam0 (equidistant fisheye, 1024x1024).
+geometry::TMatrix33F TumViIntrinsics() {
+    geometry::TMatrix33F K = geometry::TMatrix33F::Identity();
+    K(0, 0) = 380.81042871360756;
+    K(1, 1) = 380.81194179427075;
+    K(0, 2) = 510.29465304840727;
+    K(1, 2) = 514.3304630538506;
+    return K;
+}
+
+geometry::distortion_models::KannalaBrandtDistortionModel TumViModel() {
+    return geometry::distortion_models::KannalaBrandtDistortionModel(
+        0.010171079892421483, -0.010816440029919381, 0.005942781769412756, -0.001662284667857643);
+}
+
+// Features in order (raw pixels), then two stretchers so the point bounding
+// box spans [0, 640] x [0, 480] (or `stretch` when given).
 Measurement MakeMeasurement(std::vector<Feature> features,
                             const std::vector<geometry::TPoint2DF>& stretch = {{0.0, 0.0},
-                                                                               {640.0, 480.0}}) {
+                                                                               {640.0, 480.0}},
+                            const geometry::TMatrix33F& K = Intrinsics(),
+                            const geometry::distortion_models::DistortionModel* distortion = nullptr) {
     int seed = 5000;
     for (const geometry::TPoint2DF& pixel : stretch) {
         features.push_back({pixel, MakeDescriptor(seed++), 0, 0.0});
@@ -92,7 +111,7 @@ Measurement MakeMeasurement(std::vector<Feature> features,
     Measurement measurement(TestImageFeatures(std::move(points), geometry::TRowVectorF::Ones(n),
                                               std::move(angles), std::move(descriptors),
                                               std::move(levels)),
-                            Intrinsics(), nullptr, 0.0);
+                            K, distortion, 0.0);
     EXPECT_EQ(measurement.points().cols(), n);  // nothing dropped by the 85° cut
     return measurement;
 }
@@ -382,6 +401,65 @@ TEST(ProjectionMatcherTest, LocalMapPredictedLevelAndRatio) {
     EXPECT_EQ(matches[3], -1);
     EXPECT_EQ(matches[4], 2);
     EXPECT_EQ(matches[5], -1);
+}
+
+TEST(ProjectionMatcherTest, FisheyePeripheralPointsMatch) {
+    // TUM-VI KB camera, points 60-80 degrees off axis, keypoints 1.8 raw px
+    // from the true projection: inside the 2.5 px window in raw pixels, but
+    // the undistortion magnifies the offset beyond it.
+    const auto model = TumViModel();
+    const geometry::Camera camera{TumViIntrinsics(), &model};
+    constexpr double kDeg = std::numbers::pi / 180.0;
+    constexpr int kNumPoints = 8;
+    TReplica replica;
+    std::vector<Point> points;
+    std::vector<Feature> features;
+    for (int i = 0; i < kNumPoints; ++i) {
+        const double theta = (60.0 + 20.0 * i / (kNumPoints - 1)) * kDeg;
+        const double phi = 2.0 * std::numbers::pi * i / kNumPoints + 0.3;
+        const Eigen::Vector3d ray(std::sin(theta) * std::cos(phi), std::sin(theta) * std::sin(phi),
+                                  std::cos(theta));
+        points.push_back({3.0 * ray, MakeDescriptor(i + 1)});
+        const double alpha = 1.1 * i;
+        const geometry::TPoint2DF offset(1.8 * std::cos(alpha), 1.8 * std::sin(alpha));
+        features.push_back({camera.Project(points.back().position) + offset, MakeDescriptor(i + 1, 3), 0});
+    }
+    AddPoints(replica, points);
+    std::vector<uint32_t> ids(kNumPoints);
+    for (int i = 0; i < kNumPoints; ++i) ids[static_cast<size_t>(i)] = static_cast<uint32_t>(i);
+    CreateKeyFrame(replica, 0, Eigen::Vector3d::Zero(), std::vector<int>(kNumPoints, 0), ids);
+
+    // Stretch the raw bounding box with 84 degree rays along both axes.
+    const double sin84 = std::sin(84.0 * kDeg);
+    const double cos84 = std::cos(84.0 * kDeg);
+    const std::vector<geometry::TPoint2DF> stretch = {
+        camera.Project({sin84, 0.0, cos84}), camera.Project({-sin84, 0.0, cos84}),
+        camera.Project({0.0, sin84, cos84}), camera.Project({0.0, -sin84, cos84})};
+    const Measurement current = MakeMeasurement(features, stretch, TumViIntrinsics(), &model);
+
+    // Scene check: in undistorted px every keypoint is outside the 2.5 px window.
+    constexpr double kWindow = 2.5;  // th = 1, cos > 0.998, level 0; radius_px below
+    for (int i = 0; i < kNumPoints; ++i) {
+        const geometry::TPoint2DF pinhole =
+            (TumViIntrinsics() * points[static_cast<size_t>(i)].position).hnormalized();
+        ASSERT_GT((current.points().col(i) - pinhole).cwiseAbs().maxCoeff(), kWindow) << "point " << i;
+        ASSERT_LE((current.distorted_points().col(i) - camera.Project(points[static_cast<size_t>(i)].position))
+                      .norm(),
+                  2.0);
+    }
+
+    std::vector<int64_t> from_map(static_cast<size_t>(current.points().cols()), -1);
+    const size_t added = SearchFromLocalMap<TestExtractor>(current, kIdentity, replica, from_map, 1.0,
+                                                           ProjectionMatcherOptions{});
+    EXPECT_EQ(added, static_cast<size_t>(kNumPoints));
+    for (int i = 0; i < kNumPoints; ++i) EXPECT_EQ(from_map[static_cast<size_t>(i)], i) << "point " << i;
+
+    const Measurement last = MakeLastFrame(std::vector<int>(kNumPoints, 0));
+    const std::vector<int64_t> from_last = SearchFromLastFrame<TestExtractor>(
+        current, kIdentity, last, IdentityMatches(kNumPoints + 2, kNumPoints), replica, kWindow,
+        ProjectionMatcherOptions{});
+    EXPECT_EQ(CountMatches(from_last), static_cast<size_t>(kNumPoints));
+    for (int i = 0; i < kNumPoints; ++i) EXPECT_EQ(from_last[static_cast<size_t>(i)], i) << "point " << i;
 }
 
 // ---- Synthetic sequence through a real Mapper ----

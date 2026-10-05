@@ -8,6 +8,8 @@
 #include "support/synthetic_sequence.h"
 #include "support/test_measurements.h"
 #include "voyahslam/features/stereo_matcher.h"
+#include "voyahslam/geometry/camera.h"
+#include "voyahslam/geometry/distortion_models/kannala_brandt_distortion_model.h"
 
 namespace voyahslam::features::test {
 
@@ -72,6 +74,21 @@ geometry::TPoint2DF ProjectRight(const geometry::TPoint3DF& X, const StereoRig& 
 }
 
 const geometry::TPoint3DF kPoint(0.3, -0.2, 4.0);
+
+// TUM-VI cam0 (equidistant fisheye, 1024x1024).
+geometry::TMatrix33F TumViIntrinsics() {
+    geometry::TMatrix33F K = geometry::TMatrix33F::Identity();
+    K(0, 0) = 380.81042871360756;
+    K(1, 1) = 380.81194179427075;
+    K(0, 2) = 510.29465304840727;
+    K(1, 2) = 514.3304630538506;
+    return K;
+}
+
+geometry::distortion_models::KannalaBrandtDistortionModel TumViModel() {
+    return geometry::distortion_models::KannalaBrandtDistortionModel(
+        0.010171079892421483, -0.010816440029919381, 0.005942781769412756, -0.001662284667857643);
+}
 
 }  // namespace
 
@@ -280,6 +297,64 @@ TEST(StereoMatcherTest, SingleRightCandidateCanMatch) {
     ASSERT_EQ(matches.num_matches, 1U);
     EXPECT_EQ(matches.right_indices[0], 0);
     EXPECT_NEAR(matches.depths[0], kPoint.z(), 1e-6);
+}
+
+TEST(StereoMatcherTest, FisheyePeripheralPairsAccepted) {
+    // TUM-VI KB cameras on a 10 cm baseline; points 60-80 degrees off the left
+    // axis, raw keypoints with 0.5 px noise. In undistorted pixels that noise
+    // is magnified several times; in raw pixels it is well inside the gate.
+    const auto model = TumViModel();
+    const StereoRig rig{
+        .K_left = TumViIntrinsics(),
+        .K_right = TumViIntrinsics(),
+        .T_rl = geometry::RigidTransformation(geometry::TMatrix33F::Identity(), geometry::TVector3DF(-0.1, 0.0, 0.0)),
+        .baseline = 0.1,
+        .distortion_left = &model,
+        .distortion_right = &model,
+    };
+    const geometry::Camera left_camera{rig.K_left, &model};
+    const geometry::Camera right_camera{rig.K_right, &model};
+    constexpr double kDeg = std::numbers::pi / 180.0;
+    constexpr int kNumPoints = 12;
+    // 0.5 px in golden-angle directions: deterministic across standard libraries.
+    int num_noise = 0;
+    auto noise = [&]() {
+        const double a = 2.399963229728653 * ++num_noise;
+        return geometry::TPoint2DF(0.5 * std::cos(a), 0.5 * std::sin(a));
+    };
+    std::vector<Spec> left;
+    std::vector<Spec> right;
+    std::vector<Spec> exact_left;
+    std::vector<Spec> shifted_right;
+    for (int i = 0; i < kNumPoints; ++i) {
+        const double theta = (60.0 + 20.0 * i / (kNumPoints - 1)) * kDeg;
+        const double phi = 2.0 * std::numbers::pi * i / kNumPoints + 0.2;
+        const geometry::TPoint3DF X =
+            1.5 * geometry::TPoint3DF(std::sin(theta) * std::cos(phi), std::sin(theta) * std::sin(phi),
+                                      std::cos(theta));
+        const geometry::TPoint3DF X_right = rig.T_rl.Transform(X);
+        ASSERT_LT(std::acos(X_right.z() / X_right.norm()), 84.0 * kDeg) << "point " << i;
+        left.push_back({.pixel = left_camera.Project(X) + noise(), .seed = i});
+        right.push_back({.pixel = right_camera.Project(X_right) + noise(), .seed = i});
+        // The exact pair with the right keypoint 5 px across the epipolar curve
+        // (the image of the left ray), so no depth along the ray explains it.
+        // Noise is left out here: a 5 px inconsistency splits into ~2.5 px per
+        // image (chi2 ~ 6.25 against 5.991), which 0.5 px noise could undo.
+        const geometry::TPoint2DF along =
+            right_camera.ProjectJacobian(X_right) * rig.T_rl.rotation() * X.normalized();
+        const geometry::TPoint2DF across = geometry::TPoint2DF(-along.y(), along.x()).normalized();
+        exact_left.push_back({.pixel = left_camera.Project(X), .seed = i});
+        shifted_right.push_back({.pixel = right_camera.Project(X_right) + 5.0 * across, .seed = i});
+    }
+
+    const StereoMatches accepted = MatchStereo<TestExtractor>(Make(left, right, rig), {});
+    EXPECT_EQ(accepted.num_matches, static_cast<size_t>(kNumPoints));
+    for (int i = 0; i < kNumPoints; ++i) {
+        EXPECT_EQ(accepted.right_indices[i], i) << "point " << i;
+    }
+
+    const StereoMatches rejected = MatchStereo<TestExtractor>(Make(exact_left, shifted_right, rig), {});
+    EXPECT_EQ(rejected.num_matches, 0U);
 }
 
 TEST(StereoMatcherTest, SyntheticNoiseFreeExact) {

@@ -14,6 +14,7 @@
 #include <voyahslam/features/feature_grid.h>
 #include <voyahslam/features/measurement.h>
 #include <voyahslam/features/rotation_histogram.h>
+#include <voyahslam/geometry/camera.h>
 #include <voyahslam/geometry/rigid_transformation.h>
 #include <voyahslam/map/map_point_id.h>
 
@@ -36,16 +37,18 @@ struct ProjectionMatcherOptions {
 // Reference(id) (a const std::optional<map::PointReference>&), which are
 // called only for alive ids. features/ does not include tracking/.
 // Binocular measurements pass left(): right matches come from stereo matching.
+// Projections, the bounding box, the grid and the windows are in raw
+// (distorted) pixels, as ORB-SLAM3's.
 
 namespace detail {
 
-// Undistorted pixel of camera point Xc, or nullopt when Xc is behind the
-// camera, beyond the ray-angle limit or outside the current points' bounding box.
+// Raw pixel of camera point Xc, or nullopt when Xc is behind the camera,
+// beyond the ray-angle limit or outside the current raw points' bounding box.
 class ProjectionGate {
 public:
-    ProjectionGate(const geometry::TMatrix33F& K, const geometry::TPoints2DF& points,
+    ProjectionGate(const geometry::Camera& camera, const geometry::TPoints2DF& points,
                    double max_ray_angle_deg)
-        : K_(K), min_cos_ray_(std::cos(max_ray_angle_deg * std::numbers::pi / 180.0)) {
+        : camera_(camera), min_cos_ray_(std::cos(max_ray_angle_deg * std::numbers::pi / 180.0)) {
         if (points.cols() > 0) {
             min_ = points.rowwise().minCoeff();
             max_ = points.rowwise().maxCoeff();
@@ -59,7 +62,7 @@ public:
         if (Xc.z() <= 0.0 || Xc.z() < min_cos_ray_ * Xc.norm()) {
             return std::nullopt;
         }
-        const geometry::TPoint2DF uv = (K_ * Xc).hnormalized();
+        const geometry::TPoint2DF uv = camera_.Project(Xc);
         if ((uv.array() < min_.array()).any() || (uv.array() > max_.array()).any()) {
             return std::nullopt;
         }
@@ -67,7 +70,7 @@ public:
     }
 
 private:
-    geometry::TMatrix33F K_;
+    geometry::Camera camera_;
     double min_cos_ray_;
     geometry::TPoint2DF min_;
     geometry::TPoint2DF max_;
@@ -95,8 +98,8 @@ template <typename TFeatureExtractor, typename TPointSource>
     std::vector<double> matched_distance(static_cast<size_t>(num_current), kInfinity);
     std::vector<Eigen::Index> claimed_by(static_cast<size_t>(num_current), -1);  // last feature
 
-    const FeatureGrid grid(current.points(), current.levels());
-    const detail::ProjectionGate gate(current.K(), current.points(), options.max_ray_angle_deg);
+    const FeatureGrid grid(current.distorted_points(), current.levels());
+    const detail::ProjectionGate gate(current.camera(), current.distorted_points(), options.max_ray_angle_deg);
 
     for (size_t i = 0; i < last_matches.size(); ++i) {
         if (last_matches[i] < 0 || last_matches[i] > std::numeric_limits<uint32_t>::max()) {
@@ -178,8 +181,8 @@ size_t SearchFromLocalMap(const TMonocularMeasurement<TFeatureExtractor>& curren
         }
     }
 
-    const FeatureGrid grid(current.points(), current.levels());
-    const detail::ProjectionGate gate(current.K(), current.points(), options.max_ray_angle_deg);
+    const FeatureGrid grid(current.distorted_points(), current.levels());
+    const detail::ProjectionGate gate(current.camera(), current.distorted_points(), options.max_ray_angle_deg);
     const geometry::TPoint3DF centre = T_cw.Inverse().translation();
     const double log_scale = std::log(options.level_scale);
     constexpr double kInfinity = std::numeric_limits<double>::infinity();

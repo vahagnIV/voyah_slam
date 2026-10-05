@@ -8,13 +8,14 @@
 #include <voyahslam/defs.h>
 #include <voyahslam/features/measurement.h>
 #include <voyahslam/features/stereo_matches.h>
+#include <voyahslam/geometry/camera.h>
 #include <voyahslam/geometry/geometry.h>
 
 namespace voyahslam::features {
 
 struct StereoMatcherOptions {
     double nn_ratio = 0.7;
-    double sigma_px = 1.0;              // level-0 keypoint noise (px)
+    double sigma_px = 1.0;              // level-0 keypoint noise (raw px)
     double level_scale = 1.2;           // σ_level = sigma_px · level_scale^level (ORB; SIFT: 2^(1/3))
     double max_chi2 = 5.991;            // per-image reprojection test, 2 dof
     double max_parallax_cos = 0.99998;  // rays more parallel than this → rejected
@@ -22,22 +23,22 @@ struct StereoMatcherOptions {
 
 namespace detail {
 
-// Squared normalized-plane reprojection error of X (in that camera's frame)
-// against the measured homogeneous normalized point, in units of σ².
-inline double NormalizedChi2(const geometry::TPoint3DF& X, const geometry::THomogenousPointF& measured,
-                             double sigma_normalized) {
-    const geometry::TPoint2DF residual = X.hnormalized() - measured.hnormalized();
-    return residual.squaredNorm() / (sigma_normalized * sigma_normalized);
+// Squared raw-pixel reprojection error of X (in that camera's frame, z > 0)
+// against the measured raw keypoint, in units of σ² (σ in pixels).
+inline double PixelChi2(const geometry::Camera& camera, const geometry::TPoint3DF& X,
+                        const geometry::TPoint2DF& measured, double sigma_px) {
+    const geometry::TPoint2DF residual = camera.Project(X) - measured;
+    return residual.squaredNorm() / (sigma_px * sigma_px);
 }
 
 }  // namespace detail
 
 // ORB-SLAM3 Frame::ComputeStereoFishEyeMatches + KannalaBrandt8::TriangulateMatches:
 // brute-force descriptor matching with a ratio test, one-to-one resolution,
-// then DLT triangulation gated by positive depth in both cameras, a per-image
-// reprojection chi2 test and a minimum parallax. Works for any rig geometry
-// (no rectification assumed). Returns, per left feature, the right index and
-// the left-camera depth (-1 = none).
+// then DLT triangulation of the rays gated by positive depth in both cameras,
+// a per-image raw-pixel reprojection chi2 test and a minimum parallax. Works
+// for any rig geometry (no rectification assumed). Returns, per left feature,
+// the right index and the left-camera depth (-1 = none).
 template <typename TFeatureExtractor>
 [[nodiscard]] StereoMatches MatchStereo(const TBinocularMeasurement<TFeatureExtractor>& measurement,
                                         const StereoMatcherOptions& options) {
@@ -105,8 +106,6 @@ template <typename TFeatureExtractor>
     P_left.leftCols<3>().setIdentity();
     const geometry::TMatrix34F P_right = rig.T_rl.ToMatrix34();
     const geometry::TVector3DF centre_right = rig.T_rl.Inverse().translation();
-    const double f_left = left.K()(0, 0);
-    const double f_right = right.K()(0, 0);
     for (Eigen::Index i = 0; i < num_left; ++i) {
         const Eigen::Index j = candidate[i];
         if (j < 0) {
@@ -125,11 +124,12 @@ template <typename TFeatureExtractor>
         }
 
         const double sigma_left =
-            options.sigma_px * std::pow(options.level_scale, static_cast<double>(left.levels()(i))) / f_left;
+            options.sigma_px * std::pow(options.level_scale, static_cast<double>(left.levels()(i)));
         const double sigma_right =
-            options.sigma_px * std::pow(options.level_scale, static_cast<double>(right.levels()(j))) / f_right;
-        if (detail::NormalizedChi2(X, x_left, sigma_left) > options.max_chi2 ||
-            detail::NormalizedChi2(X_right, x_right, sigma_right) > options.max_chi2) {
+            options.sigma_px * std::pow(options.level_scale, static_cast<double>(right.levels()(j)));
+        if (detail::PixelChi2(left.camera(), X, left.distorted_points().col(i), sigma_left) > options.max_chi2 ||
+            detail::PixelChi2(right.camera(), X_right, right.distorted_points().col(j), sigma_right) >
+                options.max_chi2) {
             continue;
         }
 

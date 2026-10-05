@@ -3,7 +3,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
-#include <voyahslam/features/distortion_models/kannala_brandt_distortion_model.h>
+#include <voyahslam/geometry/distortion_models/kannala_brandt_distortion_model.h>
 #include <voyahslam/io/read_image.h>
 #include <yaml-cpp/yaml.h>
 
@@ -159,7 +159,7 @@ void EurocDatasetReader::LoadCalibration(const fs::path& root) {
         camera.T_cam_imu = raw.T_cam_imu;
 
         if (raw.distortion_model == "equidistant") {
-            auto model = std::make_unique<features::distortion_models::KannalaBrandtDistortionModel>(
+            auto model = std::make_unique<geometry::distortion_models::KannalaBrandtDistortionModel>(
                 raw.distortion_coeffs);
             model->PrecomputeInitialGuessLookup(camera.K, camera.width, camera.height);
             camera.distortion = model.get();

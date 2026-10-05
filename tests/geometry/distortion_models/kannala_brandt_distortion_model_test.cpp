@@ -1,9 +1,10 @@
 #include "kannala_brandt_distortion_model_test.h"
 #include <cmath>
+#include <random>
 
 #include <opencv2/calib3d.hpp>
 
-using namespace voyahslam::features::distortion_models;
+using namespace voyahslam::geometry::distortion_models;
 
 namespace voyahslam::test::features {
 
@@ -522,6 +523,72 @@ TEST_F(KannalaBrandtDistortionModelTest,
 
     EXPECT_LT(angle_diff, 0.01) << "Angular direction not preserved for angle "
                                 << angle << " (error: " << angle_diff << ")";
+  }
+}
+
+namespace {
+
+// TUM-VI cam0 Kannala-Brandt coefficients.
+KannalaBrandtDistortionModel TumViModel() {
+  return KannalaBrandtDistortionModel(0.010171079892421483, -0.010816440029919381,
+                                      0.005942781769412756, -0.001662284667857643);
+}
+
+geometry::TPoint2DF DistortPoint(const KannalaBrandtDistortionModel &model,
+                                 const geometry::TPoint2DF &p) {
+  geometry::THomogenousPointsF h(3, 1);
+  h.col(0) << p.x(), p.y(), 1.0;
+  model.Distort(h);
+  return h.col(0).head<2>();
+}
+
+void ExpectJacobianMatchesFiniteDifferences(const KannalaBrandtDistortionModel &model,
+                                            const geometry::TPoint2DF &p) {
+  const precision_t step = 1e-7;
+  geometry::TMatrix22F fd;
+  for (int c = 0; c < 2; ++c) {
+    geometry::TPoint2DF dp = geometry::TPoint2DF::Zero();
+    dp(c) = step;
+    fd.col(c) = (DistortPoint(model, p + dp) - DistortPoint(model, p - dp)) / (2 * step);
+  }
+  const geometry::TMatrix22F analytic = model.DistortJacobian(p);
+  ASSERT_TRUE(analytic.allFinite());
+  const precision_t scale = std::max<precision_t>(1.0, fd.norm());
+  EXPECT_LT((analytic - fd).norm() / scale, 1e-6)
+      << "p = (" << p.x() << ", " << p.y() << ")\nanalytic:\n" << analytic
+      << "\nfd:\n" << fd;
+}
+
+} // namespace
+
+TEST(KannalaBrandtDistortJacobian, DistortJacobianMatchesFiniteDifferences) {
+  const KannalaBrandtDistortionModel model = TumViModel();
+  const std::vector<precision_t> radii = {1e-6, 0.1, 1.0, std::tan(80.0 * M_PI / 180.0)};
+  const std::vector<precision_t> angles = {0.0, 0.7, M_PI_2, 2.3, M_PI, -1.1, -M_PI_2};
+  for (precision_t r : radii) {
+    for (precision_t a : angles) {
+      ExpectJacobianMatchesFiniteDifferences(
+          model, geometry::TPoint2DF(r * std::cos(a), r * std::sin(a)));
+    }
+  }
+  std::mt19937 rng(12345);
+  std::uniform_real_distribution<precision_t> radius(0.0, std::tan(85.0 * M_PI / 180.0));
+  std::uniform_real_distribution<precision_t> angle(-M_PI, M_PI);
+  for (int i = 0; i < 10; ++i) {
+    const precision_t r = radius(rng);
+    const precision_t a = angle(rng);
+    ExpectJacobianMatchesFiniteDifferences(
+        model, geometry::TPoint2DF(r * std::cos(a), r * std::sin(a)));
+  }
+}
+
+TEST(KannalaBrandtDistortJacobian, DistortJacobianAtCenterIsIdentity) {
+  const KannalaBrandtDistortionModel model = TumViModel();
+  for (const geometry::TPoint2DF &p : {geometry::TPoint2DF(0.0, 0.0),
+                                       geometry::TPoint2DF(1e-12, 0.0)}) {
+    const geometry::TMatrix22F j = model.DistortJacobian(p);
+    EXPECT_TRUE(j.allFinite());
+    EXPECT_TRUE(j.isApprox(geometry::TMatrix22F::Identity(), 1e-12)) << j;
   }
 }
 

@@ -269,7 +269,6 @@ auto Tracker<TFeatureExtractor>::OptimizeAndDropOutliers(
     std::vector<int64_t> matches) const -> PoseResult {
     const auto& left = LeftOf<TFeatureExtractor>(measurement);
     const auto* binocular = std::get_if<TBinocularMeasurement>(&measurement);
-    const double sigma_scale = options_.sigma_px / left.K()(0, 0);
 
     std::vector<optimization::PoseObservation> observations;
     std::vector<size_t> feature_of;  // per observation
@@ -284,12 +283,12 @@ auto Tracker<TFeatureExtractor>::OptimizeAndDropOutliers(
         }
         const auto feature = static_cast<Eigen::Index>(i);
         optimization::PoseObservation observation{
-            replica_.Position(id), left.normalized_points().col(feature).hnormalized(), std::nullopt,
-            sigma_scale * std::pow(options_.level_scale, left.levels()(feature))};
+            replica_.Position(id), left.distorted_points().col(feature), std::nullopt,
+            options_.sigma_px * std::pow(options_.level_scale, left.levels()(feature))};
         if (binocular) {
             const int right = binocular->right_indices()(feature);
             if (right >= 0) {
-                observation.right = binocular->right().normalized_points().col(right).hnormalized();
+                observation.right = binocular->right().distorted_points().col(right);
             }
         }
         observations.push_back(observation);
@@ -298,10 +297,12 @@ auto Tracker<TFeatureExtractor>::OptimizeAndDropOutliers(
 
     PoseResult pose;
     pose.num_matches = observations.size();
+    std::optional<optimization::StereoCameras> stereo;
+    if (binocular) {
+        stereo = optimization::StereoCameras{binocular->right().camera(), binocular->rig().T_rl};
+    }
     const optimization::PoseOptimizationResult result = optimization::OptimizePose(
-        initial_T_cw,
-        binocular ? std::optional<geometry::RigidTransformation>(binocular->rig().T_rl) : std::nullopt,
-        observations, options_.pose_optimization);
+        initial_T_cw, left.camera(), stereo, observations, options_.pose_optimization);
     if (!result.success || !IsFinite(result.T_cw)) {
         pose.T_cw = initial_T_cw;
         pose.matches.assign(matches.size(), -1);

@@ -7,6 +7,7 @@
 #include <Eigen/Dense>
 
 #include "voyahslam/defs.h"
+#include "voyahslam/geometry/camera.h"
 #include "voyahslam/geometry/rigid_transformation.h"
 
 namespace voyahslam::optimization {
@@ -24,13 +25,14 @@ struct BundleAdjustmentOptions {
 struct BaObservation {
     size_t keyframe;                    ///< Index into keyframe_poses.
     size_t point;                       ///< Column of points.
-    geometry::TPoint2DF measurement;    ///< Undistorted normalized coordinates (z = 1).
-    double sigma;                       ///< Normalized units.
+    geometry::TPoint2DF measurement;    ///< Raw (distorted) pixel in the keyframe's camera.
+    double sigma;                       ///< Pixels (sigma_px * scale^level).
 };
 
 struct BaProblem {
     std::vector<geometry::RigidTransformation> keyframe_poses;   ///< T_cw.
     std::vector<bool> keyframe_fixed;
+    std::vector<geometry::Camera> keyframe_cameras;              ///< One per keyframe.
     geometry::TPoints3DF points;                                 ///< World frame.
     std::vector<BaObservation> observations;
 };
@@ -46,11 +48,13 @@ struct BaResult {
     int iterations = 0;            ///< Total over both stages.
 };
 
-/// Jointly refines keyframe poses (T_cw) and world points by minimizing the normalized
-/// reprojection error of the observations (Levenberg-Marquardt, points marginalized).
+/// Jointly refines keyframe poses (T_cw) and world points by minimizing the raw-pixel
+/// reprojection error e = camera.Project(T_cw X) - measurement of the observations
+/// (Levenberg-Marquardt, points marginalized), each through its keyframe's camera.
 /// Fixed keyframes keep their input pose. Invalid input (no keyframes, points or
-/// observations; keyframe_fixed of the wrong size; a non-finite pose, point or measurement;
-/// sigma <= 0; an out-of-range index) yields success == false without optimizing.
+/// observations; keyframe_fixed or keyframe_cameras of the wrong size; a non-finite pose,
+/// point, measurement or K; sigma <= 0; an out-of-range index) yields success == false
+/// without optimizing.
 [[nodiscard]] BaResult BundleAdjust(const BaProblem& problem,
                                     const BundleAdjustmentOptions& options);
 

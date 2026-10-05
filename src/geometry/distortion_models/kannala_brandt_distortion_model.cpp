@@ -1,9 +1,9 @@
-#include "voyahslam/features/distortion_models/kannala_brandt_distortion_model.h"
+#include "voyahslam/geometry/distortion_models/kannala_brandt_distortion_model.h"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
 
-namespace voyahslam::features::distortion_models {
+namespace voyahslam::geometry::distortion_models {
 
 KannalaBrandtDistortionModel::KannalaBrandtDistortionModel(
     const std::vector<precision_t> &coefficients)
@@ -215,4 +215,24 @@ void KannalaBrandtDistortionModel::Distort(
   }
 }
 
-} // namespace voyahslam::features::distortion_models
+geometry::TMatrix22F KannalaBrandtDistortionModel::DistortJacobian(
+    const geometry::TPoint2DF &undistorted) const {
+  const precision_t r = undistorted.norm();
+  if (r < 1e-8) {
+    return geometry::TMatrix22F::Identity();
+  }
+
+  // distorted = (d(theta) / r) * p with theta = atan(r), so
+  // J = (d/r) I + (d'(theta) theta'(r) - d/r) p_hat p_hat^T
+  // (tangential gain d/r, radial gain d/dr[d/r * r]).
+  const precision_t theta = std::atan(r);
+  const precision_t scale = ComputeRadialDistance(theta) / r;
+  const precision_t radial_derivative =
+      ComputeRadialDistanceDerivative(theta) / (1.0 + r * r);
+  const geometry::TPoint2DF direction = undistorted / r;
+
+  return scale * geometry::TMatrix22F::Identity() +
+         (radial_derivative - scale) * (direction * direction.transpose());
+}
+
+} // namespace voyahslam::geometry::distortion_models

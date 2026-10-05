@@ -22,6 +22,7 @@
 namespace voyahslam::optimization {
 namespace {
 
+using geometry::Camera;
 using geometry::RigidTransformation;
 using geometry::TPoint2DF;
 using geometry::TPoint3DF;
@@ -34,24 +35,26 @@ RigidTransformation FromSE3Quat(const g2o::SE3Quat& pose) {
     return RigidTransformation(pose.rotation().toRotationMatrix(), pose.translation());
 }
 
-/// Normalized-plane reprojection error of a world point (vertex 0) seen by a T_cw pose
-/// (vertex 1): e = pi(R X + t) - measurement.
-class EdgeNormalizedProjection
+/// Raw-pixel reprojection error of a world point (vertex 0) seen by a T_cw pose (vertex 1)
+/// through the keyframe's camera: e = camera.Project(R X + t) - measurement.
+class EdgePixelProjection
     : public g2o::BaseBinaryEdge<2, Eigen::Vector2d, g2o::VertexPointXYZ, g2o::VertexSE3Expmap> {
 public:
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+    explicit EdgePixelProjection(const Camera& camera) : camera_(camera) {}
 
     bool read(std::istream& /*is*/) override { return false; }
     bool write(std::ostream& /*os*/) const override { return false; }
 
     void computeError() override {
-        _error = ProjectNormalized(Pose(), Point()) - _measurement;
+        _error = ProjectPixel(camera_, Pose(), Point()) - _measurement;
     }
 
     void linearizeOplus() override {
         Eigen::Matrix<precision_t, 2, 6> pose_jacobian;
         Eigen::Matrix<precision_t, 2, 3> point_jacobian;
-        ProjectionJacobians(Pose(), Point(), pose_jacobian, point_jacobian);
+        PixelJacobians(camera_, Pose(), Point(), pose_jacobian, point_jacobian);
         _jacobianOplusXi = point_jacobian;
         _jacobianOplusXj = pose_jacobian;
     }
@@ -64,14 +67,22 @@ private:
     [[nodiscard]] RigidTransformation Pose() const {
         return FromSE3Quat(vertexXn<1>()->estimate());
     }
+
+    Camera camera_;
 };
 
 bool IsValid(const BaProblem& problem) {
     if (problem.keyframe_poses.empty() || problem.points.cols() == 0 ||
         problem.observations.empty() ||
         problem.keyframe_fixed.size() != problem.keyframe_poses.size() ||
+        problem.keyframe_cameras.size() != problem.keyframe_poses.size() ||
         !problem.points.allFinite()) {
         return false;
+    }
+    for (const Camera& camera : problem.keyframe_cameras) {
+        if (!camera.K.allFinite()) {
+            return false;
+        }
     }
     for (const RigidTransformation& pose : problem.keyframe_poses) {
         if (!pose.rotation().allFinite() || !pose.translation().allFinite()) {
@@ -100,8 +111,10 @@ const std::shared_ptr<spdlog::logger>& Log() {
 BaResult BundleAdjust(const BaProblem& problem, const BundleAdjustmentOptions& options) {
     BaResult result;
     if (!IsValid(problem) || options.robust_iterations < 0 || options.iterations < 0) {
-        Log()->debug("BA skipped: invalid problem or options ({} keyframes, {} points, {} observations)",
-                     problem.keyframe_poses.size(), problem.points.cols(), problem.observations.size());
+        Log()->debug("BA skipped: invalid problem or options ({} keyframes, {} cameras, {} points, "
+                     "{} observations)",
+                     problem.keyframe_poses.size(), problem.keyframe_cameras.size(),
+                     problem.points.cols(), problem.observations.size());
         return result;
     }
     const auto num_fixed = static_cast<size_t>(
@@ -124,7 +137,7 @@ BaResult BundleAdjust(const BaProblem& problem, const BundleAdjustmentOptions& o
     const auto num_points = static_cast<size_t>(problem.points.cols());
     std::vector<g2o::VertexSE3Expmap*> pose_vertices(num_keyframes, nullptr);
     std::vector<g2o::VertexPointXYZ*> point_vertices(num_points, nullptr);
-    std::vector<EdgeNormalizedProjection*> edges;
+    std::vector<EdgePixelProjection*> edges;
     edges.reserve(problem.observations.size());
     for (const BaObservation& observation : problem.observations) {
         g2o::VertexSE3Expmap*& pose_vertex = pose_vertices[observation.keyframe];
@@ -145,7 +158,7 @@ BaResult BundleAdjust(const BaProblem& problem, const BundleAdjustmentOptions& o
             optimizer.addVertex(point_vertex);
         }
 
-        auto* edge = new EdgeNormalizedProjection();
+        auto* edge = new EdgePixelProjection(problem.keyframe_cameras[observation.keyframe]);
         edge->setVertex(0, point_vertex);
         edge->setVertex(1, pose_vertex);
         edge->setMeasurement(observation.measurement);
@@ -163,7 +176,7 @@ BaResult BundleAdjust(const BaProblem& problem, const BundleAdjustmentOptions& o
     // Plain chi2 sum over the edges the next pass optimizes (level 0).
     const auto active_cost = [&] {
         double cost = 0.0;
-        for (EdgeNormalizedProjection* edge : edges) {
+        for (EdgePixelProjection* edge : edges) {
             if (edge->level() == 0) {
                 edge->computeError();
                 cost += edge->chi2();
@@ -193,7 +206,7 @@ BaResult BundleAdjust(const BaProblem& problem, const BundleAdjustmentOptions& o
         return true;
     };
 
-    for (EdgeNormalizedProjection* edge : edges) {
+    for (EdgePixelProjection* edge : edges) {
         edge->computeError();
         result.initial_cost += edge->chi2();
     }
@@ -204,7 +217,7 @@ BaResult BundleAdjust(const BaProblem& problem, const BundleAdjustmentOptions& o
         }
         // Deactivate the outliers of the robust pass; the plain pass runs without a kernel.
         size_t num_deactivated = 0;
-        for (EdgeNormalizedProjection* edge : edges) {
+        for (EdgePixelProjection* edge : edges) {
             edge->computeError();
             if (edge->chi2() > options.huber_chi2 || !(edge->Depth() > 0.0)) {
                 edge->setLevel(1);
@@ -237,7 +250,7 @@ BaResult BundleAdjust(const BaProblem& problem, const BundleAdjustmentOptions& o
     // chi2 / inlier for every edge, the deactivated ones included.
     result.chi2.reserve(edges.size());
     result.inlier.reserve(edges.size());
-    for (EdgeNormalizedProjection* edge : edges) {
+    for (EdgePixelProjection* edge : edges) {
         edge->computeError();
         const double chi2 = edge->chi2();
         result.chi2.push_back(chi2);

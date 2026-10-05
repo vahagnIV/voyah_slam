@@ -7,6 +7,7 @@
 #include "support/synthetic_sequence.h"
 #include "support/test_measurements.h"
 #include "voyahslam/features/initialization_matcher.h"
+#include "voyahslam/geometry/distortion_models/kannala_brandt_distortion_model.h"
 
 namespace voyahslam::features::test {
 
@@ -41,7 +42,25 @@ Descriptor MakeDescriptor(const Spec& spec) {
     return d;
 }
 
-Measurement Make(const std::vector<Spec>& specs) {
+// TUM-VI cam0 (equidistant fisheye, 1024x1024).
+geometry::TMatrix33F TumViIntrinsics() {
+    geometry::TMatrix33F K = geometry::TMatrix33F::Identity();
+    K(0, 0) = 380.81042871360756;
+    K(1, 1) = 380.81194179427075;
+    K(0, 2) = 510.29465304840727;
+    K(1, 2) = 514.3304630538506;
+    return K;
+}
+
+geometry::distortion_models::KannalaBrandtDistortionModel TumViModel() {
+    return geometry::distortion_models::KannalaBrandtDistortionModel(
+        0.010171079892421483, -0.010816440029919381, 0.005942781769412756, -0.001662284667857643);
+}
+
+// Specs are raw pixels.
+Measurement Make(const std::vector<Spec>& specs,
+                 const geometry::TMatrix33F& K = voyahslam::test::SyntheticIntrinsics(),
+                 const geometry::distortion_models::DistortionModel* distortion = nullptr) {
     const auto n = static_cast<Eigen::Index>(specs.size());
     geometry::TPoints2DF points(2, n);
     geometry::TRowVectorF angles(n);
@@ -56,7 +75,7 @@ Measurement Make(const std::vector<Spec>& specs) {
     return Measurement(TestImageFeatures(std::move(points), geometry::TRowVectorF::Ones(n),
                                          std::move(angles), std::move(descriptors),
                                          std::move(levels)),
-                       voyahslam::test::SyntheticIntrinsics(), nullptr, 0.0);
+                       K, distortion, 0.0);
 }
 
 std::vector<geometry::TPoint2DF> PointsOf(const Measurement& m) {
@@ -192,6 +211,40 @@ TEST(InitializationMatcher, NoReferenceFeatureAtAllowedLevel) {
     const auto matches = RunMatcher(ref, cur, last);
     EXPECT_EQ(matches, (std::vector<Eigen::Index>{-1, -1}));
     EXPECT_EQ(last, before);
+}
+
+TEST(InitializationMatcherTest, UsesRawPixels) {
+    // TUM-VI KB camera, features ~70 degrees off axis moved 30 raw px between
+    // the frames. The windows are seeded from and written back in raw pixels.
+    const auto model = TumViModel();
+    std::vector<Spec> ref_specs;
+    std::vector<Spec> cur_specs;
+    constexpr int kNumFeatures = 6;
+    for (int i = 0; i < kNumFeatures; ++i) {
+        const double phi = 2.0 * std::numbers::pi * i / kNumFeatures + 0.4;
+        const double x = 510.0 + 450.0 * std::cos(phi);
+        const double y = 514.0 + 450.0 * std::sin(phi);
+        ref_specs.push_back({.x = x, .y = y, .seed = i});
+        cur_specs.push_back({.x = x + 30.0, .y = y - 10.0, .seed = i});
+    }
+    const Measurement ref = Make(ref_specs, TumViIntrinsics(), &model);
+    const Measurement cur = Make(cur_specs, TumViIntrinsics(), &model);
+    ASSERT_EQ(ref.points().cols(), kNumFeatures);
+    ASSERT_EQ(cur.points().cols(), kNumFeatures);
+
+    std::vector<geometry::TPoint2DF> last;
+    for (Eigen::Index i = 0; i < kNumFeatures; ++i) {
+        last.emplace_back(ref.distorted_points().col(i));
+    }
+    const FeatureGrid grid(cur.distorted_points(), cur.levels());
+    const auto matches = MatchForInitialization<TestExtractor>(ref, cur, grid, last, {});
+    ASSERT_EQ(matches.size(), static_cast<size_t>(kNumFeatures));
+    for (Eigen::Index i = 0; i < kNumFeatures; ++i) {
+        EXPECT_EQ(matches[i], i);
+        EXPECT_EQ(last[i], cur.distorted_points().col(i)) << "feature " << i;
+        // Sanity: raw and undistorted pixels differ substantially here.
+        EXPECT_GT((cur.points().col(i) - cur.distorted_points().col(i)).norm(), 100.0);
+    }
 }
 
 TEST(InitializationMatcher, SyntheticPrecision) {

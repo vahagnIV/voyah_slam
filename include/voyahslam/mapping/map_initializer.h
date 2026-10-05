@@ -94,8 +94,9 @@ private:
 
     MapInitializerOptions options_;
     std::optional<TMonocularMeasurement> reference_;
-    // Per reference feature: where its match was last seen (seeds the search
-    // windows); the reference's own points until a match moves it.
+    // Per reference feature: where its match was last seen, in raw pixels
+    // (seeds the search windows); the reference's own distorted_points() until
+    // a match moves it.
     std::vector<geometry::TPoint2DF> last_matched_;
     CLASS_LOGGER(MapInitializer);
 };

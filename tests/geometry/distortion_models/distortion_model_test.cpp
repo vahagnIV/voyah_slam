@@ -1,8 +1,8 @@
 #include <gtest/gtest.h>
-#include "voyahslam/features/distortion_models/distortion_model.h"
-#include "voyahslam/features/distortion_models/dummy_distortion_model.h"
+#include "voyahslam/geometry/distortion_models/distortion_model.h"
+#include "voyahslam/geometry/distortion_models/dummy_distortion_model.h"
 
-using namespace voyahslam::features::distortion_models;
+using namespace voyahslam::geometry::distortion_models;
 using voyahslam::precision_t;
 
 class DistortionModelTest : public ::testing::Test {
@@ -30,4 +30,10 @@ TEST_F(DistortionModelTest, InterfaceIsPureVirtual) {
     // This test verifies that DistortionModel cannot be instantiated
     // The following line should not compile:
     // DistortionModel model; // This should cause a compilation error
+}
+
+TEST_F(DistortionModelTest, DummyDistortJacobianIsIdentity) {
+    DummyDistortionModel model;
+    const voyahslam::geometry::TMatrix22F j = model.DistortJacobian({0.3, -0.2});
+    EXPECT_TRUE(j.isApprox(voyahslam::geometry::TMatrix22F::Identity(), 1e-15));
 }

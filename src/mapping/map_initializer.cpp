@@ -19,8 +19,8 @@ namespace voyahslam::mapping {
 namespace {
 
 template <typename TMonocularMeasurement>
-std::vector<geometry::TPoint2DF> Points(const TMonocularMeasurement& measurement) {
-    const geometry::TPoints2DF& points = measurement.points();
+std::vector<geometry::TPoint2DF> DistortedPoints(const TMonocularMeasurement& measurement) {
+    const geometry::TPoints2DF& points = measurement.distorted_points();
     std::vector<geometry::TPoint2DF> result;
     result.reserve(points.cols());
     for (Eigen::Index i = 0; i < points.cols(); ++i) {
@@ -92,7 +92,7 @@ MapInitializer<TFeatureExtractor>::TryInitializeMonocular(TMonocularMeasurement 
 
     // Like ORB-SLAM3, last_matched_ keeps the matched positions even when the
     // reconstruction below fails.
-    const features::FeatureGrid grid(measurement.points(), measurement.levels());
+    const features::FeatureGrid grid(measurement.distorted_points(), measurement.levels());
     const std::vector<Eigen::Index> matches = features::MatchForInitialization<TFeatureExtractor>(
         *reference_, measurement, grid, last_matched_, options_.matcher);
     std::vector<Eigen::Index> first;
@@ -137,22 +137,23 @@ MapInitializer<TFeatureExtractor>::TryInitializeMonocular(TMonocularMeasurement 
     geometry::RigidTransformation T_21 = reconstruction.T_21;
 
     if (options_.bundle_adjust) {
+        // Raw pixels through each view's camera; sigma in pixels.
         const auto sigma = [this](const TMonocularMeasurement& view, Eigen::Index feature) {
             return options_.sigma_px *
-                   std::pow(options_.level_scale, static_cast<double>(view.levels()(feature))) /
-                   view.K()(0, 0);
+                   std::pow(options_.level_scale, static_cast<double>(view.levels()(feature)));
         };
         optimization::BaProblem problem;
         problem.keyframe_poses = {geometry::RigidTransformation::Identity(), T_21};
         problem.keyframe_fixed = {true, false};
+        problem.keyframe_cameras = {reference_->camera(), measurement.camera()};
         problem.points = points;
         problem.observations.reserve(2 * triangulated.size());
         for (size_t p = 0; p < triangulated.size(); ++p) {
             const Eigen::Index c = triangulated[p];
             problem.observations.push_back(
-                {0, p, correspondences.x1.col(c), sigma(*reference_, first[c])});
+                {0, p, reference_->distorted_points().col(first[c]), sigma(*reference_, first[c])});
             problem.observations.push_back(
-                {1, p, correspondences.x2.col(c), sigma(measurement, second[c])});
+                {1, p, measurement.distorted_points().col(second[c]), sigma(measurement, second[c])});
         }
         const optimization::BaResult adjusted =
             optimization::BundleAdjust(problem, options_.bundle_adjustment);
@@ -213,7 +214,7 @@ MapInitializer<TFeatureExtractor>::TryInitializeMonocular(TMonocularMeasurement 
 template <typename TFeatureExtractor>
 void MapInitializer<TFeatureExtractor>::SetReference(TMonocularMeasurement measurement) {
     reference_ = std::move(measurement);
-    last_matched_ = Points(*reference_);
+    last_matched_ = DistortedPoints(*reference_);
 }
 
 template <typename TFeatureExtractor>

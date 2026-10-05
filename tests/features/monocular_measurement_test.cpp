@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
 #include "voyahslam/features/monocular_measurement.h"
-#include "voyahslam/features/distortion_models/dummy_distortion_model.h"
-#include "voyahslam/features/distortion_models/kannala_brandt_distortion_model.h"
+#include "voyahslam/geometry/distortion_models/dummy_distortion_model.h"
+#include "voyahslam/geometry/distortion_models/kannala_brandt_distortion_model.h"
 #include <cmath>
 #include "voyahslam/defs.h"
 
@@ -9,7 +9,7 @@ using voyahslam::features::ImageFeatures;
 using namespace voyahslam::geometry;
 using namespace voyahslam::features;
 using voyahslam::features::MonocularMeasurement;
-using voyahslam::features::distortion_models::DummyDistortionModel;
+using voyahslam::geometry::distortion_models::DummyDistortionModel;
 using voyahslam::precision_t;
 
 class MonocularMeasurementTest : public ::testing::Test {
@@ -114,7 +114,7 @@ TEST_F(MonocularMeasurementTest, MoveSemantics) {
 
 namespace {
 
-using voyahslam::features::distortion_models::KannalaBrandtDistortionModel;
+using voyahslam::geometry::distortion_models::KannalaBrandtDistortionModel;
 
 constexpr precision_t kDeg = 3.14159265358979323846 / 180.0;
 
@@ -215,4 +215,39 @@ TEST_F(MonocularMeasurementTest, DropKeepsLevelsAligned) {
     EXPECT_EQ(measurement.levels()(2), 3);
     EXPECT_FLOAT_EQ(measurement.points()(0, 1), 400.0F);
     EXPECT_FLOAT_EQ(measurement.points()(0, 2), 250.0F);
+}
+
+TEST_F(MonocularMeasurementTest, DistortedPointsAndCamera) {
+    KannalaBrandtDistortionModel model(kKB[0], kKB[1], kKB[2], kKB[3]);
+    TMatrix33F K = TumViK();
+    model.PrecomputeInitialGuessLookup(K, 1024, 1024);
+    TPoints2DF pixels(2, 3);
+    for (int i = 0; i < 3; ++i) pixels.col(i) = ProjectKB(K, (20 + 15 * i) * kDeg, 0.9 * i);
+
+    MonocularMeasurement<uint8_t, 32> measurement(MakeFeaturesAt(pixels), K, &model, 0.0);
+
+    ASSERT_EQ(measurement.distorted_points().cols(), 3);
+    EXPECT_TRUE(measurement.distorted_points().isApprox(pixels, 1e-12));
+    EXPECT_TRUE(measurement.camera().K.isApprox(K));
+    EXPECT_EQ(measurement.camera().distortion, &model);
+}
+
+TEST_F(MonocularMeasurementTest, DistortedPointsCompactedWithDrop) {
+    KannalaBrandtDistortionModel model(kKB[0], kKB[1], kKB[2], kKB[3]);
+    TMatrix33F K = TumViK();
+    model.PrecomputeInitialGuessLookup(K, 1024, 1024);
+    const precision_t thetas[] = {30 * kDeg, 100 * kDeg, 80 * kDeg, 86 * kDeg, 50 * kDeg};
+    TPoints2DF pixels(2, 5);
+    for (int i = 0; i < 5; ++i) pixels.col(i) = ProjectKB(K, thetas[i], 0.7 * i);
+
+    MonocularMeasurement<uint8_t, 32> measurement(MakeFeaturesAt(pixels), K, &model, 0.0);
+
+    ASSERT_EQ(measurement.points().cols(), 3);
+    ASSERT_EQ(measurement.distorted_points().cols(), 3);
+    ASSERT_EQ(measurement.levels().cols(), 3);
+    EXPECT_EQ(measurement.descriptors()(0, 2), 4);  // original feature 4 survived last
+    for (int i = 0; i < 3; ++i) {
+        EXPECT_LT((measurement.camera().Project(measurement.normalized_point(i)) -
+                   measurement.distorted_points().col(i)).norm(), 1e-6);
+    }
 }

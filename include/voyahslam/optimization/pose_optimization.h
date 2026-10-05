@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "voyahslam/defs.h"
+#include "voyahslam/geometry/camera.h"
 #include "voyahslam/geometry/rigid_transformation.h"
 
 namespace voyahslam::optimization {
@@ -13,9 +14,15 @@ namespace voyahslam::optimization {
 /// A world point (fixed) observed by the frame whose pose is optimized.
 struct PoseObservation {
     geometry::TPoint3DF point;                  ///< World frame, fixed.
-    geometry::TPoint2DF left;                   ///< Undistorted normalized (z = 1), left camera.
-    std::optional<geometry::TPoint2DF> right;   ///< Normalized in the right camera (stereo match).
-    double sigma;                               ///< Normalized units (sigma_px * scale^level / f).
+    geometry::TPoint2DF left;                   ///< Raw (distorted) pixel, left camera.
+    std::optional<geometry::TPoint2DF> right;   ///< Raw pixel in the right camera (stereo match).
+    double sigma;                               ///< Pixels (sigma_px * scale^level).
+};
+
+/// The right camera of a stereo rig and the left -> right transform.
+struct StereoCameras {
+    geometry::Camera right;
+    geometry::RigidTransformation T_rl;
 };
 
 /// ORB-SLAM3 PoseOptimization schedule: rounds of iterations_per_round iterations, every
@@ -26,7 +33,7 @@ struct PoseOptimizationOptions {
     int rounds = 4;
     int iterations_per_round = 10;
     double mono_chi2 = 5.991;    ///< 2 dof, 95 %.
-    double stereo_chi2 = 9.488;  ///< 4 dof (left + right normalized), 95 %.
+    double stereo_chi2 = 9.488;  ///< 4 dof (left + right pixels), 95 %.
 };
 
 struct PoseOptimizationResult {
@@ -37,13 +44,15 @@ struct PoseOptimizationResult {
 };
 
 /// Motion-only optimization of a frame pose T_cw (world -> left camera) against fixed world
-/// points: mono observations constrain the left camera, stereo ones (right set) both cameras,
-/// the right one through T_rl (left -> right). success = num_inliers >= 3 and a finite pose.
-/// Invalid input (no observations, a non-finite value, sigma <= 0, a right observation
-/// without T_rl) yields success == false without optimizing.
+/// points, in raw pixels: mono observations constrain the left camera
+/// (e = left.Project(T_cw X) - z), stereo ones (right set) both cameras, the right one through
+/// stereo->T_rl (left -> right) and stereo->right. success = num_inliers >= 3 and a finite pose.
+/// Invalid input (no observations, a non-finite value or K, sigma <= 0, a right observation
+/// without stereo) yields success == false without optimizing.
 [[nodiscard]] PoseOptimizationResult OptimizePose(
     const geometry::RigidTransformation& initial_T_cw,
-    const std::optional<geometry::RigidTransformation>& T_rl,   ///< Required if any `right` is set.
+    const geometry::Camera& left,
+    const std::optional<StereoCameras>& stereo,   ///< Required if any `right` is set.
     const std::vector<PoseObservation>& observations,
     const PoseOptimizationOptions& options);
 

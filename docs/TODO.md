@@ -90,6 +90,57 @@ median 36 local-map inliers. Cause: the initialization map is small and never
 grows (no keyframes yet, sub-project 2). `--viewer` screenshot capture failed
 again (xwd/import on the Wayland session).
 
+## Camera model (raw-pixel residuals, 2026-10-05)
+
+See DESIGN "Camera Model and Raw-Pixel Residuals". Smoke run 2026-10-06
+(Release, corridor1 1024, `--rate=0`): mono 400 frames 82 tracked / 18
+re-initializations (19 maps, 62-109 points), gate 20: 137 / 14; stereo 200
+frames, init on frame 1 with 358 points, no loss, median 232 inliers.
+
+- [ ] Fallback note: a calibration-free angle-dependent noise allowance
+      (σ · 1.5 · (1 + r²), window · (1 + r²); spike 2: within 0.6 % of the KB
+      stretch up to 60°, 85 tracked frames / 99 with gate 20) for lenses
+      without a distortion model. Not implemented.
+- [ ] Keep features beyond 85° (bearing vectors on the ray side; residuals are
+      already in raw pixels). (OQ 22)
+- [ ] Tuning: the local-map inlier gate (30; 20 gives 137 vs 82 tracked mono
+      frames) and the mono initial map size (62-109 points). Mono misses the
+      ≤ 5 re-initializations criterion (18); see the init-acceptance item.
+- [ ] Per-model camera classes (approach B, ORB-SLAM3 `GeometricCamera`), only
+      if ever needed (e.g. several lens models in one rig).
+- [ ] Behind-camera edges: g2o edges call `Camera::Project` before the depth
+      check, violating its `z > 0` precondition (finite mirrored value; z == 0
+      gives NaN). Check depth first.
+- [ ] `Camera::Project` heap-allocates (dynamic 3×1 for `Distort`) per call in
+      the hot path (g2o edges, matchers); add an allocation-free path.
+      `Unproject` also inverts K per call.
+- [ ] Deduplicate the TUM-VI Kannala-Brandt test fixture (copied in 5–9
+      test files) into `tests/support`.
+- [ ] Validate K beyond finiteness (fx, fy > 0) in `OptimizePose`,
+      `BundleAdjust` and `Camera`.
+- [ ] Test that `BundleAdjust` uses each keyframe's own camera (keyframes with
+      different focal lengths); today's BA tests share one K.
+- [ ] Fisheye test pinning `MapInitializer`'s grid and `last_matched_` on
+      `distorted_points()` (map_initializer.cpp); pinhole test helpers build
+      the grid on `points()`.
+- [ ] Init acceptance in raw pixels: the raw-px init matcher (window 100 px,
+      effectively wider in the periphery) accepts many adjacent-frame pairs
+      (19 maps vs 6 with the undistorted-px matcher; 11 adjacent-frame inits
+      tracked ~2.5 frames). Consider a minimum reference age / parallax or an
+      init-quality check before accepting.
+- [ ] Instrument first-frame map deaths: three adjacent-frame maps (smoke run
+      2026-10-06, ≈ frames 311–318) found 39–47 zero-motion matches but
+      `OptimizePose` round 0 kept 0–1 inliers. Log the frame gap to keyframe 2
+      and the per-match reprojection error at the predicted pose.
+- [ ] Viewer: `ProjectToImage` (`vizualization/include/voyahviz/keypoint_drawing.h`)
+      recomputes raw pixels as K·Distort(normalized); draw
+      `distorted_points()` directly, drop the separate distortion-model
+      argument and the stale "use ProjectToImage()" comment.
+- [ ] Test `Camera::ProjectJacobian` exactly on the optical axis
+      (Xc = (0, 0, z) → K₂ₓ₂·[1/z, 0, 0; 0, 1/z, 0]).
+- [ ] Tests under `tests/geometry` for the moved distortion models still use
+      namespace `test::features`; rename to `test::geometry`.
+
 ## Stereo (2026-10-04)
 
 - [ ] Epipolar-guided stereo search (optimization of the brute-force matcher).
@@ -303,12 +354,8 @@ Deferred minor findings from the per-task reviews.
 - [ ] g2o recipe `package()`: upstream's CMake config files are installed into the
       package (`lib/cmake`); remove them (`rmdir`) since the recipe declares the
       components itself.
-- [ ] Pixel-space residuals: both the stereo matcher's reprojection test
-      (distorted pixel space via `Distort`) and `BundleAdjust` (now
-      normalized-plane chi-square) could use pixel-space residuals for fisheye.
-      ORB-SLAM3's `KannalaBrandt8::TriangulateMatches` tests in distorted pixel
-      space; the normalized-plane chi-square rejects peripheral matches.
 - [ ] Second dev machine: build OpenCV 5.x from source into `/usr/local` with
       `WITH_GTK=ON` (Conan no longer provides OpenCV).
 - [ ] Recurring: syntax-check all sources with clang-18 + libc++ (clean on
-      2026-10-04, 81 sources); later add an Android NDK arm64 cross-build.
+      2026-10-06, 92 sources + 82 public headers); later add an Android NDK
+      arm64 cross-build.

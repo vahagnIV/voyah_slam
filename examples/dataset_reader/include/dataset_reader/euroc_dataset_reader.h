@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 #include <voyahslam/defs.h>
-#include <voyahslam/features/distortion_models/distortion_model.h>
+#include <voyahslam/geometry/distortion_models/distortion_model.h>
 #include <voyahslam/features/stereo_rig.h>
 #include <voyahslam/images/image.h>
 
@@ -18,7 +18,7 @@ namespace voyahslam::dataset_reader {
 struct CameraCalibration {
     geometry::TMatrix33F K;
     // Owned by the reader; nullptr means the images are already undistorted.
-    const features::distortion_models::DistortionModel* distortion = nullptr;
+    const geometry::distortion_models::DistortionModel* distortion = nullptr;
     unsigned width = 0;
     unsigned height = 0;
     // Transforms points from the IMU (body) frame into this camera's frame.
@@ -74,7 +74,7 @@ private:
     std::filesystem::path mav_dir_;
     std::vector<Entry> entries_;  // cam0; cam1 is verified to match
     std::vector<CameraCalibration> cameras_;
-    std::vector<std::unique_ptr<features::distortion_models::DistortionModel>> distortion_models_;
+    std::vector<std::unique_ptr<geometry::distortion_models::DistortionModel>> distortion_models_;
     features::StereoRig stereo_rig_;
 
     void LoadCalibration(const std::filesystem::path& root);

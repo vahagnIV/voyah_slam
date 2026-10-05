@@ -4,7 +4,8 @@
 #include <cmath>
 #include <numbers>
 #include <vector>
-#include <voyahslam/features/distortion_models/distortion_model.h>
+#include <voyahslam/geometry/camera.h>
+#include <voyahslam/geometry/distortion_models/distortion_model.h>
 #include <voyahslam/features/image_features.h>
 #include <voyahslam/defs.h>
 
@@ -22,7 +23,7 @@ public:
     MonocularMeasurement() = default;
     MonocularMeasurement(ImageFeatures<TScalar, Length>&& features,
                          const geometry::TMatrix33F& K,
-                         const distortion_models::DistortionModel* distortion_model,
+                         const geometry::distortion_models::DistortionModel* distortion_model,
                          double timestamp);
 
     MonocularMeasurement(const MonocularMeasurement&) = default;
@@ -31,6 +32,9 @@ public:
     MonocularMeasurement& operator=(MonocularMeasurement&&) = default;
 
     [[nodiscard]] const geometry::TMatrix33F& K() const;
+    // Raw keypoints as passed to the constructor (compacted with the 85 degree drop).
+    [[nodiscard]] const geometry::TPoints2DF& distorted_points() const { return distorted_points_; }
+    [[nodiscard]] const geometry::Camera& camera() const { return camera_; }
     [[nodiscard]] const geometry::THomogenousPointsF& normalized_points() const;
     [[nodiscard]] geometry::THomogenousPointF normalized_point(int idx) const;
     [[nodiscard]] geometry::TPoint2DF point(int idx) const;
@@ -40,9 +44,11 @@ private:
     // Runs on distorted normalized points: for a radially symmetric model the
     // ray angle grows with the distorted radius, so comparing against the
     // distorted radius of a kMaxRayAngle ray needs only Distort().
-    void DropFeaturesBeyondMaxRayAngle(const distortion_models::DistortionModel* distortion_model);
+    void DropFeaturesBeyondMaxRayAngle(const geometry::distortion_models::DistortionModel* distortion_model);
 
     geometry::TMatrix33F K_;
+    geometry::Camera camera_;
+    geometry::TPoints2DF distorted_points_;
     geometry::THomogenousPointsF normalized_points_;
     double timestamp_ = 0.0;
 };
@@ -51,9 +57,10 @@ template <typename TScalar, unsigned int Length>
 MonocularMeasurement<TScalar, Length>::MonocularMeasurement(
     ImageFeatures<TScalar, Length>&& features,
     const geometry::TMatrix33F& K,
-    const distortion_models::DistortionModel* distortion_model,
+    const geometry::distortion_models::DistortionModel* distortion_model,
     double timestamp)
-    : ImageFeatures<TScalar, Length>(std::move(features)), K_(K), timestamp_(timestamp) {
+    : ImageFeatures<TScalar, Length>(std::move(features)), K_(K), camera_{K, distortion_model}, distorted_points_(this->points_),
+      timestamp_(timestamp) {
     geometry::THomogenousPointsF homogeneous_points = this->points_.colwise().homogeneous();
     normalized_points_ = K_.inverse() * homogeneous_points;
     DropFeaturesBeyondMaxRayAngle(distortion_model);
@@ -65,7 +72,7 @@ MonocularMeasurement<TScalar, Length>::MonocularMeasurement(
 
 template <typename TScalar, unsigned int Length>
 void MonocularMeasurement<TScalar, Length>::DropFeaturesBeyondMaxRayAngle(
-    const distortion_models::DistortionModel* distortion_model) {
+    const geometry::distortion_models::DistortionModel* distortion_model) {
     geometry::THomogenousPointsF max_ray(3, 1);
     max_ray << std::tan(kMaxRayAngle), 0.0, 1.0;
     if (distortion_model != nullptr) {
@@ -85,6 +92,7 @@ void MonocularMeasurement<TScalar, Length>::DropFeaturesBeyondMaxRayAngle(
     }
     this->KeepFeatures(kept);
     normalized_points_ = normalized_points_(Eigen::all, kept).eval();
+    distorted_points_ = distorted_points_(Eigen::all, kept).eval();
 }
 
 template <typename TScalar, unsigned int Length>
