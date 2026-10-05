@@ -36,7 +36,7 @@ target_include_directories(voyahslam
 target_link_libraries(voyahslam
     PUBLIC Eigen3::Eigen
     PUBLIC spdlog::spdlog
-    PUBLIC moodycamel::concurrentqueue
+    PUBLIC ${VOYAHSLAM_CONCURRENTQUEUE_TARGET}
     PRIVATE stb::stb
     PRIVATE opencv_core
     PRIVATE opencv_imgproc

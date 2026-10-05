@@ -13,6 +13,12 @@ find_package(OpenCV 5 REQUIRED COMPONENTS core imgproc features highgui)
 find_package(spdlog REQUIRED)
 find_package(fmt REQUIRED)
 find_package(concurrentqueue REQUIRED)
+# Conan Center's concurrentqueue recipe revisions differ in the target name.
+if(TARGET moodycamel::concurrentqueue)
+    set(VOYAHSLAM_CONCURRENTQUEUE_TARGET moodycamel::concurrentqueue)
+else()
+    set(VOYAHSLAM_CONCURRENTQUEUE_TARGET concurrentqueue::concurrentqueue)
+endif()
 
 # Main library
 add_subdirectory(src)

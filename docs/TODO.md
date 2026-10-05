@@ -47,17 +47,28 @@ as soon as they come up.
       converges; more rounds or a looser re-collection threshold do not help.
       Remedy: robust-loss local optimization over all correspondences
       (Cauchy/Huber or a truncated-χ² loss matching the score; MSAC/MAGSAC-style
-      LO). Bundle adjustment after initialization provides further accuracy.
+      LO). Bundle adjustment after initialization (done 2026-10-05) polishes the result but not the lock-in.
 - [ ] Optional: run the H and E RANSACs in parallel.
 
 ## Initialization (monocular, 2026-10-04)
 
 - [ ] Tuning on TUM-VI 512 (`dataset-corridor1_512_16`) after the Pangolin
       viewer, plus a per-frame "dropped by the 85° rule" statistic.
-- [ ] Bundle adjustment after initialization (accuracy; see the refinement
-      lock-in item under Geometry).
+- [ ] Tuning: rescale to median depth 1 *before* the initialization BA (faster
+      convergence than the current 5 + 40 iterations on the unscaled problem).
+- [ ] Tuning: initialize later / require more parallax. The absolute accuracy of
+      the initialization is noise-limited at the first accepted pair (synthetic
+      seeds initialize at frame 3, baseline 0.15 vs depth 4-8; the ML optimum is
+      0.3-2.7 degrees off), so BA cannot improve on it.
 - [ ] `OrbFeatureExtractor::Distance` returns `uint8_t`, so a 256-bit
       difference wraps to 0 — widen the return type.
+
+Smoke run note (2026-10-05, after the initialization bundle adjustment, same
+dataset/flags, Release): mono still initializes at frame 121 (not at 120) with
+73 points; debug line `Initialization BA: cost 25.37 -> 21.06 in 36 iterations,
+0 outliers removed, 73 points survive`. Binocular (`--max-frames=20`) unchanged:
+355 points. (The debug line needs `Logger::SetLevel(debug)`, which the apps do
+not call; a temporary local change was used.)
 
 Smoke run note (2026-10-04, `dataset-corridor1_1024_16`, ORB, Release,
 `--rate=0 --max-frames=200`): mono initialized at about frame 121
@@ -79,6 +90,7 @@ root window).
 - [ ] Stereo matcher: test reprojection in distorted pixel space (via
       `Distort`) for fisheye, as ORB-SLAM3 `KannalaBrandt8::TriangulateMatches`
       does; the normalized-plane chi-square rejects peripheral matches.
+      (Merged with the same item for `BundleAdjust` under Environment.)
 - [ ] Tests to add (deferred review findings): stereo observation depth and
       right index are not read back by any test (add when a consumer exists);
       the initializer path for an unmatched measurement; Tracking-state stereo
@@ -255,6 +267,21 @@ Deferred minor findings from the per-task reviews.
 - [ ] Matcher: per-candidate descriptor copy (matters for SIFT cost).
 
 ## Environment
+
+- [ ] g2o build under a clang/libc++ profile and an Android NDK profile (only gcc 13
+      is checked today). Expose more g2o libraries in the recipe only when needed.
+- [ ] Local and global bundle adjustment reusing `optimization::BundleAdjust`
+      (Mapper keyframe insertion / loop closing; needs a windowed `BaProblem`
+      builder with fixed keyframes).
+- [ ] BundleAdjust hardening: the all-edges-deactivated path relies on g2o
+      returning -1 plus stderr noise; validate `huber_chi2` (> 0, finite);
+      handle zero-depth initial points explicitly.
+- [ ] g2o recipe `package()`: upstream's CMake config files are installed into the
+      package (`lib/cmake`); remove them (`rmdir`) since the recipe declares the
+      components itself.
+- [ ] Pixel-space residuals: both the stereo matcher's reprojection test
+      (distorted pixel space via `Distort`, see Stereo) and `BundleAdjust` (now
+      normalized-plane chi-square) could use pixel-space residuals for fisheye.
 
 - [ ] Second dev machine: build OpenCV 5.x from source into `/usr/local` with
       `WITH_GTK=ON` (Conan no longer provides OpenCV).

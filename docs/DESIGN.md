@@ -8,7 +8,7 @@
 > `docs/superpowers/specs/` and `docs/superpowers/plans/`. When they disagree
 > with this document, **this document wins** — fix the spec or note the change here.
 
-Last updated: 2026-10-04
+Last updated: 2026-10-05
 
 ---
 
@@ -617,6 +617,36 @@ looser re-collection threshold do not fix it. Only ~58 % of true inliers are fla
 Further accuracy is left to bundle adjustment right after initialization (as in
 ORB-SLAM3).
 
+## Optimization (`optimization/`, g2o behind Eigen types)
+
+Spec: `docs/superpowers/specs/2026-10-05-init-bundle-adjustment-design.md`
+(amended during implementation; the decisions log has the changes).
+
+`optimization::BundleAdjust(BaProblem, BundleAdjustmentOptions) -> BaResult`
+(`include/voyahslam/optimization/bundle_adjustment.h`) jointly refines keyframe
+poses (`T_cw`, some may be fixed) and world points from **undistorted normalized
+observations** (z = 1; per-observation sigma in normalized units). The public
+header uses only our types and Eigen; g2o is linked `PRIVATE` and never appears
+in `include/` (principle 8 applies to g2o as well). Internals: `src/optimization/`
+(`projection.h` has the normalized projection and analytic Jacobians; the g2o
+edge/vertex glue lives in `bundle_adjustment.cpp`). Levenberg-Marquardt with
+`BlockSolver_6_3` + `LinearSolverEigen`, points marginalized.
+
+**Two stages like ORB-SLAM3 LocalBA:** `robust_iterations` (5) with the Huber
+kernel (delta^2 = `huber_chi2` = 5.991), then edges with chi2 > `huber_chi2` or
+camera-frame depth <= 0 are deactivated and `iterations` (default 10) plain
+iterations run. `BaResult` has per-observation `chi2` and `inlier` (for all
+observations, deactivated ones included), initial/final cost and the iteration
+count. Invalid input gives `success == false` without optimizing.
+
+**Vendored g2o.** `third_party/g2o/src/` is pristine upstream (tag
+`20241228_git`, commit `eec325a1`); the local Conan recipe
+`third_party/g2o/conanfile.py` (reference `g2o/20241228@voyah/stable`, user/channel
+set in the recipe) builds only the BSD-2-Clause core (`stuff`, `core`,
+`types_slam3d`, `types_sba`, `solver_eigen`) and exposes them as components
+(`g2o::core`, ...). The one-time `conan create` is part of the README build steps.
+Details: `third_party/README.md`.
+
 ## Monocular Initialization (Mapper, `MapInitializer`, `InitializationMatcher`)
 
 Spec: `docs/superpowers/specs/2026-10-04-mono-initialization-design.md`.
@@ -636,9 +666,16 @@ Verified on synthetic sequences; the app smoke run is recorded in `docs/TODO.md`
    reference **and** the matcher's updated `last_matched` positions are kept
    (ORB-SLAM3 `mvbPrevMatched`). Zero triangulated points or a non-finite /
    non-positive median depth also count as failure.
-4. **Scaling:** positions and the translation of `T_21` are divided by the median
-   depth of the triangulated points in camera 1, so the median depth is 1.
-5. **Publication order** (the Mapper sets state and map id first): one
+4. **Bundle adjustment** (`bundle_adjust`, default on): a two-keyframe
+   `BundleAdjust` on the *unscaled* reconstruction (keyframe 1 fixed at identity,
+   keyframe 2 and the points free, sigma = `sigma_px * level_scale^level / f` per
+   observation). 5 + 40 iterations (baseline 1, depths ~40, so the plain stage
+   needs ~40 iterations; LM stops at convergence). Points with any outlier
+   observation are dropped; fewer than `min_points_after_ba` (50) survivors, or an
+   unsuccessful adjustment, fail the attempt (reference kept, like any failure).
+5. **Scaling:** positions and the translation of `T_21` are divided by the median
+   depth of the surviving points in camera 1, so the median depth is 1.
+6. **Publication order** (the Mapper sets state and map id first): one
    `MapPointsAdded` (`start_id` 0) -> `KeyFrameCreated` per keyframe (with
    observations) -> `MapCreated`. Replicas therefore have the points before the
    keyframes that observe them.
@@ -751,7 +788,7 @@ initialized on the first frame with 355 points; median point depth 1.96 m
 
 **Build & test (Conan 2 + CMake):**
 - Dependencies (`conanfile.txt`): gtest, eigen, stb, spdlog, concurrentqueue,
-  yaml-cpp (examples only).
+  yaml-cpp (examples only), g2o (local package, see below).
 - **OpenCV is not from Conan:** OpenCV **5.x** built from source and installed
   in `/usr/local` (`find_package(OpenCV 5 ... core imgproc features highgui)`,
   config in `/usr/local/lib/cmake/opencv5`). Every dev machine needs it.
@@ -760,6 +797,11 @@ initialized on the first frame with 355 points; median point depth 1.96 m
   `calib` / `geometry` / `stereo` (compat headers `features2d.hpp`,
   `calib3d.hpp` exist). Linked as: `voyahslam` → core, imgproc, features;
   `voyahviz` → core (public), imgproc, highgui; tests → all.
+- **g2o is a local Conan package:** vendored in `third_party/g2o/` and built with
+  `conan create third_party/g2o --build=missing -s build_type=Debug|Release` once per
+  machine, before the project's `conan install` (`conanfile.txt` requires
+  `g2o/20241228@voyah/stable`). Step-by-step build instructions: `README.md`
+  (checked on a fresh `CONAN_HOME` on 2026-10-05).
 - Debug: `cmake --build cmake-build-debug/build/Debug && ctest --test-dir cmake-build-debug/build/Debug --output-on-failure`
 - Release: `conan install . --output-folder=build --build=missing -s build_type=Release`, then the `conan-release` preset.
 
@@ -840,6 +882,14 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-04 | `InitialMapPoint::feature_in_second = -1` means a single-keyframe map. | The result type serves both mono (two keyframes) and stereo (one). |
 | 2026-10-04 | Stereo observations are stored per map in an `ObservationStorage<Stereo>` beside the mono one. | Keeps mixed mono/stereo sessions possible. |
 | 2026-10-04 | Stereo depth is capped at about 17 m by `max_parallax_cos = 0.99998` at the 0.11 m baseline. | Accepted for now; the limit is a matcher option, tune later. |
+| 2026-10-05 | g2o is vendored pristine in `third_party/g2o/src/` and packaged by a local Conan recipe; linked `PRIVATE`; the public API stays on Eigen types. | Reproducible build across machines (no system g2o), no g2o in public headers (principle 8), adaptations live in the recipe so upstream updates are a directory swap. |
+| 2026-10-05 | Local Conan package `g2o/20241228@voyah/stable`: `user`/`channel` set in the recipe (not passed on the command line). | A plain `conan create third_party/g2o` yields the reference `conanfile.txt` requires; a missing package gives Conan's "not found" error, which the README explains. |
+| 2026-10-05 | BundleAdjust works on undistorted normalized points (z = 1) with sigma in normalized units; poses are `T_cw`; analytic Jacobians. | Same convention as the geometry toolkit (no camera model inside the optimizer; works for pinhole and fisheye). Pixel-space residuals deferred (TODO). |
+| 2026-10-05 | BundleAdjust is two-stage like ORB-SLAM3 LocalBA: Huber pass (5 iterations), deactivate edges with chi2 > 5.991 or depth <= 0, plain pass (default 10 iterations). | A single robust pass drifted (baseline collapse, free scale) with 10 % gross outliers; deactivating outliers and re-converging fixed it. |
+| 2026-10-05 | Monocular initialization runs a two-keyframe BA after the two-view reconstruction; outlier points are dropped; fewer than 50 survivors fail the attempt. | Accuracy (the reconstruction is limited by the RANSAC models; see TODO "refinement lock-in"); ORB-SLAM3 does the same (`Optimizer::GlobalBundleAdjustemnt` in `CreateInitialMapMonocular`). |
+| 2026-10-05 | Init-time error at low parallax is noise-limited (synthetic seeds initialize at frame 3, baseline 0.15 vs depth 4-8; ML optimum 0.3-2.7 degrees), so tests check convergence to the maximum-likelihood optimum (oracle from ground truth) rather than an absolute error bound. Mean error 2.11 -> 1.34 degrees with BA. | An absolute bound would test the noise, not the optimizer. |
+| 2026-10-05 | Init BA uses 5 + 40 iterations and runs on the unscaled problem (baseline 1, depths ~40), before the median-depth rescale (ORB-SLAM3 order). | The plain stage needs about 40 iterations to converge there; LM stops at convergence so runtime is barely affected. Rescaling first would converge faster (TODO, tuning). |
+| 2026-10-05 | `src/CMakeLists.txt` picks the concurrentqueue target (`moodycamel::concurrentqueue` or `concurrentqueue::concurrentqueue`). | Found by the clean-machine build: the revision of concurrentqueue/1.0.4 that Conan Center serves today declares only `concurrentqueue::concurrentqueue`. |
 
 ## 9. Open Questions
 
