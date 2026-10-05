@@ -143,8 +143,10 @@ stub was deleted on 2026-10-05.
   `WaitingForMap` -> `Tracking` -> `Lost` -> `Tracking`...
   One `ProcessPending()` pass: (1) drain the whole inbox applying the `map_id`
   consumer rule (§6) — every Mapper diff of the current map is applied to the
-  Tracker's `tracking::MapReplica`; `MapCreated` sets `last_pose_`, the map's
-  frame id and moves `WaitingForMap`/`Lost` to `Tracking`; (2) take **one**
+  Tracker's `tracking::MapReplica`; `MapCreated` sets `last_frame_` to the
+  keyframe's replica entry (measurement, `T_cw`, observations as matches),
+  resets the velocity, sets the map's frame id and moves
+  `WaitingForMap`/`Lost` to `Tracking`; (2) take **one**
   measurement: in `WaitingForMap`/`Lost` publish it as
   `InitializationMeasurement` (`map_id` 0); in `Tracking` run the frame-to-map
   tracking described in "Tracking Against the Map" — success publishes
@@ -790,7 +792,7 @@ local-map `th` 1.0; 30 local-map inliers.
 template on the extractor; undistorted pixel space). `SearchFromLastFrame`:
 project the last frame's matched points, candidates within the level-scaled
 window on levels [l-1, l+1], best descriptor <= 100, one-to-one claims
-(closer wins), rotation-consistency histogram (12 bins, three maxima). 
+(closer wins), rotation-consistency histogram (12 bins, three maxima).
 `SearchFromLocalMap`: visibility (z > 0, within 85 deg, view/normal cosine >
 0.5), predicted level from the reference observation, radius `th * (cos > 0.998
 ? 2.5 : 4.0) * level_scale^l`, levels [l-1, l], ratio test 0.8 unless the two
@@ -801,7 +803,7 @@ clamped instead).
 
 **`OptimizePose`** (`optimization/pose_optimization.h`, g2o private). Unary
 edges on one `VertexSE3Expmap`: mono (2 rows, normalized plane) and stereo (4
-rows: left and right via `T_rl`, with `ProjectionJacobianRightCamera`).
+rows: left and right via `T_rl`, with `ProjectionJacobianRightPose`).
 Schedule as ORB-SLAM3: 4 rounds x 10 iterations, every round restarts from the
 initial pose, Huber kernel in rounds 0-1 and plain after, edges classified per
 round by chi2 > 5.991 (mono) / 9.488 (stereo, 4 dof) or depth <= 0; success

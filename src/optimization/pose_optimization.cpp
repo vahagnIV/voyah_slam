@@ -207,6 +207,11 @@ PoseOptimizationResult OptimizePose(const RigidTransformation& initial_T_cw,
                  observations.size(), observations.size() - num_stereo, num_stereo, options.rounds,
                  options.iterations_per_round);
 
+    // Every round resets the vertex to the input pose, so a failed round would
+    // leave the unoptimized input in it: keep the last successfully optimized
+    // estimate and report that one (none after a round-0 failure: no success).
+    g2o::SE3Quat optimized = pose_vertex->estimate();
+    bool optimized_once = false;
     size_t num_active = observations.size();
     for (int round = 0; round < options.rounds; ++round) {
         if (num_active == 0) {
@@ -230,6 +235,9 @@ PoseOptimizationResult OptimizePose(const RigidTransformation& initial_T_cw,
                          performed);
             break;
         }
+
+        optimized = pose_vertex->estimate();
+        optimized_once = true;
 
         // Re-classify every observation, the excluded ones included.
         num_active = 0;
@@ -256,8 +264,8 @@ PoseOptimizationResult OptimizePose(const RigidTransformation& initial_T_cw,
                      performed);
     }
 
-    result.T_cw = FromSE3Quat(pose_vertex->estimate());
-    result.success = result.num_inliers >= 3 && IsFinite(result.T_cw);
+    result.T_cw = FromSE3Quat(optimized);
+    result.success = optimized_once && result.num_inliers >= 3 && IsFinite(result.T_cw);
     if (!result.success) {
         Log()->debug("Pose optimization failed: {} inliers{}", result.num_inliers,
                      IsFinite(result.T_cw) ? "" : ", non-finite pose");

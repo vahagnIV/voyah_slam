@@ -98,8 +98,7 @@ again (xwd/import on the Wayland session).
       `TriangulateMatches` uses 0.9998, about 1.15 degrees / 5.5 m cap).
 - [ ] Tests to add (deferred review findings): stereo observation depth and
       right index are not read back by any test (add when a consumer exists);
-      the initializer path for an unmatched measurement; Tracking-state stereo
-      matching before `Estimate()`.
+      the initializer path for an unmatched measurement.
 - [ ] Matcher: the one-to-one drop loses a valid second candidate (ORB-SLAM3
       behaviour); consider second-chance matching.
 
@@ -136,6 +135,15 @@ again (xwd/import on the Wayland session).
       (`NewKeyFrameCandidate`, Mapper keyframe creation); (3) local BA and
       culling; (4) relocalization / reference-keyframe tracking via place
       recognition (BoW).
+      Includes: keyframe decision (Tracker publishes `NewKeyFrameCandidate`,
+      Mapper handling; now only acknowledged) and relocalization in
+      `TrackerState::Lost` (now it behaves like `WaitingForMap`; the Mapper
+      starts a new map on `TrackingLost`).
+- [ ] `SearchFromLocalMap` scans the whole replica (allocates per call):
+      covisibility-based local map with sub-project 2.
+- [ ] Derive `TrackerOptions::level_scale` and `ProjectionMatcherOptions`
+      `level_scale`/`max_level` from the feature extractor instead of keeping
+      them in sync by hand.
 - [ ] BoW-less fallback limitation: a wide-window (x4) zero-motion projection
       search replaces `TrackReferenceKeyFrame`; it recovers only small motion.
 - [ ] Local-map search: add ORB-SLAM3's scale-invariance distance check (now
@@ -149,10 +157,6 @@ again (xwd/import on the Wayland session).
       (unreachable today); handle before multi-map / relocalization.
 - [ ] Mono translation accuracy at default init (about 10 % at 1 deg parallax,
       decision T): tuning.
-- [ ] Keyframe decision: Tracker publishes `NewKeyFrameCandidate`; Mapper
-      handling (currently only acknowledged).
-- [ ] Relocalization in `TrackerState::Lost` (now it behaves like
-      `WaitingForMap`; the Mapper starts a new map on `TrackingLost`).
 - [ ] LoopCloser logic (its `ProcessPending()` only acknowledges events).
 
 ## Visualization
@@ -222,7 +226,7 @@ Deferred minor findings from the per-task and final reviews.
       returns an engaged empty result — treat it as failure; transition log
       wording ("0 keyframes" with the old map id, "1 keyframes").
 - [ ] Share one `NumFeatures(TMeasurement)` helper (the "left camera for
-      binocular" visit is duplicated in `pose_estimator.cpp` and
+      binocular" visit is duplicated in `tracker.cpp` (`LeftOf`) and
       `map_initializer.cpp`, in two dispatch styles).
 - [ ] Document thread-usage rules: one waiter per `WakeSignal` (`notify_one`);
       never call `WorkerThread::Start()`/`Stop()` from its callback (self-join);

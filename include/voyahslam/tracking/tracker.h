@@ -55,6 +55,9 @@ struct TrackerOptions {
     double sigma_px = 1.0;     // keypoint noise std-dev at level 0, px
     // sigma_level = sigma_px * level_scale^level. Separate from
     // StereoMatcherOptions::level_scale on purpose; both default to 1.2.
+    // level_scale here, ProjectionMatcherOptions::level_scale and max_level
+    // must match the extractor's scale factor and number of levels.
+    // TODO: derive them from the extractor.
     double level_scale = 1.2;
 };
 

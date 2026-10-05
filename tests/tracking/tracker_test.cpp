@@ -62,21 +62,8 @@ test::SyntheticStereoSequence StereoSequence(double step = 0.05, double yaw_step
 // records what the Tracker publishes.
 class TrackerTest : public ::testing::Test {
 protected:
-    // Mono accuracy (spec success criterion 1, Ruling T) is measured on a
-    // well-conditioned initial map: the default 1 deg minimum parallax
-    // initializes the synthetic sequence at frame 3 (~1.4 deg), whose map has
-    // ~12 % depth error, and the tracked translation inherits it. 4 deg
-    // initializes at frame 10 (~3 % depth error).
-    static mapping::MapperOptions MapperOptionsForCurrentTest() {
-        mapping::MapperOptions options;
-        const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
-        if (info != nullptr && std::string_view(info->name()) == "TracksSyntheticMono") {
-            options.initializer.reconstruction.min_parallax_deg = 4.0;
-        }
-        return options;
-    }
-
-    TrackerTest() {
+    explicit TrackerTest(mapping::MapperOptions mapper_options = {})
+        : mapper_(std::move(mapper_options)) {
         mapper_.AddObserver(tracker_.inbox());
         tracker_.AddObserver(mapper_.inbox());
         injector_.ConnectAsync(tracker_.inbox());
@@ -244,11 +231,27 @@ protected:
     memory::ObjectPool<events::MapCreated, memory::ThreadSafePolicy> map_created_pool_{16};
     // Declaration order: the components outlive every queue that can hold
     // their events (capture_), and each other's inboxes are drained in TearDown.
-    TMapper mapper_{MapperOptionsForCurrentTest()};
+    TMapper mapper_;
     TTracker tracker_;
     events::Observable injector_;
     events::AsyncObserver capture_;
     events::Listener listener_ = capture_.GetListener();
+};
+
+// Mono accuracy (spec success criterion 1, Ruling T) is measured on a
+// well-conditioned initial map: the default 1 deg minimum parallax initializes
+// the synthetic sequence at frame 3 (~1.4 deg), whose map has ~12 % depth
+// error, and the tracked translation inherits it. 4 deg initializes at frame 10
+// (~3 % depth error).
+class TrackerMonoAccuracyTest : public TrackerTest {
+protected:
+    TrackerMonoAccuracyTest() : TrackerTest(MonoAccuracyMapperOptions()) {}
+
+    static mapping::MapperOptions MonoAccuracyMapperOptions() {
+        mapping::MapperOptions options;
+        options.initializer.reconstruction.min_parallax_deg = 4.0;
+        return options;
+    }
 };
 
 std::vector<geometry::RigidTransformation> TruePoses(const test::SyntheticStereoSequence& sequence) {
@@ -325,10 +328,9 @@ TEST_F(TrackerTest, TracksAndPublishesPosition) {
     EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
 }
 
-TEST_F(TrackerTest, TracksSyntheticMono) {
-    // The Mapper of this test initializes with min_parallax_deg = 4 (see
-    // MapperOptionsForCurrentTest): the error bounds measure the tracker, not
-    // the initial map.
+TEST_F(TrackerMonoAccuracyTest, TracksSyntheticMono) {
+    // The fixture's Mapper initializes with min_parallax_deg = 4: the error
+    // bounds measure the tracker, not the initial map.
     const MonoRun run = TrackSyntheticMono(/*check_translation=*/true);
     RecordProperty("init_frame", std::to_string(run.init_frame));
     RecordProperty("max_rotation_deg", std::to_string(run.max_rotation_deg));
