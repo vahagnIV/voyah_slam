@@ -117,7 +117,7 @@ dequeue):
 1. **Motion model,** if `velocity_` is set.
    - Predict `T_cw = velocity · T_last`.
    - Run `SearchByProjection` from the last frame. Window: 15 px for mono,
-     7 px for a binocular measurement, × the scale of the candidate's level
+     7 px for a binocular measurement, × the scale of the last-frame feature's level
      (`level_scale^level`).
    - If fewer than 20 matches, clear the matches and retry with the window ×2.
    - `OptimizePose`, then drop the outlier matches. The step fails if fewer
@@ -164,7 +164,7 @@ struct ProjectionMatcherOptions {
     bool check_orientation = true;      // frame-to-frame only, histogram as in the init matcher (12 bins)
     double level_scale = 1.2;
     int max_level = 7;                  // ORB 8 levels
-    double max_ray_cos = std::cos(85°); // reject projections beyond the 85° limit
+    double max_ray_angle_deg = 85.0;    // reject projections beyond the measurement's 85° limit
 };
 ```
 
