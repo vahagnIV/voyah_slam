@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <utility>
 #include <vector>
 
@@ -9,6 +10,7 @@
 #include "voyahslam/estimators/homography_estimator.h"
 #include "voyahslam/geometry/geometry.h"
 #include "voyahslam/geometry/two_view_decomposition.h"
+#include "voyahslam/logging/logger.h"
 
 namespace voyahslam::geometry {
 
@@ -81,6 +83,12 @@ CandidateCheck CheckCandidate(const RigidTransformation& a_T_21, const TwoViewCo
     return check;
 }
 
+// One logger for all calls; created on first use (after the app set the level).
+const std::shared_ptr<spdlog::logger>& Log() {
+    static const std::shared_ptr<spdlog::logger> log = Logger::CreateLogger("TwoViewReconstructor");
+    return log;
+}
+
 } // namespace
 
 PoseSelection SelectPose(std::span<const RigidTransformation> a_candidates,
@@ -120,6 +128,12 @@ PoseSelection SelectPose(std::span<const RigidTransformation> a_candidates,
     }
     selection.success = static_cast<double>(selection.num_good) > min_good && unique &&
                         selection.parallax_deg >= a_options.min_parallax_deg;
+    if (!selection.success) {
+        Log()->debug("Pose selection rejected: {} good points (need > {:.0f}), {}, parallax {:.2f} deg "
+                     "(need >= {:.2f})",
+                     selection.num_good, min_good, unique ? "unique" : "ambiguous",
+                     selection.parallax_deg, a_options.min_parallax_deg);
+    }
     return selection;
 }
 
@@ -130,6 +144,7 @@ TwoViewReconstruction TwoViewReconstructor::Reconstruct(const TwoViewCorresponde
     // The estimators' scores and the reprojection gate divide by sigma; an infinite sigma would
     // make every chi-square 0 and every correspondence an inlier.
     if (!(std::isfinite(a_correspondences.sigma) && a_correspondences.sigma > 0.0)) {
+        Log()->debug("Two-view reconstruction skipped: invalid sigma {}", a_correspondences.sigma);
         return reconstruction;
     }
 
@@ -140,6 +155,8 @@ TwoViewReconstruction TwoViewReconstructor::Reconstruct(const TwoViewCorresponde
     const auto essential = estimators::Ransac<estimators::EssentialEstimator>().Run(a_correspondences,
                                                                                     essential_ransac);
     if (!homography.success && !essential.success) {
+        Log()->debug("Two-view reconstruction failed: neither H nor E RANSAC succeeded ({} correspondences)",
+                     a_correspondences.size());
         return reconstruction;
     }
     reconstruction.homography_score = homography.success ? homography.score.score : 0.0;
@@ -151,6 +168,11 @@ TwoViewReconstruction TwoViewReconstructor::Reconstruct(const TwoViewCorresponde
         (!essential.success || static_cast<double>(homography.score.num_inliers) >=
                                    options_.homography_inlier_ratio *
                                        static_cast<double>(essential.score.num_inliers));
+
+    Log()->debug("Two-view: {} correspondences, H {} inliers, E {} inliers -> {}", a_correspondences.size(),
+                 homography.success ? homography.score.num_inliers : 0,
+                 essential.success ? essential.score.num_inliers : 0,
+                 use_homography ? "homography" : "essential");
 
     std::vector<RigidTransformation> candidates;
     PoseSelection selection;
@@ -169,6 +191,7 @@ TwoViewReconstruction TwoViewReconstructor::Reconstruct(const TwoViewCorresponde
                                options_.essential_uniqueness, options_);
     }
     if (candidates.empty()) {
+        Log()->debug("Two-view reconstruction failed: model decomposition gave no candidates");
         return reconstruction;
     }
 
