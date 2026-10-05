@@ -13,7 +13,7 @@
 namespace voyahslam::features {
 
 struct InitializationMatcherOptions {
-    double window_px = 100.0;     // square half-size around the last matched position
+    double window_px = 100.0;     // square half-size around the last matched position (raw px)
     double max_distance = 50.0;   // descriptor distance threshold (double so SIFT's float L2 fits)
     double nn_ratio = 0.9;        // best < nn_ratio * second best
     bool check_orientation = true;
@@ -21,10 +21,12 @@ struct InitializationMatcherOptions {
     int max_reference_level = 0;  // only reference features with level <= this
 };
 
-// ORB-SLAM3 ORBmatcher::SearchForInitialization. Returns, per reference
-// feature, the matched current feature index or -1. out_last_matched (one entry
-// per reference feature) seeds the search windows and is overwritten with the
-// matched current point for every surviving match.
+// ORB-SLAM3 ORBmatcher::SearchForInitialization, in raw (distorted) pixels.
+// Returns, per reference feature, the matched current feature index or -1.
+// current_grid is built on current.distorted_points(). out_last_matched (one
+// entry per reference feature, raw px; initially the reference's
+// distorted_points()) seeds the search windows and is overwritten with the
+// matched current raw point for every surviving match.
 template <typename TFeatureExtractor>
 [[nodiscard]] std::vector<Eigen::Index> MatchForInitialization(
     const TMonocularMeasurement<TFeatureExtractor>& reference,
@@ -100,7 +102,7 @@ template <typename TFeatureExtractor>
 
     for (Eigen::Index i = 0; i < num_reference; ++i) {
         if (matches[i] >= 0) {
-            out_last_matched[i] = current.points().col(matches[i]);
+            out_last_matched[i] = current.distorted_points().col(matches[i]);
         }
     }
     return matches;

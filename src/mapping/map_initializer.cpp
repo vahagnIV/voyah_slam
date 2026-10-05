@@ -19,8 +19,8 @@ namespace voyahslam::mapping {
 namespace {
 
 template <typename TMonocularMeasurement>
-std::vector<geometry::TPoint2DF> Points(const TMonocularMeasurement& measurement) {
-    const geometry::TPoints2DF& points = measurement.points();
+std::vector<geometry::TPoint2DF> DistortedPoints(const TMonocularMeasurement& measurement) {
+    const geometry::TPoints2DF& points = measurement.distorted_points();
     std::vector<geometry::TPoint2DF> result;
     result.reserve(points.cols());
     for (Eigen::Index i = 0; i < points.cols(); ++i) {
@@ -92,7 +92,7 @@ MapInitializer<TFeatureExtractor>::TryInitializeMonocular(TMonocularMeasurement 
 
     // Like ORB-SLAM3, last_matched_ keeps the matched positions even when the
     // reconstruction below fails.
-    const features::FeatureGrid grid(measurement.points(), measurement.levels());
+    const features::FeatureGrid grid(measurement.distorted_points(), measurement.levels());
     const std::vector<Eigen::Index> matches = features::MatchForInitialization<TFeatureExtractor>(
         *reference_, measurement, grid, last_matched_, options_.matcher);
     std::vector<Eigen::Index> first;
@@ -214,7 +214,7 @@ MapInitializer<TFeatureExtractor>::TryInitializeMonocular(TMonocularMeasurement 
 template <typename TFeatureExtractor>
 void MapInitializer<TFeatureExtractor>::SetReference(TMonocularMeasurement measurement) {
     reference_ = std::move(measurement);
-    last_matched_ = Points(*reference_);
+    last_matched_ = DistortedPoints(*reference_);
 }
 
 template <typename TFeatureExtractor>
