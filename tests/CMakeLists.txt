@@ -41,10 +41,12 @@ add_executable(voyahslam_tests
     mapping/map_initializer_test.cpp
     mapping/mapper_test.cpp
     loop_closing/loop_closer_test.cpp
+    optimization/projection_test.cpp
 )
 
 target_include_directories(voyahslam_tests
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    PRIVATE ${PROJECT_SOURCE_DIR}/src
 )
 
 target_link_libraries(voyahslam_tests

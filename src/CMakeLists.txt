@@ -1,3 +1,5 @@
+find_package(g2o REQUIRED)
+
 add_library(voyahslam
     voyahslam.cpp
     algebra/algebra.cpp
@@ -38,4 +40,5 @@ target_link_libraries(voyahslam
     PRIVATE opencv_core
     PRIVATE opencv_imgproc
     PRIVATE opencv_features
+    PRIVATE g2o::core g2o::stuff g2o::types_sba g2o::types_slam3d g2o::solver_eigen
 )
