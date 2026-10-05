@@ -750,14 +750,24 @@ ORB, `--rate=0`, apps at debug level):
 | Stereo, 200 frames | initialized on frame 1 with 358 points; 197 local-map successes, no loss, 1 map; median 232 inliers (68–269), was 189 |
 
 Against the success criterion (≥ 53 tracked and ≤ 5 re-initializations) mono
-passes on tracked frames and **misses on re-initializations**. Each map is
-still tracked for only a few frames (82 / 19 ≈ 4.3, baseline 32 / 8 = 4.0,
-spike KB 53 / 6 ≈ 8.8): the 62–109-point initial map cannot keep 30
-local-map inliers without map growth (sub-project 2). Re-initialization is
-fast (a new map follows a loss after a median of about 5 frames, by log order;
-the first map still needs about 118), so short-lived maps turn into many
-re-initializations. No parameter was tuned (gate and init-map tuning are in
-TODO).
+passes on tracked frames and **misses on re-initializations**. The cause is
+initialization acceptance, not shorter-lived maps: the initialization
+matcher's 100 px window is now in raw pixels, which is effectively wider in the
+fisheye periphery, so the reference frame is reset about half as often (94 vs
+181 resets) and many more pairs initialize (19 maps vs 6; 11 of them from
+adjacent frames, tracked for about 2.5 frames on average). Every accepted
+init still passes the unchanged 1° parallax gate (1.02–2.34°). Maps from
+comparable inits live as long as before; the 82 / 19 ≈ 4.3 frames per map
+average (baseline 32 / 8 = 4.0, spike KB 53 / 6 ≈ 8.8) is diluted by the extra
+short inits. Causal check (final review, scratch worktree): reverting only the
+init matcher to undistorted pixels gives 6 maps / 56 tracked / 9.3 frames per
+map, matching the spike. The branch keeps the raw-pixel init matcher: more
+tracked frames (82 vs 56) at the cost of more, mostly short, maps. Every map
+still dies at the 30-inlier local-map gate because nothing grows the
+62–109-point initial map (sub-project 2). Three adjacent-frame maps
+(≈ frames 311–318) died on their first tracked frame with 0–1 pose inliers out
+of 39–47 matches; this is not diagnosed (TODO). No parameter was tuned (gate,
+init acceptance and init-map tuning are in TODO).
 
 ## Optimization (`optimization/`, g2o behind Eigen types)
 
@@ -1129,7 +1139,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-05 | (U) `DistortJacobian` for Kannala-Brandt: J = (d/r)·I + (d′(θ)·θ′(r) − d/r)·p̂p̂ᵀ, θ′(r) = 1/(1 + r²), identity for r < 1e-8. | Analytic; verified against central finite differences (the spec draft had an extra 1/r). |
 | 2026-10-05 | (V) Pinhole invariance with the old normalized code holds exactly (1e-9) only for fx = fy. `OptimizePose`, `BundleAdjust` and the stereo gate now weight x and y separately in pixels, so χ² changes slightly on fx ≠ fy rigs (e.g. EuRoC). | The old code divided σ by one f; per-axis pixel weighting is the intended behaviour. |
 | 2026-10-05 | The calibration-free angle allowance (σ · 1.5 · (1 + r²), window · (1 + r²)) is recorded as a fallback for lenses without a model, not implemented. | Spike 2 measured it within 0.6 % of the KB stretch up to 60° (85 tracked frames vs 53 for KB window + σ); not needed while every lens has a model (TODO). |
-| 2026-10-05 | Smoke result of the camera-model branch (run 2026-10-06, corridor1, Release): mono 82 tracked / 18 re-initializations (gate 20: 137 / 14, measurement only); stereo tracks the run, median 232 inliers. The ≤ 5 re-initializations criterion is missed; nothing was tuned. | Maps still die after a few frames (62-109-point initial map, no map growth); re-initialization is fast, so short maps become many re-initializations. Gate / init map size tuning and map growth (sub-project 2) are next (TODO). |
+| 2026-10-05 | Smoke result of the camera-model branch (run 2026-10-06, corridor1, Release): mono 82 tracked / 18 re-initializations (gate 20: 137 / 14, measurement only); stereo 197/200 local-map successes (198 before), no loss, median 232 inliers. The ≤ 5 re-initializations criterion is missed; nothing was tuned. | The extra re-initializations come from the raw-pixel init matcher accepting more (mostly adjacent-frame) pairs: 19 maps vs 6; reverting only that matcher gives 6 maps / 56 tracked / 9.3 frames per map. Kept for more tracked frames (82 vs 56). Maps still die at the local-map gate without map growth (sub-project 2); init acceptance and gate tuning are in TODO. |
 
 ## 9. Open Questions
 

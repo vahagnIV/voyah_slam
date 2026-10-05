@@ -104,8 +104,8 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
 - [ ] Keep features beyond 85° (bearing vectors on the ray side; residuals are
       already in raw pixels). (OQ 22)
 - [ ] Tuning: the local-map inlier gate (30; 20 gives 137 vs 82 tracked mono
-      frames) and the mono initial map size (62-109 points; maps last ~4
-      frames). Mono misses the ≤ 5 re-initializations criterion (18).
+      frames) and the mono initial map size (62-109 points). Mono misses the
+      ≤ 5 re-initializations criterion (18); see the init-acceptance item.
 - [ ] Per-model camera classes (approach B, ORB-SLAM3 `GeometricCamera`), only
       if ever needed (e.g. several lens models in one rig).
 - [ ] Behind-camera edges: g2o edges call `Camera::Project` before the depth
@@ -114,7 +114,7 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
 - [ ] `Camera::Project` heap-allocates (dynamic 3×1 for `Distort`) per call in
       the hot path (g2o edges, matchers); add an allocation-free path.
       `Unproject` also inverts K per call.
-- [ ] Deduplicate the TUM-VI Kannala-Brandt test fixture (copied in about 8
+- [ ] Deduplicate the TUM-VI Kannala-Brandt test fixture (copied in 5–9
       test files) into `tests/support`.
 - [ ] Validate K beyond finiteness (fx, fy > 0) in `OptimizePose`,
       `BundleAdjust` and `Camera`.
@@ -123,6 +123,23 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
 - [ ] Fisheye test pinning `MapInitializer`'s grid and `last_matched_` on
       `distorted_points()` (map_initializer.cpp); pinhole test helpers build
       the grid on `points()`.
+- [ ] Init acceptance in raw pixels: the raw-px init matcher (window 100 px,
+      effectively wider in the periphery) accepts many adjacent-frame pairs
+      (19 maps vs 6 with the undistorted-px matcher; 11 adjacent-frame inits
+      tracked ~2.5 frames). Consider a minimum reference age / parallax or an
+      init-quality check before accepting.
+- [ ] Instrument first-frame map deaths: three adjacent-frame maps (smoke run
+      2026-10-06, ≈ frames 311–318) found 39–47 zero-motion matches but
+      `OptimizePose` round 0 kept 0–1 inliers. Log the frame gap to keyframe 2
+      and the per-match reprojection error at the predicted pose.
+- [ ] Viewer: `ProjectToImage` (`vizualization/include/voyahviz/keypoint_drawing.h`)
+      recomputes raw pixels as K·Distort(normalized); draw
+      `distorted_points()` directly, drop the separate distortion-model
+      argument and the stale "use ProjectToImage()" comment.
+- [ ] Test `Camera::ProjectJacobian` exactly on the optical axis
+      (Xc = (0, 0, z) → K₂ₓ₂·[1/z, 0, 0; 0, 1/z, 0]).
+- [ ] Tests under `tests/geometry` for the moved distortion models still use
+      namespace `test::features`; rename to `test::geometry`.
 
 ## Stereo (2026-10-04)
 
