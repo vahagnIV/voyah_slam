@@ -55,6 +55,19 @@ public:
         return trajectory_;
     }
 
+    // From the last FrameTracked; cleared on a map switch and on TrackingLost.
+    // Points matched in the current frame.
+    [[nodiscard]] const std::vector<voyahslam::map::MapPointId>& tracked_points() const {
+        return tracked_points_;
+    }
+    // Local-map points that pass the projection gate, matched or not.
+    [[nodiscard]] const std::vector<voyahslam::map::MapPointId>& visible_points() const {
+        return visible_points_;
+    }
+    [[nodiscard]] const std::vector<voyahslam::map::FrameId>& local_frames() const {
+        return local_frames_;
+    }
+
 private:
     static constexpr size_t kNumEventTypes =
         static_cast<size_t>(voyahslam::events::EventType::TrackingLost) + 1;
@@ -79,6 +92,9 @@ private:
     std::optional<voyahslam::geometry::RigidTransformation> current_pose_;
     TrackingStatus status_ = TrackingStatus::None;
     std::vector<voyahslam::geometry::TPoint3DF> trajectory_;
+    std::vector<voyahslam::map::MapPointId> tracked_points_;
+    std::vector<voyahslam::map::MapPointId> visible_points_;
+    std::vector<voyahslam::map::FrameId> local_frames_;
 };
 
 } // namespace voyahviz

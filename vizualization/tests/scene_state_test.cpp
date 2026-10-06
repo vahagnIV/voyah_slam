@@ -215,6 +215,81 @@ TEST(SceneStateTest, FrameTrackedSetsPoseAndTrajectory) {
     EXPECT_EQ(scene.trajectory().size(), 2u);
 }
 
+TEST(SceneStateTest, FrameTrackedSetsTrackedAndVisible) {
+    TOrbScene scene;
+    memory::ObjectPool<TOrbFrameTracked, memory::ThreadSafePolicy> pool(1);
+    TOrbFrameTracked* event = pool.Create();
+    event->map_id = {1};
+    event->pose = MakePose(0.1, 1, 0, 0);
+    event->observed_points = {{0}, {2}};
+    event->visible_points = {{0}, {1}, {2}};
+    event->local_frames = {{4}, {5}};
+    scene.Apply(*event);
+    event->Recycle();
+
+    EXPECT_EQ(scene.tracked_points(), (std::vector<map::MapPointId>{{0}, {2}}));
+    EXPECT_EQ(scene.visible_points(), (std::vector<map::MapPointId>{{0}, {1}, {2}}));
+    EXPECT_EQ(scene.local_frames(), (std::vector<map::FrameId>{{4}, {5}}));
+
+    // The next FrameTracked replaces them.
+    TrackFrame(scene, 1, MakePose(0.2, 1, 0, 0));
+    EXPECT_TRUE(scene.tracked_points().empty());
+    EXPECT_TRUE(scene.visible_points().empty());
+    EXPECT_TRUE(scene.local_frames().empty());
+}
+
+TEST(SceneStateTest, TrackingLostClearsTrackedSets) {
+    TOrbScene scene;
+    memory::ObjectPool<TOrbFrameTracked, memory::ThreadSafePolicy> pool(1);
+    TOrbFrameTracked* event = pool.Create();
+    event->map_id = {1};
+    event->observed_points = {{0}};
+    event->visible_points = {{0}, {1}};
+    event->local_frames = {{4}};
+    scene.Apply(*event);
+    event->Recycle();
+    ASSERT_FALSE(scene.tracked_points().empty());
+
+    LoseTracking(scene, 1);
+    EXPECT_TRUE(scene.tracked_points().empty());
+    EXPECT_TRUE(scene.visible_points().empty());
+    EXPECT_TRUE(scene.local_frames().empty());
+}
+
+TEST(SceneStateTest, NewerMapClearsTrackedSets) {
+    TOrbScene scene;
+    memory::ObjectPool<TOrbFrameTracked, memory::ThreadSafePolicy> pool(1);
+    TOrbFrameTracked* event = pool.Create();
+    event->map_id = {1};
+    event->observed_points = {{0}};
+    event->visible_points = {{1}};
+    event->local_frames = {{4}};
+    scene.Apply(*event);
+    event->Recycle();
+    AddPoints(scene, 2, 0, {{1, 1, 1}});
+    EXPECT_TRUE(scene.tracked_points().empty());
+    EXPECT_TRUE(scene.visible_points().empty());
+    EXPECT_TRUE(scene.local_frames().empty());
+}
+
+TEST(SceneStateTest, KeyFrameCreatedAppliesUpdatedPoints) {
+    TOrbScene scene;
+    CreateKeyFrame(scene, 1, 0, MakePose(0, 0, 0, 0), kThreePoints);
+
+    memory::ObjectPool<TOrbKeyFrameCreated, memory::ThreadSafePolicy> pool(1);
+    TOrbKeyFrameCreated* event = pool.Create();
+    event->map_id = {1};
+    event->frame_id = {1};
+    event->new_points_start_id = {3};
+    event->ResizeUpdatedPoints(1);
+    event->updated_ids[0] = {1};
+    event->updated_positions.col(0) = Eigen::Vector3d(7, 7, 7).cast<precision_t>();
+    scene.Apply(*event);
+    event->Recycle();
+    EXPECT_TRUE(scene.point_positions()[1].isApprox(Eigen::Vector3d(7, 7, 7).cast<precision_t>()));
+    EXPECT_EQ(scene.num_alive_points(), 3u);
+}
+
 TEST(SceneStateTest, MapCreatedSetsCurrentPose) {
     TOrbScene scene;
     memory::ObjectPool<events::MapCreated, memory::ThreadSafePolicy> pool(1);

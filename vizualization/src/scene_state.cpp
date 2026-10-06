@@ -61,10 +61,16 @@ void SceneState<TFeatureExtractor>::Apply(const voyahslam::events::Event& event)
             current_pose_ = tracked.pose;
             status_ = TrackingStatus::Tracking;
             trajectory_.push_back(tracked.pose.Inverse().translation());
+            tracked_points_ = tracked.observed_points;
+            visible_points_ = tracked.visible_points;
+            local_frames_ = tracked.local_frames;
             break;
         }
         case EventType::TrackingLost:
             status_ = TrackingStatus::Lost;
+            tracked_points_.clear();
+            visible_points_.clear();
+            local_frames_.clear();
             break;
         case EventType::LoopDetected:
         case EventType::InitializationMeasurement:
@@ -89,6 +95,9 @@ void SceneState<TFeatureExtractor>::ClearScene() {
     num_alive_points_ = 0;
     keyframes_.clear();
     trajectory_.clear();
+    tracked_points_.clear();
+    visible_points_.clear();
+    local_frames_.clear();
     current_pose_.reset();
     status_ = TrackingStatus::None;
 }
