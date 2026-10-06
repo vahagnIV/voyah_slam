@@ -6,26 +6,36 @@
 #include <cstdint>
 #include <vector>
 #include <voyahslam/events/event_node.h>
+#include <voyahslam/events/event_types.h>
+#include <voyahslam/events/frame_tracked.h>
 #include <voyahslam/events/initialization_measurement.h>
 #include <voyahslam/events/key_frame_created.h>
-#include <voyahslam/events/listener.h>
 #include <voyahslam/events/map_created.h>
 #include <voyahslam/events/tracking_lost.h>
 #include <voyahslam/events/worker_thread.h>
 #include <voyahslam/features/measurement.h>
 #include <voyahslam/logging/logger.h>
+#include <voyahslam/map/covisibility_index.h>
 #include <voyahslam/map/frame.h>
 #include <voyahslam/map/frame_id.h>
 #include <voyahslam/map/map_id.h>
 #include <voyahslam/map/map_point_storage.h>
 #include <voyahslam/map/observation_storage.h>
+#include <voyahslam/mapping/keyframe_decision.h>
 #include <voyahslam/mapping/map_initializer.h>
+#include <voyahslam/mapping/triangulation.h>
 #include <voyahslam/memory/object_pool.h>
 
 namespace voyahslam::mapping {
 
 struct MapperOptions {
     MapInitializerOptions initializer;
+    KeyFrameOptions keyframe;            // when a tracked measurement becomes a Frame
+    TriangulationOptions triangulation;  // new points against neighbour Frames
+    size_t neighbours_mono = 30;         // Frames triangulated against, by covisibility
+    size_t neighbours_stereo = 10;
+    size_t min_close_points = 100;       // stereo close points created at least per Frame
+    double min_baseline_depth_ratio = 0.01;  // mono: skip a neighbour below baseline / depth
 };
 
 enum class MapperState : uint8_t {
@@ -33,11 +43,14 @@ enum class MapperState : uint8_t {
     Mapping,       // extends the current map
 };
 
-// Owns the authoritative map and is its only writer: creates keyframes and map
-// points, runs local BA and culling, and performs loop closure. Publishes map
-// diffs; consumes InitializationMeasurement, TrackingLost and FrameTracked
-// (Tracker) and LoopDetected (LoopCloser). Runs on its own
-// thread; each ProcessPending() pass drains the inbox.
+// Owns the authoritative map and is its only writer. Builds the map from the
+// Tracker's InitializationMeasurements; then, per FrameTracked, decides
+// (ShouldCreateFrame) whether the tracked measurement becomes a Frame and
+// creates it with its tracked observations. Each Frame insertion is published
+// as one KeyFrameCreated (a new map is then announced by MapCreated). A
+// TrackingLost of the current map discards it.
+// LoopDetected is not consumed yet. Runs on its own thread; each
+// ProcessPending() pass drains the inbox.
 template <typename TFeatureExtractor>
 class Mapper : public events::EventNode {
 public:
@@ -68,12 +81,49 @@ public:
     [[nodiscard]] size_t num_map_points() const {
         return num_map_points_.load(std::memory_order_acquire);
     }
+    // FrameTracked events evaluated by the Frame creation rule (not skipped).
+    [[nodiscard]] size_t num_frame_evaluations() const {
+        return num_frame_evaluations_.load(std::memory_order_acquire);
+    }
+    // FrameTracked events of the current map skipped, in total, because a
+    // newer FrameTracked (or a TrackingLost) of the same map was in the same
+    // drained batch.
+    [[nodiscard]] size_t backlog_skipped() const {
+        return backlog_skipped_.load(std::memory_order_acquire);
+    }
+
+    // The current map's observations. Mapper thread (or a test driving
+    // ProcessPending synchronously) only.
+    [[nodiscard]] const map::CovisibilityIndex& covisibility() const { return covisibility_; }
 
 private:
+    // Marks in superseded_ each FrameTracked of batch_ that is followed in the
+    // batch by a FrameTracked or a TrackingLost of the same map.
+    void MarkSupersededFrameTracked();
     void ApplyEvent(const events::Event& event);
+    // A superseded FrameTracked: counted in the backlog if it is of the map
+    // being extended.
+    void SkipFrameTracked(const events::Event& event);
     void OnInitializationMeasurement(const events::InitializationMeasurement<TFeatureExtractor>& event);
+    void OnFrameTracked(const events::FrameTracked<TFeatureExtractor>& event);
     void OnTrackingLost(const events::TrackingLost& event);
     void SetState(MapperState state);
+    // Empties the current map (Frames, points, observations).
+    void ClearMap();
+
+    // The current map's Frame `id`; nullptr if it is not in the map.
+    [[nodiscard]] const TKeyFrame* FindKeyFrame(map::FrameId id) const;
+    // The inputs to ShouldCreateFrame for `event` (spec section 3.2).
+    [[nodiscard]] KeyFrameSignals MeasureSignals(
+        const events::FrameTracked<TFeatureExtractor>& event) const;
+    // Inserts `event`'s measurement as a new Frame with its tracked
+    // observations and publishes the insertion.
+    void CreateFrame(const events::FrameTracked<TFeatureExtractor>& event);
+    // Recomputes the normal and representative descriptor of `points` from all
+    // their observations, stores them and writes them, with the unchanged
+    // positions, into `out_event`'s updated part.
+    void UpdatePointStatistics(const std::vector<map::MapPointId>& points,
+                               events::KeyFrameCreated<TFeatureExtractor>& out_event);
 
     // Stores the initial map points and their observations: in both keyframes
     // (monocular) or in the one stereo keyframe, with depth and right index.
@@ -84,7 +134,14 @@ private:
     void PublishKeyFrameCreated(const TKeyFrame& keyframe, bool with_new_points);
     void PublishMapCreated(const TKeyFrame& keyframe);
 
-    events::Listener inbox_listener_ = inbox_.GetListener();
+    MapperOptions options_;
+    // One ProcessPending() batch: the events drained from the inbox and, per
+    // event, whether it is a superseded FrameTracked.
+    std::vector<events::Event*> batch_;
+    std::vector<bool> superseded_;
+    size_t backlog_ = 0;  // FrameTracked skipped since the last evaluated one
+    std::atomic<size_t> num_frame_evaluations_{0};
+    std::atomic<size_t> backlog_skipped_{0};
 
     std::atomic<MapperState> state_{MapperState::Initializing};
     std::atomic<map::MapId> current_map_id_{map::MapId{0}};
@@ -99,6 +156,8 @@ private:
     map::ObservationStorage<map::ObservationType::Monocular> observations_;
     map::ObservationStorage<map::ObservationType::Stereo> stereo_observations_;
     std::atomic<size_t> num_map_points_{0};  // map_points_.size(), readable from any thread
+    // Both kinds of observations, indexed per point and per Frame.
+    map::CovisibilityIndex covisibility_;
     MapInitializer<TFeatureExtractor> initializer_;
 
     memory::ObjectPool<events::KeyFrameCreated<TFeatureExtractor>, memory::ThreadSafePolicy>

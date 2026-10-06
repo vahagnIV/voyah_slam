@@ -8,6 +8,8 @@
 #include <voyahslam/memory/object_pool.h>
 
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <variant>
 #include <vector>
 
@@ -17,6 +19,7 @@ namespace {
 using Extractor = test::TestExtractor;
 using TMapper = Mapper<Extractor>;
 using TKeyFrameCreated = events::KeyFrameCreated<Extractor>;
+using TFrameTracked = events::FrameTracked<Extractor>;
 using TInitializationMeasurement = events::InitializationMeasurement<Extractor>;
 using TMonocularMeasurement = features::TMonocularMeasurement<Extractor>;
 using TBinocularMeasurement = features::TBinocularMeasurement<Extractor>;
@@ -43,6 +46,11 @@ struct Published {
     geometry::TPoints3DF normals;
     size_t num_updated = 0;
     size_t num_added_observations = 0;
+    // KeyFrameCreated: the updated points.
+    std::vector<map::MapPointId> updated_ids;
+    geometry::TPoints3DF updated_positions;
+    TDescriptors updated_descriptors;
+    geometry::TPoints3DF updated_normals;
 };
 
 // Feeds the Mapper's inbox from `tracker_` (stands in for the Tracker) and
@@ -101,6 +109,10 @@ protected:
                 p.normals = created->new_normals.matrix();
                 p.num_updated = created->updated_ids.size();
                 p.num_added_observations = created->added_observations.size();
+                p.updated_ids = created->updated_ids;
+                p.updated_positions = created->updated_positions.matrix();
+                p.updated_descriptors = created->updated_descriptors.matrix();
+                p.updated_normals = created->updated_normals.matrix();
             } else if (event->type == events::EventType::MapCreated) {
                 const auto* created = static_cast<events::MapCreated*>(event);
                 p.frame_id = created->frame_id;
@@ -166,6 +178,7 @@ protected:
     memory::ObjectPool<TInitializationMeasurement, memory::ThreadSafePolicy> initialization_pool_{
         256};
     memory::ObjectPool<events::TrackingLost, memory::ThreadSafePolicy> tracking_lost_pool_{256};
+    memory::ObjectPool<TFrameTracked, memory::ThreadSafePolicy> frame_tracked_pool_{256};
     events::Observable tracker_;
     test::SyntheticSequence sequence_ = test::MakeSyntheticSequence();
     TMapper mapper_;
@@ -530,6 +543,300 @@ TEST_F(MapperTest, DoesNotConsumeSharedMeasurement) {
     const auto& init = *static_cast<TInitializationMeasurement*>(event);
     ASSERT_TRUE(std::holds_alternative<TMonocularMeasurement>(init.measurement));
     EXPECT_EQ(std::get<TMonocularMeasurement>(init.measurement).points().cols(), 200);
+}
+
+// A monocular map (Frames 0 and 1) and FrameTracked events of later sequence
+// frames that re-observe its points.
+class MapperFrameTrackedTest : public MapperTest {
+protected:
+    struct Pair {
+        uint32_t feature;
+        map::MapPointId point;
+    };
+
+    void SetUpMonoMap() {
+        const auto published = InitializeMono(0);
+        ASSERT_EQ(published.size(), 3u);
+        first_ = published[0];
+        second_ = published[1];
+        num_points_ = mapper_.num_map_points();
+        ASSERT_GE(num_points_, 100u);
+        const size_t second_index = FirstSuccessIndex();
+        ASSERT_LT(second_index + 3, sequence_.frames.size());
+        point_of_scene_.assign(static_cast<size_t>(sequence_.points_w.cols()), -1);
+        const auto& scene_of_feature = sequence_.frames[second_index].point_of_feature;
+        for (size_t o = 0; o < second_.observed_points.size(); ++o) {
+            const Eigen::Index scene = scene_of_feature[second_.observed_features[o]];
+            ASSERT_GE(scene, 0);
+            point_of_scene_[static_cast<size_t>(scene)] = second_.observed_points[o].value;
+        }
+        next_ = second_index + 1;
+    }
+
+    // The first `count` (feature, map point) pairs of sequence frame `index`.
+    std::vector<Pair> TrackedPairs(size_t index, size_t count) const {
+        std::vector<Pair> pairs;
+        const auto& scene_of_feature = sequence_.frames[index].point_of_feature;
+        for (size_t f = 0; f < scene_of_feature.size() && pairs.size() < count; ++f) {
+            const Eigen::Index scene = scene_of_feature[f];
+            if (scene >= 0 && point_of_scene_[static_cast<size_t>(scene)] >= 0) {
+                pairs.push_back({static_cast<uint32_t>(f),
+                                 map::MapPointId{static_cast<uint32_t>(
+                                     point_of_scene_[static_cast<size_t>(scene)])}});
+            }
+        }
+        EXPECT_EQ(pairs.size(), count) << "frame " << index;
+        return pairs;
+    }
+
+    // Features of sequence frame `index` that observe no scene point.
+    std::vector<uint32_t> ExtraFeatures(size_t index) const {
+        std::vector<uint32_t> extras;
+        const auto& scene_of_feature = sequence_.frames[index].point_of_feature;
+        for (size_t f = 0; f < scene_of_feature.size(); ++f) {
+            if (scene_of_feature[f] < 0) {
+                extras.push_back(static_cast<uint32_t>(f));
+            }
+        }
+        return extras;
+    }
+
+    // Sequence frame `index`, tracked in map `map` with `pairs` as its
+    // inliers (num_inliers = pairs.size() unless given), posed at Frame 1.
+    void PublishFrameTracked(uint32_t map, size_t index, const std::vector<Pair>& pairs,
+                             std::optional<map::FrameId> reference = map::FrameId{1},
+                             std::optional<size_t> num_inliers = std::nullopt) {
+        auto* event = frame_tracked_pool_.Create();
+        event->map_id = map::MapId{map};
+        event->timestamp = sequence_.frames[index].measurement.timestamp();
+        event->pose = second_.pose;
+        event->measurement = sequence_.frames[index].measurement;
+        for (const Pair& pair : pairs) {
+            event->observed_features.push_back(pair.feature);
+            event->observed_points.push_back(pair.point);
+        }
+        event->reference_frame_id = reference;
+        event->stage = events::TrackingStage::LocalMap;
+        event->num_matches = static_cast<uint32_t>(pairs.size());
+        event->num_inliers = static_cast<uint32_t>(num_inliers.value_or(pairs.size()));
+        tracker_.Notify(event);
+    }
+
+    Published first_;
+    Published second_;
+    size_t num_points_ = 0;
+    std::vector<int64_t> point_of_scene_;  // map point id per scene point, -1 if none
+    size_t next_ = 0;                      // the first sequence frame after the map's
+};
+
+class MapperInboxTest : public MapperFrameTrackedTest {};
+class MapperFrameCreationTest : public MapperFrameTrackedTest {};
+
+TEST_F(MapperInboxTest, DrainsToLatest) {
+    SetUpMonoMap();
+    const size_t evaluations = mapper_.num_frame_evaluations();
+    const size_t skipped = mapper_.backlog_skipped();
+
+    for (size_t k = 0; k < 3; ++k) {
+        PublishFrameTracked(1, next_ + k, TrackedPairs(next_ + k, num_points_ / 2));
+    }
+    ASSERT_TRUE(mapper_.ProcessPending());
+
+    EXPECT_EQ(mapper_.num_frame_evaluations(), evaluations + 1);
+    EXPECT_EQ(mapper_.backlog_skipped(), skipped + 2);
+}
+
+TEST_F(MapperInboxTest, TrackingLostAfterFrameTrackedCreatesNoFrame) {
+    SetUpMonoMap();
+    const size_t evaluations = mapper_.num_frame_evaluations();
+
+    PublishFrameTracked(1, next_, TrackedPairs(next_, num_points_ / 2));
+    PublishTrackingLost(1, sequence_.frames[next_].measurement.timestamp());
+    Drain();
+
+    EXPECT_TRUE(TakeCaptured().empty());
+    EXPECT_EQ(mapper_.num_frame_evaluations(), evaluations);
+    EXPECT_EQ(mapper_.state(), MapperState::Initializing);
+    EXPECT_EQ(mapper_.num_keyframes(), 0u);
+}
+
+TEST_F(MapperInboxTest, IgnoresFrameTrackedOfOldMap) {
+    SetUpMonoMap();
+    const std::vector<Pair> pairs = TrackedPairs(next_, num_points_ / 2);
+    PublishTrackingLost(1, sequence_.frames.back().measurement.timestamp());
+    Drain();
+    ASSERT_FALSE(InitializeMono(17).empty());
+    ASSERT_EQ(mapper_.current_map_id(), map::MapId{2});
+    const size_t evaluations = mapper_.num_frame_evaluations();
+
+    // Weak tracking, but against map 1: its point ids mean nothing in map 2.
+    PublishFrameTracked(1, next_, pairs);
+    Drain();
+
+    EXPECT_TRUE(TakeCaptured().empty());
+    EXPECT_EQ(mapper_.num_frame_evaluations(), evaluations);
+    EXPECT_EQ(mapper_.num_keyframes(), 2u);
+}
+
+TEST_F(MapperFrameCreationTest, CreatesFrameWhenWeak) {
+    SetUpMonoMap();
+    const size_t evaluations = mapper_.num_frame_evaluations();
+    // An idle Mapper (backlog 0) and inliers at 50 % of the reference's points.
+    const std::vector<Pair> pairs = TrackedPairs(next_, num_points_ / 2);
+    PublishFrameTracked(1, next_, pairs);
+    Drain();
+
+    const auto published = TakeCaptured();
+    ASSERT_EQ(published.size(), 1u);
+    const Published& created = published[0];
+    ExpectPublished(created, events::EventType::KeyFrameCreated, 1, second_.frame_id.value + 1);
+    EXPECT_EQ(mapper_.num_frame_evaluations(), evaluations + 1);
+    EXPECT_EQ(mapper_.num_keyframes(), 3u);
+    EXPECT_EQ(mapper_.num_map_points(), num_points_);
+    EXPECT_EQ(created.count, 0u);
+    EXPECT_EQ(created.num_added_observations, 0u);
+    EXPECT_DOUBLE_EQ(created.timestamp, sequence_.frames[next_].measurement.timestamp());
+    EXPECT_TRUE(created.pose.ToMatrix34().isApprox(second_.pose.ToMatrix34()));
+
+    ASSERT_EQ(created.observed_features.size(), pairs.size());
+    ASSERT_EQ(created.observed_points.size(), pairs.size());
+    ASSERT_EQ(created.updated_ids.size(), pairs.size());
+    ASSERT_EQ(created.updated_positions.cols(), static_cast<Eigen::Index>(pairs.size()));
+    ASSERT_EQ(created.updated_descriptors.cols(), static_cast<Eigen::Index>(pairs.size()));
+    ASSERT_EQ(created.updated_normals.cols(), static_cast<Eigen::Index>(pairs.size()));
+
+    // Each point's (feature) in Frames 0 and 1.
+    std::vector<int64_t> in_first(num_points_, -1);
+    std::vector<int64_t> in_second(num_points_, -1);
+    for (size_t o = 0; o < first_.observed_points.size(); ++o) {
+        in_first[first_.observed_points[o].value] = first_.observed_features[o];
+    }
+    for (size_t o = 0; o < second_.observed_points.size(); ++o) {
+        in_second[second_.observed_points[o].value] = second_.observed_features[o];
+    }
+    const std::vector<geometry::TVector3DF> centres = {
+        first_.pose.Inverse().translation(), second_.pose.Inverse().translation()};
+    for (size_t i = 0; i < pairs.size(); ++i) {
+        EXPECT_EQ(created.observed_features[i], pairs[i].feature) << "pair " << i;
+        EXPECT_EQ(created.observed_points[i], pairs[i].point) << "pair " << i;
+        const map::MapPointId id = created.updated_ids[i];
+        EXPECT_EQ(id, pairs[i].point) << "pair " << i;
+        // Positions are unchanged; the normal faces every observing camera.
+        const geometry::TVector3DF position = first_.positions.col(id.value);
+        EXPECT_TRUE(created.updated_positions.col(i).isApprox(position)) << "pair " << i;
+        EXPECT_NEAR(created.updated_normals.col(i).norm(), 1.0, 1e-5) << "pair " << i;
+        for (const geometry::TVector3DF& centre : centres) {
+            EXPECT_GT(created.updated_normals.col(i).dot(position - centre), 0.0) << "pair " << i;
+        }
+        // The descriptor is one of the three observations'.
+        const auto descriptor = created.updated_descriptors.col(i);
+        ASSERT_GE(in_first[id.value], 0);
+        ASSERT_GE(in_second[id.value], 0);
+        EXPECT_TRUE(descriptor == first_.descriptors.col(in_first[id.value]) ||
+                    descriptor == second_.descriptors.col(in_second[id.value]) ||
+                    descriptor == created.descriptors.col(pairs[i].feature))
+            << "pair " << i;
+    }
+}
+
+TEST_F(MapperFrameCreationTest, NoFrameWhenStrong) {
+    SetUpMonoMap();
+    const size_t evaluations = mapper_.num_frame_evaluations();
+    // Every map point is observed by the reference, so ref_points = all of them.
+    PublishFrameTracked(1, next_, TrackedPairs(next_, num_points_ / 2), map::FrameId{1},
+                        num_points_);
+    Drain();
+
+    EXPECT_TRUE(TakeCaptured().empty());
+    EXPECT_EQ(mapper_.num_frame_evaluations(), evaluations + 1);
+    EXPECT_EQ(mapper_.num_keyframes(), 2u);
+}
+
+TEST_F(MapperFrameCreationTest, SkipsInvalidAndDuplicatePoints) {
+    SetUpMonoMap();
+    const std::vector<Pair> valid = TrackedPairs(next_, num_points_ / 2);
+    const std::vector<uint32_t> extras = ExtraFeatures(next_);
+    ASSERT_GE(extras.size(), 2u);
+    std::vector<Pair> pairs = valid;
+    pairs.insert(pairs.begin() + 1, {extras[0], map::MapPointId{static_cast<uint32_t>(num_points_)}});
+    pairs.push_back({extras[1], valid[0].point});  // the same point again
+    PublishFrameTracked(1, next_, pairs);
+    Drain();
+
+    const auto published = TakeCaptured();
+    ASSERT_EQ(published.size(), 1u);
+    const Published& created = published[0];
+    ASSERT_EQ(created.type, events::EventType::KeyFrameCreated);
+    ASSERT_EQ(created.observed_points.size(), valid.size());
+    ASSERT_EQ(created.observed_features.size(), valid.size());
+    ASSERT_EQ(created.updated_ids.size(), valid.size());
+    for (size_t i = 0; i < valid.size(); ++i) {
+        EXPECT_EQ(created.observed_features[i], valid[i].feature) << "pair " << i;
+        EXPECT_EQ(created.observed_points[i], valid[i].point) << "pair " << i;
+        EXPECT_EQ(created.updated_ids[i], valid[i].point) << "pair " << i;
+    }
+    EXPECT_EQ(mapper_.num_map_points(), num_points_);
+}
+
+TEST_F(MapperFrameCreationTest, RefPointsUsesMinObs) {
+    SetUpMonoMap();
+    // Frame 2 re-observes half the points; they now have 3 observations.
+    const size_t half = num_points_ / 2;
+    PublishFrameTracked(1, next_, TrackedPairs(next_, half));
+    Drain();
+    ASSERT_EQ(TakeCaptured().size(), 1u);
+    ASSERT_EQ(mapper_.num_keyframes(), 3u);
+    const size_t evaluations = mapper_.num_frame_evaluations();
+
+    // Against Frame 1 (observes every point): with 3 Frames only the points
+    // observed >= 3 times count, so ref_points = half and 0.7 * all inliers
+    // is strong (>= 0.9 * half). Counting all points would make it weak.
+    const size_t inliers = num_points_ * 7 / 10;
+    PublishFrameTracked(1, next_ + 1, TrackedPairs(next_ + 1, half), map::FrameId{1}, inliers);
+    Drain();
+
+    EXPECT_TRUE(TakeCaptured().empty());
+    EXPECT_EQ(mapper_.num_frame_evaluations(), evaluations + 1);
+    EXPECT_EQ(mapper_.num_keyframes(), 3u);
+}
+
+TEST_F(MapperFrameCreationTest, CreatesStereoFrame) {
+    const TBinocularMeasurement measurement = StereoMeasurement(0.0);
+    PublishInitializationMeasurement(measurement);
+    Drain();
+    const auto initial = TakeCaptured();
+    ASSERT_EQ(initial.size(), 2u);
+    const Published& first = initial[0];
+    ASSERT_GE(first.observed_points.size(), 100u);
+
+    // The same view a second later, tracking only 30 of its points:
+    // need_close holds (close_tracked <= 30 < 100, close_untracked > 70).
+    // ref_points is 0 here: a one-Frame map's points have one observation.
+    const size_t count = 30;
+    auto* event = frame_tracked_pool_.Create();
+    event->map_id = map::MapId{1};
+    event->timestamp = 1.0;
+    event->pose = first.pose;
+    event->measurement = StereoMeasurement(1.0);
+    event->observed_features.assign(first.observed_features.begin(),
+                                    first.observed_features.begin() + count);
+    event->observed_points.assign(first.observed_points.begin(),
+                                  first.observed_points.begin() + count);
+    event->reference_frame_id = first.frame_id;
+    event->num_matches = event->num_inliers = static_cast<uint32_t>(count);
+    tracker_.Notify(event);
+    Drain();
+
+    const auto published = TakeCaptured();
+    ASSERT_EQ(published.size(), 1u);
+    ExpectPublished(published[0], events::EventType::KeyFrameCreated, 1, first.frame_id.value + 1);
+    EXPECT_EQ(published[0].observed_points.size(), count);
+    EXPECT_EQ(published[0].updated_ids.size(), count);
+    for (size_t i = 0; i < count; ++i) {
+        EXPECT_EQ(mapper_.covisibility().NumObservations(first.observed_points[i]), 2u)
+            << "point " << i;
+    }
+    EXPECT_EQ(mapper_.covisibility().Points(published[0].frame_id).size(), count);
 }
 
 } // namespace
