@@ -43,6 +43,8 @@ add_executable(voyahslam_tests
     support/synthetic_sequence_test.cpp
     mapping/map_initializer_test.cpp
     mapping/paired_inliers_test.cpp
+    mapping/keyframe_decision_test.cpp
+    map/point_statistics_test.cpp
     mapping/mapper_test.cpp
     loop_closing/loop_closer_test.cpp
     optimization/projection_test.cpp

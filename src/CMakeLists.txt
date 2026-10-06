@@ -22,6 +22,8 @@ add_library(voyahslam
     tracking/tracker.cpp
     mapping/mapper.cpp
     mapping/map_initializer.cpp
+    mapping/keyframe_decision.cpp
+    map/point_statistics.cpp
     loop_closing/loop_closer.cpp
     map/covisibility_index.cpp
     optimization/bundle_adjustment.cpp
