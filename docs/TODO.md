@@ -292,6 +292,20 @@ Spec `docs/superpowers/specs/2026-10-06-keyframes-design.md`; DESIGN
       ctest timeout.
 - [ ] ATE against mocap for the smoke runs: the apps do not write their
       trajectory; add a TUM-format trajectory dump and an alignment script.
+- [ ] Final-review follow-ups (2026-10-07):
+  - Comments at `tracking/local_map.h` (`ReferenceFrame`) and `tracker.h`
+    say the reference Frame is chosen among K1 / local Frames; Ruling L
+    chooses among all observing Frames. Fix the comments.
+  - `ObjectPool::Create()` aborts when the 256 `FrameTracked` slots are
+    exhausted; a Mapper blocked in long `CreateFrame` calls (30 mono
+    neighbours, Debug) could reach it. Bound in-flight events or degrade
+    (drop) instead of aborting.
+  - No test that the replica and the Mapper agree after a map switch
+    (removing either `covisibility_.Clear()` fails nothing).
+  - The zero-motion fallback re-centres on the last pose with a 28 px window,
+    which cannot cover 6–8° per frame; the stereo loss in fast rotation
+    (corridor1 ~frame 360) needs a rotation-aware fallback or reference-Frame
+    tracking (sub-project 4).
 
 ## Visualization
 
