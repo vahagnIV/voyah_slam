@@ -20,7 +20,6 @@ using TKeyFrameCreated = events::KeyFrameCreated<Extractor>;
 using TInitializationMeasurement = events::InitializationMeasurement<Extractor>;
 using TMonocularMeasurement = features::TMonocularMeasurement<Extractor>;
 using TBinocularMeasurement = features::TBinocularMeasurement<Extractor>;
-using TMapPointsAdded = events::MapPointsAdded<Extractor>;
 using TDescriptors = typename Extractor::TDescriptors;
 
 struct Published {
@@ -35,12 +34,15 @@ struct Published {
     std::vector<map::MapPointId> observed_points;
     TDescriptors descriptors;
     geometry::TRowVectorF depths;
-    // MapPointsAdded.
+    // KeyFrameCreated: the new points, the number of updated points and of
+    // observations added to existing keyframes.
     map::MapPointId start_id{};
     uint32_t count = 0;
     geometry::TPoints3DF positions;
     TDescriptors point_descriptors;
     geometry::TPoints3DF normals;
+    size_t num_updated = 0;
+    size_t num_added_observations = 0;
 };
 
 // Feeds the Mapper's inbox from `tracker_` (stands in for the Tracker) and
@@ -92,17 +94,17 @@ protected:
                     p.descriptors = binocular->left().descriptors();
                     p.depths = binocular->depths();
                 }
+                p.start_id = created->new_points_start_id;
+                p.count = created->num_new_points();
+                p.positions = created->new_positions.matrix();
+                p.point_descriptors = created->new_descriptors.matrix();
+                p.normals = created->new_normals.matrix();
+                p.num_updated = created->updated_ids.size();
+                p.num_added_observations = created->added_observations.size();
             } else if (event->type == events::EventType::MapCreated) {
                 const auto* created = static_cast<events::MapCreated*>(event);
                 p.frame_id = created->frame_id;
                 p.pose = created->pose;
-            } else if (event->type == events::EventType::MapPointsAdded) {
-                const auto* added = static_cast<TMapPointsAdded*>(event);
-                p.start_id = added->start_id;
-                p.count = added->count();
-                p.positions = added->positions.matrix();
-                p.point_descriptors = added->descriptors.matrix();
-                p.normals = added->normals.matrix();
             }
             published.push_back(p);
         }
@@ -179,10 +181,9 @@ TEST_F(MapperTest, StereoInitializesFromOneMeasurement) {
     Drain();
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 3u);
-    ExpectPublished(published[0], events::EventType::MapPointsAdded, 1, 0);
-    ExpectPublished(published[1], events::EventType::KeyFrameCreated, 1, 0);
-    ExpectPublished(published[2], events::EventType::MapCreated, 1, 0);
+    ASSERT_EQ(published.size(), 2u);
+    ExpectPublished(published[0], events::EventType::KeyFrameCreated, 1, 0);
+    ExpectPublished(published[1], events::EventType::MapCreated, 1, 0);
     EXPECT_EQ(mapper_.state(), MapperState::Mapping);
     EXPECT_EQ(mapper_.current_map_id(), map::MapId{1});
     EXPECT_EQ(mapper_.num_keyframes(), 1u);
@@ -195,10 +196,10 @@ TEST_F(MapperTest, StereoPublishesMapPoints) {
     Drain();
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 3u);
+    ASSERT_EQ(published.size(), 2u);
+    // The keyframe carries its points.
+    const Published& keyframe = published[0];
     const Published& points = published[0];
-    const Published& keyframe = published[1];
-    ASSERT_EQ(points.type, events::EventType::MapPointsAdded);
     ASSERT_EQ(keyframe.type, events::EventType::KeyFrameCreated);
     EXPECT_EQ(points.start_id, map::MapPointId{0});
     EXPECT_GE(points.count, 100u);
@@ -218,21 +219,22 @@ TEST_F(MapperTest, StereoPublishesMapPoints) {
     }
 }
 
-TEST_F(MapperTest, StereoPublishesPointsKeyFrameThenMap) {
+TEST_F(MapperTest, StereoPublishesKeyFrameWithPointsThenMap) {
     PublishInitializationMeasurement(StereoMeasurement(0.0));
     Drain();
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 3u);
-    EXPECT_EQ(published[0].type, events::EventType::MapPointsAdded);
-    EXPECT_EQ(published[1].type, events::EventType::KeyFrameCreated);
-    EXPECT_EQ(published[2].type, events::EventType::MapCreated);
+    ASSERT_EQ(published.size(), 2u);
+    EXPECT_EQ(published[0].type, events::EventType::KeyFrameCreated);
+    EXPECT_EQ(published[1].type, events::EventType::MapCreated);
     for (const Published& p : published) {
         EXPECT_EQ(p.map_id, map::MapId{1});
     }
 
     const Published& points = published[0];
-    const Published& keyframe = published[1];
+    const Published& keyframe = published[0];
+    EXPECT_EQ(keyframe.num_updated, 0u);
+    EXPECT_EQ(keyframe.num_added_observations, 0u);
     EXPECT_GE(points.count, 100u);
     EXPECT_EQ(points.count, mapper_.num_map_points());
     ASSERT_EQ(points.positions.cols(), points.count);
@@ -274,14 +276,13 @@ TEST_F(MapperTest, StereoMapAfterMonoMap) {
     Drain();
 
     const auto second = TakeCaptured();
-    ASSERT_EQ(second.size(), 3u);
-    ExpectPublished(second[0], events::EventType::MapPointsAdded, 2, 0);
-    ExpectPublished(second[1], events::EventType::KeyFrameCreated, 2, 2);
-    ExpectPublished(second[2], events::EventType::MapCreated, 2, 2);
+    ASSERT_EQ(second.size(), 2u);
+    ExpectPublished(second[0], events::EventType::KeyFrameCreated, 2, 2);
+    ExpectPublished(second[1], events::EventType::MapCreated, 2, 2);
     EXPECT_EQ(second[0].start_id, map::MapPointId{0});
     EXPECT_EQ(second[0].count, num_depths);
     EXPECT_EQ(mapper_.num_map_points(), num_depths);
-    EXPECT_EQ(second[1].observed_points.size(), num_depths);
+    EXPECT_EQ(second[0].observed_points.size(), num_depths);
     EXPECT_EQ(mapper_.num_keyframes(), 1u);
 }
 
@@ -299,28 +300,30 @@ TEST_F(MapperTest, MonoInitializesWithParallax) {
     Drain();
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 4u);
-    EXPECT_EQ(published[0].type, events::EventType::MapPointsAdded);
-    ExpectPublished(published[1], events::EventType::KeyFrameCreated, 1, 0);
-    ExpectPublished(published[2], events::EventType::KeyFrameCreated, 1, 1);
-    ExpectPublished(published[3], events::EventType::MapCreated, 1, 1);
+    ASSERT_EQ(published.size(), 3u);
+    ExpectPublished(published[0], events::EventType::KeyFrameCreated, 1, 0);
+    ExpectPublished(published[1], events::EventType::KeyFrameCreated, 1, 1);
+    ExpectPublished(published[2], events::EventType::MapCreated, 1, 1);
     EXPECT_EQ(mapper_.state(), MapperState::Mapping);
     EXPECT_EQ(mapper_.num_keyframes(), 2u);
 }
 
-TEST_F(MapperTest, MonoPublishesPointsKeyFramesThenMap) {
+TEST_F(MapperTest, MonoPublishesKeyFramesWithPointsThenMap) {
     const auto published = InitializeMono(0);
 
-    ASSERT_EQ(published.size(), 4u);
-    EXPECT_EQ(published[0].type, events::EventType::MapPointsAdded);
+    ASSERT_EQ(published.size(), 3u);
+    EXPECT_EQ(published[0].type, events::EventType::KeyFrameCreated);
     EXPECT_EQ(published[1].type, events::EventType::KeyFrameCreated);
-    EXPECT_EQ(published[2].type, events::EventType::KeyFrameCreated);
-    EXPECT_EQ(published[3].type, events::EventType::MapCreated);
+    EXPECT_EQ(published[2].type, events::EventType::MapCreated);
     for (const Published& p : published) {
         EXPECT_EQ(p.map_id, map::MapId{1});
+        EXPECT_EQ(p.num_updated, 0u);
+        EXPECT_EQ(p.num_added_observations, 0u);
     }
 
+    // The first keyframe carries every point, the second none.
     const Published& points = published[0];
+    EXPECT_EQ(published[1].count, 0u);
     EXPECT_EQ(points.start_id, map::MapPointId{0});
     EXPECT_GT(points.count, 0u);
     EXPECT_EQ(points.count, mapper_.num_map_points());
@@ -330,7 +333,7 @@ TEST_F(MapperTest, MonoPublishesPointsKeyFramesThenMap) {
     for (uint32_t i = 0; i < points.count; ++i) {
         EXPECT_NEAR(points.normals.col(i).norm(), 1.0, 1e-5) << "point " << i;
         // The normal points from the scene towards both camera centres.
-        for (size_t k = 1; k <= 2; ++k) {
+        for (size_t k = 0; k <= 1; ++k) {
             const geometry::TVector3DF centre = published[k].pose.Inverse().translation();
             const geometry::TVector3DF position = points.positions.col(i);
             EXPECT_GT(points.normals.col(i).dot(position - centre), 0.0)
@@ -338,7 +341,7 @@ TEST_F(MapperTest, MonoPublishesPointsKeyFramesThenMap) {
         }
     }
 
-    for (size_t k = 1; k <= 2; ++k) {
+    for (size_t k = 0; k <= 1; ++k) {
         const Published& keyframe = published[k];
         ASSERT_EQ(keyframe.observed_features.size(), points.count);
         ASSERT_EQ(keyframe.observed_points.size(), points.count);
@@ -355,19 +358,19 @@ TEST_F(MapperTest, MonoPublishesPointsKeyFramesThenMap) {
     const auto& first_of_feature = sequence_.frames[0].point_of_feature;
     const auto& second_of_feature = sequence_.frames[second_index].point_of_feature;
     std::vector<int64_t> scene_point_in_first(points.count, -2);
-    for (size_t o = 0; o < published[1].observed_points.size(); ++o) {
-        scene_point_in_first[published[1].observed_points[o].value] =
-            first_of_feature[published[1].observed_features[o]];
+    for (size_t o = 0; o < published[0].observed_points.size(); ++o) {
+        scene_point_in_first[published[0].observed_points[o].value] =
+            first_of_feature[published[0].observed_features[o]];
     }
-    for (size_t o = 0; o < published[2].observed_points.size(); ++o) {
-        const int64_t in_second = second_of_feature[published[2].observed_features[o]];
-        const int64_t in_first = scene_point_in_first[published[2].observed_points[o].value];
+    for (size_t o = 0; o < published[1].observed_points.size(); ++o) {
+        const int64_t in_second = second_of_feature[published[1].observed_features[o]];
+        const int64_t in_first = scene_point_in_first[published[1].observed_points[o].value];
         EXPECT_GE(in_first, 0) << "observation " << o;
         EXPECT_EQ(in_first, in_second) << "observation " << o;
     }
 
     // A point's descriptor is the first keyframe's descriptor of its feature.
-    const Published& first = published[1];
+    const Published& first = published[0];
     for (size_t o = 0; o < first.observed_points.size(); ++o) {
         EXPECT_EQ(points.point_descriptors.col(first.observed_points[o].value),
                   first.descriptors.col(first.observed_features[o]))
@@ -378,9 +381,9 @@ TEST_F(MapperTest, MonoPublishesPointsKeyFramesThenMap) {
 TEST_F(MapperTest, MapCreatedCarriesSecondKeyFramePose) {
     const auto published = InitializeMono(0);
 
-    ASSERT_EQ(published.size(), 4u);
-    EXPECT_EQ(published[3].frame_id, published[2].frame_id);
-    EXPECT_TRUE(published[3].pose.ToMatrix34().isApprox(published[2].pose.ToMatrix34()));
+    ASSERT_EQ(published.size(), 3u);
+    EXPECT_EQ(published[2].frame_id, published[1].frame_id);
+    EXPECT_TRUE(published[2].pose.ToMatrix34().isApprox(published[1].pose.ToMatrix34()));
 }
 
 TEST_F(MapperTest, PointIdsRestartAfterTrackingLost) {
@@ -395,7 +398,7 @@ TEST_F(MapperTest, PointIdsRestartAfterTrackingLost) {
     // A later stretch of the sequence, its first frame the new reference.
     const auto second = InitializeMono(17);
     ASSERT_FALSE(second.empty());
-    EXPECT_EQ(second[0].type, events::EventType::MapPointsAdded);
+    EXPECT_EQ(second[0].type, events::EventType::KeyFrameCreated);
     EXPECT_EQ(second[0].map_id, map::MapId{2});
     EXPECT_EQ(second[0].start_id, map::MapPointId{0});
     EXPECT_EQ(second[0].count, mapper_.num_map_points());
@@ -429,10 +432,9 @@ TEST_F(MapperTest, FewFeaturesReplacesReference) {
     }
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 4u);
-    EXPECT_EQ(published[0].type, events::EventType::MapPointsAdded);
-    EXPECT_EQ(published[1].type, events::EventType::KeyFrameCreated);
-    EXPECT_DOUBLE_EQ(published[1].timestamp, sequence_.frames[3].measurement.timestamp());
+    ASSERT_EQ(published.size(), 3u);
+    EXPECT_EQ(published[0].type, events::EventType::KeyFrameCreated);
+    EXPECT_DOUBLE_EQ(published[0].timestamp, sequence_.frames[3].measurement.timestamp());
     EXPECT_EQ(published.back().type, events::EventType::MapCreated);
     EXPECT_EQ(mapper_.state(), MapperState::Mapping);
 }
@@ -463,13 +465,12 @@ TEST_F(MapperTest, TrackingLostStartsNewMap) {
     Drain();
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 3u);
-    ExpectPublished(published[0], events::EventType::MapPointsAdded, 2, 0);
+    ASSERT_EQ(published.size(), 2u);
+    ExpectPublished(published[0], events::EventType::KeyFrameCreated, 2, 1);
     EXPECT_EQ(published[0].start_id, map::MapPointId{0});
     EXPECT_GE(published[0].count, 100u);
     EXPECT_EQ(published[0].count, mapper_.num_map_points());
-    ExpectPublished(published[1], events::EventType::KeyFrameCreated, 2, 1);
-    ExpectPublished(published[2], events::EventType::MapCreated, 2, 1);
+    ExpectPublished(published[1], events::EventType::MapCreated, 2, 1);
     EXPECT_EQ(mapper_.state(), MapperState::Mapping);
     EXPECT_EQ(mapper_.current_map_id(), map::MapId{2});
     EXPECT_EQ(mapper_.num_keyframes(), 1u);

@@ -7,10 +7,13 @@
 #include <map>
 #include <optional>
 #include <vector>
+#include <voyahslam/defs.h>
 #include <voyahslam/events/event_types.h>
 #include <voyahslam/geometry/rigid_transformation.h>
 #include <voyahslam/map/frame_id.h>
 #include <voyahslam/map/map_id.h>
+#include <voyahslam/map/map_point_id.h>
+#include <voyahslam/memory/column_buffer.h>
 
 namespace voyahviz {
 
@@ -47,7 +50,7 @@ public:
         return current_pose_;
     }
     [[nodiscard]] TrackingStatus status() const { return status_; }
-    // Camera centres of the current map, in the order PositionUpdated arrived.
+    // Camera centres of the current map, in the order FrameTracked arrived.
     [[nodiscard]] const std::vector<voyahslam::geometry::TPoint3DF>& trajectory() const {
         return trajectory_;
     }
@@ -61,6 +64,9 @@ private:
     bool AdmitMap(voyahslam::map::MapId map_id);
     void ClearScene();
     void SetPoint(uint32_t id, const voyahslam::geometry::TPoint3DF& position);
+    // Moves point ids[i] to column i of `positions`; unknown ids are skipped.
+    void UpdatePositions(const std::vector<voyahslam::map::MapPointId>& ids,
+                         const voyahslam::memory::ColumnBuffer<voyahslam::precision_t, 3>& positions);
 
     std::array<size_t, kNumEventTypes> applied_counts_{};
     size_t total_applied_ = 0;

@@ -28,7 +28,7 @@ size_t FrameIndexOf(double timestamp) {
     return static_cast<size_t>(std::lround(timestamp / kFrameInterval));
 }
 
-// A pose published for a map: KeyFrameCreated (Mapper) or PositionUpdated (Tracker).
+// A pose published for a map: KeyFrameCreated (Mapper) or FrameTracked (Tracker).
 struct StampedPose {
     uint32_t map;
     geometry::RigidTransformation pose;
@@ -94,18 +94,20 @@ public:
                 keyframes.push_back({event->map_id.value, created.pose,
                                      std::visit([](const auto& m) { return m.timestamp(); },
                                                 created.measurement)});
-            } else if (event->type == events::EventType::MapPointsAdded) {
-                map_points_added.push_back(event->map_id.value);
-                // Map points before the MapCreated that announces their map.
-                map_points_added_before_map_created.push_back(
-                    map_created.empty() || map_created.back() != event->map_id.value);
+                if (created.num_new_points() > 0) {
+                    new_points.push_back(event->map_id.value);
+                    // Map points before the MapCreated that announces their map.
+                    new_points_before_map_created.push_back(
+                        map_created.empty() || map_created.back() != event->map_id.value);
+                }
             }
         }
         while (events::Event* event = tracker_listener_.GetNextEvent()) {
-            if (event->type == events::EventType::PositionUpdated) {
-                const auto& position = *static_cast<events::PositionUpdated*>(event);
-                position_updated.push_back(event->map_id.value);
-                positions.push_back({event->map_id.value, position.pose, position.timestamp});
+            if (event->type == events::EventType::FrameTracked) {
+                const auto& tracked =
+                    *static_cast<events::FrameTracked<features::OrbFeatureExtractor>*>(event);
+                frame_tracked.push_back(event->map_id.value);
+                positions.push_back({event->map_id.value, tracked.pose, tracked.timestamp});
             } else if (event->type == events::EventType::TrackingLost) {
                 tracking_lost.push_back(event->map_id.value);
             }
@@ -131,9 +133,10 @@ public:
     }
 
     std::vector<uint32_t> map_created;
-    std::vector<uint32_t> map_points_added;
-    std::vector<bool> map_points_added_before_map_created;
-    std::vector<uint32_t> position_updated;
+    // Map ids of the KeyFrameCreated events that carry new points.
+    std::vector<uint32_t> new_points;
+    std::vector<bool> new_points_before_map_created;
+    std::vector<uint32_t> frame_tracked;
     std::vector<uint32_t> tracking_lost;
     std::vector<StampedPose> keyframes;  // in publication order
     std::vector<StampedPose> positions;
@@ -167,7 +170,7 @@ TEST(SlamTest, ForwardsTrackerOptions) {
     EXPECT_TRUE(map_created_for({}, std::chrono::seconds(30)));
 }
 
-// Expects every PositionUpdated of `map` to be near ground truth (`truth`,
+// Expects every FrameTracked of `map` to be near ground truth (`truth`,
 // indexed by frame), aligned through the map's keyframes. Monocular: scale
 // from the second keyframe's baseline, rotation < 0.5 deg and centre error
 // < 2 % of the distance travelled since the map's first keyframe. Stereo:
@@ -254,8 +257,8 @@ TEST(SlamTest, EndToEndInitializeTrackLoseReinitialize) {
     }
     ASSERT_TRUE(recorder.WaitFor([&] { return !recorder.map_created.empty(); }));
     EXPECT_EQ(recorder.map_created, std::vector<uint32_t>{1});
-    EXPECT_EQ(recorder.map_points_added, std::vector<uint32_t>{1});
-    EXPECT_EQ(recorder.map_points_added_before_map_created, std::vector<bool>{true});
+    EXPECT_EQ(recorder.new_points, std::vector<uint32_t>{1});
+    EXPECT_EQ(recorder.new_points_before_map_created, std::vector<bool>{true});
     ASSERT_TRUE(recorder.WaitFor([&] {
         return tracker.state() == tracking::TrackerState::Tracking &&
                tracker.current_map_id() == map::MapId{1};
@@ -266,8 +269,8 @@ TEST(SlamTest, EndToEndInitializeTrackLoseReinitialize) {
     // Tracking on map 1.
     tracker.Track(frame(kMap1End + 1));
     tracker.Track(frame(kMap1End + 2));
-    ASSERT_TRUE(recorder.WaitFor([&] { return recorder.position_updated.size() >= 2; }));
-    for (uint32_t map : recorder.position_updated) {
+    ASSERT_TRUE(recorder.WaitFor([&] { return recorder.frame_tracked.size() >= 2; }));
+    for (uint32_t map : recorder.frame_tracked) {
         EXPECT_EQ(map, 1u);
     }
     EXPECT_TRUE(recorder.tracking_lost.empty());
@@ -286,8 +289,8 @@ TEST(SlamTest, EndToEndInitializeTrackLoseReinitialize) {
     }
     ASSERT_TRUE(recorder.WaitFor([&] { return recorder.map_created.size() >= 2; }));
     EXPECT_EQ(recorder.map_created, (std::vector<uint32_t>{1, 2}));
-    EXPECT_EQ(recorder.map_points_added, (std::vector<uint32_t>{1, 2}));
-    EXPECT_EQ(recorder.map_points_added_before_map_created, (std::vector<bool>{true, true}));
+    EXPECT_EQ(recorder.new_points, (std::vector<uint32_t>{1, 2}));
+    EXPECT_EQ(recorder.new_points_before_map_created, (std::vector<bool>{true, true}));
     ASSERT_TRUE(recorder.WaitFor([&] {
         return tracker.state() == tracking::TrackerState::Tracking &&
                tracker.current_map_id() == map::MapId{2};
@@ -296,13 +299,13 @@ TEST(SlamTest, EndToEndInitializeTrackLoseReinitialize) {
     EXPECT_EQ(mapper.current_map_id(), map::MapId{2});
 
     // Tracking on map 2: every remaining frame.
-    const size_t before = recorder.position_updated.size();
+    const size_t before = recorder.frame_tracked.size();
     for (size_t i = kMap2End + 1; i < sequence.frames.size(); ++i) {
         tracker.Track(frame(i));
     }
     const size_t expected = before + sequence.frames.size() - kMap2End - 1;
-    ASSERT_TRUE(recorder.WaitFor([&] { return recorder.position_updated.size() >= expected; }));
-    EXPECT_EQ(recorder.position_updated.back(), 2u);
+    ASSERT_TRUE(recorder.WaitFor([&] { return recorder.frame_tracked.size() >= expected; }));
+    EXPECT_EQ(recorder.frame_tracked.back(), 2u);
     EXPECT_EQ(recorder.tracking_lost, std::vector<uint32_t>{1});
 
     EXPECT_GE(ExpectPositionsNearTruth(recorder, 1, truth, /*monocular=*/true), 2u);
@@ -342,8 +345,8 @@ TEST(SlamTest, EndToEndStereoInitializeTrackLoseReinitialize) {
     tracker.Track(frame(0));
     ASSERT_TRUE(recorder.WaitFor([&] { return !recorder.map_created.empty(); }));
     EXPECT_EQ(recorder.map_created, std::vector<uint32_t>{1});
-    EXPECT_EQ(recorder.map_points_added, std::vector<uint32_t>{1});
-    EXPECT_EQ(recorder.map_points_added_before_map_created, std::vector<bool>{true});
+    EXPECT_EQ(recorder.new_points, std::vector<uint32_t>{1});
+    EXPECT_EQ(recorder.new_points_before_map_created, std::vector<bool>{true});
     EXPECT_GE(mapper.num_map_points(), 100u);
     ASSERT_TRUE(recorder.WaitFor([&] {
         return tracker.state() == tracking::TrackerState::Tracking &&
@@ -354,8 +357,8 @@ TEST(SlamTest, EndToEndStereoInitializeTrackLoseReinitialize) {
 
     // Tracking on map 1.
     tracker.Track(frame(1));
-    ASSERT_TRUE(recorder.WaitFor([&] { return !recorder.position_updated.empty(); }));
-    for (uint32_t map : recorder.position_updated) {
+    ASSERT_TRUE(recorder.WaitFor([&] { return !recorder.frame_tracked.empty(); }));
+    for (uint32_t map : recorder.frame_tracked) {
         EXPECT_EQ(map, 1u);
     }
 
@@ -369,8 +372,8 @@ TEST(SlamTest, EndToEndStereoInitializeTrackLoseReinitialize) {
     tracker.Track(frame(3));
     ASSERT_TRUE(recorder.WaitFor([&] { return recorder.map_created.size() >= 2; }));
     EXPECT_EQ(recorder.map_created, (std::vector<uint32_t>{1, 2}));
-    EXPECT_EQ(recorder.map_points_added, (std::vector<uint32_t>{1, 2}));
-    EXPECT_EQ(recorder.map_points_added_before_map_created, (std::vector<bool>{true, true}));
+    EXPECT_EQ(recorder.new_points, (std::vector<uint32_t>{1, 2}));
+    EXPECT_EQ(recorder.new_points_before_map_created, (std::vector<bool>{true, true}));
     EXPECT_GE(mapper.num_map_points(), 100u);
     ASSERT_TRUE(recorder.WaitFor([&] {
         return tracker.state() == tracking::TrackerState::Tracking &&
@@ -380,7 +383,7 @@ TEST(SlamTest, EndToEndStereoInitializeTrackLoseReinitialize) {
     EXPECT_EQ(mapper.current_map_id(), map::MapId{2});
 
     tracker.Track(frame(4));
-    ASSERT_TRUE(recorder.WaitFor([&] { return recorder.position_updated.back() == 2u; }));
+    ASSERT_TRUE(recorder.WaitFor([&] { return recorder.frame_tracked.back() == 2u; }));
     EXPECT_EQ(recorder.tracking_lost, std::vector<uint32_t>{1});
 
     EXPECT_EQ(ExpectPositionsNearTruth(recorder, 1, truth, /*monocular=*/false), 1u);

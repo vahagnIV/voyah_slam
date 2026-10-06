@@ -30,6 +30,7 @@ using Extractor = test::TestExtractor;
 using TTracker = Tracker<Extractor>;
 using TMapper = mapping::Mapper<Extractor>;
 using TInitializationMeasurement = events::InitializationMeasurement<Extractor>;
+using TFrameTracked = events::FrameTracked<Extractor>;
 using Clock = std::chrono::steady_clock;
 
 constexpr double kFrameInterval = 0.05;  // SyntheticSequenceOptions::frame_interval
@@ -38,9 +39,17 @@ constexpr double kFrameInterval = 0.05;  // SyntheticSequenceOptions::frame_inte
 struct Captured {
     events::EventType type;
     map::MapId map_id;
-    map::FrameId frame_id;       // PositionUpdated
-    geometry::RigidTransformation pose;  // PositionUpdated
-    double timestamp = 0.0;      // PositionUpdated, TrackingLost
+    map::FrameId frame_id;       // FrameTracked: the reference frame
+    geometry::RigidTransformation pose;  // FrameTracked
+    double timestamp = 0.0;      // FrameTracked, TrackingLost
+    // FrameTracked.
+    double measurement_timestamp = 0.0;
+    size_t num_observed_features = 0;
+    size_t num_observed_points = 0;
+    bool has_reference = false;
+    events::TrackingStage stage = events::TrackingStage::MotionModel;
+    uint32_t num_matches = 0;
+    uint32_t num_inliers = 0;
 };
 
 size_t FrameIndexOf(double timestamp) {
@@ -98,11 +107,19 @@ protected:
         std::vector<Captured> captured;
         while (events::Event* event = listener_.GetNextEvent()) {
             Captured c{event->type, event->map_id, map::FrameId{0}};
-            if (event->type == events::EventType::PositionUpdated) {
-                const auto& position = *static_cast<events::PositionUpdated*>(event);
-                c.frame_id = position.frame_id;
-                c.pose = position.pose;
-                c.timestamp = position.timestamp;
+            if (event->type == events::EventType::FrameTracked) {
+                const auto& tracked = *static_cast<TFrameTracked*>(event);
+                c.has_reference = tracked.reference_frame_id.has_value();
+                c.frame_id = tracked.reference_frame_id.value_or(map::FrameId{0});
+                c.pose = tracked.pose;
+                c.timestamp = tracked.timestamp;
+                c.measurement_timestamp = std::visit([](const auto& m) { return m.timestamp(); },
+                                                     tracked.measurement);
+                c.num_observed_features = tracked.observed_features.size();
+                c.num_observed_points = tracked.observed_points.size();
+                c.stage = tracked.stage;
+                c.num_matches = tracked.num_matches;
+                c.num_inliers = tracked.num_inliers;
             } else if (event->type == events::EventType::TrackingLost) {
                 c.timestamp = static_cast<events::TrackingLost*>(event)->timestamp;
             }
@@ -157,15 +174,28 @@ protected:
         return sequence.frames.size();
     }
 
-    // Expects exactly one PositionUpdated within the bounds of a metric map.
+    // Expects exactly one FrameTracked within the bounds of a metric map,
+    // with its inliers.
     void ExpectTrackedMetric(const std::vector<Captured>& captured,
                              const geometry::RigidTransformation& truth,
                              const test::MapAlignment& alignment, size_t frame) {
         ASSERT_EQ(captured.size(), 1u) << "frame " << frame;
-        ASSERT_EQ(captured[0].type, events::EventType::PositionUpdated) << "frame " << frame;
+        ASSERT_EQ(captured[0].type, events::EventType::FrameTracked) << "frame " << frame;
+        ExpectTrackedThroughLocalMap(captured[0], frame);
         EXPECT_TRUE(captured[0].pose.ToMatrix34().allFinite());
         EXPECT_LT(alignment.RotationErrorDeg(captured[0].pose, truth), 0.5) << "frame " << frame;
         EXPECT_LT(alignment.CentreError(captured[0].pose, truth), 0.02) << "frame " << frame;
+    }
+
+    // A successful frame's final step is the local map; its observations are
+    // exactly its inliers.
+    static void ExpectTrackedThroughLocalMap(const Captured& tracked, size_t frame) {
+        EXPECT_EQ(tracked.stage, events::TrackingStage::LocalMap) << "frame " << frame;
+        EXPECT_EQ(tracked.num_observed_points, tracked.num_inliers) << "frame " << frame;
+        EXPECT_EQ(tracked.num_observed_features, tracked.num_observed_points) << "frame " << frame;
+        EXPECT_GE(tracked.num_matches, tracked.num_inliers) << "frame " << frame;
+        EXPECT_DOUBLE_EQ(tracked.measurement_timestamp, tracked.timestamp) << "frame " << frame;
+        EXPECT_TRUE(tracked.has_reference) << "frame " << frame;
     }
 
     struct MonoRun {
@@ -202,11 +232,12 @@ protected:
                 continue;
             }
             EXPECT_EQ(captured.size(), 1u) << "frame " << k;
-            if (captured.size() != 1 || captured[0].type != events::EventType::PositionUpdated) {
+            if (captured.size() != 1 || captured[0].type != events::EventType::FrameTracked) {
                 ADD_FAILURE() << "frame " << k << " not tracked";
                 continue;
             }
             EXPECT_EQ(captured[0].map_id, map::MapId{1});
+            ExpectTrackedThroughLocalMap(captured[0], k);
             const double rotation = alignment->RotationErrorDeg(captured[0].pose, truth[k]);
             const double travelled =
                 (test::MapAlignment::Centre(truth[k]) - test::MapAlignment::Centre(truth[0])).norm();
@@ -294,8 +325,8 @@ TEST_F(TrackerTest, StereoMatchedBeforeForwarding) {
 }
 
 TEST_F(TrackerTest, InitialMapEventsBeforeMapCreatedAreKept) {
-    // The Mapper publishes MapPointsAdded and KeyFrameCreated before MapCreated;
-    // all of them reach the replica, and the keyframe becomes the last frame.
+    // The Mapper publishes KeyFrameCreated (with the points) before MapCreated;
+    // both reach the replica, and the keyframe becomes the last frame.
     EXPECT_EQ(tracker_.state(), TrackerState::WaitingForMap);
     EXPECT_EQ(tracker_.current_map_id(), map::MapId{0});
     const auto sequence = StereoSequence();
@@ -311,7 +342,7 @@ TEST_F(TrackerTest, InitialMapEventsBeforeMapCreatedAreKept) {
     ExpectLastMatchesAreKeyFrameObservations(replica.keyframe_ids().front());
 }
 
-TEST_F(TrackerTest, TracksAndPublishesPosition) {
+TEST_F(TrackerTest, TracksAndPublishesFrameTracked) {
     const auto sequence = StereoSequence();
     ASSERT_EQ(InitializeStereo(sequence, 0), 0u);
     const map::FrameId keyframe = tracker_.replica().keyframe_ids().front();
@@ -319,9 +350,15 @@ TEST_F(TrackerTest, TracksAndPublishesPosition) {
     const auto captured = Feed(sequence.frames[1].measurement);
 
     ASSERT_EQ(captured.size(), 1u);
-    ASSERT_EQ(captured[0].type, events::EventType::PositionUpdated);
+    ASSERT_EQ(captured[0].type, events::EventType::FrameTracked);
     EXPECT_EQ(captured[0].map_id, map::MapId{1});
+    ASSERT_TRUE(captured[0].has_reference);
     EXPECT_EQ(captured[0].frame_id, keyframe);  // the MapCreated keyframe
+    EXPECT_GE(captured[0].num_inliers, TrackingOptions{}.min_local_map_inliers);
+    // The published observations are the last frame's matches.
+    size_t num_last_matches = 0;
+    for (const int64_t id : tracker_.last_matches()) num_last_matches += id >= 0 ? 1 : 0;
+    EXPECT_EQ(captured[0].num_observed_points, num_last_matches);
     EXPECT_DOUBLE_EQ(captured[0].timestamp, sequence.frames[1].measurement.timestamp());
     ExpectTrackedMetric(captured, sequence.frames[1].T_cw,
                         test::MapAlignment(sequence.frames[0].T_cw), 1);
@@ -358,7 +395,7 @@ TEST_F(TrackerTest, TracksSyntheticStereo) {
     for (size_t k = 1; k < sequence.frames.size(); ++k) {
         const auto captured = Feed(sequence.frames[k].measurement);
         ExpectTrackedMetric(captured, truth[k], alignment, k);
-        if (captured.size() == 1 && captured[0].type == events::EventType::PositionUpdated) {
+        if (captured.size() == 1 && captured[0].type == events::EventType::FrameTracked) {
             max_rotation = std::max(max_rotation, alignment.RotationErrorDeg(captured[0].pose, truth[k]));
             max_translation = std::max(max_translation, alignment.CentreError(captured[0].pose, truth[k]));
         }
@@ -388,7 +425,7 @@ TEST_F(TrackerTest, TeleportedFrameIsLost) {
     const auto turned = StereoSequence(/*step=*/0.0, /*yaw_step_deg=*/180.0);
     const auto expect_no_nan = [](const std::vector<Captured>& captured) {
         for (const Captured& c : captured) {
-            if (c.type == events::EventType::PositionUpdated) {
+            if (c.type == events::EventType::FrameTracked) {
                 EXPECT_TRUE(c.pose.ToMatrix34().allFinite());
             }
         }
@@ -398,7 +435,7 @@ TEST_F(TrackerTest, TeleportedFrameIsLost) {
     for (size_t k = 1; k <= 3; ++k) {
         const auto captured = Feed(sequence.frames[k].measurement);
         ASSERT_EQ(captured.size(), 1u);
-        ASSERT_EQ(captured[0].type, events::EventType::PositionUpdated);
+        ASSERT_EQ(captured[0].type, events::EventType::FrameTracked);
         expect_no_nan(captured);
     }
     auto captured = Feed(teleported.frames[1].measurement);
@@ -412,7 +449,7 @@ TEST_F(TrackerTest, TeleportedFrameIsLost) {
     captured = Feed(sequence.frames[5].measurement);
     expect_no_nan(captured);
     ASSERT_EQ(captured.size(), 1u);
-    ASSERT_EQ(captured[0].type, events::EventType::PositionUpdated);
+    ASSERT_EQ(captured[0].type, events::EventType::FrameTracked);
     captured = Feed(turned.frames[1].measurement);
     expect_no_nan(captured);
     ASSERT_EQ(captured.size(), 1u);
@@ -429,7 +466,7 @@ TEST_F(TrackerTest, NewMapResetsTrackingState) {
     for (size_t k = 1; k <= kMap1End; ++k) {
         const auto captured = Feed(sequence.frames[k].measurement);
         ASSERT_EQ(captured.size(), 1u);
-        ASSERT_EQ(captured[0].type, events::EventType::PositionUpdated);
+        ASSERT_EQ(captured[0].type, events::EventType::FrameTracked);
     }
     // Forced loss: an empty frame.
     auto captured =
@@ -572,7 +609,7 @@ TEST_F(TrackerTest, ThreadProcessesTrackedMeasurements) {
     tracker_.Stop();
 
     ASSERT_EQ(captured.size(), 3u);
-    for (const Captured& c : captured) EXPECT_EQ(c.type, events::EventType::PositionUpdated);
+    for (const Captured& c : captured) EXPECT_EQ(c.type, events::EventType::FrameTracked);
 }
 
 } // namespace

@@ -14,29 +14,10 @@ void SceneState<TFeatureExtractor>::Apply(const voyahslam::events::Event& event)
     if (!AdmitMap(event.map_id)) return;
     // No default case: adding an EventType must produce a -Wswitch warning here.
     switch (event.type) {
-        case EventType::MapPointsAdded: {
-            const auto& added =
-                static_cast<const events::MapPointsAdded<TFeatureExtractor>&>(event);
-            const size_t end = static_cast<size_t>(added.start_id.value) + added.count();
-            if (end > point_positions_.size()) {
-                point_positions_.resize(end, voyahslam::geometry::TPoint3DF::Zero());
-                point_alive_.resize(end, false);
-            }
-            for (uint32_t i = 0; i < added.count(); ++i) {
-                SetPoint(added.start_id.value + i,
-                         added.positions.col(i).template cast<voyahslam::precision_t>());
-            }
-            break;
-        }
         case EventType::MapPointsUpdated: {
             const auto& updated =
                 static_cast<const events::MapPointsUpdated<TFeatureExtractor>&>(event);
-            for (uint32_t i = 0; i < updated.count(); ++i) {
-                const uint32_t id = updated.ids[i].value;
-                if (id < point_positions_.size()) {
-                    point_positions_[id] = updated.positions.col(i);
-                }
-            }
+            UpdatePositions(updated.ids, updated.positions);
             break;
         }
         case EventType::MapPointsRemoved: {
@@ -52,6 +33,16 @@ void SceneState<TFeatureExtractor>::Apply(const voyahslam::events::Event& event)
         case EventType::KeyFrameCreated: {
             const auto& created =
                 static_cast<const events::KeyFrameCreated<TFeatureExtractor>&>(event);
+            const uint32_t start = created.new_points_start_id.value;
+            const size_t end = static_cast<size_t>(start) + created.num_new_points();
+            if (end > point_positions_.size()) {
+                point_positions_.resize(end, voyahslam::geometry::TPoint3DF::Zero());
+                point_alive_.resize(end, false);
+            }
+            for (uint32_t i = 0; i < created.num_new_points(); ++i) {
+                SetPoint(start + i, created.new_positions.col(i));
+            }
+            UpdatePositions(created.updated_ids, created.updated_positions);
             keyframes_.insert_or_assign(created.frame_id, created.pose);
             break;
         }
@@ -65,17 +56,16 @@ void SceneState<TFeatureExtractor>::Apply(const voyahslam::events::Event& event)
             status_ = TrackingStatus::Tracking;
             break;
         }
-        case EventType::PositionUpdated: {
-            const auto& position = static_cast<const events::PositionUpdated&>(event);
-            current_pose_ = position.pose;
+        case EventType::FrameTracked: {
+            const auto& tracked = static_cast<const events::FrameTracked<TFeatureExtractor>&>(event);
+            current_pose_ = tracked.pose;
             status_ = TrackingStatus::Tracking;
-            trajectory_.push_back(position.pose.Inverse().translation());
+            trajectory_.push_back(tracked.pose.Inverse().translation());
             break;
         }
         case EventType::TrackingLost:
             status_ = TrackingStatus::Lost;
             break;
-        case EventType::NewKeyFrameCandidate:
         case EventType::LoopDetected:
         case EventType::InitializationMeasurement:
             break;
@@ -110,6 +100,18 @@ void SceneState<TFeatureExtractor>::SetPoint(uint32_t id,
     if (!point_alive_[id]) {
         point_alive_[id] = true;
         ++num_alive_points_;
+    }
+}
+
+template <typename TFeatureExtractor>
+void SceneState<TFeatureExtractor>::UpdatePositions(
+    const std::vector<voyahslam::map::MapPointId>& ids,
+    const voyahslam::memory::ColumnBuffer<voyahslam::precision_t, 3>& positions) {
+    for (size_t i = 0; i < ids.size(); ++i) {
+        const uint32_t id = ids[i].value;
+        if (id < point_positions_.size()) {
+            point_positions_[id] = positions.col(static_cast<Eigen::Index>(i));
+        }
     }
 }
 

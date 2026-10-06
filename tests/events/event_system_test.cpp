@@ -16,23 +16,23 @@
 namespace voyahslam::events {
 namespace {
 
-using OrbMapPointsAdded = MapPointsAdded<features::OrbFeatureExtractor>;
+using OrbMapPointsUpdated = MapPointsUpdated<features::OrbFeatureExtractor>;
 using OrbMonocularMeasurement = features::MonocularMeasurement<uint8_t, 32>;
 using OrbBinocularMeasurement = features::BinocularMeasurement<uint8_t, 32>;
 using OrbKeyFrameCreated = KeyFrameCreated<features::OrbFeatureExtractor>;
-using OrbNewKeyFrameCandidate = NewKeyFrameCandidate<features::OrbFeatureExtractor>;
+using OrbFrameTracked = FrameTracked<features::OrbFeatureExtractor>;
 using OrbInitializationMeasurement = InitializationMeasurement<features::OrbFeatureExtractor>;
 
 TEST(EventSystemTest, EventTypeTag) {
-    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(4);
+    memory::ObjectPool<OrbMapPointsUpdated, memory::ThreadSafePolicy> pool(4);
     auto* event = pool.Create();
 
-    EXPECT_EQ(event->type, EventType::MapPointsAdded);
+    EXPECT_EQ(event->type, EventType::MapPointsUpdated);
     event->Recycle();
 }
 
 TEST(EventSystemTest, ListenerAutoRecycle) {
-    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(2);
+    memory::ObjectPool<OrbMapPointsUpdated, memory::ThreadSafePolicy> pool(2);
 
     moodycamel::ConcurrentQueue<Event*> queue;
 
@@ -60,7 +60,7 @@ TEST(EventSystemTest, ListenerAutoRecycle) {
 }
 
 TEST(EventSystemTest, ListenerMoveSemantics) {
-    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(2);
+    memory::ObjectPool<OrbMapPointsUpdated, memory::ThreadSafePolicy> pool(2);
     moodycamel::ConcurrentQueue<Event*> queue;
 
     auto* event = pool.Create();
@@ -90,7 +90,7 @@ TEST(EventSystemTest, ObservableSyncHandler) {
 
     // Stack-allocated event for sync-only path (no pool needed)
     struct TestEvent : Event {
-        TestEvent() : Event(EventType::PositionUpdated, nullptr, nullptr) {}
+        TestEvent() : Event(EventType::FrameTracked, nullptr, nullptr) {}
     } event;
 
     observable.Notify(&event);
@@ -100,7 +100,7 @@ TEST(EventSystemTest, ObservableSyncHandler) {
 TEST(EventSystemTest, ObservableAsyncFanOut) {
     // Single slot: Create() after draining only succeeds if the event really
     // went back to the pool.
-    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(1);
+    memory::ObjectPool<OrbMapPointsUpdated, memory::ThreadSafePolicy> pool(1);
 
     Observable observable;
     AsyncObserver observer1;
@@ -116,14 +116,14 @@ TEST(EventSystemTest, ObservableAsyncFanOut) {
         auto listener1 = observer1.GetListener();
         auto* got1 = listener1.GetNextEvent();
         ASSERT_NE(got1, nullptr);
-        EXPECT_EQ(got1->type, EventType::MapPointsAdded);
+        EXPECT_EQ(got1->type, EventType::MapPointsUpdated);
     }
 
     {
         auto listener2 = observer2.GetListener();
         auto* got2 = listener2.GetNextEvent();
         ASSERT_NE(got2, nullptr);
-        EXPECT_EQ(got2->type, EventType::MapPointsAdded);
+        EXPECT_EQ(got2->type, EventType::MapPointsUpdated);
     }
 
     // Both listeners recycled → ref count hit 0 → event returned to pool
@@ -132,28 +132,38 @@ TEST(EventSystemTest, ObservableAsyncFanOut) {
     if (reused) reused->Recycle();
 }
 
-TEST(EventSystemTest, MapPointsAddedResizesAllColumnsTogether) {
-    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(1);
+TEST(EventSystemTest, KeyFrameCreatedResizesPointColumnsTogether) {
+    memory::ObjectPool<OrbKeyFrameCreated, memory::ThreadSafePolicy> pool(1);
     auto* e = pool.Create();
-    e->Resize(7);
-    EXPECT_EQ(e->count(), 7u);
-    EXPECT_EQ(e->positions.cols(), 7);
-    EXPECT_EQ(e->descriptors.cols(), 7);
-    EXPECT_EQ(e->normals.cols(), 7);
-    EXPECT_EQ(e->descriptors.matrix().rows(), features::OrbFeatureExtractor::DescriptorSize);
+    e->ResizeNewPoints(7);
+    EXPECT_EQ(e->num_new_points(), 7u);
+    EXPECT_EQ(e->new_positions.cols(), 7);
+    EXPECT_EQ(e->new_descriptors.cols(), 7);
+    EXPECT_EQ(e->new_normals.cols(), 7);
+    EXPECT_EQ(e->new_descriptors.matrix().rows(), features::OrbFeatureExtractor::DescriptorSize);
+    e->ResizeUpdatedPoints(3);
+    EXPECT_EQ(e->updated_ids.size(), 3u);
+    EXPECT_EQ(e->updated_positions.cols(), 3);
+    EXPECT_EQ(e->updated_descriptors.cols(), 3);
+    EXPECT_EQ(e->updated_normals.cols(), 3);
     e->Recycle();
 }
 
-TEST(EventSystemTest, RecycledMapPointsAddedReusesItsBuffers) {
-    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(1);
+TEST(EventSystemTest, RecycledKeyFrameCreatedIsResetAndReusesItsBuffers) {
+    memory::ObjectPool<OrbKeyFrameCreated, memory::ThreadSafePolicy> pool(1);
     Observable observable;
     AsyncObserver observer;
     observable.ConnectAsync(observer);
 
     auto* e = pool.Create();
-    e->Resize(500);
-    const auto* positions = e->positions.matrix().data();
-    const auto* descriptors = e->descriptors.matrix().data();
+    e->new_points_start_id = map::MapPointId{9};
+    e->ResizeNewPoints(500);
+    e->ResizeUpdatedPoints(20);
+    e->added_observations.push_back({map::FrameId{1}, 2, map::MapPointId{3}});
+    e->observed_features.push_back(4);
+    e->observed_points.push_back(map::MapPointId{5});
+    const auto* positions = e->new_positions.matrix().data();
+    const auto* descriptors = e->new_descriptors.matrix().data();
     observable.Notify(e);
     {
         auto listener = observer.GetListener();
@@ -162,15 +172,21 @@ TEST(EventSystemTest, RecycledMapPointsAddedReusesItsBuffers) {
 
     auto* reused = pool.Create();
     ASSERT_EQ(reused, e);
-    EXPECT_EQ(reused->count(), 0u);  // Reset() on reuse
-    reused->Resize(300);
-    EXPECT_EQ(reused->positions.matrix().data(), positions);
-    EXPECT_EQ(reused->descriptors.matrix().data(), descriptors);
+    // Reset() on reuse clears every part.
+    EXPECT_EQ(reused->new_points_start_id, map::MapPointId{0});
+    EXPECT_EQ(reused->num_new_points(), 0u);
+    EXPECT_TRUE(reused->updated_ids.empty());
+    EXPECT_EQ(reused->updated_positions.cols(), 0);
+    EXPECT_TRUE(reused->added_observations.empty());
+    EXPECT_TRUE(reused->observed_features.empty());
+    EXPECT_TRUE(reused->observed_points.empty());
+    reused->ResizeNewPoints(300);
+    EXPECT_EQ(reused->new_positions.matrix().data(), positions);
+    EXPECT_EQ(reused->new_descriptors.matrix().data(), descriptors);
     reused->Recycle();
 }
 
 TEST(EventSystemTest, RecycledMapPointsUpdatedAndRemovedAreReset) {
-    using OrbMapPointsUpdated = MapPointsUpdated<features::OrbFeatureExtractor>;
     memory::ObjectPool<OrbMapPointsUpdated, memory::ThreadSafePolicy> updated_pool(1);
     memory::ObjectPool<MapPointsRemoved, memory::ThreadSafePolicy> removed_pool(1);
 
@@ -193,7 +209,7 @@ TEST(EventSystemTest, RecycledMapPointsUpdatedAndRemovedAreReset) {
 }
 
 TEST(EventSystemTest, NotifyWithOnlySyncHandlersRecyclesPooledEvent) {
-    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(1);
+    memory::ObjectPool<OrbMapPointsUpdated, memory::ThreadSafePolicy> pool(1);
     Observable observable;
     int sync_count = 0;
     observable.ConnectSync(
@@ -210,7 +226,7 @@ TEST(EventSystemTest, NotifyWithOnlySyncHandlersRecyclesPooledEvent) {
 }
 
 TEST(EventSystemTest, NotifyWithoutConnectionsRecyclesPooledEvent) {
-    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(1);
+    memory::ObjectPool<OrbMapPointsUpdated, memory::ThreadSafePolicy> pool(1);
     Observable observable;
 
     auto* event = pool.Create();
@@ -224,7 +240,7 @@ TEST(EventSystemTest, NotifyWithoutConnectionsRecyclesPooledEvent) {
 TEST(EventSystemTest, CrossThreadFanOutReturnsEveryEventToPool) {
     constexpr int kEvents = 50'000;
     constexpr int kPoolSize = 16;
-    memory::ObjectPool<PositionUpdated, memory::ThreadSafePolicy> pool(kPoolSize);
+    memory::ObjectPool<KeyFramePoseUpdated, memory::ThreadSafePolicy> pool(kPoolSize);
     Observable observable;
     AsyncObserver observer1;
     AsyncObserver observer2;
@@ -237,10 +253,10 @@ TEST(EventSystemTest, CrossThreadFanOutReturnsEveryEventToPool) {
         while (true) {
             Event* e = listener.GetNextEvent();
             if (e) {
-                out_sum += static_cast<PositionUpdated*>(e)->frame_id.value;
+                out_sum += static_cast<KeyFramePoseUpdated*>(e)->frame_id.value;
             } else if (done.load(std::memory_order_acquire)) {
                 if (!(e = listener.GetNextEvent())) break;
-                out_sum += static_cast<PositionUpdated*>(e)->frame_id.value;
+                out_sum += static_cast<KeyFramePoseUpdated*>(e)->frame_id.value;
             }
         }
     };
@@ -251,7 +267,7 @@ TEST(EventSystemTest, CrossThreadFanOutReturnsEveryEventToPool) {
 
     uint64_t expected = 0;
     for (int i = 0; i < kEvents; ++i) {
-        PositionUpdated* e = nullptr;
+        KeyFramePoseUpdated* e = nullptr;
         while (!(e = pool.TryCreate())) std::this_thread::yield();
         e->frame_id = map::FrameId{static_cast<uint32_t>(i)};
         expected += static_cast<uint64_t>(i);
@@ -263,7 +279,7 @@ TEST(EventSystemTest, CrossThreadFanOutReturnsEveryEventToPool) {
 
     EXPECT_EQ(sum1, expected);
     EXPECT_EQ(sum2, expected);
-    std::vector<PositionUpdated*> all;
+    std::vector<KeyFramePoseUpdated*> all;
     for (int i = 0; i < kPoolSize; ++i) {
         all.push_back(pool.TryCreate());
         ASSERT_NE(all.back(), nullptr);
@@ -272,7 +288,7 @@ TEST(EventSystemTest, CrossThreadFanOutReturnsEveryEventToPool) {
 }
 
 TEST(EventSystemTest, ObservableSyncAndAsync) {
-    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(4);
+    memory::ObjectPool<OrbMapPointsUpdated, memory::ThreadSafePolicy> pool(4);
 
     Observable observable;
     int sync_count = 0;
@@ -291,15 +307,35 @@ TEST(EventSystemTest, ObservableSyncAndAsync) {
     auto listener = async_obs.GetListener();
     auto* got = listener.GetNextEvent();
     ASSERT_NE(got, nullptr);
-    EXPECT_EQ(got->type, EventType::MapPointsAdded);
+    EXPECT_EQ(got->type, EventType::MapPointsUpdated);
 }
 
-TEST(EventSystemTest, PositionUpdatedHasFrameId) {
-    memory::ObjectPool<PositionUpdated, memory::ThreadSafePolicy> pool(4);
+TEST(EventSystemTest, RecycledFrameTrackedIsReset) {
+    memory::ObjectPool<OrbFrameTracked, memory::ThreadSafePolicy> pool(1);
     auto* event = pool.Create();
-    event->frame_id = map::FrameId{42};
-    EXPECT_EQ(event->frame_id, map::FrameId{42});
+    event->timestamp = 1.5;
+    event->observed_features = {1, 2};
+    event->observed_points = {map::MapPointId{3}, map::MapPointId{4}};
+    event->visible_points = {map::MapPointId{5}};
+    event->reference_frame_id = map::FrameId{42};
+    event->local_frames = {map::FrameId{42}};
+    event->stage = TrackingStage::LocalMap;
+    event->num_matches = 7;
+    event->num_inliers = 2;
     event->Recycle();
+
+    auto* reused = pool.Create();
+    ASSERT_EQ(reused, event);
+    EXPECT_EQ(reused->timestamp, 0.0);
+    EXPECT_TRUE(reused->observed_features.empty());
+    EXPECT_TRUE(reused->observed_points.empty());
+    EXPECT_TRUE(reused->visible_points.empty());
+    EXPECT_FALSE(reused->reference_frame_id.has_value());
+    EXPECT_TRUE(reused->local_frames.empty());
+    EXPECT_EQ(reused->stage, TrackingStage::MotionModel);
+    EXPECT_EQ(reused->num_matches, 0u);
+    EXPECT_EQ(reused->num_inliers, 0u);
+    reused->Recycle();
 }
 
 TEST(EventSystemTest, KeyFrameCreatedTypeTag) {
@@ -309,10 +345,10 @@ TEST(EventSystemTest, KeyFrameCreatedTypeTag) {
     event->Recycle();
 }
 
-TEST(EventSystemTest, NewKeyFrameCandidateTypeTag) {
-    memory::ObjectPool<OrbNewKeyFrameCandidate, memory::ThreadSafePolicy> pool(4);
+TEST(EventSystemTest, FrameTrackedTypeTag) {
+    memory::ObjectPool<OrbFrameTracked, memory::ThreadSafePolicy> pool(4);
     auto* event = pool.Create();
-    EXPECT_EQ(event->type, EventType::NewKeyFrameCandidate);
+    EXPECT_EQ(event->type, EventType::FrameTracked);
     event->Recycle();
 }
 
@@ -326,7 +362,7 @@ TEST(EventSystemTest, ObservableNoAsyncSkipsRefCount) {
 
     // Stack-allocated event with no pool — sync-only path must not call set_ref_count_
     struct StackEvent : Event {
-        StackEvent() : Event(EventType::PositionUpdated, nullptr, nullptr) {}
+        StackEvent() : Event(EventType::FrameTracked, nullptr, nullptr) {}
     } event;
 
     observable.Notify(&event);

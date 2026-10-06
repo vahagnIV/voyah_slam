@@ -59,7 +59,7 @@ void Mapper<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
             OnTrackingLost(static_cast<const events::TrackingLost&>(event));
             return;
         default:
-            return;  // NewKeyFrameCandidate, LoopDetected: handled later
+            return;  // FrameTracked, LoopDetected: handled later
     }
 }
 
@@ -91,11 +91,10 @@ void Mapper<TFeatureExtractor>::OnInitializationMeasurement(
     // The state changes before the events that announce it are published, so
     // anyone who observes MapCreated also observes state() == Mapping.
     SetState(MapperState::Mapping);
-    if (map_points_.size() > 0) {
-        PublishMapPointsAdded();
-    }
-    for (const TKeyFrame& keyframe : keyframes_) {
-        PublishKeyFrameCreated(keyframe);
+    // The first keyframe carries every initial point; a monocular second
+    // keyframe only its observations.
+    for (size_t i = 0; i < keyframes_.size(); ++i) {
+        PublishKeyFrameCreated(keyframes_[i], i == 0);
     }
     PublishMapCreated(keyframes_.back());
 }
@@ -169,24 +168,8 @@ void Mapper<TFeatureExtractor>::AddInitialMapPoints(
 }
 
 template <typename TFeatureExtractor>
-void Mapper<TFeatureExtractor>::PublishMapPointsAdded() {
-    // Fresh storage of a new map: the ids are exactly [0, num_ids()).
-    const uint32_t count = map_points_.num_ids();
-    auto* event = map_points_added_pool_.Create();
-    event->map_id = current_map_id();
-    event->start_id = map::MapPointId{0};
-    event->Resize(count);
-    for (uint32_t i = 0; i < count; ++i) {
-        const map::MapPointId id{i};
-        event->positions.col(i) = map_points_.Position(id);
-        event->descriptors.col(i) = map_points_.Descriptor(id);
-        event->normals.col(i) = map_points_.Normal(id);
-    }
-    observable_.Notify(event);
-}
-
-template <typename TFeatureExtractor>
-void Mapper<TFeatureExtractor>::PublishKeyFrameCreated(const TKeyFrame& keyframe) {
+void Mapper<TFeatureExtractor>::PublishKeyFrameCreated(const TKeyFrame& keyframe,
+                                                       bool with_new_points) {
     auto* event = key_frame_created_pool_.Create();
     event->map_id = current_map_id();
     event->frame_id = keyframe.id();
@@ -204,6 +187,18 @@ void Mapper<TFeatureExtractor>::PublishKeyFrameCreated(const TKeyFrame& keyframe
     };
     add_observations(observations_);
     add_observations(stereo_observations_);
+    if (with_new_points) {
+        // Fresh storage of a new map: the ids are exactly [0, num_ids()).
+        const uint32_t count = map_points_.num_ids();
+        event->new_points_start_id = map::MapPointId{0};
+        event->ResizeNewPoints(count);
+        for (uint32_t i = 0; i < count; ++i) {
+            const map::MapPointId id{i};
+            event->new_positions.col(i) = map_points_.Position(id);
+            event->new_descriptors.col(i) = map_points_.Descriptor(id);
+            event->new_normals.col(i) = map_points_.Normal(id);
+        }
+    }
     observable_.Notify(event);
 }
 

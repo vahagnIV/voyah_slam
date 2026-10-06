@@ -33,6 +33,7 @@ add_executable(voyahslam_tests
     map/map_point_storage_test.cpp
     map/frame_test.cpp
     map/observation_storage_test.cpp
+    map/covisibility_index_test.cpp
     events/event_system_test.cpp
     events/wake_signal_test.cpp
     events/worker_thread_test.cpp

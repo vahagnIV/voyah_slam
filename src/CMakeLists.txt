@@ -23,6 +23,7 @@ add_library(voyahslam
     mapping/mapper.cpp
     mapping/map_initializer.cpp
     loop_closing/loop_closer.cpp
+    map/covisibility_index.cpp
     optimization/bundle_adjustment.cpp
     optimization/pose_optimization.cpp
     events/worker_thread.cpp

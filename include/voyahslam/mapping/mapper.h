@@ -10,7 +10,6 @@
 #include <voyahslam/events/key_frame_created.h>
 #include <voyahslam/events/listener.h>
 #include <voyahslam/events/map_created.h>
-#include <voyahslam/events/map_points_added.h>
 #include <voyahslam/events/tracking_lost.h>
 #include <voyahslam/events/worker_thread.h>
 #include <voyahslam/features/measurement.h>
@@ -36,8 +35,8 @@ enum class MapperState : uint8_t {
 
 // Owns the authoritative map and is its only writer: creates keyframes and map
 // points, runs local BA and culling, and performs loop closure. Publishes map
-// diffs; consumes InitializationMeasurement, TrackingLost and
-// NewKeyFrameCandidate (Tracker) and LoopDetected (LoopCloser). Runs on its own
+// diffs; consumes InitializationMeasurement, TrackingLost and FrameTracked
+// (Tracker) and LoopDetected (LoopCloser). Runs on its own
 // thread; each ProcessPending() pass drains the inbox.
 template <typename TFeatureExtractor>
 class Mapper : public events::EventNode {
@@ -80,8 +79,9 @@ private:
     // (monocular) or in the one stereo keyframe, with depth and right index.
     void AddInitialMapPoints(const std::vector<InitialMapPoint>& map_points);
 
-    void PublishMapPointsAdded();
-    void PublishKeyFrameCreated(const TKeyFrame& keyframe);
+    // Publishes the insertion of `keyframe`; with `with_new_points`, every
+    // point of the (fresh) map is new in it.
+    void PublishKeyFrameCreated(const TKeyFrame& keyframe, bool with_new_points);
     void PublishMapCreated(const TKeyFrame& keyframe);
 
     events::Listener inbox_listener_ = inbox_.GetListener();
@@ -104,8 +104,6 @@ private:
     memory::ObjectPool<events::KeyFrameCreated<TFeatureExtractor>, memory::ThreadSafePolicy>
         key_frame_created_pool_{256};
     memory::ObjectPool<events::MapCreated, memory::ThreadSafePolicy> map_created_pool_{256};
-    memory::ObjectPool<events::MapPointsAdded<TFeatureExtractor>, memory::ThreadSafePolicy>
-        map_points_added_pool_{256};
 
     CLASS_LOGGER(Mapper);
 

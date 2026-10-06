@@ -10,10 +10,10 @@
 #include <vector>
 #include <voyahslam/defs.h>
 #include <voyahslam/events/event_node.h>
+#include <voyahslam/events/frame_tracked.h>
 #include <voyahslam/events/initialization_measurement.h>
 #include <voyahslam/events/listener.h>
 #include <voyahslam/events/map_created.h>
-#include <voyahslam/events/position_updated.h>
 #include <voyahslam/events/tracking_lost.h>
 #include <voyahslam/events/worker_thread.h>
 #include <voyahslam/features/measurement.h>
@@ -68,13 +68,13 @@ struct TrackerOptions {
 // Each ProcessPending() pass first applies all pending map diffs, then tracks
 // one measurement, so the replica is never modified while it is being tracked
 // against. Binocular measurements are stereo-matched on dequeue. Publishes
-// InitializationMeasurement, PositionUpdated and TrackingLost; never modifies
+// InitializationMeasurement, FrameTracked and TrackingLost; never modifies
 // map objects.
 //
 // Tracking (ORB-SLAM3 Track without BoW): the motion model (projection search
 // from the last frame at velocity * T_last, pose optimization), else a
 // wide-window search at zero motion, then the local map (every visible replica
-// point) and a final pose optimization. PositionUpdated::frame_id is the
+// point) and a final pose optimization. FrameTracked::reference_frame_id is the
 // keyframe of the current map's MapCreated.
 template <typename TFeatureExtractor>
 class Tracker : public events::EventNode {
@@ -132,6 +132,7 @@ private:
         std::vector<int64_t> matches;
         size_t num_matches = 0;   // before the optimization
         size_t num_inliers = 0;
+        events::TrackingStage stage = events::TrackingStage::MotionModel;
     };
 
     // Applies the consumer rule; returns false if the event is stale.
@@ -145,7 +146,7 @@ private:
     // window x2 below min_motion_matches), then pose optimization.
     std::optional<PoseResult> TrackFromLastFrame(const TMeasurement& measurement,
                                                  const geometry::RigidTransformation& predicted,
-                                                 double window_px, const char* step);
+                                                 double window_px, events::TrackingStage stage);
     std::optional<PoseResult> TrackLocalMap(const TMeasurement& measurement, PoseResult pose);
     // Optimizes `initial_T_cw` against the matches and drops the outliers from
     // them; on an optimization failure every match is dropped.
@@ -155,7 +156,8 @@ private:
     void SetState(TrackerState state);
 
     void PublishInitializationMeasurement(TMeasurement& measurement);
-    void PublishPositionUpdated(double timestamp);
+    // Publishes last_frame_, just tracked as `pose`.
+    void PublishFrameTracked(const PoseResult& pose);
     void PublishTrackingLost(double timestamp);
 
     const TrackerOptions options_;
@@ -176,7 +178,8 @@ private:
     memory::ObjectPool<events::InitializationMeasurement<TFeatureExtractor>,
                        memory::ThreadSafePolicy>
         initialization_measurement_pool_{256};
-    memory::ObjectPool<events::PositionUpdated, memory::ThreadSafePolicy> position_updated_pool_{256};
+    memory::ObjectPool<events::FrameTracked<TFeatureExtractor>, memory::ThreadSafePolicy>
+        frame_tracked_pool_{256};
     memory::ObjectPool<events::TrackingLost, memory::ThreadSafePolicy> tracking_lost_pool_{256};
 
     CLASS_LOGGER(Tracker);

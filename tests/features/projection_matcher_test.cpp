@@ -33,7 +33,6 @@ using voyahslam::test::TestImageFeatures;
 using Measurement = TMonocularMeasurement<TestExtractor>;
 using Descriptor = TestImageFeatures::TDescriptor;
 using TReplica = tracking::MapReplica<TestExtractor>;
-using TAdded = events::MapPointsAdded<TestExtractor>;
 using TKeyFrameCreated = events::KeyFrameCreated<TestExtractor>;
 
 constexpr double kFocal = 500.0;
@@ -122,17 +121,20 @@ struct Point {
     Eigen::Vector3d normal = Eigen::Vector3d::Zero();  // zero: the view direction from the origin
 };
 
+// Adds the points through a KeyFrameCreated whose Frame (no features)
+// observes none of them, so they get no reference.
 void AddPoints(TReplica& out_replica, const std::vector<Point>& points) {
-    memory::ObjectPool<TAdded, memory::ThreadSafePolicy> pool(1);
-    TAdded* event = pool.Create();
+    memory::ObjectPool<TKeyFrameCreated, memory::ThreadSafePolicy> pool(1);
+    TKeyFrameCreated* event = pool.Create();
     event->map_id = {1};
-    event->start_id = {static_cast<uint32_t>(out_replica.num_points())};
-    event->Resize(static_cast<uint32_t>(points.size()));
+    event->frame_id = {1000 + static_cast<uint32_t>(out_replica.num_points())};
+    event->new_points_start_id = {static_cast<uint32_t>(out_replica.num_points())};
+    event->ResizeNewPoints(static_cast<uint32_t>(points.size()));
     for (size_t i = 0; i < points.size(); ++i) {
         const auto col = static_cast<Eigen::Index>(i);
-        event->positions.col(col) = points[i].position;
-        event->descriptors.col(col) = points[i].descriptor;
-        event->normals.col(col) =
+        event->new_positions.col(col) = points[i].position;
+        event->new_descriptors.col(col) = points[i].descriptor;
+        event->new_normals.col(col) =
             points[i].normal.isZero() ? points[i].position.normalized() : points[i].normal;
     }
     out_replica.Apply(*event);
