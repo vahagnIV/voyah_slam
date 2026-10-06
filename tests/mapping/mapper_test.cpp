@@ -6,7 +6,9 @@
 #include <voyahslam/events/observable.h>
 #include <voyahslam/mapping/mapper.h>
 #include <voyahslam/memory/object_pool.h>
+#include <voyahslam/tracking/map_replica.h>
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -46,6 +48,7 @@ struct Published {
     geometry::TPoints3DF normals;
     size_t num_updated = 0;
     size_t num_added_observations = 0;
+    std::vector<events::AddedObservation> added_observations;
     // KeyFrameCreated: the updated points.
     std::vector<map::MapPointId> updated_ids;
     geometry::TPoints3DF updated_positions;
@@ -54,7 +57,8 @@ struct Published {
 };
 
 // Feeds the Mapper's inbox from `tracker_` (stands in for the Tracker) and
-// captures what the Mapper publishes in `capture_`.
+// captures what the Mapper publishes in `capture_`; every captured event is
+// also applied to `replica_`, as the Tracker would.
 class MapperTest : public ::testing::Test {
 protected:
     MapperTest() {
@@ -86,6 +90,7 @@ protected:
     std::vector<Published> TakeCaptured() {
         std::vector<Published> published;
         while (events::Event* event = listener_.GetNextEvent()) {
+            replica_.Apply(*event);
             Published p{event->type, event->map_id, map::FrameId{0}};
             if (event->type == events::EventType::KeyFrameCreated) {
                 const auto* created = static_cast<TKeyFrameCreated*>(event);
@@ -109,6 +114,7 @@ protected:
                 p.normals = created->new_normals.matrix();
                 p.num_updated = created->updated_ids.size();
                 p.num_added_observations = created->added_observations.size();
+                p.added_observations = created->added_observations;
                 p.updated_ids = created->updated_ids;
                 p.updated_positions = created->updated_positions.matrix();
                 p.updated_descriptors = created->updated_descriptors.matrix();
@@ -184,6 +190,7 @@ protected:
     TMapper mapper_;
     events::AsyncObserver capture_;
     events::Listener listener_ = capture_.GetListener();
+    tracking::MapReplica<Extractor> replica_;
 };
 
 TEST_F(MapperTest, StereoInitializesFromOneMeasurement) {
@@ -571,6 +578,23 @@ protected:
             point_of_scene_[static_cast<size_t>(scene)] = second_.observed_points[o].value;
         }
         next_ = second_index + 1;
+        // The map's world is sequence frame 0's camera, scaled by the
+        // initialization.
+        map_scale_ = second_.pose.translation().norm() /
+                     sequence_.frames[second_index].T_cw.translation().norm();
+    }
+
+    // A noise-free sequence: the initial map is then exact up to scale.
+    void UseNoiseFreeSequence() {
+        test::SyntheticSequenceOptions options;
+        options.pixel_noise = 0.0;
+        sequence_ = test::MakeSyntheticSequence(options);
+    }
+
+    // Sequence frame `index`'s true pose in the map (SetUpMonoMap first).
+    geometry::RigidTransformation MapPose(size_t index) const {
+        const geometry::RigidTransformation& T_cw = sequence_.frames[index].T_cw;
+        return geometry::RigidTransformation(T_cw.rotation(), map_scale_ * T_cw.translation());
     }
 
     // The first `count` (feature, map point) pairs of sequence frame `index`.
@@ -602,14 +626,16 @@ protected:
     }
 
     // Sequence frame `index`, tracked in map `map` with `pairs` as its
-    // inliers (num_inliers = pairs.size() unless given), posed at Frame 1.
+    // inliers (num_inliers = pairs.size() unless given), posed at Frame 1
+    // unless `pose` is given.
     void PublishFrameTracked(uint32_t map, size_t index, const std::vector<Pair>& pairs,
                              std::optional<map::FrameId> reference = map::FrameId{1},
-                             std::optional<size_t> num_inliers = std::nullopt) {
+                             std::optional<size_t> num_inliers = std::nullopt,
+                             std::optional<geometry::RigidTransformation> pose = std::nullopt) {
         auto* event = frame_tracked_pool_.Create();
         event->map_id = map::MapId{map};
         event->timestamp = sequence_.frames[index].measurement.timestamp();
-        event->pose = second_.pose;
+        event->pose = pose.value_or(second_.pose);
         event->measurement = sequence_.frames[index].measurement;
         for (const Pair& pair : pairs) {
             event->observed_features.push_back(pair.feature);
@@ -627,10 +653,70 @@ protected:
     size_t num_points_ = 0;
     std::vector<int64_t> point_of_scene_;  // map point id per scene point, -1 if none
     size_t next_ = 0;                      // the first sequence frame after the map's
+    double map_scale_ = 1.0;               // map units per sequence unit
 };
 
 class MapperInboxTest : public MapperFrameTrackedTest {};
-class MapperFrameCreationTest : public MapperFrameTrackedTest {};
+class MapperFrameCreationTest : public MapperFrameTrackedTest {
+protected:
+    // Initializes a stereo map from StereoMeasurement(0.0) and returns its
+    // KeyFrameCreated.
+    Published InitializeStereoMap() {
+        PublishInitializationMeasurement(StereoMeasurement(0.0));
+        Drain();
+        const auto initial = TakeCaptured();
+        EXPECT_EQ(initial.size(), 2u);
+        EXPECT_GE(initial.at(0).observed_points.size(), 100u);
+        return initial.at(0);
+    }
+
+    // `measurement` tracked at `first`'s pose, with `first`'s first `count`
+    // observations as its inliers: weak enough to become a Frame.
+    void PublishStereoFrameTracked(const Published& first, TBinocularMeasurement measurement,
+                                   size_t count) {
+        auto* event = frame_tracked_pool_.Create();
+        event->map_id = map::MapId{1};
+        event->timestamp = measurement.timestamp();
+        event->pose = first.pose;
+        event->measurement = std::move(measurement);
+        event->observed_features.assign(first.observed_features.begin(),
+                                        first.observed_features.begin() + count);
+        event->observed_points.assign(first.observed_points.begin(),
+                                      first.observed_points.begin() + count);
+        event->reference_frame_id = first.frame_id;
+        event->num_matches = event->num_inliers = static_cast<uint32_t>(count);
+        tracker_.Notify(event);
+    }
+
+    // Covisibility of the Mapper and of the replica agree for every Frame.
+    void ExpectReplicaConsistent() {
+        const map::CovisibilityIndex& mapper = mapper_.covisibility();
+        const map::CovisibilityIndex& replica = replica_.covisibility();
+        const std::vector<map::FrameId> frames = replica_.keyframe_ids();
+        ASSERT_EQ(frames.size(), mapper_.num_keyframes());
+        for (const map::FrameId frame : frames) {
+            std::vector<map::MapPointId> expected = mapper.Points(frame);
+            std::vector<map::MapPointId> actual = replica.Points(frame);
+            std::sort(expected.begin(), expected.end());
+            std::sort(actual.begin(), actual.end());
+            EXPECT_EQ(actual, expected) << "Frame " << frame.value;
+            for (const map::MapPointId point : expected) {
+                const auto features = [&](const map::CovisibilityIndex& index) {
+                    std::vector<std::pair<uint32_t, uint32_t>> result;
+                    for (const map::PointObservation& o : index.Observations(point)) {
+                        result.emplace_back(o.frame.value, o.feature);
+                    }
+                    std::sort(result.begin(), result.end());
+                    return result;
+                };
+                EXPECT_EQ(features(replica), features(mapper)) << "point " << point.value;
+            }
+            const size_t max_count = frames.size();
+            EXPECT_EQ(replica.Covisible(frame, max_count), mapper.Covisible(frame, max_count))
+                << "Frame " << frame.value;
+        }
+    }
+};
 
 TEST_F(MapperInboxTest, DrainsToLatest) {
     SetUpMonoMap();
@@ -692,14 +778,16 @@ TEST_F(MapperFrameCreationTest, CreatesFrameWhenWeak) {
     ExpectPublished(created, events::EventType::KeyFrameCreated, 1, second_.frame_id.value + 1);
     EXPECT_EQ(mapper_.num_frame_evaluations(), evaluations + 1);
     EXPECT_EQ(mapper_.num_keyframes(), 3u);
-    EXPECT_EQ(mapper_.num_map_points(), num_points_);
-    EXPECT_EQ(created.count, 0u);
-    EXPECT_EQ(created.num_added_observations, 0u);
+    // Points triangulated against Frame 0 (Frame 1 shares the pose) follow
+    // the tracked observations, each also observed by Frame 0.
+    EXPECT_EQ(mapper_.num_map_points(), num_points_ + created.count);
+    EXPECT_EQ(created.start_id, map::MapPointId{static_cast<uint32_t>(num_points_)});
+    EXPECT_EQ(created.num_added_observations, created.count);
     EXPECT_DOUBLE_EQ(created.timestamp, sequence_.frames[next_].measurement.timestamp());
     EXPECT_TRUE(created.pose.ToMatrix34().isApprox(second_.pose.ToMatrix34()));
 
-    ASSERT_EQ(created.observed_features.size(), pairs.size());
-    ASSERT_EQ(created.observed_points.size(), pairs.size());
+    ASSERT_EQ(created.observed_features.size(), pairs.size() + created.count);
+    ASSERT_EQ(created.observed_points.size(), pairs.size() + created.count);
     ASSERT_EQ(created.updated_ids.size(), pairs.size());
     ASSERT_EQ(created.updated_positions.cols(), static_cast<Eigen::Index>(pairs.size()));
     ASSERT_EQ(created.updated_descriptors.cols(), static_cast<Eigen::Index>(pairs.size()));
@@ -760,6 +848,12 @@ TEST_F(MapperFrameCreationTest, SkipsInvalidAndDuplicatePoints) {
     std::vector<Pair> pairs = valid;
     pairs.insert(pairs.begin() + 1, {extras[0], map::MapPointId{static_cast<uint32_t>(num_points_)}});
     pairs.push_back({extras[1], valid[0].point});  // the same point again
+    // A point the valid pairs leave out, through a feature out of range and
+    // through a feature already paired.
+    const map::MapPointId unused = TrackedPairs(next_, num_points_ / 2 + 1).back().point;
+    const auto num_features = static_cast<uint32_t>(sequence_.frames[next_].point_of_feature.size());
+    pairs.push_back({num_features, unused});
+    pairs.push_back({valid[1].feature, unused});
     PublishFrameTracked(1, next_, pairs);
     Drain();
 
@@ -767,15 +861,16 @@ TEST_F(MapperFrameCreationTest, SkipsInvalidAndDuplicatePoints) {
     ASSERT_EQ(published.size(), 1u);
     const Published& created = published[0];
     ASSERT_EQ(created.type, events::EventType::KeyFrameCreated);
-    ASSERT_EQ(created.observed_points.size(), valid.size());
-    ASSERT_EQ(created.observed_features.size(), valid.size());
+    // The tracked observations come first; new points follow.
+    ASSERT_EQ(created.observed_points.size(), valid.size() + created.count);
+    ASSERT_EQ(created.observed_features.size(), valid.size() + created.count);
     ASSERT_EQ(created.updated_ids.size(), valid.size());
     for (size_t i = 0; i < valid.size(); ++i) {
         EXPECT_EQ(created.observed_features[i], valid[i].feature) << "pair " << i;
         EXPECT_EQ(created.observed_points[i], valid[i].point) << "pair " << i;
         EXPECT_EQ(created.updated_ids[i], valid[i].point) << "pair " << i;
     }
-    EXPECT_EQ(mapper_.num_map_points(), num_points_);
+    EXPECT_EQ(mapper_.num_map_points(), num_points_ + created.count);
 }
 
 TEST_F(MapperFrameCreationTest, RefPointsUsesMinObs) {
@@ -830,13 +925,19 @@ TEST_F(MapperFrameCreationTest, CreatesStereoFrame) {
     const auto published = TakeCaptured();
     ASSERT_EQ(published.size(), 1u);
     ExpectPublished(published[0], events::EventType::KeyFrameCreated, 1, first.frame_id.value + 1);
-    EXPECT_EQ(published[0].observed_points.size(), count);
+    // The tracked observations, then the close points (Frame 0 shares the
+    // pose: nothing is triangulated).
+    EXPECT_GT(published[0].count, 0u);
+    EXPECT_EQ(published[0].num_added_observations, 0u);
+    EXPECT_EQ(published[0].observed_points.size(), count + published[0].count);
     EXPECT_EQ(published[0].updated_ids.size(), count);
     for (size_t i = 0; i < count; ++i) {
+        EXPECT_EQ(published[0].observed_points[i], first.observed_points[i]) << "point " << i;
         EXPECT_EQ(mapper_.covisibility().NumObservations(first.observed_points[i]), 2u)
             << "point " << i;
     }
-    EXPECT_EQ(mapper_.covisibility().Points(published[0].frame_id).size(), count);
+    EXPECT_EQ(mapper_.covisibility().Points(published[0].frame_id).size(),
+              count + published[0].count);
 }
 
 TEST_F(MapperFrameCreationTest, RefPointsCountsStereoObservationsTwice) {
@@ -887,8 +988,285 @@ TEST_F(MapperFrameCreationTest, RefPointsCountsStereoObservationsTwice) {
     const auto published = TakeCaptured();
     ASSERT_EQ(published.size(), 1u);
     ExpectPublished(published[0], events::EventType::KeyFrameCreated, 1, first.frame_id.value + 1);
-    EXPECT_EQ(published[0].observed_points.size(), count);
+    EXPECT_EQ(published[0].observed_points.size(), count + published[0].count);
     EXPECT_EQ(mapper_.num_keyframes(), 2u);
+}
+
+TEST_F(MapperFrameCreationTest, StereoClosePointsFromDepth) {
+    const Published first = InitializeStereoMap();
+    // The same view, noise-free (same seed: same features in the same order).
+    test::SyntheticStereoOptions options;
+    options.pixel_noise = 0.0;
+    options.timestamp = 1.0;
+    const test::SyntheticStereoFrame frame = test::MakeMatchedSyntheticStereoFrame(options);
+    const TBinocularMeasurement& measurement = frame.measurement;
+    const size_t count = 30;
+    PublishStereoFrameTracked(first, measurement, count);
+    Drain();
+
+    const auto published = TakeCaptured();
+    ASSERT_EQ(published.size(), 1u);
+    const Published& created = published[0];
+    ExpectPublished(created, events::EventType::KeyFrameCreated, 1, first.frame_id.value + 1);
+
+    // Expected: the untracked stereo-matched features, every close one and at
+    // least the 100 closest.
+    std::vector<bool> tracked(frame.right_of_left.size(), false);
+    for (size_t i = 0; i < count; ++i) {
+        tracked[first.observed_features[i]] = true;
+    }
+    const double close_depth = KeyFrameOptions{}.close_depth_baselines *
+                               measurement.rig().T_rl.translation().norm();
+    size_t num_matched = 0;
+    size_t num_close = 0;
+    for (size_t f = 0; f < tracked.size(); ++f) {
+        const auto i = static_cast<int>(f);
+        if (tracked[f] || measurement.right_indices()(i) < 0) {
+            continue;
+        }
+        ++num_matched;
+        num_close += measurement.depth(i) < close_depth;
+    }
+    ASSERT_GT(num_close, 0u);
+    ASSERT_GT(num_matched, num_close);
+    const size_t expected = std::max(num_close, std::min<size_t>(100, num_matched));
+    ASSERT_EQ(created.count, expected);
+    EXPECT_EQ(created.start_id, map::MapPointId{static_cast<uint32_t>(first.count)});
+    EXPECT_EQ(created.num_added_observations, 0u);  // Frame 0 is too close: no triangulation
+    EXPECT_EQ(mapper_.num_map_points(), first.count + expected);
+
+    // The Frame observes its tracked points, then each new point once.
+    ASSERT_EQ(created.observed_points.size(), count + expected);
+    const geometry::RigidTransformation T_wc = created.pose.Inverse();
+    const geometry::TVector3DF centre = T_wc.translation();
+    double max_chosen = 0.0;
+    std::vector<bool> chosen(tracked.size(), false);
+    for (size_t k = count; k < created.observed_points.size(); ++k) {
+        const uint32_t feature = created.observed_features[k];
+        const uint32_t i = created.observed_points[k].value - created.start_id.value;
+        ASSERT_EQ(i, k - count) << "observation " << k;
+        ASSERT_FALSE(tracked[feature]) << "observation " << k;
+        ASSERT_GE(measurement.right_indices()(static_cast<int>(feature)), 0) << "observation " << k;
+        ASSERT_GT(frame.depth_of_left[feature], 0.0) << "observation " << k;
+        chosen[feature] = true;
+        max_chosen = std::max(max_chosen, static_cast<double>(measurement.depth(static_cast<int>(feature))));
+        const geometry::TVector3DF truth = T_wc.Transform(geometry::TPoint3DF(frame.points_left.col(feature)));
+        const geometry::TVector3DF position = created.positions.col(i);
+        EXPECT_LT((position - truth).norm(), 1e-9) << "observation " << k;
+        EXPECT_EQ(created.point_descriptors.col(i), created.descriptors.col(feature))
+            << "observation " << k;
+        EXPECT_NEAR(created.normals.col(i).norm(), 1.0, 1e-9) << "observation " << k;
+        EXPECT_GT(created.normals.col(i).dot(position - centre), 0.0) << "observation " << k;
+        // The replica's reference is (new Frame, feature).
+        const auto& reference = replica_.Reference(created.observed_points[k]);
+        ASSERT_TRUE(reference.has_value()) << "observation " << k;
+        EXPECT_EQ(reference->keyframe, created.frame_id) << "observation " << k;
+        EXPECT_EQ(reference->feature, static_cast<Eigen::Index>(feature)) << "observation " << k;
+    }
+    // The closest are chosen.
+    for (size_t f = 0; f < tracked.size(); ++f) {
+        const auto i = static_cast<int>(f);
+        if (!tracked[f] && !chosen[f] && measurement.right_indices()(i) >= 0) {
+            EXPECT_GE(measurement.depth(i), max_chosen) << "feature " << f;
+        }
+    }
+}
+
+TEST_F(MapperFrameCreationTest, StereoWithoutMatchesCreatesNoClosePoints) {
+    const Published first = InitializeStereoMap();
+    // Not stereo-matched: no feature has a depth.
+    test::SyntheticStereoOptions options;
+    options.timestamp = 1.0;
+    TBinocularMeasurement measurement = test::MakeSyntheticStereoFrame(options).measurement;
+    ASSERT_EQ(NumDepths(measurement), 0u);
+    const size_t count = 30;
+    PublishStereoFrameTracked(first, std::move(measurement), count);
+    Drain();
+
+    const auto published = TakeCaptured();
+    ASSERT_EQ(published.size(), 1u);
+    ExpectPublished(published[0], events::EventType::KeyFrameCreated, 1, first.frame_id.value + 1);
+    EXPECT_EQ(published[0].count, 0u);
+    EXPECT_EQ(published[0].num_added_observations, 0u);
+    EXPECT_EQ(published[0].observed_points.size(), count);
+    EXPECT_EQ(mapper_.num_map_points(), first.count);
+}
+
+TEST_F(MapperFrameCreationTest, MonoTriangulatesAgainstNeighbours) {
+    UseNoiseFreeSequence();
+    SetUpMonoMap();
+    const size_t second_index = next_ - 1;
+    // A noise-free initialization maps every scene point, so Frames 0 and 1
+    // leave nothing to triangulate. Frame 2 tracks half of the points; the
+    // third Frame tracks a different half and triangulates, against Frame 2,
+    // the points neither tracks. Frames are 5 sequence frames apart: a 0.25
+    // baseline at depths 4-8, about 4 % parallax.
+    const size_t frame_2 = second_index + 5;
+    const size_t third = second_index + 10;
+    ASSERT_LT(third, sequence_.frames.size());
+    PublishFrameTracked(1, frame_2, TrackedPairs(frame_2, num_points_ / 2), map::FrameId{1},
+                        std::nullopt, MapPose(frame_2));
+    Drain();
+    const auto before = TakeCaptured();
+    ASSERT_EQ(before.size(), 1u);
+    const map::FrameId frame_2_id = before[0].frame_id;
+    const size_t num_points = mapper_.num_map_points();
+
+    // The mapped points the third frame sees, all but the first half.
+    size_t num_visible = 0;
+    for (const Eigen::Index scene : sequence_.frames[third].point_of_feature) {
+        num_visible += scene >= 0 && point_of_scene_[static_cast<size_t>(scene)] >= 0;
+    }
+    std::vector<Pair> pairs = TrackedPairs(third, num_visible);
+    pairs.erase(pairs.begin(), pairs.begin() + static_cast<std::ptrdiff_t>(num_visible / 2));
+    PublishFrameTracked(1, third, pairs, frame_2_id, 20, MapPose(third));
+    Drain();
+
+    const auto published = TakeCaptured();
+    ASSERT_EQ(published.size(), 1u);
+    const Published& created = published[0];
+    ASSERT_GT(created.count, 0u);
+    EXPECT_EQ(created.start_id, map::MapPointId{static_cast<uint32_t>(num_points)});
+    EXPECT_EQ(mapper_.num_map_points(), num_points + created.count);
+    ASSERT_EQ(created.observed_points.size(), pairs.size() + created.count);
+    ASSERT_EQ(created.num_added_observations, created.count);
+
+    // Sequence frame of each existing Frame.
+    const auto sequence_index = [&](map::FrameId frame) -> size_t {
+        return frame == first_.frame_id ? 0 : frame == second_.frame_id ? second_index : frame_2;
+    };
+    const auto& scene_in_third = sequence_.frames[third].point_of_feature;
+    std::vector<int> in_frame(created.count, 0);
+    std::vector<int> in_neighbour(created.count, 0);
+    for (size_t k = pairs.size(); k < created.observed_points.size(); ++k) {
+        const uint32_t i = created.observed_points[k].value - created.start_id.value;
+        ASSERT_LT(i, created.count) << "observation " << k;
+        ++in_frame[i];
+        const Eigen::Index scene = scene_in_third[created.observed_features[k]];
+        ASSERT_GE(scene, 0) << "observation " << k;
+        const geometry::TVector3DF truth = map_scale_ * sequence_.points_w.col(scene);
+        EXPECT_LT((created.positions.col(i) - truth).norm(), 1e-6) << "observation " << k;
+        EXPECT_EQ(created.point_descriptors.col(i), created.descriptors.col(created.observed_features[k]))
+            << "observation " << k;
+        EXPECT_NEAR(created.normals.col(i).norm(), 1.0, 1e-9) << "observation " << k;
+        // The neighbour's half observes the same scene point.
+        for (const events::AddedObservation& added : created.added_observations) {
+            if (added.point == created.observed_points[k]) {
+                ++in_neighbour[i];
+                const auto& scene_in_neighbour =
+                    sequence_.frames[sequence_index(added.frame_id)].point_of_feature;
+                EXPECT_EQ(scene_in_neighbour[added.feature], scene) << "observation " << k;
+                EXPECT_EQ(added.depth, -1.0);
+                EXPECT_EQ(added.right_index, -1);
+            }
+        }
+    }
+    for (uint32_t i = 0; i < created.count; ++i) {
+        EXPECT_EQ(in_frame[i], 1) << "new point " << i;
+        EXPECT_EQ(in_neighbour[i], 1) << "new point " << i;
+    }
+}
+
+TEST_F(MapperFrameCreationTest, ReplicaStaysConsistent) {
+    UseNoiseFreeSequence();
+    SetUpMonoMap();
+    ExpectReplicaConsistent();
+    const size_t second_index = next_ - 1;
+    size_t num_added = 0;
+    // Three more Frames, each weak against Frame 1 (20 inliers).
+    for (size_t index = second_index + 4; index <= second_index + 12; index += 4) {
+        ASSERT_LT(index, sequence_.frames.size());
+        PublishFrameTracked(1, index, TrackedPairs(index, num_points_ / 2), map::FrameId{1}, 20,
+                            MapPose(index));
+        Drain();
+        const auto published = TakeCaptured();
+        ASSERT_EQ(published.size(), 1u) << "frame " << index;
+        num_added += published[0].num_added_observations;
+        ExpectReplicaConsistent();
+        // Every new point's reference is (new Frame, its feature there).
+        for (size_t k = 0; k < published[0].observed_points.size(); ++k) {
+            const map::MapPointId point = published[0].observed_points[k];
+            if (point < published[0].start_id) {
+                continue;
+            }
+            const auto& reference = replica_.Reference(point);
+            ASSERT_TRUE(reference.has_value());
+            EXPECT_EQ(reference->keyframe, published[0].frame_id);
+            EXPECT_EQ(reference->feature, static_cast<Eigen::Index>(published[0].observed_features[k]));
+        }
+    }
+    EXPECT_EQ(mapper_.num_keyframes(), 5u);
+    EXPECT_GT(num_added, 0u);
+}
+
+TEST_F(MapperFrameCreationTest, StereoNeighbourObservationCarriesDepth) {
+    // A stereo sequence moving 0.05 per frame, with enough features to
+    // initialize; the map's world is frame 0's left camera, metric.
+    test::SyntheticStereoSequenceOptions options;
+    options.trajectory.num_points = 600;
+    const test::SyntheticStereoSequence stereo = test::MakeSyntheticStereoSequence(options);
+    const auto matched = [&](size_t index) {
+        TBinocularMeasurement measurement = stereo.frames[index].measurement;
+        measurement.SetStereoMatches(
+            features::MatchStereo<Extractor>(measurement, features::StereoMatcherOptions{}));
+        return measurement;
+    };
+    PublishInitializationMeasurement(matched(0));
+    Drain();
+    const auto initial = TakeCaptured();
+    ASSERT_EQ(initial.size(), 2u);
+    const Published& first = initial[0];
+    std::vector<int64_t> point_of_scene(static_cast<size_t>(stereo.points_w.cols()), -1);
+    for (size_t o = 0; o < first.observed_points.size(); ++o) {
+        const Eigen::Index scene = stereo.frames[0].point_of_feature[first.observed_features[o]];
+        ASSERT_GE(scene, 0);
+        point_of_scene[static_cast<size_t>(scene)] = first.observed_points[o].value;
+    }
+
+    // Two Frames 0.2 apart (> the 0.11 rig baseline), each tracking 30 points.
+    std::vector<TBinocularMeasurement> measurements;
+    std::vector<Published> frames;
+    for (const size_t index : {size_t{4}, size_t{8}}) {
+        measurements.push_back(matched(index));
+        auto* event = frame_tracked_pool_.Create();
+        event->map_id = map::MapId{1};
+        event->timestamp = measurements.back().timestamp();
+        event->pose = stereo.frames[index].T_cw;
+        event->measurement = measurements.back();
+        const auto& scene_of_feature = stereo.frames[index].point_of_feature;
+        for (size_t f = 0; f < scene_of_feature.size() && event->observed_points.size() < 30; ++f) {
+            const Eigen::Index scene = scene_of_feature[f];
+            if (scene >= 0 && point_of_scene[static_cast<size_t>(scene)] >= 0) {
+                event->observed_features.push_back(static_cast<uint32_t>(f));
+                event->observed_points.push_back(
+                    map::MapPointId{static_cast<uint32_t>(point_of_scene[static_cast<size_t>(scene)])});
+            }
+        }
+        event->reference_frame_id = first.frame_id;
+        event->num_matches = event->num_inliers = static_cast<uint32_t>(event->observed_points.size());
+        tracker_.Notify(event);
+        Drain();
+        const auto published = TakeCaptured();
+        ASSERT_EQ(published.size(), 1u) << "frame " << index;
+        frames.push_back(published[0]);
+        ExpectReplicaConsistent();
+    }
+
+    // The second Frame's points triangulated against the first: the first's
+    // stereo-matched features carry their depth and right index.
+    size_t with_depth = 0;
+    for (const events::AddedObservation& added : frames[1].added_observations) {
+        if (added.frame_id != frames[0].frame_id) {
+            continue;
+        }
+        const auto feature = static_cast<int>(added.feature);
+        const int right = measurements[0].right_indices()(feature);
+        EXPECT_EQ(added.right_index, right) << "feature " << feature;
+        EXPECT_EQ(added.depth, right >= 0 ? measurements[0].depth(feature) : -1.0)
+            << "feature " << feature;
+        with_depth += right >= 0;
+    }
+    EXPECT_GT(with_depth, 0u);
 }
 
 } // namespace

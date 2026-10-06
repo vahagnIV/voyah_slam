@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <vector>
 #include <voyahslam/events/event_node.h>
 #include <voyahslam/events/event_types.h>
@@ -46,7 +47,8 @@ enum class MapperState : uint8_t {
 // Owns the authoritative map and is its only writer. Builds the map from the
 // Tracker's InitializationMeasurements; then, per FrameTracked, decides
 // (ShouldCreateFrame) whether the tracked measurement becomes a Frame and
-// creates it with its tracked observations. Each Frame insertion is published
+// creates it with its tracked observations, stereo close points and points
+// triangulated against covisible Frames. Each Frame insertion is published
 // as one KeyFrameCreated (a new map is then announced by MapCreated). A
 // TrackingLost of the current map discards it.
 // LoopDetected is not consumed yet. Runs on its own thread; each
@@ -121,8 +123,41 @@ private:
     [[nodiscard]] KeyFrameSignals MeasureSignals(
         const events::FrameTracked<TFeatureExtractor>& event) const;
     // Inserts `event`'s measurement as a new Frame with its tracked
-    // observations and publishes the insertion.
+    // observations, then new points (stereo close points, then points
+    // triangulated against neighbour Frames), and publishes the insertion.
     void CreateFrame(const events::FrameTracked<TFeatureExtractor>& event);
+    // Stores `frame`'s observation of `point` through its (left) feature
+    // `feature`, a stereo-matched feature of a binocular Frame with its depth
+    // and right index, and indexes it in covisibility_. Returns it as an
+    // AddedObservation.
+    events::AddedObservation AddObservation(const TKeyFrame& frame, uint32_t feature,
+                                            map::MapPointId point);
+    // Adds a point at `position` observed by `keyframe`'s `feature`: that
+    // feature's descriptor, the mean viewing direction from `centres` as its
+    // normal; the observation goes into `out_event`'s Frame part.
+    map::MapPointId AddNewPoint(const geometry::TPoint3DF& position, const TKeyFrame& keyframe,
+                                uint32_t feature, const std::vector<geometry::TPoint3DF>& centres,
+                                events::KeyFrameCreated<TFeatureExtractor>& out_event);
+    // Binocular `keyframe`: a point per untracked stereo-matched feature
+    // closer than the close depth, and at least for the min_close_points
+    // closest, at its stereo back-projection. Marks their features in
+    // `out_has_point`.
+    void AddClosePoints(const TKeyFrame& keyframe, std::vector<bool>& out_has_point,
+                        events::KeyFrameCreated<TFeatureExtractor>& out_event);
+    // Triangulates `keyframe`'s features without a point (`has_point` false)
+    // against its covisible neighbour Frames, skipping a neighbour with too
+    // small a baseline. The neighbour's observation of each new point goes
+    // into `out_event`'s added_observations.
+    void TriangulateWithNeighbours(const TKeyFrame& keyframe, std::vector<bool> has_point,
+                                   events::KeyFrameCreated<TFeatureExtractor>& out_event);
+    // `frame`'s side of a triangulation, with `has_point` per feature.
+    [[nodiscard]] TriangulationView<TFeatureExtractor> ViewOf(const TKeyFrame& frame,
+                                                              std::vector<bool> has_point) const;
+    // Per (left) feature of `frame`: whether it observes a map point.
+    [[nodiscard]] std::vector<bool> FeaturesWithPoints(const TKeyFrame& frame) const;
+    // The median camera-frame depth of `frame`'s alive points; nullopt if it
+    // observes none.
+    [[nodiscard]] std::optional<double> SceneMedianDepth(const TKeyFrame& frame) const;
     // Recomputes the normal and representative descriptor of `points` from all
     // their observations, stores them and writes them, with the unchanged
     // positions, into `out_event`'s updated part.
