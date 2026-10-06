@@ -225,6 +225,21 @@ auto Mapper<TFeatureExtractor>::FindKeyFrame(map::FrameId id) const -> const TKe
 }
 
 template <typename TFeatureExtractor>
+size_t Mapper<TFeatureExtractor>::WeightedObservations(map::MapPointId point) const {
+    size_t count = 0;
+    for (const map::PointObservation& observation : covisibility_.Observations(point)) {
+        const TKeyFrame* keyframe = FindKeyFrame(observation.frame);
+        assert(keyframe != nullptr);
+        const auto* binocular =
+            std::get_if<features::TBinocularMeasurement<TFeatureExtractor>>(&keyframe->measurement());
+        const bool stereo_matched =
+            binocular && binocular->right_indices()(static_cast<int>(observation.feature)) >= 0;
+        count += stereo_matched ? 2 : 1;
+    }
+    return count;
+}
+
+template <typename TFeatureExtractor>
 KeyFrameSignals Mapper<TFeatureExtractor>::MeasureSignals(
     const events::FrameTracked<TFeatureExtractor>& event) const {
     assert(!keyframes_.empty());
@@ -243,7 +258,7 @@ KeyFrameSignals Mapper<TFeatureExtractor>::MeasureSignals(
     const size_t min_observations = keyframes_.size() <= 2 ? 2 : 3;
     for (const map::MapPointId point : covisibility_.Points(reference->id())) {
         if (map_points_.IsValid(point) &&
-            covisibility_.NumObservations(point) >= min_observations) {
+            WeightedObservations(point) >= min_observations) {
             ++signals.ref_points;
         }
     }

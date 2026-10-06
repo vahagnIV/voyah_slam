@@ -113,6 +113,10 @@ private:
 
     // The current map's Frame `id`; nullptr if it is not in the map.
     [[nodiscard]] const TKeyFrame* FindKeyFrame(map::FrameId id) const;
+    // `point`'s observations as ORB-SLAM3 counts them for ref_points: 2 for a
+    // stereo-matched one (right index >= 0), 1 otherwise. Unlike
+    // CovisibilityIndex::NumObservations, which counts Frames.
+    [[nodiscard]] size_t WeightedObservations(map::MapPointId point) const;
     // The inputs to ShouldCreateFrame for `event` (spec section 3.2).
     [[nodiscard]] KeyFrameSignals MeasureSignals(
         const events::FrameTracked<TFeatureExtractor>& event) const;

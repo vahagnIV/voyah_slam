@@ -809,9 +809,9 @@ TEST_F(MapperFrameCreationTest, CreatesStereoFrame) {
     const Published& first = initial[0];
     ASSERT_GE(first.observed_points.size(), 100u);
 
-    // The same view a second later, tracking only 30 of its points:
-    // need_close holds (close_tracked <= 30 < 100, close_untracked > 70).
-    // ref_points is 0 here: a one-Frame map's points have one observation.
+    // The same view a second later, tracking only 30 of its points: weak
+    // (30 < 0.4 * ref_points), and need_close holds too (close_tracked <= 30
+    // < 100, close_untracked > 70).
     const size_t count = 30;
     auto* event = frame_tracked_pool_.Create();
     event->map_id = map::MapId{1};
@@ -837,6 +837,58 @@ TEST_F(MapperFrameCreationTest, CreatesStereoFrame) {
             << "point " << i;
     }
     EXPECT_EQ(mapper_.covisibility().Points(published[0].frame_id).size(), count);
+}
+
+TEST_F(MapperFrameCreationTest, RefPointsCountsStereoObservationsTwice) {
+    const TBinocularMeasurement measurement = StereoMeasurement(0.0);
+    PublishInitializationMeasurement(measurement);
+    Drain();
+    const auto initial = TakeCaptured();
+    ASSERT_EQ(initial.size(), 2u);
+    const Published& first = initial[0];
+    const size_t num_points = first.observed_points.size();
+    ASSERT_GE(num_points, 100u);
+    // Every point of a stereo initialization is stereo-matched: one Frame
+    // observation, counted 2 (>= min_obs 2), so ref_points = num_points.
+    for (const uint32_t feature : first.observed_features) {
+        ASSERT_GE(measurement.right_indices()(static_cast<int>(feature)), 0);
+    }
+
+    // Inliers at 0.3 of ref_points: weak (< ratio_stereo_early 0.4).
+    const size_t count = num_points * 3 / 10;
+    // need_close does not hold (>= 100 tracked close points), so only the
+    // ref_points comparison can create the Frame.
+    const KeyFrameOptions options;
+    const double close_depth =
+        options.close_depth_baselines * measurement.rig().T_rl.translation().norm();
+    size_t close_tracked = 0;
+    for (size_t i = 0; i < count; ++i) {
+        const auto feature = static_cast<int>(first.observed_features[i]);
+        const double depth = measurement.depth(feature);
+        close_tracked += measurement.right_indices()(feature) >= 0 && depth > 0.0 &&
+                         depth < close_depth;
+    }
+    ASSERT_GE(close_tracked, options.close_tracked_max);
+
+    auto* event = frame_tracked_pool_.Create();
+    event->map_id = map::MapId{1};
+    event->timestamp = 0.05;  // well within max_interval: c1b (idle) decides
+    event->pose = first.pose;
+    event->measurement = StereoMeasurement(0.05);
+    event->observed_features.assign(first.observed_features.begin(),
+                                    first.observed_features.begin() + count);
+    event->observed_points.assign(first.observed_points.begin(),
+                                  first.observed_points.begin() + count);
+    event->reference_frame_id = first.frame_id;
+    event->num_matches = event->num_inliers = static_cast<uint32_t>(count);
+    tracker_.Notify(event);
+    Drain();
+
+    const auto published = TakeCaptured();
+    ASSERT_EQ(published.size(), 1u);
+    ExpectPublished(published[0], events::EventType::KeyFrameCreated, 1, first.frame_id.value + 1);
+    EXPECT_EQ(published[0].observed_points.size(), count);
+    EXPECT_EQ(mapper_.num_keyframes(), 2u);
 }
 
 } // namespace
