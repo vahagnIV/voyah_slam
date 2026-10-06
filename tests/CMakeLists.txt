@@ -44,6 +44,7 @@ add_executable(voyahslam_tests
     mapping/map_initializer_test.cpp
     mapping/paired_inliers_test.cpp
     mapping/keyframe_decision_test.cpp
+    mapping/triangulation_test.cpp
     map/point_statistics_test.cpp
     mapping/mapper_test.cpp
     loop_closing/loop_closer_test.cpp
