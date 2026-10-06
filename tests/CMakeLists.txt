@@ -40,6 +40,7 @@ add_executable(voyahslam_tests
     slam/slam_test.cpp
     tracking/tracker_test.cpp
     tracking/map_replica_test.cpp
+    tracking/local_map_test.cpp
     support/synthetic_sequence_test.cpp
     mapping/map_initializer_test.cpp
     mapping/paired_inliers_test.cpp

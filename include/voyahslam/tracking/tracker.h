@@ -12,6 +12,7 @@
 #include <voyahslam/events/event_node.h>
 #include <voyahslam/events/frame_tracked.h>
 #include <voyahslam/events/initialization_measurement.h>
+#include <voyahslam/events/key_frame_created.h>
 #include <voyahslam/events/listener.h>
 #include <voyahslam/events/map_created.h>
 #include <voyahslam/events/tracking_lost.h>
@@ -23,8 +24,10 @@
 #include <voyahslam/logging/logger.h>
 #include <voyahslam/map/frame_id.h>
 #include <voyahslam/map/map_id.h>
+#include <voyahslam/map/map_point_id.h>
 #include <voyahslam/memory/object_pool.h>
 #include <voyahslam/optimization/pose_optimization.h>
+#include <voyahslam/tracking/local_map.h>
 #include <voyahslam/tracking/map_replica.h>
 
 namespace voyahslam::tracking {
@@ -45,6 +48,8 @@ struct TrackingOptions {
     double fallback_window_scale = 4.0; // zero-motion fallback window factor
     double local_map_th = 1.0;          // local-map search window factor
     size_t min_local_map_inliers = 30;
+    size_t local_neighbours = 10;       // K2: top covisible Frames per K1 Frame
+    size_t max_local_frames = 80;       // local-map Frames, K1 first
 };
 
 struct TrackerOptions {
@@ -73,9 +78,15 @@ struct TrackerOptions {
 //
 // Tracking (ORB-SLAM3 Track without BoW): the motion model (projection search
 // from the last frame at velocity * T_last, pose optimization), else a
-// wide-window search at zero motion, then the local map (every visible replica
-// point) and a final pose optimization. FrameTracked::reference_frame_id is the
-// keyframe of the current map's MapCreated.
+// wide-window search at zero motion, then the local map and a final pose
+// optimization. The local map (local_map.h) is built from the covisibility of
+// the Frames observing that step's matches; FrameTracked carries its Frames,
+// the local points passing the projection gate, and the reference Frame (the
+// local Frame observing the most final inliers).
+//
+// A KeyFrameCreated whose measurement is the last tracked one (same
+// timestamp) merges its observations into the last frame's matches, so the
+// next motion-model search uses the Mapper's new points at once.
 template <typename TFeatureExtractor>
 class Tracker : public events::EventNode {
 public:
@@ -133,12 +144,19 @@ private:
         size_t num_matches = 0;   // before the optimization
         size_t num_inliers = 0;
         events::TrackingStage stage = events::TrackingStage::MotionModel;
+        // Local map step.
+        std::vector<map::FrameId> local_frames;
+        std::vector<map::MapPointId> visible_points;
+        std::optional<map::FrameId> reference_frame_id;
     };
 
     // Applies the consumer rule; returns false if the event is stale.
     bool AdoptMapOf(const events::Event& event);
     void ApplyEvent(const events::Event& event);
     void OnMapCreated(const events::MapCreated& created);
+    // Merges the Frame's observations into last_frame_.matches if the Frame is
+    // made of last_frame_'s measurement.
+    void OnKeyFrameCreated(const events::KeyFrameCreated<TFeatureExtractor>& created);
     void ProcessMeasurement(TMeasurement& measurement);
     // Steps 1-3 of the tracking flow; on success T_cw and the inlier matches.
     std::optional<PoseResult> TrackFrame(const TMeasurement& measurement);
@@ -166,7 +184,6 @@ private:
 
     std::atomic<TrackerState> state_{TrackerState::WaitingForMap};
     std::atomic<map::MapId> current_map_id_{map::MapId{0}};
-    map::FrameId map_frame_id_{0};  // keyframe of the current map's MapCreated
 
     // Tracker-thread state.
     MapReplica<TFeatureExtractor> replica_;

@@ -50,6 +50,9 @@ struct Captured {
     events::TrackingStage stage = events::TrackingStage::MotionModel;
     uint32_t num_matches = 0;
     uint32_t num_inliers = 0;
+    std::vector<map::MapPointId> observed_points;
+    std::vector<map::MapPointId> visible_points;
+    std::vector<map::FrameId> local_frames;
 };
 
 size_t FrameIndexOf(double timestamp) {
@@ -120,6 +123,9 @@ protected:
                 c.stage = tracked.stage;
                 c.num_matches = tracked.num_matches;
                 c.num_inliers = tracked.num_inliers;
+                c.observed_points = tracked.observed_points;
+                c.visible_points = tracked.visible_points;
+                c.local_frames = tracked.local_frames;
             } else if (event->type == events::EventType::TrackingLost) {
                 c.timestamp = static_cast<events::TrackingLost*>(event)->timestamp;
             }
@@ -363,6 +369,81 @@ TEST_F(TrackerTest, TracksAndPublishesFrameTracked) {
     ExpectTrackedMetric(captured, sequence.frames[1].T_cw,
                         test::MapAlignment(sequence.frames[0].T_cw), 1);
     EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
+}
+
+TEST_F(TrackerTest, FrameTrackedCarriesLocalMap) {
+    const test::SyntheticSequence sequence = test::MakeSyntheticSequence();
+    size_t k = 0;
+    for (; k < sequence.frames.size() && tracker_.state() != TrackerState::Tracking; ++k) {
+        Feed(sequence.frames[k].measurement);
+    }
+    ASSERT_EQ(tracker_.state(), TrackerState::Tracking);
+    ASSERT_LT(k, sequence.frames.size());
+    std::vector<map::FrameId> frames = tracker_.replica().keyframe_ids();
+    ASSERT_EQ(frames.size(), 2u);
+
+    const auto captured = Feed(sequence.frames[k].measurement);
+
+    ASSERT_EQ(captured.size(), 1u);
+    ASSERT_EQ(captured[0].type, events::EventType::FrameTracked);
+    std::vector<map::FrameId> local_frames = captured[0].local_frames;
+    std::sort(local_frames.begin(), local_frames.end());
+    EXPECT_EQ(local_frames, frames);
+    ASSERT_TRUE(captured[0].has_reference);
+    EXPECT_NE(std::find(frames.begin(), frames.end(), captured[0].frame_id), frames.end());
+    // Each visible point once; every observed point is visible.
+    std::vector<map::MapPointId> visible = captured[0].visible_points;
+    std::sort(visible.begin(), visible.end());
+    EXPECT_EQ(std::adjacent_find(visible.begin(), visible.end()), visible.end());
+    ASSERT_FALSE(captured[0].observed_points.empty());
+    for (const map::MapPointId point : captured[0].observed_points) {
+        EXPECT_TRUE(std::binary_search(visible.begin(), visible.end(), point))
+            << "point " << point.value;
+    }
+}
+
+TEST_F(TrackerTest, MergesOwnFrameObservationsIntoLastFrame) {
+    const auto sequence = StereoSequence();
+    ASSERT_EQ(InitializeStereo(sequence, 0), 0u);
+    ASSERT_EQ(Feed(sequence.frames[1].measurement).size(), 1u);
+    const std::vector<int64_t> before = tracker_.last_matches();
+    // Two unmatched features of the last frame.
+    std::vector<uint32_t> unmatched;
+    for (size_t i = 0; i < before.size() && unmatched.size() < 2; ++i) {
+        if (before[i] < 0) unmatched.push_back(static_cast<uint32_t>(i));
+    }
+    ASSERT_EQ(unmatched.size(), 2u);
+    const auto new_id = static_cast<uint32_t>(tracker_.replica().num_points());
+
+    // A Frame of the last frame's measurement: feature unmatched[0] observes
+    // a new point, unmatched[1] an existing one.
+    memory::ObjectPool<events::KeyFrameCreated<Extractor>, memory::ThreadSafePolicy> pool(2);
+    const auto inject = [&](uint32_t frame, const auto& measurement) {
+        auto* created = pool.Create();
+        created->map_id = map::MapId{1};
+        created->frame_id = map::FrameId{frame};
+        created->pose = sequence.frames[1].T_cw;
+        created->measurement = measurement;
+        created->new_points_start_id = map::MapPointId{new_id};
+        created->ResizeNewPoints(1);
+        created->new_positions.col(0) = geometry::TPoint3DF(0, 0, 5);
+        created->new_descriptors.col(0).setZero();
+        created->new_normals.col(0) = geometry::TPoint3DF(0, 0, 1);
+        created->observed_features = unmatched;
+        created->observed_points = {map::MapPointId{new_id}, map::MapPointId{0}};
+        injector_.Notify(created);
+        Drain();
+    };
+
+    // Another measurement's Frame: not merged.
+    inject(900, sequence.frames[2].measurement);
+    EXPECT_EQ(tracker_.last_matches(), before);
+
+    inject(901, sequence.frames[1].measurement);
+    std::vector<int64_t> expected = before;
+    expected[unmatched[0]] = new_id;
+    expected[unmatched[1]] = 0;
+    EXPECT_EQ(tracker_.last_matches(), expected);
 }
 
 TEST_F(TrackerMonoAccuracyTest, TracksSyntheticMono) {

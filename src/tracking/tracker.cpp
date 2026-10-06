@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <utility>
 #include <variant>
@@ -128,6 +129,8 @@ void Tracker<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
     replica_.Apply(event);
     if (event.type == events::EventType::MapCreated) {
         OnMapCreated(static_cast<const events::MapCreated&>(event));
+    } else if (event.type == events::EventType::KeyFrameCreated) {
+        OnKeyFrameCreated(static_cast<const events::KeyFrameCreated<TFeatureExtractor>&>(event));
     }
 }
 
@@ -136,7 +139,6 @@ void Tracker<TFeatureExtractor>::OnMapCreated(const events::MapCreated& created)
     if (state() == TrackerState::Tracking) {
         return;  // duplicate
     }
-    map_frame_id_ = created.frame_id;
     // The keyframe (published before MapCreated) is the last frame; its
     // observations are its matches.
     last_frame_ = {};
@@ -160,6 +162,22 @@ void Tracker<TFeatureExtractor>::OnMapCreated(const events::MapCreated& created)
     velocity_.reset();
     tracked_frames_ = 0;
     SetState(TrackerState::Tracking);
+}
+
+template <typename TFeatureExtractor>
+void Tracker<TFeatureExtractor>::OnKeyFrameCreated(
+    const events::KeyFrameCreated<TFeatureExtractor>& created) {
+    if (last_frame_.matches.empty() ||
+        TimestampOf(created.measurement) != TimestampOf(last_frame_.measurement)) {
+        return;
+    }
+    const size_t num = std::min(created.observed_features.size(), created.observed_points.size());
+    for (size_t i = 0; i < num; ++i) {
+        const uint32_t feature = created.observed_features[i];
+        if (feature < last_frame_.matches.size()) {
+            last_frame_.matches[feature] = static_cast<int64_t>(created.observed_points[i].value);
+        }
+    }
 }
 
 template <typename TFeatureExtractor>
@@ -261,18 +279,26 @@ auto Tracker<TFeatureExtractor>::TrackFromLastFrame(const TMeasurement& measurem
 template <typename TFeatureExtractor>
 auto Tracker<TFeatureExtractor>::TrackLocalMap(const TMeasurement& measurement, PoseResult pose)
     -> std::optional<PoseResult> {
+    const TrackingOptions& tracking = options_.tracking;
+    LocalMap local = BuildLocalMap(replica_, pose.matches, tracking.local_neighbours,
+                                   tracking.max_local_frames);
+    std::vector<map::MapPointId> visible;
     const size_t added = features::SearchFromLocalMap<TFeatureExtractor>(
-        LeftOf<TFeatureExtractor>(measurement), pose.T_cw, replica_, pose.matches,
-        options_.tracking.local_map_th, options_.matcher);
+        LeftOf<TFeatureExtractor>(measurement), pose.T_cw,
+        LocalPointSource<TFeatureExtractor>(replica_, local), pose.matches, tracking.local_map_th,
+        options_.matcher, &visible);
     PoseResult result = OptimizeAndDropOutliers(measurement, pose.T_cw, std::move(pose.matches));
-    if (result.num_inliers < options_.tracking.min_local_map_inliers) {
+    if (result.num_inliers < tracking.min_local_map_inliers) {
         log_->debug("local map failed: {} matches ({} new), {} inliers (< {})", result.num_matches,
-                    added, result.num_inliers, options_.tracking.min_local_map_inliers);
+                    added, result.num_inliers, tracking.min_local_map_inliers);
         return std::nullopt;
     }
     log_->debug("local map: {} matches ({} new), {} inliers", result.num_matches, added,
                 result.num_inliers);
     result.stage = events::TrackingStage::LocalMap;
+    result.local_frames = std::move(local.frames);
+    result.visible_points = std::move(visible);
+    result.reference_frame_id = ReferenceFrame(replica_, result.matches);
     return result;
 }
 
@@ -360,9 +386,9 @@ void Tracker<TFeatureExtractor>::PublishFrameTracked(const PoseResult& pose) {
             event->observed_points.push_back(map::MapPointId{static_cast<uint32_t>(point)});
         }
     }
-    // Until the Tracker builds a local map from the covisibility: the map's
-    // keyframe as the reference, no visible points or local Frames.
-    event->reference_frame_id = map_frame_id_;
+    event->visible_points = pose.visible_points;
+    event->reference_frame_id = pose.reference_frame_id;
+    event->local_frames = pose.local_frames;
     event->stage = pose.stage;
     event->num_matches = static_cast<uint32_t>(pose.num_matches);
     event->num_inliers = static_cast<uint32_t>(pose.num_inliers);

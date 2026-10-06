@@ -166,11 +166,16 @@ template <typename TFeatureExtractor, typename TPointSource>
 // th * (cos > 0.998 ? 2.5 : 4.0) * level_scale^l over levels [l - 1, l].
 // The best match is accepted at <= max_distance_map if the second best is on
 // another level or best < nn_ratio_map * second. Returns the number added.
+// If given, out_visible gets appended, in id order and once each, the alive
+// points already in out_matches (as ORB-SLAM3 SearchLocalPoints, not
+// re-projected) and the points with a reference that pass the visibility test
+// above, matched or not. No predicted-scale (distance) bound is applied.
 template <typename TFeatureExtractor, typename TPointSource>
 size_t SearchFromLocalMap(const TMonocularMeasurement<TFeatureExtractor>& current,
                           const geometry::RigidTransformation& T_cw, const TPointSource& points,
                           std::vector<int64_t>& out_matches, double th,
-                          const ProjectionMatcherOptions& options) {
+                          const ProjectionMatcherOptions& options,
+                          std::vector<map::MapPointId>* out_visible = nullptr) {
     const Eigen::Index num_current = current.points().cols();
     assert(static_cast<Eigen::Index>(out_matches.size()) == num_current);
     const size_t num_points = points.num_points();
@@ -190,7 +195,13 @@ size_t SearchFromLocalMap(const TMonocularMeasurement<TFeatureExtractor>& curren
     size_t added = 0;
     for (size_t p = 0; p < num_points; ++p) {
         const map::MapPointId id{static_cast<uint32_t>(p)};
-        if (already_matched[p] || !points.IsAlive(id)) {
+        if (!points.IsAlive(id)) {
+            continue;
+        }
+        if (already_matched[p]) {
+            if (out_visible) {
+                out_visible->push_back(id);
+            }
             continue;
         }
         const auto& reference = points.Reference(id);
@@ -208,6 +219,9 @@ size_t SearchFromLocalMap(const TMonocularMeasurement<TFeatureExtractor>& curren
         const double view_cos = view.dot(normal) / (distance * normal.norm());
         if (!(view_cos > 0.5)) {
             continue;
+        }
+        if (out_visible) {
+            out_visible->push_back(id);
         }
         const int level = std::clamp(
             reference->level +
