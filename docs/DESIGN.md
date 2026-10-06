@@ -75,14 +75,14 @@ keyframes of different types share the map is still open (Open Question 17).
 ## 4. Threads and Responsibilities
 
 ```
-            NewKeyFrameCandidate                LoopDetected
+               FrameTracked                     LoopDetected
  Tracker ───────────────────────────► Mapper ◄────────────── LoopCloser
     ▲                                   │                        ▲
     │      map diff events              │   map diff events      │
     └───────────────────────────────────┴────────────────────────┘
                                         │
-                                        ▼   map diffs, PositionUpdated (from Tracker)
-                                   Visualizer (future)
+                                        ▼   map diffs, FrameTracked (from Tracker)
+                                   Visualizer (MapViewer)
 ```
 
 ### Slam (orchestrator) and EventNode
@@ -150,7 +150,7 @@ stub was deleted on 2026-10-05.
   measurement: in `WaitingForMap`/`Lost` publish it as
   `InitializationMeasurement` (`map_id` 0); in `Tracking` run the frame-to-map
   tracking described in "Tracking Against the Map" — success publishes
-  `PositionUpdated`, failure moves to `Lost` and then publishes
+  `FrameTracked`, failure moves to `Lost` and then publishes
   `TrackingLost(current map)`. `Lost` currently behaves like `WaitingForMap`
   (relocalization will live there; deferred, TODO).
 - Runs its **own thread with two input queues**:
@@ -165,7 +165,7 @@ stub was deleted on 2026-10-05.
   while running:
       apply ALL pending map diffs from inbox()     // replica is now current
       take a measurement (see Open Question 19)
-      track it; publish PositionUpdated (+ NewKeyFrameCandidate)
+      track it; publish FrameTracked
   ```
   Diffs and tracking run on the same thread, so the replica never changes while
   being tracked against — no locks. Two queues rather than one: map diffs get
@@ -178,14 +178,17 @@ stub was deleted on 2026-10-05.
 - Tracks against **its own** map replica.
 - Optimizes **only its own camera pose** relative to the map (motion-only BA).
   Never touches `Frame`s, map points, or observations.
-- Publishes `PositionUpdated` (frame id, pose, timestamp) for each tracked frame.
-- Decides when a keyframe *might* be needed and publishes
-  `NewKeyFrameCandidate` (features, pose, and the tracked
-  `(map_point_id, feature_idx)` associations). The Mapper makes the final decision.
+- Publishes `FrameTracked` for each tracked measurement: pose, the measurement
+  copy, the inlier `(feature, map point)` pairs, the visible local-map points,
+  the reference Frame, the local Frames, the stage and the match / inlier
+  counts (§6). It does **not** decide on keyframes: the Mapper decides from
+  `FrameTracked` (see "Keyframes and Map Growth").
 - Its replica only changes when Mapper diff events arrive. Between publishing a
-  candidate and receiving the resulting diffs it simply keeps tracking with the
-  map it has. This lag is accepted (ORB-SLAM3 behaves similarly while
-  LocalMapping processes a keyframe).
+  `FrameTracked` and receiving the resulting `KeyFrameCreated` it simply keeps
+  tracking with the map it has. This lag is accepted (ORB-SLAM3 behaves
+  similarly while LocalMapping processes a keyframe); the next `KeyFrameCreated`
+  for the last tracked measurement is merged into `last_frame_` at once (fast
+  pickup).
 - Any temporary helper points the Tracker uses (e.g. ORB-SLAM3's stereo "temporal
   points" for the last frame) are Tracker-private and never part of the map.
 
@@ -199,18 +202,21 @@ stub was deleted on 2026-10-05.
   (reference + a later frame), stereo one measurement. On success the Mapper
   creates a `Frame` per initial keyframe (ids from a monotonic counter, never
   reused across maps), takes `current_map_id_ = next_map_id_++`, moves to
-  `Mapping`, then publishes `MapPointsAdded` first (monocular only), then
-  `KeyFrameCreated` for each keyframe and then
+  `Mapping`, then publishes one `KeyFrameCreated` per initial keyframe (mono:
+  the first carries every initial point, stereo: one event) and then
   `MapCreated(map_id, frame id, pose)`; the Tracker switches to `Tracking` on
   `MapCreated`. `InitializationMeasurement` is ignored while `Mapping`.
   `TrackingLost` for the current map (in `Mapping`) clears keyframes and the
   map-point and observation storage, resets
   the initializer and returns to `Initializing`, so the next success starts
   map n+1 (relocalization / multi-map later). A stale `TrackingLost` is ignored.
-  `NewKeyFrameCandidate` / `LoopDetected` are only acknowledged for now.
-- Consumes `NewKeyFrameCandidate`: accepts/rejects, creates the `Frame`, records
-  observations, triangulates new map points, local BA, map point culling and
-  fusion, keyframe culling.
+  `LoopDetected` is only acknowledged for now.
+- Consumes `FrameTracked` (current map, `Mapping` only): drains to the latest
+  per map, decides with `ShouldCreateFrame` whether the measurement becomes a
+  Frame, and creates it — tracked observations, stereo close points,
+  triangulation against covisible neighbour Frames — published as **one**
+  `KeyFrameCreated` (see "Keyframes and Map Growth"). Local BA, point fusion
+  and culling of points and Frames follow in sub-project 3.
 - Consumes `LoopDetected`: performs the **entire** loop closure — validation,
   Sim3/SE3 correction, map point fusion, essential graph optimization, global BA.
 - Publishes diff events after every change (see §6).
@@ -253,7 +259,7 @@ Detailed spec: `docs/superpowers/specs/2026-09-30-core-slam-data-structures-desi
 | `StereoRig` | `features/stereo_rig.h` | K left/right, `T_rl` (left → right: `p_r = T_rl p_l`), baseline, distortion models. |
 | `BinocularMeasurement<T, L>` | `features/binocular_measurement.h` | Left/right `MonocularMeasurement`, copy of its `StereoRig`, stereo matches (`SetStereoMatches`; per-feature depth, right index); `timestamp()` = left's. |
 | `Event`, `EventType` | `events/event_types.h` | Base event: type tag + `recycle_` / `set_ref_count_` fn pointers. |
-| concrete events | `events/<event_name>.h` | One header per event (e.g. `events/map_points_added.h`); `events/events.h` includes all. See §6. |
+| concrete events | `events/<event_name>.h` | One header per event (e.g. `events/key_frame_created.h`); `events/events.h` includes all. See §6. |
 | `Observable` | `events/observable.h` | Sync handlers (inline, fn ptr + ctx) run first, then async enqueue with ref count = #async queues. |
 | `AsyncObserver` | `events/async_observer.h` | One queue per observer (1:1 channel). |
 | `Listener` | `events/listener.h` | Iterates a queue; auto-recycles previous/last event; move-only. |
@@ -267,12 +273,10 @@ The distortion models now live in `geometry/distortion_models/` (moved from
 
 | Event | Producer → Consumer | Payload |
 |---|---|---|
-| `NewKeyFrameCandidate<FE>` | Tracker → Mapper | frame_id, pose, measurement (`features::TMeasurement<FE>`), observations `(map_point_id, feature_idx)` (TODO) |
-| `PositionUpdated` | Tracker → Visualizer/others | frame_id, pose, timestamp |
-| `MapPointsAdded<FE>` | Mapper → all | start_id, positions, descriptors, normals (`Resize(n)`, `count()`) |
-| `MapPointsUpdated<FE>` | Mapper → all | ids, positions, descriptors, normals (`Resize(n)`, `count()`) |
-| `MapPointsRemoved` | Mapper → all | ids |
-| `KeyFrameCreated<FE>` | Mapper → all | frame_id, pose (`T_cw`), measurement (`features::TMeasurement<FE>`), observations as parallel vectors `observed_features[i]` -> `observed_points[i]` (map point of `map_id`) |
+| `FrameTracked<FE>` | Tracker → Mapper, viewer | every tracked measurement: timestamp, pose (`T_cw` after `OptimizePose`), measurement copy (binocular: stereo-matched), inlier pairs `observed_features[i]` -> `observed_points[i]`, `visible_points` (local points passing the projection gate, matched ones included), `reference_frame_id` (optional), `local_frames`, `stage` (`MotionModel` / `ZeroMotion` / `LocalMap`), `num_matches`, `num_inliers` |
+| `KeyFrameCreated<FE>` | Mapper → all | **one Frame insertion as one transaction**: the Frame (frame_id, pose `T_cw`, measurement, its observations `observed_features[i]` -> `observed_points[i]`); new points (`new_points_start_id`, contiguous ids, `new_positions` / `new_descriptors` / `new_normals`); `added_observations` on existing Frames (`frame_id`, feature, point; stereo Frames also depth and right index, -1 when absent); updated points (`updated_ids`, positions, descriptors, normals). Used by initialization too |
+| `MapPointsUpdated<FE>` | Mapper → all | ids, positions, descriptors, normals (`Resize(n)`, `count()`); changes that create no Frame (sub-project 3) |
+| `MapPointsRemoved` | Mapper → all | ids (sub-project 3) |
 | `KeyFramePoseUpdated` | Mapper → all | frame_id, pose |
 | `LoopDetected` | LoopCloser → Mapper | query/match frames + verification data (TBD) |
 | `InitializationMeasurement<FE>` | Tracker → Mapper (+ other Tracker observers) | `features::TMeasurement<FE>` (`map_id` 0) |
@@ -285,8 +289,12 @@ Rules:
 - Consumers never call `Recycle()` — the `Listener` does.
 - Per channel delivery is FIFO, so a replica applying diffs in order always ends
   up identical to the Mapper's map as of the last applied event.
-- Because IDs are never reused, `MapPointsAdded` allocates a contiguous id range
-  `[start_id, start_id + count)` and every replica stores point `i` at the same slot.
+- Because IDs are never reused, a `KeyFrameCreated` allocates its new points a
+  contiguous id range `[new_points_start_id, new_points_start_id + count)` and
+  every replica stores point `i` at the same slot.
+- **Atomic application:** a consumer applies a `KeyFrameCreated` in one step,
+  in the order new points, updated points, observations on existing Frames,
+  the Frame — the Tracker never tracks against a half-applied insertion.
 - **Pointer rule:** an event may point only at data that never changes and lives
   for the whole run (calibration and configuration, e.g. a `DistortionModel` or
   `StereoRig`). Measurements and every `geometry::Camera` copy hold the
@@ -298,23 +306,23 @@ Rules:
 - **Measurement variant (resolves OQ 24).** `features/measurement.h` defines
   `TMonocularMeasurement<FE>`, `TBinocularMeasurement<FE>` and
   `TMeasurement<FE> = std::variant<mono, binocular>`. `KeyFrameCreated`,
-  `NewKeyFrameCandidate` and `InitializationMeasurement` hold a
+  `FrameTracked` and `InitializationMeasurement` hold a
   `TMeasurement<FE>`, so mono and stereo share one event type each.
 - **`map_id`.** `map::MapId` (`map/map_id.h`, strong `uint32_t`; ids start at
   1, only increase, `MapId{0}` = not tied to a map). `Event` has a public
   `map_id` field that **producers must set on every publish** (pooled events
   are reused without reset). It is the map the Mapper is building (diffs,
-  `MapCreated`), the map the Tracker tracks against (`NewKeyFrameCandidate`,
-  `PositionUpdated`, `TrackingLost`) or 0 (`InitializationMeasurement`).
+  `MapCreated`), the map the Tracker tracks against (`FrameTracked`,
+  `TrackingLost`) or 0 (`InitializationMeasurement`).
   **Consumer rule** (`map_id == 0` exempt): `< current` -> stale, acknowledge
   and ignore; `> current` -> first event of a newer map: reset the replica,
-  adopt `current = map_id`, apply (the initial map's `MapPointsAdded` and
-  `KeyFrameCreated` events arrive *before* its `MapCreated`, so they must not be dropped); `== current`
+  adopt `current = map_id`, apply (the initial map's `KeyFrameCreated`
+  events arrive *before* its `MapCreated`, so they must not be dropped); `== current`
   -> apply. The Mapper builds map n+1 only after `TrackingLost(n)`, so a newer
   map never appears while the Tracker tracks an older one.
 - **No subscription filtering:** an `Observable` delivers every event to every
-  connected observer (the viewer also receives `NewKeyFrameCandidate` and just
-  acknowledges it). A future serializing observer chooses what to send.
+  connected observer (the viewer also receives `InitializationMeasurement` and
+  just counts it). A future serializing observer chooses what to send.
 
 ### 6.1 Event Lifecycle: Pooled, Reference-Counted, Acknowledged
 
@@ -411,16 +419,16 @@ pointer returned by `GetNextEvent()` is a **borrow**, valid until the next
    (back-pressure) and `Create()` where it indicates a bug.
 5. A created event may be a reused one. Events with a `Reset()` come back
    cleared (counts 0, ids empty, capacity kept). Events **without** `Reset()`
-   (`PositionUpdated`, `KeyFramePoseUpdated`, `KeyFrameCreated`,
-   `NewKeyFrameCandidate`, `LoopDetected`) still hold the previous values: the
-   producer must set every field.
+   (`KeyFramePoseUpdated`, `LoopDetected`, `MapCreated`, `TrackingLost`,
+   `InitializationMeasurement`) still hold the previous values: the producer
+   must set every field. `FrameTracked` and `KeyFrameCreated` have `Reset()`.
 6. Fill batched payloads with `e->Resize(n)` and then write into
    `e->positions.matrix()` / `.col(i)` etc. — never assign a freshly built
    `Eigen::Matrix` to a buffer's storage, that would throw away the reuse.
 
 **Adding a new event type:** inherit `Event` and
 `memory::Recyclable<Self, memory::ThreadSafePolicy>`, wire `recycle_` /
-`set_ref_count_` in the constructor (see e.g. `events/map_points_added.h`), make it default
+`set_ref_count_` in the constructor (see e.g. `events/frame_tracked.h`), make it default
 constructible, store variable-size payloads in `ColumnBuffer`s / `std::vector`s,
 and give it `Reset()` if it has any. Put it in its own header
 `events/<snake_case_name>.h`, add the `EventType` value, and add it to
@@ -500,10 +508,10 @@ Spec: `docs/superpowers/specs/2026-10-03-map-viewer-design.md`.
 
 | Header | Contents |
 |---|---|
-| `scene_state.h` | `SceneState<FE>`: `Apply(const Event&)`, per-`EventType` counters, and the decoded scene: map points (dense, indexed by per-map point id), keyframe poses (`T_cw`), current camera pose, trajectory. Built only from events; no threads/GUI |
+| `scene_state.h` | `SceneState<FE>`: `Apply(const Event&)`, per-`EventType` counters, and the decoded scene: map points (dense, indexed by per-map point id), keyframe poses (`T_cw`), current camera pose, trajectory, and from the latest `FrameTracked` the tracked and visible point ids and the local Frames. Built only from events; no threads/GUI |
 | `camera_frustum.h` | Camera frustum geometry helper (corner points of a frustum of a given size) |
 | `map_viewer.h` | `MapViewer<FE>(MapViewerOptions{fps, show_window, width, height, camera_size})`: one `AsyncObserver` inbox, `Start()` / `Stop()` / `RunOnCurrentThread()` / `RequestStop()`, `inbox()`, `events_processed()`, `window_closed()`, `WaitForWindowClose()` |
-| `pangolin_renderer.h` (private, `src/`) | Pangolin window: points, keyframe frustums (blue), current camera (green), trajectory, control panel (toggles, map id, counts, status) |
+| `pangolin_renderer.h` (private, `src/`) | Pangolin window: points (tracked green, visible blue, others grey), keyframe frustums (local-map Frames orange, others blue), current camera (green, red when lost), trajectory, control panel (toggles, map id, counts, status) |
 
 Specs: `docs/superpowers/specs/2026-10-04-pangolin-viewer-design.md`
 (Pangolin viewer), `docs/superpowers/specs/2026-10-03-map-viewer-design.md`.
@@ -831,9 +839,11 @@ Verified on synthetic sequences; the app smoke run is recorded in `docs/TODO.md`
    unsuccessful adjustment, fail the attempt (reference kept, like any failure).
 5. **Scaling:** positions and the translation of `T_21` are divided by the median
    depth of the surviving points in camera 1, so the median depth is 1.
-6. **Publication order** (the Mapper sets state and map id first): one
-   `MapPointsAdded` (`start_id` 0) -> `KeyFrameCreated` per keyframe (with
-   observations) -> `MapCreated`. Replicas therefore have the points before the
+6. **Publication order** (the Mapper sets state and map id first): a
+   `KeyFrameCreated` for keyframe 1 carrying every initial point (ids from 0)
+   and keyframe 1's observations, a `KeyFrameCreated` for keyframe 2 with its
+   observations, then `MapCreated` (since 2026-10-06; before, a separate
+   `MapPointsAdded` came first). Replicas therefore have the points before the
    keyframes that observe them.
 
 **Conventions.** Keyframe/frame poses are `T_cw` (world -> camera,
@@ -882,9 +892,9 @@ Verified on synthetic stereo frames and a TUM-VI smoke run (see `docs/TODO.md`).
    result is **one** keyframe with an identity `T_cw`.
    `InitialMapPoint::feature_in_second == -1` is the sentinel for maps with a
    single keyframe. A binocular measurement drops any mono reference.
-5. The Mapper publishes the usual `MapPointsAdded` -> `KeyFrameCreated` ->
-   `MapCreated`. Point descriptors come from the left image; the normal is the
-   viewing direction of the single keyframe.
+5. The Mapper publishes one `KeyFrameCreated` (the keyframe with every
+   initial point) -> `MapCreated`. Point descriptors come from the left image;
+   the normal is the viewing direction of the single keyframe.
 
 **`StereoRig::T_rl`.** A `RigidTransformation` mapping left-camera coordinates
 to right-camera coordinates (`p_r = T_rl p_l`); `baseline = ‖T_rl.translation()‖`.
@@ -909,8 +919,9 @@ initialized on the first frame with 355 points; median point depth 1.96 m
 ## Tracking Against the Map (Tracker, `MapReplica`, `ProjectionMatcher`, `OptimizePose`)
 
 Spec: `docs/superpowers/specs/2026-10-05-tracking-design.md` (sub-project 1 of
-4; keyframe creation / map growth, local BA and culling, relocalization are
-sub-projects 2-4, deferred; the user has their own designs for them).
+4; keyframe creation / map growth is sub-project 2, see "Keyframes and Map
+Growth"; local BA and culling, relocalization are sub-projects 3-4, deferred;
+the user has their own designs for them).
 
 **Replica.** `tracking::MapReplica<FE>` (`tracking/map_replica.h`) is the
 Tracker's private copy of the map, touched only on the Tracker thread and fed
@@ -928,15 +939,15 @@ level, distance to the camera centre). It does not count events (decision R).
 2. **Zero-motion fallback** when step 1 failed or there is no velocity: same
    with the predicted pose = `T_last` and the window x4 (the BoW-less stand-in
    for ORB-SLAM3's `TrackReferenceKeyFrame`; see limitation below).
-3. **Local map**: `SearchFromLocalMap` over every alive, unmatched, visible
-   point (`th` = 1), then `OptimizePose` on all matches; success needs >= 30
-   inliers.
-4. **Success**: `PositionUpdated` (frame id stays the `MapCreated` keyframe id),
-   `velocity_ = T_cur * T_last^-1`, `last_frame_` = this frame with its inlier
-   matches; info log at most 1 Hz ("Tracking: frame N, M inliers"), debug log
-   per step. **Failure**: `TrackingLost`; the debug log names the step and counts.
-No `NewKeyFrameCandidate` yet, so the map never grows during Tracking
-(sub-project 2): the local map is the initialization map.
+3. **Local map** (since 2026-10-06 built from covisibility, see "Keyframes and
+   Map Growth"): `SearchFromLocalMap` over the alive, unmatched, visible points
+   of the local Frames (`th` = 1), then `OptimizePose` on all matches; success
+   needs >= 30 inliers.
+4. **Success**: `FrameTracked` (pose, inlier pairs, visible points, reference
+   Frame, local Frames, stage, counts), `velocity_ = T_cur * T_last^-1`,
+   `last_frame_` = this frame with its inlier matches; info log at most 1 Hz
+   ("Tracking: frame N, M inliers"), debug log per step. **Failure**:
+   `TrackingLost`; the debug log names the step and counts.
 
 **Thresholds** (`TrackingOptions`): window 15 px mono / 7 px stereo; motion
 model needs 20 matches (else x2 retry) and 10 inliers; zero-motion window x4;
@@ -983,7 +994,156 @@ After the camera-model change (raw-pixel residuals, 2026-10-06 smoke run; see
 "Camera Model and Raw-Pixel Residuals"): binocular still tracks the whole run
 (median 232 inliers); monocular tracks 82 frames in 400 with 18
 re-initializations (19 maps, 62-109 points each, median 41 local-map inliers).
-Maps are still short-lived for the same reason (no map growth).
+Maps are still short-lived for the same reason (no map growth). Map growth
+arrived with sub-project 2: see "Keyframes and Map Growth" for its smoke run.
+
+## Keyframes and Map Growth (sub-project 2: Mapper decides, `KeyFrameCreated` transaction, covisibility local map)
+
+Spec: `docs/superpowers/specs/2026-10-06-keyframes-design.md` (amended in
+place for rulings F, G, H). A `Frame` is what ORB-SLAM3 calls a KeyFrame;
+event names keep "KeyFrame".
+
+**Who decides: the Mapper.** The Tracker publishes `FrameTracked` for every
+tracked measurement (§6) and decides nothing about keyframes;
+`NewKeyFrameCandidate` and `PositionUpdated` are deleted. The Mapper, the only
+map writer, has the authoritative observation counts, its own backlog and the
+Frames the Tracker's replica has not received yet, so it decides.
+
+**Mapper inbox.** `FrameTracked` is considered only in `Mapping` and only for
+the current map. *Drain to latest:* a `FrameTracked` is skipped when a newer
+`FrameTracked` **or a `TrackingLost`** of the same map follows it in the
+drained batch (ruling I); all other events keep their order. *Backlog* = the
+`FrameTracked` events skipped since the last evaluated one; 0 means idle.
+
+**Signals and rule** (`mapping/keyframe_decision.h`, pure
+`ShouldCreateFrame(KeyFrameSignals, KeyFrameOptions)`):
+
+| Signal | Definition |
+|---|---|
+| `ref_points` | points of the reference Frame (in the Mapper's map) with >= `min_obs` observations, `min_obs` = 2 while the map has <= 2 Frames, else 3; **a stereo-matched observation counts 2** (ruling H, ORB-SLAM3 `AddObservation`) |
+| `since_last` | timestamp − the last Frame's timestamp |
+| `inliers` | `num_inliers` |
+| `close_tracked` / `close_untracked` | stereo: stereo-matched left features with depth < 40 baselines, inside / outside the inlier pairs |
+| `need_close` | stereo: `close_tracked < 100 && close_untracked > 70` |
+
+```
+c1a = since_last >= max_interval (1 s)       c1b = backlog == 0
+c1c = stereo && (inliers < 0.25 · ref_points || need_close)
+ratio = mono ? 0.9 : (num_frames < 2 ? 0.4 : 0.75)
+c2  = (inliers < ratio · ref_points || need_close) && inliers > 15
+create = (c1a || c1b || c1c) && c2
+```
+
+The reference Frame comes from `FrameTracked::reference_frame_id`, a
+`std::optional` (ruling A); when it is absent or no longer in the Mapper's map
+the newest Frame is used. Every evaluation is logged at debug level with all
+signals and the result.
+
+**Creating a Frame** (`Mapper::CreateFrame`, one `KeyFrameCreated`):
+1. Frame id from `next_frame_id_` (never reused), pose and the copied
+   measurement.
+2. Tracked observations of alive points (every id checked with `IsValid`);
+   each touched point gets its normal (`MeanViewingDirection`) and
+   representative descriptor (`DistinctiveDescriptor`: least median Hamming
+   distance; even counts take the mean of the two middle distances, ties the
+   lowest index — ruling E) recomputed, published as updated points.
+3. Stereo close points (binocular Frames): untracked stereo-matched left
+   features by depth; every one closer than 40 baselines and at least the 100
+   closest; one stereo observation each.
+4. Triangulation against neighbour Frames (`mapping/triangulation.h`): the top
+   30 (mono) / 10 (stereo) Frames by covisibility; a neighbour is skipped when
+   mono baseline / its median scene depth < 0.01, or stereo baseline < the rig
+   baseline. Matching is **brute force** over the features without a point in
+   either Frame: distance <= 50, ratio 0.6, the epipolar test on rays, the
+   rotation histogram (12 bins), one-to-one. **Epipolar band (ruling F):** the
+   angle between Frame b's ray and the epipolar plane (normal n) must satisfy
+   `asin(|n·ray_b|) <= k·σ·‖(JJᵀ)⁻¹J n‖` with J = `Camera::ProjectJacobian` at
+   the unit ray, k = 3 and σ = `sigma_px · level_scale^level` px — the exact
+   directional 3σ bound (σ/f at a pinhole centre), not the norm of J.
+   Acceptance: DLT on rays, ray parallax cos < 0.9998 (or ORB-SLAM3's stereo
+   fallback when a stereo depth has more parallax), positive depth in both,
+   raw-pixel χ² < 5.991 in both, and **scale consistency (ruling G):**
+   dist_b / dist_a within [1/f, f] · level_scale^(level_a − level_b), f = 1.5 ·
+   level_scale (ORB-SLAM3 order). Each new point has the new Frame's
+   observation and the neighbour's (`added_observations`).
+5. Publish. `sigma_px`, `level_scale` and the matching thresholds live in
+   `MapperOptions::triangulation` (`TriangulationOptions`, ruling B); the
+   neighbour counts, `min_close_points` and the baseline ratio in
+   `MapperOptions`.
+
+The Mapper keeps a `map::CovisibilityIndex` (per point: observing Frames; per
+Frame: points), fed by initialization and `CreateFrame`, readable through
+`Mapper::covisibility()` on the Mapper thread / in tests only (ruling C). The
+replica keeps its own, fed by `KeyFrameCreated`.
+
+**Tracker local map** (replaces "every alive point of the replica"):
+- **K1:** the Frames observing a current match; **K2:** for each K1 Frame its
+  top `local_neighbours` (10) covisible Frames not yet included (ruling K:
+  each K1 Frame adds up to 10, as the spec words it; ORB-SLAM3 adds only the
+  first new one); cap `max_local_frames` (80), K1 first by shared points.
+- **Local points:** the alive points of the local Frames
+  (`CovisibilityIndex` does not purge removed points, so `IsAlive` filters).
+- **Reference Frame:** after the final `OptimizePose`, the Frame sharing the
+  most inliers among **all** observing Frames (ruling L; the spec said K1).
+- **`visible_points`:** local points passing the projection gate, **plus every
+  already-matched point** without re-projection (ruling K, ORB-SLAM3
+  `SearchLocalPoints`), so `visible ⊇ matched`.
+- **Fast pickup:** a `KeyFrameCreated` whose timestamp equals `last_frame_`'s
+  merges its observations into `last_frame_.matches`.
+
+**Viewer.** `SceneState` consumes `FrameTracked` (pose, trajectory, tracked and
+visible point sets, local Frames) and the combined `KeyFrameCreated`. Colours:
+tracked points **green**, visible-but-unmatched points **blue**, other points
+**grey**; local-map Frames **orange**, other Frames blue; current camera green
+(red when lost). Checked on corridor1 mono with `--viewer` (200 frames,
+2026-10-07): green, blue and orange all appear.
+
+**Knowingly deferred** (sub-project 3/4, `docs/TODO.md`): fusion, point and
+Frame culling, local BA (duplicates accumulate; tracking tolerates them through
+the pose outlier rejection), `ObservationsRemoved`, interruptible BA and the
+busy-Mapper branch, the post-relocalization Frame guard, the Faiss vs
+DBoW2/FBoW index for matching.
+
+**Synthetic end-to-end tests** (`SlamTest.{Mono,Stereo}MapGrowsWhileLeavingInitialView`):
+120 frames, 6 m along +x through a 10 m room (`surround_scene`: points on the
+walls, up to 1 m relief), turning 90° towards +x (`turn_deg`), so the last
+frames see only a wall the first frames never saw (mono 1000 scene points;
+stereo 700 with `stereo_min_features` 150, to keep the Debug run near 45 s).
+Both track every frame
+with no `TrackingLost`, create Frames and grow the map. The error bounds are
+looser than planned (30 % of the path mono, 0.3 m stereo instead of 5 % and
+2 cm): without local BA the error random-walks with the 0.5 px pixel noise
+(measured 20 % / 0.15 m; 0 / 0 without noise). Tighten with local BA (TODO).
+ThreadSanitizer (`Tracker*:Mapper*:Slam*`, 55 tests, 2026-10-07): clean.
+
+**Smoke (corridor1 1024, Release, ORB 1500, debug logs, headless, 2026-10-07).**
+Lifetimes are tracked frames per map; the last map of a run is cut by its end.
+
+| Run | Maps (tracked frames) | First map | Median lifetime | Re-inits | Frames created | Points | Inliers (median) | Bar |
+|---|---|---|---|---|---|---|---|---|
+| Mono, 400 frames | 2 (129, 142+) | 129, lost | 135.5 | 1 | 1 / 2 (beside 2 init Frames per map) | 329 / 582 | 83 / 141 | first map ≥ 150: **missed** (129); median ≥ 50: met |
+| Stereo, 1000 frames | 2 (360, 637+) | 360, lost | 498.5 | 1 | 17 / 252 (beside 1 init Frame per map) | 6 931 / 67 879 | 498 / 434 | no `TrackingLost`, one map: **missed** |
+| *Before (master, 2026-10-06)* | mono 19 maps (82 tracked in 400), stereo 1 map in 200 | | ≈ 4 (mono) | 18 (mono) | – | 62-109 per mono map | 41 mono / 232 stereo | |
+
+Mono initializes at about frame 120 (as before); map 1 then tracks 129 frames
+(about 6.5 s) — the user-visible symptom (losing the map within a few frames)
+is gone, but the first-map bar is missed. Diagnosis from the decision log: of
+129 evaluations on map 1, 1 created a Frame (`c2` via the ratio, `c1b`) and
+128 had `c2` false. After Frame 2, `ref_points` stays at 36: the 258
+triangulated points have only 2 observations (< `min_obs` 3) and nothing adds
+a third until the next Frame, so `inliers < 0.9 · ref_points` holds only when
+inliers fall to 32, and they dropped from 41 to 27 (< 30 gate) in one frame
+while the camera rotated at 50-70 deg/s (mocap). ORB-SLAM3 avoids the stall
+through fusion (`SearchInNeighbors`), sub-project 3. Stereo creates Frames
+mostly through `need_close` (215 of 252 in map 2) and is lost once, at
+frame ~360, by the motion model (17 matches < 20, zero motion 6 inliers)
+during a 120-170 deg/s rotation: a missing reference-Frame / relocalization
+fallback (sub-project 4), not map starvation (a Frame had been created on each
+of the three previous frames). Mapper cost per `CreateFrame` (temporary
+timer, not committed): triangulation is ≥ 98 % of it, about 25 ms per mono
+neighbour (brute force, 1500 features); mono 49-76 ms with 2-3 neighbours
+(0.75 s expected with 30), stereo 88 ms mean (max 124 ms) with 8.8 neighbours, about 10 ms each. A second stereo run lost map 1 at frame ~354 and map 2 right after its initialization (3 maps): the stereo result varies between runs (thread timing). ATE vs mocap: not measured —
+the apps do not write a trajectory (TODO).
 
 ## 7. Coding Conventions
 
@@ -1056,7 +1216,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-02 | Tracker optimizes only its own pose; never mutates map objects. Its replica changes only via Mapper diffs. | Same. |
 | 2026-10-02 | `MapPointId` / `FrameId` are never reused. | Stale IDs from lagging replicas are detectable and can't alias new objects; replicas share slot layout. |
 | 2026-10-05 | Scope of the id rule made precise: `FrameId` unique per run; `MapPointId` unique within a map and append-only (`MapPointStorage::Remove` only marks a point dead, the free-list slot reuse is removed; `num_ids()` = next id); point ids restart per map and `(map_id, id)` identifies a point. CLAUDE.md updated to match. | The free list could hand a removed id to a new point (aliasing for lagging replicas, non-contiguous `MapPointsAdded` ranges); restarting per map is safe because every event carries `map_id`. |
-| 2026-10-02 | Tracker lag between `NewKeyFrameCandidate` and resulting diffs is accepted. | Matches ORB-SLAM3 behaviour; Tracker keeps tracking with its current replica. |
+| 2026-10-02 | Tracker lag between `NewKeyFrameCandidate` and resulting diffs is accepted. (Since 2026-10-06: between `FrameTracked` and the resulting `KeyFrameCreated`.) | Matches ORB-SLAM3 behaviour; Tracker keeps tracking with its current replica. |
 | 2026-10-02 | `ObjectPool` free-list is a lock-free Treiber stack with tagged head; links in a separate index array. | Removes the last mutex from the event path; slot memory never read concurrently with construction. Verified with ThreadSanitizer. |
 | 2026-10-02 | `Observable::Notify()` always takes ownership of the event. | One rule for producers regardless of how observers are wired. |
 | 2026-10-02 | Pooled objects are default-constructed once and kept alive; `Recycle()` doesn't destroy, reuse calls optional `Reset()`. `Create()` takes no arguments. | Payload buffers (the bulk of allocation) are reused, not just the event shell. |
@@ -1140,6 +1300,24 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-05 | (V) Pinhole invariance with the old normalized code holds exactly (1e-9) only for fx = fy. `OptimizePose`, `BundleAdjust` and the stereo gate now weight x and y separately in pixels, so χ² changes slightly on fx ≠ fy rigs (e.g. EuRoC). | The old code divided σ by one f; per-axis pixel weighting is the intended behaviour. |
 | 2026-10-05 | The calibration-free angle allowance (σ · 1.5 · (1 + r²), window · (1 + r²)) is recorded as a fallback for lenses without a model, not implemented. | Spike 2 measured it within 0.6 % of the KB stretch up to 60° (85 tracked frames vs 53 for KB window + σ); not needed while every lens has a model (TODO). |
 | 2026-10-05 | Smoke result of the camera-model branch (run 2026-10-06, corridor1, Release): mono 82 tracked / 18 re-initializations (gate 20: 137 / 14, measurement only); stereo 197/200 local-map successes (198 before), no loss, median 232 inliers. The ≤ 5 re-initializations criterion is missed; nothing was tuned. | The extra re-initializations come from the raw-pixel init matcher accepting more (mostly adjacent-frame) pairs: 19 maps vs 6; reverting only that matcher gives 6 maps / 56 tracked / 9.3 frames per map. Kept for more tracked frames (82 vs 56). Maps still die at the local-map gate without map growth (sub-project 2); init acceptance and gate tuning are in TODO. |
+| 2026-10-06 | `FrameTracked` replaces `PositionUpdated` (deleted): every tracked measurement publishes pose, measurement copy, inlier pairs, visible points, reference Frame, local Frames, stage and counts. | One event gives the Mapper everything it needs to decide and the viewer the tracked / visible sets; no candidate protocol. |
+| 2026-10-06 | The Mapper decides on Frame creation (`ShouldCreateFrame`, ORB-SLAM3 rule and defaults); it drains `FrameTracked` to the latest per map and counts the skipped ones as backlog (backlog 0 = idle). | The Mapper holds the authoritative observation counts, its own backlog and Frames the replica lacks; reverses the 2026-10-02 split. |
+| 2026-10-06 | `NewKeyFrameCandidate` is deleted. | No candidate protocol (one in flight, rejections, timeouts) is needed once the Mapper decides. |
+| 2026-10-06 | `KeyFrameCreated` is one atomic transaction (Frame, new points, observations on existing Frames, updated points), used by initialization too (mono 2 events, stereo 1); `MapPointsAdded` is deleted. | The replica applies an insertion in one `ApplyEvent`, so the Tracker never tracks against a half-applied one. |
+| 2026-10-06 | The Tracker's local map is built from covisibility: K1 (Frames observing a match), K2 (top 10 covisible per K1 Frame), cap 80; local points are the local Frames' alive points. | ORB-SLAM3 `UpdateLocalKeyFrames` / `UpdateLocalPoints` without a spanning tree; keeps the search bounded as the map grows. |
+| 2026-10-06 | Triangulation uses an epipolar test on rays and a raw-pixel χ² (5.991, σ = `sigma_px · level_scale^level`) in each Frame. | Rays work for pinhole and fisheye alike; the residual space matches the rest of the library. |
+| 2026-10-06 | Matching for triangulation is brute force for now; the Faiss vs DBoW2/FBoW decision is deferred to sub-project 4. | Smallest working matcher; its cost is measured (smoke: about 25 ms per neighbour) and in TODO. |
+| 2026-10-06 | (A) `FrameTracked::reference_frame_id` is `std::optional<FrameId>`; with none (or one the Mapper no longer has) the Mapper uses its newest Frame. (B) `sigma_px` / `level_scale` live in `MapperOptions::triangulation`. (C) The Mapper keeps its own `CovisibilityIndex` with a Mapper-thread-only `covisibility()` accessor. | (A) the Tracker may know none of the observing Frames; (B) one source of truth; (C) needed for `ref_points` and the replica-consistency test. |
+| 2026-10-06 | (D, E) `DistinctiveDescriptor`: least median Hamming distance; an even count takes the mean of the two middle distances (ORB-SLAM3 takes the lower), ties go to the lowest index. | A strict winner on small sets; the plan's 1-bit example violated the triangle inequality (test uses 1/9/10). |
+| 2026-10-06 | (F, spec amended) The epipolar band is the exact directional 3σ bound `asin(|n·ray_b|) ≤ k·σ·‖(JJᵀ)⁻¹J n‖` with J = `ProjectJacobian` at the unit ray (σ/f at a pinhole centre), replacing the spec's "norm of `ProjectJacobian`". | The spectral norm at z = 1 is up to 5.8× too loose at 80° and too strict along slow fisheye directions. |
+| 2026-10-06 | (G, spec amended) Scale consistency compares dist_b / dist_a with level_scale^(level_a − level_b) (ORB-SLAM3 order). | The plan's dist_a / dist_b was inverted and rejected valid multi-level matches (`ScaleConsistencyFollowsOctaveRatio`). |
+| 2026-10-06 | (H, spec amended) For `ref_points` / `min_obs` a stereo-matched observation counts 2 (ORB-SLAM3 `MapPoint::AddObservation`). | With a count of 1 a one-Frame stereo map has `ref_points` 0 and creates Frames only through `need_close`. |
+| 2026-10-06 | (I) A later `TrackingLost` of the same map in the drained batch also supersedes a `FrameTracked`; all events keep their order. | No Frame is created for a map that is about to be cleared. |
+| 2026-10-06 | (J) The mono triangulation unit test triangulates on the 4th Frame. | A noise-free initialization maps every synthetic point; new points duplicate existing ones until fusion. |
+| 2026-10-06 | (K) `visible_points` includes already-matched points without re-projection (ORB-SLAM3 `SearchLocalPoints`), so visible ⊇ matched; K2 takes the top 10 neighbours of every K1 Frame (ORB-SLAM3 adds only the first new one). | The viewer and the Mapper see every tracked point as visible; the spec's wording for K2, slightly larger local map. |
+| 2026-10-06 | (L) The reference Frame is the Frame sharing the most inliers among **all** observing Frames, not only K1. | Includes Frames reached through local-map matches, a better reference; occasionally a K2 Frame. |
+| 2026-10-06 | Viewer colours: tracked points green, visible points blue, other points grey; local-map Frames orange, other Frames blue. | Debugging the local map and the matcher at a glance. |
+| 2026-10-07 | Keyframes smoke result (corridor1, Release; "Keyframes and Map Growth"): mono 2 maps in 400 frames, first map 129 tracked frames, median lifetime 135.5, 1 re-initialization (was 82 tracked / 18 re-initializations); stereo 2 maps in 1000 frames (lost once at frame ~360). Both bars (first mono map ≥ 150; stereo no loss) are missed; nothing was tuned. Synthetic end-to-end error bounds loosened to 30 % of the path / 0.3 m. | Mono: the Frame rule stalls without fusion (`ref_points` stuck at 36); stereo: motion-model failure at 120-170 deg/s without a reference-Frame fallback. The synthetic error is noise random-walk without local BA (0 without noise). All in TODO. |
 
 ## 9. Open Questions
 
@@ -1307,20 +1485,25 @@ branch → review → merge to `master`. Update this document at the end.
   keep raw keypoints and `camera()`, all five residual / gate consumers in raw
   pixels (see "Camera Model and Raw-Pixel Residuals").
 
+- Keyframes and map growth, tracking sub-project 2 (branch `feat/keyframes`,
+  merge pending): `FrameTracked`, the Mapper's Frame decision and creation
+  (stereo close points, triangulation against neighbours) as one
+  `KeyFrameCreated`, covisibility local map and reference Frame, viewer
+  highlights (see "Keyframes and Map Growth").
+
 **Required follow-up:**
 - Decide `MapPointStorage` growth / compaction (Open Question 2); ids are
   append-only since 2026-10-05.
 - Decide on Open Question 14 (pool sizing per event type).
-- `NewKeyFrameCandidate` doesn't carry the tracked `(map_point_id, feature_idx)`
-  observations yet (§6 says it should) — add when designing the Tracker.
 
 **Next:**
 - ORB extractor plan in Open Question 21 (own FAST, buffers, descriptor
   rounding). Building OpenCV from source to link against
   (in progress, user).
 - Tracker measurement policy (19).
-- Sub-projects 2-4 of tracking (the user has their own designs; ask before
-  designing): keyframe decision and map growth, local BA and culling,
-  relocalization / reference-keyframe tracking via place recognition.
+- Sub-projects 3-4 of tracking (the user has their own designs; ask before
+  designing): local BA, fusion and culling (fixes the mono Frame-rule stall,
+  see "Keyframes and Map Growth"), relocalization / reference-keyframe
+  tracking via place recognition.
 - Event pool lifetime (Open Question 25).
 - Then the Mapper, then the LoopCloser.

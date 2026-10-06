@@ -120,7 +120,7 @@ tracks against a half-applied insertion.
 
 | Signal | Definition |
 |---|---|
-| `ref_points` | points observed by `reference_frame_id` (in the Mapper's map) with ≥ `min_obs` observations; `min_obs` = 2 while the map has ≤ 2 Frames, else 3 |
+| `ref_points` | points observed by `reference_frame_id` (in the Mapper's map) with ≥ `min_obs` observations; `min_obs` = 2 while the map has ≤ 2 Frames, else 3; a stereo-matched observation counts 2 (amended: ruling H, ORB-SLAM3 `AddObservation`; with a count of 1 a one-Frame stereo map has `ref_points` 0) |
 | `since_last` | `timestamp − timestamp of the last Frame` |
 | `inliers` | `num_inliers` |
 | `close_tracked`, `close_untracked` | stereo only: left features with a stereo match and depth < `close_depth_baselines × baseline`, inside / outside the observed pairs |
@@ -198,8 +198,10 @@ Interruptible BA is a sub-project 3 TODO.
      - Brute force over features with no observation in either Frame.
      - Descriptor distance ≤ `TH_LOW` (50), best/second ratio 0.6.
      - Epipolar test on **rays**: the angle between the second Frame's ray
-       and the epipolar plane is ≤ 3σ_level, where σ_level is converted to an
-       angle through the norm of `Camera::ProjectJacobian` at that feature.
+       and the epipolar plane (normal n) is ≤ 3σ_level, converted to an angle
+       by the exact directional bound `asin(|n·ray_b|) ≤ 3·σ_level·‖(JJᵀ)⁻¹J n‖`
+       with J = `Camera::ProjectJacobian` at the unit ray (amended: ruling F;
+       was "the norm of `ProjectJacobian`", up to 5.8× too loose at 80°).
      - Rotation-histogram consistency (12 bins of 30°, the init matcher's).
      - One-to-one.
    - **Acceptance:**
@@ -212,8 +214,10 @@ Interruptible BA is a sub-project 3 TODO.
      - Positive depth in both.
      - Reprojection χ² < 5.991 in raw pixels through each Frame's `Camera`,
        with σ = `sigma_px · level_scale^level`.
-     - Scale consistency: the distance ratio must lie within the octave ratio
-       · 1.5·`level_scale` and its inverse.
+     - Scale consistency: the distance ratio dist_b / dist_a must lie within
+       the octave ratio `level_scale^(level_a − level_b)` · 1.5·`level_scale`
+       and that ratio / (1.5·`level_scale`) (amended: ruling G, ORB-SLAM3
+       order; the ratio direction was unspecified).
    - **Result:** each new point has two observations, the new Frame's
      (Frame part) and the neighbour's (`added_observations`). Its reference
      is (new Frame, feature).

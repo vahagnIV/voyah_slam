@@ -160,14 +160,11 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
       decide whether/when to compact (a compaction would need an id remap
       event for the replicas).
 - [ ] Size event pools per event type. (OQ 14)
-- [ ] `NewKeyFrameCandidate`: add the tracked `(map_point_id, feature_idx)`
-      observations.
-- [ ] Mapper: `PublishKeyFrameCreated` scans all observations per keyframe
-      (O(obs x keyframes)) — add a per-frame observation index before
-      keyframes are created during Mapping.
-- [ ] Mapper: `PublishMapPointsAdded` publishes `[0, num_ids())` of a fresh
-      map; points added later during Mapping need a `start_id = num_ids()`
-      before the additions (ids are append-only, so the range is contiguous).
+- [ ] `ObservationsRemoved` event (sub-project 3): observations dropped by
+      culling / fusion; `KeyFrameCreated` only adds.
+- [ ] Immutable shared measurement in events (`shared_ptr<const>`):
+      `FrameTracked`, `KeyFrameCreated` and `InitializationMeasurement` copy
+      the measurement (about 80 KB per frame).
 
 ## Threads
 
@@ -181,17 +178,12 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
       depends on the sequence (mono then mono: today's two-view init; mono
       then stereo, stereo then mono, …: to be designed). Keep both
       observation storages and per-keyframe measurement types to allow it.
-- [ ] **Tracking sub-projects 2-4 (deferred; the user has their own designs for
-      them, ask before designing):** (2) keyframe decision and map growth
-      (`NewKeyFrameCandidate`, Mapper keyframe creation); (3) local BA and
-      culling; (4) relocalization / reference-keyframe tracking via place
-      recognition (BoW).
-      Includes: keyframe decision (Tracker publishes `NewKeyFrameCandidate`,
-      Mapper handling; now only acknowledged) and relocalization in
-      `TrackerState::Lost` (now it behaves like `WaitingForMap`; the Mapper
-      starts a new map on `TrackingLost`).
-- [ ] `SearchFromLocalMap` scans the whole replica (allocates per call):
-      covisibility-based local map with sub-project 2.
+- [ ] **Tracking sub-projects 3-4 (deferred; the user has their own designs for
+      them, ask before designing; sub-project 2 is done, see DESIGN "Keyframes
+      and Map Growth"):** (3) local BA and culling; (4) relocalization /
+      reference-keyframe tracking via place recognition (BoW).
+      Includes relocalization in `TrackerState::Lost` (now it behaves like
+      `WaitingForMap`; the Mapper starts a new map on `TrackingLost`).
 - [ ] Derive `TrackerOptions::level_scale` and `ProjectionMatcherOptions`
       `level_scale`/`max_level` from the feature extractor instead of keeping
       them in sync by hand.
@@ -202,13 +194,81 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
 - [ ] Debug `OptimizePose` costs about 0.5 s per call with about 500 stereo
       edges (Release is fine): profile.
 - [ ] Stereo tracking test margin: 1.79 cm error against the 2 cm bound.
-- [ ] Tracking test helpers assume 2 (mono) / 1 (stereo) keyframes per map;
-      revisit with sub-project 2.
+- [ ] Tracking test helpers assume 2 (mono) / 1 (stereo) keyframes per map
+      (`ExpectPositionsNearTruth` in `slam_test.cpp`); the end-to-end tests
+      that use it stop before the Mapper adds a Frame. Use the first keyframes
+      for the alignment (as `MaxCentreError` does).
 - [ ] A newer `MapCreated` while `Tracking` leaves an empty `last_frame_`
       (unreachable today); handle before multi-map / relocalization.
 - [ ] Mono translation accuracy at default init (about 10 % at 1 deg parallax,
       decision T): tuning.
 - [ ] LoopCloser logic (its `ProcessPending()` only acknowledges events).
+
+## Keyframes and map growth (sub-project 2, 2026-10-06)
+
+Spec `docs/superpowers/specs/2026-10-06-keyframes-design.md`; DESIGN
+"Keyframes and Map Growth" (smoke table there).
+
+- [ ] **Mono Frame creation stalls (smoke 2026-10-07):** after the first
+      created Frame, `ref_points` stays at the reference Frame's tracked
+      points with >= 3 observations (36 on corridor1): triangulated points
+      have 2 observations and nothing adds a third until the next Frame, so
+      `inliers < 0.9 · ref_points` never holds while tracking is healthy and
+      the map dies at the 30-inlier gate instead (map 1: 129 tracked frames,
+      1 Frame created after initialization). Fusion (sub-project 3) adds the
+      observations ORB-SLAM3 relies on; revisit the rule if it does not.
+- [ ] **Stereo loss at fast rotation (smoke 2026-10-07):** frame ~360 of
+      corridor1 (mocap 120-170 deg/s): motion model 17 matches (< 20), zero
+      motion 6 inliers. Needs reference-Frame tracking / relocalization
+      (sub-project 4).
+- [ ] **Measure triangulation matching cost; accelerate if needed.**
+      Brute force per neighbour: about 25 ms per neighbour on corridor1
+      (1500 features, Release); mono uses up to 30 neighbours (about 0.75 s
+      per Frame once the map has them). Faiss vs DBoW2/FBoW spike for place
+      recognition (sub-project 4) decides the index.
+- [ ] Faiss vs DBoW2/FBoW spike for place recognition (sub-project 4).
+- [ ] Interruptible BA and ORB-SLAM3's busy-Mapper branch of the Frame rule
+      (sub-project 3; nothing long runs in the Mapper yet).
+- [ ] Point fusion, point and Frame culling, local BA (sub-project 3). Without
+      them duplicate points accumulate (stereo smoke: 67 879 points in map 2
+      after 637 tracked frames).
+- [ ] The post-relocalization Frame guard (sub-project 4).
+- [ ] Synthetic end-to-end error bounds: `SlamTest.*MapGrowsWhileLeavingInitialView`
+      allow 30 % of the path (mono) / 0.3 m (stereo); measured 20 % / 0.15 m
+      at 0.5 px noise, 0 without noise. The plan's 5 % / 2 cm need local BA:
+      tighten then.
+- [ ] ORB `Distance` returns `uint8_t`: a 256-bit difference (all bits
+      differ) wraps to 0. Pre-existing; widen the return type.
+- [ ] The 80-Frame local-map cap can drop the only K1 Frame of a matched
+      point, hiding it from the local points (`visible ⊇ matched` corner
+      case): always include matched points in the mask.
+- [ ] `Mapper::FindKeyFrame` assumes consecutive Frame ids per map (assert
+      only); breaks with Frame culling (sub-project 3).
+- [ ] `CovisibilityIndex` does not purge removed points; consumers filter by
+      `IsAlive`. Purge with `MapPointsRemoved` (sub-project 3).
+- [ ] The replica feeds a `KeyFrameCreated` Frame's own observations into
+      covisibility unvalidated (out-of-range id → huge resize, duplicate →
+      index disagreement); added observations are checked against
+      `positions_.size()`, not `IsAlive`; a re-sent `frame_id` leaves stale
+      covisibility.
+- [ ] Triangulation filter tests missing: rotation histogram, one-to-one,
+      `th_low`, ratio test, positive depth (no test fails if the z > 0 check
+      is removed), stereo fallback with the depth on side b, the
+      neighbour-skip rules (deleting either passes), at most one new point per
+      new-Frame feature across neighbours; the fisheye test cannot tell the
+      Ruling F band from the old one.
+- [ ] Slow Mapper tests: about 5 s each in Debug (they start from a mono
+      initialization); share a fixture or a pre-built map.
+- [ ] Smaller review leftovers: `ShouldCreateFrame` one-sided boundary tests;
+      `MeanViewingDirection` returns zero on empty / cancelling input;
+      `CreateFrame` feature index check is assert-only and one feature paired
+      with two points is not rejected; `LeftOf` / `TimestampOf` duplicated in
+      `tracker.cpp` and `mapper.cpp`; `DrainsToLatest` does not assert that the
+      newest was evaluated, the reference fallback and covisibility clear are
+      untested; `PublishFrameTracked` copies instead of moving vectors; the
+      viewer's local-Frame lookup is O(K·L).
+- [ ] ATE against mocap for the smoke runs: the apps do not write their
+      trajectory; add a TUM-format trajectory dump and an alignment script.
 
 ## Visualization
 
@@ -263,13 +323,12 @@ Deferred minor findings from the per-task and final reviews.
 
 - [ ] **Before relocalization / multi-map:** the Tracker adopts a newer map's
       id but drops its `MapCreated` while `Tracking` (treated as a duplicate);
-      the next `PositionUpdated` would carry the new map id with the old
+      the next `FrameTracked` would carry the new map id with the old
       frame/pose. Make the duplicate check specific to the last `MapCreated`.
 - [ ] `SceneState` and `LoopCloser` don't apply the `map_id` consumer rule
       (no replicas yet) — apply it when they get replicas. DESIGN §6 "rule for
       every consumer" should exempt the Mapper (it assigns map ids).
-- [ ] Docs: `PositionUpdated.frame_id` is the `MapCreated` keyframe id, not the
-      current frame's; the `slam.h` stop-order comment overstates (the graph is
+- [ ] Docs: the `slam.h` stop-order comment overstates (the graph is
       cyclic, events stay queued in stopped inboxes); DESIGN.md Tracker section
       keeps the older loop pseudo-code beside the state machine; event pool
       size (256) is not documented.
@@ -284,9 +343,9 @@ Deferred minor findings from the per-task and final reviews.
       the defensive join in `Start()`.
 - [ ] Tests to add: inbox-first / one-measurement-per-pass ordering in the
       Tracker; consumer rule for stale/newer non-`MapCreated` events; Mapper
-      acknowledging `NewKeyFrameCandidate`/`LoopDetected` and returning false on
+      acknowledging `LoopDetected` and returning false on
       an empty inbox; `Slam` forwarding `MapperOptions`; 49/50 and 99/100
-      feature boundaries; e2e checks of every `PositionUpdated` map id.
+      feature boundaries; e2e checks of every `FrameTracked` map id.
 - [ ] Test robustness: `WaitBlocksUntilNotify` hangs rather than fails if
       `Wait` breaks (relies on ctest `--timeout`); `RunsUntilNoWorkThenSleeps`
       20 ms settle may flake on loaded CI and calls `Notify` needlessly;

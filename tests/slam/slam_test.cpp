@@ -9,6 +9,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
@@ -94,6 +95,7 @@ public:
                 keyframes.push_back({event->map_id.value, created.pose,
                                      std::visit([](const auto& m) { return m.timestamp(); },
                                                 created.measurement)});
+                keyframe_new_points.push_back(created.num_new_points());
                 if (created.num_new_points() > 0) {
                     new_points.push_back(event->map_id.value);
                     // Map points before the MapCreated that announces their map.
@@ -139,6 +141,7 @@ public:
     std::vector<uint32_t> frame_tracked;
     std::vector<uint32_t> tracking_lost;
     std::vector<StampedPose> keyframes;  // in publication order
+    std::vector<size_t> keyframe_new_points;  // per entry of `keyframes`
     std::vector<StampedPose> positions;
 
 private:
@@ -388,6 +391,136 @@ TEST(SlamTest, EndToEndStereoInitializeTrackLoseReinitialize) {
 
     EXPECT_EQ(ExpectPositionsNearTruth(recorder, 1, truth, /*monocular=*/false), 1u);
     EXPECT_EQ(ExpectPositionsNearTruth(recorder, 2, truth, /*monocular=*/false), 1u);
+}
+
+// Synthetic sequence for the map-growth tests: the camera moves 6 m along +x
+// through a 10 m room and turns 90 deg towards +x, so the last frames see
+// only a wall the first frames never saw.
+//
+// Error bounds: without local BA (sub-project 3) every new Frame and point
+// inherits the pose noise, so the error random-walks with the 0.5 px pixel
+// noise. Measured: 1.21 m mono (20 % of the 5.95 m path) and 0.15 m stereo;
+// 0 for both without pixel noise. The bounds (30 % of the path, 0.3 m) leave
+// a 1.5x margin; the plan's 5 % and 2 cm wait for local BA (docs/TODO.md).
+test::SyntheticSequenceOptions LeavingInitialViewOptions() {
+    test::SyntheticSequenceOptions options;
+    options.num_frames = 120;
+    options.turn_deg = 90.0;
+    options.surround_scene = true;
+    options.num_points = 1000;
+    return options;
+}
+
+// Largest camera-centre error, in true units, of `map`'s FrameTracked poses,
+// aligned through the map's first keyframe (stereo) or first two keyframes
+// (mono: scale from the second keyframe's baseline).
+double MaxCentreError(const ProtocolRecorder& recorder, uint32_t map,
+                      const std::vector<geometry::RigidTransformation>& truth, bool monocular) {
+    std::vector<StampedPose> keyframes;
+    for (const StampedPose& keyframe : recorder.keyframes) {
+        if (keyframe.map == map) keyframes.push_back(keyframe);
+    }
+    const size_t first = FrameIndexOf(keyframes.at(0).timestamp);
+    const test::MapAlignment alignment =
+        monocular ? test::MapAlignment(truth[first],
+                                       truth[FrameIndexOf(keyframes.at(1).timestamp)],
+                                       keyframes[1].pose)
+                  : test::MapAlignment(truth[first]);
+    double max_error = 0.0;
+    for (const StampedPose& position : recorder.positions) {
+        if (position.map != map) continue;
+        const size_t k = FrameIndexOf(position.timestamp);
+        max_error = std::max(max_error, alignment.CentreError(position.pose, truth[k]));
+    }
+    return max_error;
+}
+
+// Feeds a sequence to a running Slam: the first `init_frames` frames build
+// the map, then every later frame must be tracked. Expects map 1 only, no
+// TrackingLost, more than the initial Frames and points, and a centre error
+// within `max_error`.
+template <typename TSequence>
+void ExpectMapGrowsWhileLeavingInitialView(const TSequence& sequence, size_t init_frames,
+                                           bool monocular,
+                                           const mapping::MapperOptions& mapper_options,
+                                           double max_error) {
+    std::vector<geometry::RigidTransformation> truth;
+    for (const auto& frame : sequence.frames) truth.push_back(frame.T_cw);
+
+    // Lifetimes as in EndToEndInitializeTrackLoseReinitialize.
+    ProtocolRecorder recorder;
+    OrbSlam slam(mapper_options);
+    recorder.Attach(slam);
+    struct StopAndDrain {
+        OrbSlam& slam;
+        ProtocolRecorder& recorder;
+        ~StopAndDrain() {
+            slam.Stop();
+            recorder.Poll();
+        }
+    } stop_and_drain{slam, recorder};
+    slam.Start();
+
+    // The Tracker forwards frames to the Mapper until the map arrives, so the
+    // frames to track are fed only once it tracks.
+    for (size_t i = 0; i < init_frames; ++i) {
+        slam.tracker().Track(sequence.frames[i].measurement);
+    }
+    ASSERT_TRUE(recorder.WaitFor(
+        [&] { return slam.tracker().state() == tracking::TrackerState::Tracking; },
+        std::chrono::seconds(120)));
+    const size_t tracked_before = recorder.positions.size();
+    for (size_t i = init_frames; i < sequence.frames.size(); ++i) {
+        slam.tracker().Track(sequence.frames[i].measurement);
+    }
+    const size_t to_track = sequence.frames.size() - init_frames;
+    ASSERT_TRUE(recorder.WaitFor(
+        [&] {
+            return !recorder.tracking_lost.empty() ||
+                   recorder.positions.size() >= tracked_before + to_track;
+        },
+        std::chrono::seconds(120)));
+    slam.Stop();
+    recorder.Poll();
+
+    EXPECT_TRUE(recorder.tracking_lost.empty());
+    EXPECT_EQ(recorder.positions.size() - tracked_before, to_track);
+    EXPECT_EQ(recorder.map_created, std::vector<uint32_t>{1});
+    const size_t initial_frames = monocular ? 2 : 1;
+    ASSERT_GE(recorder.keyframes.size(), initial_frames);
+    size_t initial_points = 0;
+    for (size_t i = 0; i < initial_frames; ++i) initial_points += recorder.keyframe_new_points[i];
+    EXPECT_GT(slam.mapper().num_keyframes(), 2u);
+    EXPECT_GT(slam.mapper().num_map_points(), initial_points);
+    EXPECT_LE(MaxCentreError(recorder, 1, truth, monocular), max_error);
+}
+
+TEST(SlamTest, MonoMapGrowsWhileLeavingInitialView) {
+    const test::SyntheticSequenceOptions options = LeavingInitialViewOptions();
+    const test::SyntheticSequence sequence = test::MakeSyntheticSequence(options);
+    // As in EndToEndInitializeTrackLoseReinitialize: a well-conditioned initial map.
+    mapping::MapperOptions mapper_options;
+    mapper_options.initializer.reconstruction.min_parallax_deg = 4.0;
+    const double path_length = static_cast<double>(options.num_frames - 1) * options.step;
+    // The map is initialized within the first 30 frames. Error bound: see
+    // LeavingInitialViewOptions.
+    ExpectMapGrowsWhileLeavingInitialView(sequence, /*init_frames=*/30, /*monocular=*/true,
+                                          mapper_options, 0.3 * path_length);
+}
+
+TEST(SlamTest, StereoMapGrowsWhileLeavingInitialView) {
+    test::SyntheticStereoSequenceOptions options;
+    options.trajectory = LeavingInitialViewOptions();
+    // Fewer points than mono: Debug stereo tracking costs about 0.5 s per
+    // frame at 1000.
+    options.trajectory.num_points = 700;
+    const test::SyntheticStereoSequence sequence = test::MakeSyntheticStereoSequence(options);
+    mapping::MapperOptions mapper_options;
+    // The room's first view has about 200 features (a real stereo map needs
+    // 500).
+    mapper_options.initializer.stereo_min_features = 150;
+    ExpectMapGrowsWhileLeavingInitialView(sequence, /*init_frames=*/1, /*monocular=*/false,
+                                          mapper_options, 0.3);
 }
 
 } // namespace

@@ -27,6 +27,12 @@ struct SyntheticSequenceOptions {
     size_t num_frames = 30;
     double step = 0.05;            ///< Camera centre moves +x per frame (world units).
     double yaw_step_deg = 0.2;     ///< Rotation about the camera y axis per frame.
+    /// Total yaw over the sequence, linear in the frame index, turning the view
+    /// towards +x (the direction of motion); 0 keeps yaw_step_deg.
+    double turn_deg = 0.0;
+    /// Points on the walls (height 4 m) of a 10 m room centred on the path
+    /// instead of a frontal slab at min_depth..max_depth.
+    bool surround_scene = false;
     double min_depth = 4.0, max_depth = 8.0;
     double pixel_noise = 0.5;      ///< Gaussian sigma, px.
     int bit_flips = 3;             ///< Descriptor bits flipped per point per frame.
@@ -82,6 +88,44 @@ inline SyntheticDescriptor FlipBits(SyntheticDescriptor descriptor, int count, s
     return descriptor;
 }
 
+/// A random point on the walls of a 10 m x 10 m room, 4 m high, centred on the
+/// path (x in [0, (num_frames - 1) * step], y = z = 0). Points stand up to 1 m
+/// off their wall (shelves, furniture): a single plane makes two-view
+/// initialization ambiguous.
+inline geometry::TVector3DF RoomWallPoint(const SyntheticSequenceOptions& options,
+                                          std::mt19937& rng) {
+    constexpr double kHalfSize = 5.0, kHalfHeight = 2.0, kMaxRelief = 1.0;
+    std::uniform_int_distribution<int> wall(0, 3);
+    std::uniform_real_distribution<double> along(-kHalfSize, kHalfSize);
+    std::uniform_real_distribution<double> height(-kHalfHeight, kHalfHeight);
+    std::uniform_real_distribution<double> relief(0.0, kMaxRelief);
+    const double centre_x = 0.5 * static_cast<double>(options.num_frames - 1) * options.step;
+    const int w = wall(rng);
+    const double t = along(rng), y = height(rng);
+    const double inset = kHalfSize - relief(rng);
+    switch (w) {
+        case 0: return {centre_x + t, y, inset};
+        case 1: return {centre_x + t, y, -inset};
+        case 2: return {centre_x + inset, y, t};
+        default: return {centre_x - inset, y, t};
+    }
+}
+
+/// Frame `k`'s true pose: centre at +x k * step, yaw about the camera y axis.
+inline geometry::RigidTransformation SyntheticPose(const SyntheticSequenceOptions& options,
+                                                   size_t k) {
+    const double index = static_cast<double>(k);
+    const double yaw =
+        options.turn_deg != 0.0 && options.num_frames > 1
+            ? -options.turn_deg * std::numbers::pi / 180.0 * index /
+                  static_cast<double>(options.num_frames - 1)
+            : index * (options.yaw_step_deg * std::numbers::pi / 180.0);
+    const geometry::TMatrix33F R_cw =
+        Eigen::AngleAxis<double>(yaw, geometry::TVector3DF::UnitY()).toRotationMatrix();
+    const geometry::TVector3DF centre(index * options.step, 0.0, 0.0);
+    return {R_cw, -R_cw * centre};
+}
+
 }  // namespace detail
 
 inline SyntheticSequence MakeSyntheticSequence(const SyntheticSequenceOptions& options = {}) {
@@ -101,20 +145,18 @@ inline SyntheticSequence MakeSyntheticSequence(const SyntheticSequenceOptions& o
     std::vector<detail::SyntheticDescriptor> base_descriptors;
     std::vector<double> base_angles;
     for (Eigen::Index i = 0; i < n; ++i) {
-        const geometry::TVector3DF ray(pixel(rng), pixel(rng), 1.0);
-        sequence.points_w.col(i) = depth(rng) * (K_inverse * ray);
+        if (options.surround_scene) {
+            sequence.points_w.col(i) = detail::RoomWallPoint(options, rng);
+        } else {
+            const geometry::TVector3DF ray(pixel(rng), pixel(rng), 1.0);
+            sequence.points_w.col(i) = depth(rng) * (K_inverse * ray);
+        }
         base_descriptors.push_back(detail::RandomDescriptor(rng));
         base_angles.push_back(angle(rng));
     }
 
-    const double yaw_step = options.yaw_step_deg * std::numbers::pi / 180.0;
     for (size_t k = 0; k < options.num_frames; ++k) {
-        const geometry::TMatrix33F R_cw =
-            Eigen::AngleAxis<double>(static_cast<double>(k) * yaw_step,
-                                     geometry::TVector3DF::UnitY())
-                .toRotationMatrix();
-        const geometry::TVector3DF centre(static_cast<double>(k) * options.step, 0.0, 0.0);
-        const geometry::RigidTransformation T_cw(R_cw, -R_cw * centre);
+        const geometry::RigidTransformation T_cw = detail::SyntheticPose(options, k);
         const geometry::TPoints3DF points_c = T_cw.Transform(sequence.points_w);
 
         std::vector<Eigen::Index> point_of_feature;
@@ -381,8 +423,12 @@ inline SyntheticStereoSequence MakeSyntheticStereoSequence(
     std::vector<detail::SyntheticDescriptor> base_descriptors;
     std::vector<double> base_angles;
     for (Eigen::Index i = 0; i < n; ++i) {
-        const geometry::TVector3DF ray(pixel(rng), pixel(rng), 1.0);
-        sequence.points_w.col(i) = depth(rng) * (K_inverse * ray);
+        if (traj.surround_scene) {
+            sequence.points_w.col(i) = detail::RoomWallPoint(traj, rng);
+        } else {
+            const geometry::TVector3DF ray(pixel(rng), pixel(rng), 1.0);
+            sequence.points_w.col(i) = depth(rng) * (K_inverse * ray);
+        }
         base_descriptors.push_back(detail::RandomDescriptor(rng));
         base_angles.push_back(angle(rng));
     }
@@ -397,14 +443,8 @@ inline SyntheticStereoSequence MakeSyntheticStereoSequence(
         return p.x() >= 0.0 && p.x() < kImageSize && p.y() >= 0.0 && p.y() < kImageSize;
     };
 
-    const double yaw_step = traj.yaw_step_deg * std::numbers::pi / 180.0;
     for (size_t k = 0; k < traj.num_frames; ++k) {
-        const geometry::TMatrix33F R_cw =
-            Eigen::AngleAxis<double>(static_cast<double>(k) * yaw_step,
-                                     geometry::TVector3DF::UnitY())
-                .toRotationMatrix();
-        const geometry::TVector3DF centre(static_cast<double>(k) * traj.step, 0.0, 0.0);
-        const geometry::RigidTransformation T_cw(R_cw, -R_cw * centre);
+        const geometry::RigidTransformation T_cw = detail::SyntheticPose(traj, k);
         const geometry::TPoints3DF points_c = T_cw.Transform(sequence.points_w);
 
         std::vector<Record> left, right;
