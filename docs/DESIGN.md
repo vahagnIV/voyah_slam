@@ -1122,7 +1122,8 @@ Lifetimes are tracked frames per map; the last map of a run is cut by its end.
 | Run | Maps (tracked frames) | First map | Median lifetime | Re-inits | Frames created | Points | Inliers (median) | Bar |
 |---|---|---|---|---|---|---|---|---|
 | Mono, 400 frames | 2 (129, 142+) | 129, lost | 135.5 | 1 | 1 / 2 (beside 2 init Frames per map) | 329 / 582 | 83 / 141 | first map ≥ 150: **missed** (129); median ≥ 50: met |
-| Stereo, 1000 frames | 2 (360, 637+) | 360, lost | 498.5 | 1 | 17 / 252 (beside 1 init Frame per map) | 6 931 / 67 879 | 498 / 434 | no `TrackingLost`, one map: **missed** |
+| Stereo, 1000 frames (run 1) | 2 (360, 637+) | 360, lost | 498.5 | 1 | 17 / 252 (beside 1 init Frame per map) | 6 931 / 67 879 | 498 / 434 | no `TrackingLost`, one map: **missed** |
+| Stereo, 1000 frames (run 2) | 3 (354, 0, 638+) | 354, lost | 354 | 2 | 16 / 0 / 251 | 6 207 / 334 / 68 833 | 491 / – / 433 | **missed**; map 2 lost on its first frame (zero motion, 5 inliers, fast rotation) |
 | *Before (master, 2026-10-06)* | mono 19 maps (82 tracked in 400), stereo 1 map in 200 | | ≈ 4 (mono) | 18 (mono) | – | 62-109 per mono map | 41 mono / 232 stereo | |
 
 Mono initializes at about frame 120 (as before); map 1 then tracks 129 frames
@@ -1317,7 +1318,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-06 | (K) `visible_points` includes already-matched points without re-projection (ORB-SLAM3 `SearchLocalPoints`), so visible ⊇ matched; K2 takes the top 10 neighbours of every K1 Frame (ORB-SLAM3 adds only the first new one). | The viewer and the Mapper see every tracked point as visible; the spec's wording for K2, slightly larger local map. |
 | 2026-10-06 | (L) The reference Frame is the Frame sharing the most inliers among **all** observing Frames, not only K1. | Includes Frames reached through local-map matches, a better reference; occasionally a K2 Frame. |
 | 2026-10-06 | Viewer colours: tracked points green, visible points blue, other points grey; local-map Frames orange, other Frames blue. | Debugging the local map and the matcher at a glance. |
-| 2026-10-07 | Keyframes smoke result (corridor1, Release; "Keyframes and Map Growth"): mono 2 maps in 400 frames, first map 129 tracked frames, median lifetime 135.5, 1 re-initialization (was 82 tracked / 18 re-initializations); stereo 2 maps in 1000 frames (lost once at frame ~360). Both bars (first mono map ≥ 150; stereo no loss) are missed; nothing was tuned. Synthetic end-to-end error bounds loosened to 30 % of the path / 0.3 m. | Mono: the Frame rule stalls without fusion (`ref_points` stuck at 36); stereo: motion-model failure at 120-170 deg/s without a reference-Frame fallback. The synthetic error is noise random-walk without local BA (0 without noise). All in TODO. |
+| 2026-10-07 | Keyframes smoke result (corridor1, Release; "Keyframes and Map Growth"): mono 2 maps in 400 frames, first map 129 tracked frames, median lifetime 135.5, 1 re-initialization (was 82 tracked / 18 re-initializations); stereo 2 maps in 1000 frames (lost once at frame ~360; a second run: 3 maps, lost at frame ~354 and again on the new map's first frame). Both bars (first mono map ≥ 150; stereo no loss) are missed; nothing was tuned. Synthetic end-to-end error bounds loosened to 30 % of the path / 0.3 m. | Mono: the Frame rule stalls without fusion (`ref_points` stuck at 36); stereo: motion-model failure at 120-170 deg/s without a reference-Frame fallback. The synthetic error is noise random-walk without local BA (0 without noise). All in TODO. |
 
 ## 9. Open Questions
 
@@ -1331,8 +1332,10 @@ branch → review → merge to `master`. Update this document at the end.
    or be per-replica).
 3. **Large diffs:** a loop closure corrects many points/keyframes at once — one
    huge `MapPointsUpdated` or chunked events?
-4. **Mapper back-pressure:** how the Tracker knows the Mapper is busy (ORB-SLAM3's
-   `AcceptKeyFrames()`): an atomic flag (lock-free) or an event.
+4. ~~Mapper back-pressure~~ — resolved 2026-10-06: the Tracker no longer needs
+   to know (no ORB-SLAM3 `AcceptKeyFrames()`). The Mapper decides on Frames,
+   drains `FrameTracked` to the latest per map and uses the skipped count as
+   its backlog (backlog 0 = idle, `c1b`); see "Keyframes and Map Growth".
 5. **Global BA after loop closure:** runs inside the Mapper (blocks local mapping)
    or in a Mapper-owned worker whose result the Mapper applies and publishes?
 6. **`LoopDetected` payload:** just frame ids, or also matches / Sim3 estimate from

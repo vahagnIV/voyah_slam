@@ -267,6 +267,29 @@ Spec `docs/superpowers/specs/2026-10-06-keyframes-design.md`; DESIGN
       newest was evaluated, the reference fallback and covisibility clear are
       untested; `PublishFrameTracked` copies instead of moving vectors; the
       viewer's local-Frame lookup is O(K·L).
+- [ ] Replica / covisibility test gaps (Task 1 review): `tracker_test`
+      compares only the count of `observed_points`; the atomic-apply test does
+      not check updated-before-Frame order or point 3's distance; test helpers
+      create featureless carrier Frames (use Frames with real features).
+- [ ] Triangulation nits: the `TriangulationView` measurement pointer
+      defaults to `nullptr`; `PixelChi2` is reached through `features::detail`
+      (make it a public helper); add an early-out before the geometry checks;
+      drop the `asin` in the epipolar test (compare sines).
+- [ ] `Mapper` constructor: dead copy of the initializer options inside
+      `options_` (remove).
+- [ ] Map-growth test gaps (Task 5 review): the replica's point reference
+      level / distance are not checked; `StereoClosePointsFromDepth` lacks
+      `ExpectReplicaConsistent`; the Mapper's storage for new points is not
+      checked directly.
+- [ ] `Mapper::FeaturesWithPoints` counts features of dead points as taken
+      (filter by `IsAlive`).
+- [ ] The local-map merge test reuses a new-point start id (violates
+      append-only ids inside the test); local-map tests were RED only at
+      compile time.
+- [ ] `SceneState` test `KeyFrameCreatedAppliesUpdatedPoints` had no RED run.
+- [ ] `SlamTest.*MapGrowsWhileLeavingInitialView` do not assert that the last
+      frames share no point with the first view; their 120 s waits equal the
+      ctest timeout.
 - [ ] ATE against mocap for the smoke runs: the apps do not write their
       trajectory; add a TUM-format trajectory dump and an alignment script.
 
