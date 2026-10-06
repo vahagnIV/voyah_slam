@@ -15,7 +15,7 @@
 namespace voyahslam::events {
 namespace {
 
-using OrbMapPointsAdded = MapPointsAdded<features::OrbFeatureExtractor>;
+using OrbMapPointsUpdated = MapPointsUpdated<features::OrbFeatureExtractor>;
 
 TEST(WakeSignalTest, WaitReturnsImmediatelyWhenValueChanged) {
     WakeSignal s;
@@ -41,7 +41,7 @@ TEST(WakeSignalTest, WaitBlocksUntilNotify) {
 }
 
 TEST(AsyncObserverTest, PushNotifiesAttachedSignal) {
-    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(2);
+    memory::ObjectPool<OrbMapPointsUpdated, memory::ThreadSafePolicy> pool(2);
     WakeSignal s;
     AsyncObserver observer;
     observer.SetWakeSignal(&s);
@@ -57,7 +57,7 @@ TEST(AsyncObserverTest, PushNotifiesAttachedSignal) {
 }
 
 TEST(AsyncObserverTest, PushWithoutSignalStillEnqueues) {
-    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(2);
+    memory::ObjectPool<OrbMapPointsUpdated, memory::ThreadSafePolicy> pool(2);
     AsyncObserver observer;
     auto* event = pool.Create();
     observer.Push(event);
@@ -67,7 +67,7 @@ TEST(AsyncObserverTest, PushWithoutSignalStillEnqueues) {
 }
 
 TEST(AsyncObserverTest, ObservableDeliversThroughPush) {
-    memory::ObjectPool<OrbMapPointsAdded, memory::ThreadSafePolicy> pool(2);
+    memory::ObjectPool<OrbMapPointsUpdated, memory::ThreadSafePolicy> pool(2);
     WakeSignal s;
     AsyncObserver observer;
     observer.SetWakeSignal(&s);

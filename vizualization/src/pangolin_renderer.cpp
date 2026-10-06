@@ -1,5 +1,6 @@
 #include "pangolin_renderer.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <pangolin/display/display.h>
 #include <pangolin/display/widgets.h>
@@ -107,19 +108,43 @@ bool PangolinRenderer<TFeatureExtractor>::Draw(const SceneState<TFeatureExtracto
     if (show_points_) {
         const auto& positions = scene.point_positions();
         const auto& alive = scene.point_alive();
-        glPointSize(2);
-        glColor3f(0.0f, 0.0f, 0.0f);
-        glBegin(GL_POINTS);
-        for (size_t i = 0; i < positions.size(); ++i) {
-            if (alive[i]) Vertex(positions[i]);
+        // Classify alive points; tracked wins over visible. Unknown or dead ids are skipped.
+        point_class_.assign(positions.size(), PointClass::Other);
+        for (const auto& id : scene.visible_points()) {
+            if (id.value < positions.size() && alive[id.value]) point_class_[id.value] = PointClass::Visible;
         }
-        glEnd();
+        for (const auto& id : scene.tracked_points()) {
+            if (id.value < positions.size() && alive[id.value]) point_class_[id.value] = PointClass::Tracked;
+        }
+        // Grey first, then blue, then green, so the highlights stay on top.
+        glPointSize(2);
+        const struct {
+            PointClass point_class;
+            float r, g, b;
+        } passes[] = {{PointClass::Other, 0.5f, 0.5f, 0.5f},
+                      {PointClass::Visible, 0.2f, 0.4f, 1.0f},
+                      {PointClass::Tracked, 0.0f, 0.9f, 0.0f}};
+        for (const auto& pass : passes) {
+            glColor3f(pass.r, pass.g, pass.b);
+            glBegin(GL_POINTS);
+            for (size_t i = 0; i < positions.size(); ++i) {
+                if (alive[i] && point_class_[i] == pass.point_class) Vertex(positions[i]);
+            }
+            glEnd();
+        }
     }
 
     glLineWidth(1);
     if (show_keyframes_) {
-        glColor3f(0.0f, 0.0f, 1.0f);
+        const auto& local_frames = scene.local_frames();
         for (const auto& [id, T_cw] : scene.keyframes()) {
+            const bool local =
+                std::find(local_frames.begin(), local_frames.end(), id) != local_frames.end();
+            if (local) {
+                glColor3f(1.0f, 0.6f, 0.0f);
+            } else {
+                glColor3f(0.0f, 0.0f, 1.0f);
+            }
             DrawFrustum(T_cw, camera_size_);
         }
     }

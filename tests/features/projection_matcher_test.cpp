@@ -33,7 +33,6 @@ using voyahslam::test::TestImageFeatures;
 using Measurement = TMonocularMeasurement<TestExtractor>;
 using Descriptor = TestImageFeatures::TDescriptor;
 using TReplica = tracking::MapReplica<TestExtractor>;
-using TAdded = events::MapPointsAdded<TestExtractor>;
 using TKeyFrameCreated = events::KeyFrameCreated<TestExtractor>;
 
 constexpr double kFocal = 500.0;
@@ -122,17 +121,20 @@ struct Point {
     Eigen::Vector3d normal = Eigen::Vector3d::Zero();  // zero: the view direction from the origin
 };
 
+// Adds the points through a KeyFrameCreated whose Frame (no features)
+// observes none of them, so they get no reference.
 void AddPoints(TReplica& out_replica, const std::vector<Point>& points) {
-    memory::ObjectPool<TAdded, memory::ThreadSafePolicy> pool(1);
-    TAdded* event = pool.Create();
+    memory::ObjectPool<TKeyFrameCreated, memory::ThreadSafePolicy> pool(1);
+    TKeyFrameCreated* event = pool.Create();
     event->map_id = {1};
-    event->start_id = {static_cast<uint32_t>(out_replica.num_points())};
-    event->Resize(static_cast<uint32_t>(points.size()));
+    event->frame_id = {1000 + static_cast<uint32_t>(out_replica.num_points())};
+    event->new_points_start_id = {static_cast<uint32_t>(out_replica.num_points())};
+    event->ResizeNewPoints(static_cast<uint32_t>(points.size()));
     for (size_t i = 0; i < points.size(); ++i) {
         const auto col = static_cast<Eigen::Index>(i);
-        event->positions.col(col) = points[i].position;
-        event->descriptors.col(col) = points[i].descriptor;
-        event->normals.col(col) =
+        event->new_positions.col(col) = points[i].position;
+        event->new_descriptors.col(col) = points[i].descriptor;
+        event->new_normals.col(col) =
             points[i].normal.isZero() ? points[i].position.normalized() : points[i].normal;
     }
     out_replica.Apply(*event);
@@ -366,6 +368,38 @@ TEST(ProjectionMatcherTest, LocalMapVisibility) {
     EXPECT_EQ(matches[4], 4);
     EXPECT_EQ(matches[5], -1);
     EXPECT_EQ(CountMatches(matches), 2u);
+}
+
+TEST(ProjectionMatcherTest, ReportsVisiblePoints) {
+    TReplica replica;
+    const std::vector<Point> points = {
+        {{0.0, 0.0, 5.0}, MakeDescriptor(1)},    // visible, matched now
+        {{0.0, 0.0, -5.0}, MakeDescriptor(2)},   // behind the camera
+        {{1.0, 0.0, 5.0}, MakeDescriptor(3),     // cos(view, normal) = 0.45
+         Eigen::AngleAxisd(std::acos(0.45), Eigen::Vector3d::UnitY()) *
+             Eigen::Vector3d(1.0, 0.0, 5.0).normalized()},
+        {{-1.0, 0.0, 5.0}, MakeDescriptor(4)},   // already matched
+        {{0.0, 1.0, 5.0}, MakeDescriptor(5)},    // visible, no candidate
+        {{0.0, -1.0, 5.0}, MakeDescriptor(6)},   // visible, but removed
+        {{0.0, -0.5, 5.0}, MakeDescriptor(7)},   // in view, no reference
+    };
+    AddPoints(replica, points);
+    CreateKeyFrame(replica, 0, Eigen::Vector3d::Zero(), {0, 0, 0, 0, 0, 0}, {0, 1, 2, 3, 4, 5});
+    RemovePoint(replica, 5);
+
+    const Measurement current = MakeMeasurement({
+        {Project(points[0].position), MakeDescriptor(1), 0},
+        {Project(points[2].position), MakeDescriptor(3), 0},
+        {Project(points[3].position), MakeDescriptor(4), 0},
+    });
+    std::vector<int64_t> matches(static_cast<size_t>(current.points().cols()), -1);
+    matches[2] = 3;
+    std::vector<map::MapPointId> visible = {{42}};  // appended to
+    const size_t added = SearchFromLocalMap<TestExtractor>(
+        current, kIdentity, replica, matches, 1.0, ProjectionMatcherOptions{}, &visible);
+    EXPECT_EQ(added, 1u);
+    EXPECT_EQ(matches[0], 0);
+    EXPECT_EQ(visible, (std::vector<map::MapPointId>{{42}, {0}, {3}, {4}}));
 }
 
 TEST(ProjectionMatcherTest, LocalMapPredictedLevelAndRatio) {

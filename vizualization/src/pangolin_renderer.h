@@ -2,12 +2,14 @@
 #define VOYAHVIZ_PANGOLIN_RENDERER_H
 
 #include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <pangolin/display/view.h>
 #include <pangolin/gl/opengl_render_state.h>
 #include <pangolin/handler/handler.h>
 #include <pangolin/var/var.h>
 #include <string>
+#include <vector>
 #include <voyahviz/map_viewer.h>
 #include <voyahviz/scene_state.h>
 
@@ -23,7 +25,8 @@ void PreferX11BackendOnWayland();
 // including construction and destruction, must happen on the viewer loop's
 // thread (the context is bound to it).
 //
-// Draws alive map points, keyframe frustums, the current camera and its
+// Draws alive map points (tracked green, visible-unmatched blue, others grey),
+// keyframe frustums (local-map ones orange), the current camera and its
 // trajectory, with a side panel of display toggles and scene statistics.
 // Pangolin vars are global by name: a renderer recreated after Stop()/Start()
 // re-attaches to the same vars, so the toggles keep their last values.
@@ -65,6 +68,10 @@ private:
     pangolin::Var<std::string> status_text_;
     pangolin::Var<std::string> events_text_;
     bool following_ = false;
+
+    // Scratch, reused every frame: how each point is drawn.
+    enum class PointClass : uint8_t { Other, Visible, Tracked };
+    std::vector<PointClass> point_class_;
 };
 
 } // namespace voyahviz

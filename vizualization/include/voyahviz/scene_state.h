@@ -7,10 +7,13 @@
 #include <map>
 #include <optional>
 #include <vector>
+#include <voyahslam/defs.h>
 #include <voyahslam/events/event_types.h>
 #include <voyahslam/geometry/rigid_transformation.h>
 #include <voyahslam/map/frame_id.h>
 #include <voyahslam/map/map_id.h>
+#include <voyahslam/map/map_point_id.h>
+#include <voyahslam/memory/column_buffer.h>
 
 namespace voyahviz {
 
@@ -47,9 +50,22 @@ public:
         return current_pose_;
     }
     [[nodiscard]] TrackingStatus status() const { return status_; }
-    // Camera centres of the current map, in the order PositionUpdated arrived.
+    // Camera centres of the current map, in the order FrameTracked arrived.
     [[nodiscard]] const std::vector<voyahslam::geometry::TPoint3DF>& trajectory() const {
         return trajectory_;
+    }
+
+    // From the last FrameTracked; cleared on a map switch and on TrackingLost.
+    // Points matched in the current frame.
+    [[nodiscard]] const std::vector<voyahslam::map::MapPointId>& tracked_points() const {
+        return tracked_points_;
+    }
+    // Local-map points that pass the projection gate, matched or not.
+    [[nodiscard]] const std::vector<voyahslam::map::MapPointId>& visible_points() const {
+        return visible_points_;
+    }
+    [[nodiscard]] const std::vector<voyahslam::map::FrameId>& local_frames() const {
+        return local_frames_;
     }
 
 private:
@@ -61,6 +77,9 @@ private:
     bool AdmitMap(voyahslam::map::MapId map_id);
     void ClearScene();
     void SetPoint(uint32_t id, const voyahslam::geometry::TPoint3DF& position);
+    // Moves point ids[i] to column i of `positions`; unknown ids are skipped.
+    void UpdatePositions(const std::vector<voyahslam::map::MapPointId>& ids,
+                         const voyahslam::memory::ColumnBuffer<voyahslam::precision_t, 3>& positions);
 
     std::array<size_t, kNumEventTypes> applied_counts_{};
     size_t total_applied_ = 0;
@@ -73,6 +92,9 @@ private:
     std::optional<voyahslam::geometry::RigidTransformation> current_pose_;
     TrackingStatus status_ = TrackingStatus::None;
     std::vector<voyahslam::geometry::TPoint3DF> trajectory_;
+    std::vector<voyahslam::map::MapPointId> tracked_points_;
+    std::vector<voyahslam::map::MapPointId> visible_points_;
+    std::vector<voyahslam::map::FrameId> local_frames_;
 };
 
 } // namespace voyahviz

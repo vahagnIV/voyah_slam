@@ -7,17 +7,15 @@
 namespace voyahslam::events {
 
 enum class EventType : uint8_t {
-    NewKeyFrameCandidate,
-    MapPointsAdded,
     MapPointsUpdated,
     MapPointsRemoved,
     KeyFrameCreated,
     KeyFramePoseUpdated,
     LoopDetected,
-    PositionUpdated,
+    FrameTracked,
     InitializationMeasurement,
     MapCreated,
-    TrackingLost,
+    TrackingLost,  // keep last: consumers size per-type tables by it
 };
 
 struct Event {

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <utility>
 #include <variant>
@@ -7,6 +8,15 @@
 
 namespace voyahslam::tracking {
 namespace {
+
+const char* ToString(events::TrackingStage stage) {
+    switch (stage) {
+        case events::TrackingStage::MotionModel: return "motion model";
+        case events::TrackingStage::ZeroMotion: return "zero motion";
+        case events::TrackingStage::LocalMap: return "local map";
+    }
+    return "?";
+}
 
 const char* ToString(TrackerState state) {
     switch (state) {
@@ -119,6 +129,8 @@ void Tracker<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
     replica_.Apply(event);
     if (event.type == events::EventType::MapCreated) {
         OnMapCreated(static_cast<const events::MapCreated&>(event));
+    } else if (event.type == events::EventType::KeyFrameCreated) {
+        OnKeyFrameCreated(static_cast<const events::KeyFrameCreated<TFeatureExtractor>&>(event));
     }
 }
 
@@ -127,7 +139,6 @@ void Tracker<TFeatureExtractor>::OnMapCreated(const events::MapCreated& created)
     if (state() == TrackerState::Tracking) {
         return;  // duplicate
     }
-    map_frame_id_ = created.frame_id;
     // The keyframe (published before MapCreated) is the last frame; its
     // observations are its matches.
     last_frame_ = {};
@@ -154,6 +165,22 @@ void Tracker<TFeatureExtractor>::OnMapCreated(const events::MapCreated& created)
 }
 
 template <typename TFeatureExtractor>
+void Tracker<TFeatureExtractor>::OnKeyFrameCreated(
+    const events::KeyFrameCreated<TFeatureExtractor>& created) {
+    if (last_frame_.matches.empty() ||
+        TimestampOf(created.measurement) != TimestampOf(last_frame_.measurement)) {
+        return;
+    }
+    const size_t num = std::min(created.observed_features.size(), created.observed_points.size());
+    for (size_t i = 0; i < num; ++i) {
+        const uint32_t feature = created.observed_features[i];
+        if (feature < last_frame_.matches.size()) {
+            last_frame_.matches[feature] = static_cast<int64_t>(created.observed_points[i].value);
+        }
+    }
+}
+
+template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::ProcessMeasurement(TMeasurement& measurement) {
     if (auto* binocular = std::get_if<TBinocularMeasurement>(&measurement)) {
         binocular->SetStereoMatches(
@@ -165,14 +192,13 @@ void Tracker<TFeatureExtractor>::ProcessMeasurement(TMeasurement& measurement) {
         return;
     }
 
-    const double timestamp = TimestampOf(measurement);
     std::optional<PoseResult> pose = TrackFrame(measurement);
     if (!pose) {
         last_frame_ = {};
         velocity_.reset();
         // State first: whoever observes TrackingLost also observes Lost.
         SetState(TrackerState::Lost);
-        PublishTrackingLost(timestamp);
+        PublishTrackingLost(TimestampOf(measurement));
         return;
     }
 
@@ -181,7 +207,7 @@ void Tracker<TFeatureExtractor>::ProcessMeasurement(TMeasurement& measurement) {
     last_frame_.T_cw = pose->T_cw;
     last_frame_.matches = std::move(pose->matches);
     ++tracked_frames_;
-    PublishPositionUpdated(timestamp);
+    PublishFrameTracked(*pose);
 
     const auto now = std::chrono::steady_clock::now();
     if (now - last_info_log_ >= std::chrono::seconds(1)) {
@@ -199,12 +225,14 @@ auto Tracker<TFeatureExtractor>::TrackFrame(const TMeasurement& measurement)
                               : tracking.window_mono_px;
     std::optional<PoseResult> pose;
     if (velocity_) {
-        pose = TrackFromLastFrame(measurement, *velocity_ * last_frame_.T_cw, window, "motion model");
+        pose = TrackFromLastFrame(measurement, *velocity_ * last_frame_.T_cw, window,
+                                  events::TrackingStage::MotionModel);
     }
     if (!pose) {
         // No BoW reference-keyframe tracking: a wide window at zero motion.
         pose = TrackFromLastFrame(measurement, last_frame_.T_cw,
-                                  window * tracking.fallback_window_scale, "zero motion");
+                                  window * tracking.fallback_window_scale,
+                                  events::TrackingStage::ZeroMotion);
     }
     if (!pose) {
         return std::nullopt;
@@ -215,9 +243,10 @@ auto Tracker<TFeatureExtractor>::TrackFrame(const TMeasurement& measurement)
 template <typename TFeatureExtractor>
 auto Tracker<TFeatureExtractor>::TrackFromLastFrame(const TMeasurement& measurement,
                                                     const geometry::RigidTransformation& predicted,
-                                                    double window_px, const char* step)
+                                                    double window_px, events::TrackingStage stage)
     -> std::optional<PoseResult> {
     const TrackingOptions& tracking = options_.tracking;
+    const char* step = ToString(stage);
     const auto& current = LeftOf<TFeatureExtractor>(measurement);
     const auto& last = LeftOf<TFeatureExtractor>(last_frame_.measurement);
     const auto search = [&](double radius_px) {
@@ -243,23 +272,33 @@ auto Tracker<TFeatureExtractor>::TrackFromLastFrame(const TMeasurement& measurem
         return std::nullopt;
     }
     log_->debug("{}: {} matches, {} inliers", step, pose.num_matches, pose.num_inliers);
+    pose.stage = stage;
     return pose;
 }
 
 template <typename TFeatureExtractor>
 auto Tracker<TFeatureExtractor>::TrackLocalMap(const TMeasurement& measurement, PoseResult pose)
     -> std::optional<PoseResult> {
+    const TrackingOptions& tracking = options_.tracking;
+    LocalMap local = BuildLocalMap(replica_, pose.matches, tracking.local_neighbours,
+                                   tracking.max_local_frames);
+    std::vector<map::MapPointId> visible;
     const size_t added = features::SearchFromLocalMap<TFeatureExtractor>(
-        LeftOf<TFeatureExtractor>(measurement), pose.T_cw, replica_, pose.matches,
-        options_.tracking.local_map_th, options_.matcher);
+        LeftOf<TFeatureExtractor>(measurement), pose.T_cw,
+        LocalPointSource<TFeatureExtractor>(replica_, local), pose.matches, tracking.local_map_th,
+        options_.matcher, &visible);
     PoseResult result = OptimizeAndDropOutliers(measurement, pose.T_cw, std::move(pose.matches));
-    if (result.num_inliers < options_.tracking.min_local_map_inliers) {
+    if (result.num_inliers < tracking.min_local_map_inliers) {
         log_->debug("local map failed: {} matches ({} new), {} inliers (< {})", result.num_matches,
-                    added, result.num_inliers, options_.tracking.min_local_map_inliers);
+                    added, result.num_inliers, tracking.min_local_map_inliers);
         return std::nullopt;
     }
     log_->debug("local map: {} matches ({} new), {} inliers", result.num_matches, added,
                 result.num_inliers);
+    result.stage = events::TrackingStage::LocalMap;
+    result.local_frames = std::move(local.frames);
+    result.visible_points = std::move(visible);
+    result.reference_frame_id = ReferenceFrame(replica_, result.matches);
     return result;
 }
 
@@ -334,12 +373,25 @@ void Tracker<TFeatureExtractor>::PublishInitializationMeasurement(TMeasurement& 
 }
 
 template <typename TFeatureExtractor>
-void Tracker<TFeatureExtractor>::PublishPositionUpdated(double timestamp) {
-    auto* event = position_updated_pool_.Create();
+void Tracker<TFeatureExtractor>::PublishFrameTracked(const PoseResult& pose) {
+    auto* event = frame_tracked_pool_.Create();
     event->map_id = current_map_id();
-    event->frame_id = map_frame_id_;
+    event->timestamp = TimestampOf(last_frame_.measurement);
     event->pose = last_frame_.T_cw;
-    event->timestamp = timestamp;
+    event->measurement = last_frame_.measurement;
+    for (size_t feature = 0; feature < last_frame_.matches.size(); ++feature) {
+        const int64_t point = last_frame_.matches[feature];
+        if (point >= 0) {
+            event->observed_features.push_back(static_cast<uint32_t>(feature));
+            event->observed_points.push_back(map::MapPointId{static_cast<uint32_t>(point)});
+        }
+    }
+    event->visible_points = pose.visible_points;
+    event->reference_frame_id = pose.reference_frame_id;
+    event->local_frames = pose.local_frames;
+    event->stage = pose.stage;
+    event->num_matches = static_cast<uint32_t>(pose.num_matches);
+    event->num_inliers = static_cast<uint32_t>(pose.num_inliers);
     observable_.Notify(event);
 }
 

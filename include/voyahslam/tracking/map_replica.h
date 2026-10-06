@@ -12,6 +12,7 @@
 #include <voyahslam/events/events.h>
 #include <voyahslam/features/measurement.h>
 #include <voyahslam/geometry/rigid_transformation.h>
+#include <voyahslam/map/covisibility_index.h>
 #include <voyahslam/map/frame_id.h>
 #include <voyahslam/map/map_id.h>
 #include <voyahslam/map/map_point_id.h>
@@ -31,6 +32,11 @@ struct ReplicaKeyFrame {
 // touched only on the Tracker thread (no locks). Same map-id rule as the viewer's
 // SceneState: map 0 is exempt (ignored), events of older maps are ignored, and an
 // event of a newer map clears the replica and adopts the id.
+//
+// A KeyFrameCreated is applied whole, in one Apply(): new points, updated
+// points, observations on existing Frames, then the Frame. Afterwards every
+// observation refers to a known point and Frame, and the per-Frame
+// observations and covisibility() agree.
 template <typename TFeatureExtractor>
 class MapReplica {
 public:
@@ -65,12 +71,18 @@ public:
         for (const auto& [id, keyframe] : keyframes_) ids.push_back(id);
         return ids;
     }
+    // The observations indexed per point and per Frame.
+    [[nodiscard]] const map::CovisibilityIndex& covisibility() const { return covisibility_; }
 
 private:
     // Applies the multi-map rule; returns false if the event must not be applied.
     bool AdmitMap(map::MapId map_id);
     void Clear();
     void ApplyKeyFrameCreated(const events::KeyFrameCreated<TFeatureExtractor>& created);
+    // Sets point ids[i] from column i of the buffers; unknown ids are skipped.
+    template <typename TPositions, typename TDescriptors, typename TNormals>
+    void UpdatePoints(const std::vector<map::MapPointId>& ids, const TPositions& positions,
+                      const TDescriptors& descriptors, const TNormals& normals);
 
     map::MapId map_id_{0};
     std::vector<geometry::TPoint3DF> positions_;
@@ -79,6 +91,7 @@ private:
     std::vector<bool> alive_;
     std::vector<std::optional<map::PointReference>> references_;
     std::map<map::FrameId, ReplicaKeyFrame<TFeatureExtractor>> keyframes_;
+    map::CovisibilityIndex covisibility_;
 };
 
 template <typename TFeatureExtractor>
@@ -87,34 +100,9 @@ void MapReplica<TFeatureExtractor>::Apply(const events::Event& event) {
     if (!AdmitMap(event.map_id)) return;
     // No default case: adding an EventType must produce a -Wswitch warning here.
     switch (event.type) {
-        case EventType::MapPointsAdded: {
-            const auto& added = static_cast<const events::MapPointsAdded<TFeatureExtractor>&>(event);
-            const size_t end = static_cast<size_t>(added.start_id.value) + added.count();
-            if (end > positions_.size()) {
-                positions_.resize(end, geometry::TPoint3DF::Zero());
-                descriptors_.resize(end, TDescriptor::Zero());
-                normals_.resize(end, geometry::TPoint3DF::Zero());
-                alive_.resize(end, false);
-                references_.resize(end);
-            }
-            for (uint32_t i = 0; i < added.count(); ++i) {
-                const uint32_t id = added.start_id.value + i;
-                positions_[id] = added.positions.col(i);
-                descriptors_[id] = added.descriptors.col(i);
-                normals_[id] = added.normals.col(i);
-                alive_[id] = true;
-            }
-            break;
-        }
         case EventType::MapPointsUpdated: {
             const auto& updated = static_cast<const events::MapPointsUpdated<TFeatureExtractor>&>(event);
-            for (uint32_t i = 0; i < updated.count(); ++i) {
-                const uint32_t id = updated.ids[i].value;
-                if (id >= positions_.size()) continue;
-                positions_[id] = updated.positions.col(i);
-                descriptors_[id] = updated.descriptors.col(i);
-                normals_[id] = updated.normals.col(i);
-            }
+            UpdatePoints(updated.ids, updated.positions, updated.descriptors, updated.normals);
             break;
         }
         case EventType::MapPointsRemoved: {
@@ -133,9 +121,8 @@ void MapReplica<TFeatureExtractor>::Apply(const events::Event& event) {
             break;
         }
         case EventType::MapCreated:
-        case EventType::PositionUpdated:
+        case EventType::FrameTracked:
         case EventType::TrackingLost:
-        case EventType::NewKeyFrameCandidate:
         case EventType::LoopDetected:
         case EventType::InitializationMeasurement:
             break;
@@ -145,6 +132,37 @@ void MapReplica<TFeatureExtractor>::Apply(const events::Event& event) {
 template <typename TFeatureExtractor>
 void MapReplica<TFeatureExtractor>::ApplyKeyFrameCreated(
     const events::KeyFrameCreated<TFeatureExtractor>& created) {
+    // New points.
+    const uint32_t num_new = created.num_new_points();
+    const size_t end = static_cast<size_t>(created.new_points_start_id.value) + num_new;
+    if (end > positions_.size()) {
+        positions_.resize(end, geometry::TPoint3DF::Zero());
+        descriptors_.resize(end, TDescriptor::Zero());
+        normals_.resize(end, geometry::TPoint3DF::Zero());
+        alive_.resize(end, false);
+        references_.resize(end);
+    }
+    for (uint32_t i = 0; i < num_new; ++i) {
+        const uint32_t id = created.new_points_start_id.value + i;
+        positions_[id] = created.new_positions.col(i);
+        descriptors_[id] = created.new_descriptors.col(i);
+        normals_[id] = created.new_normals.col(i);
+        alive_[id] = true;
+    }
+
+    UpdatePoints(created.updated_ids, created.updated_positions, created.updated_descriptors,
+                 created.updated_normals);
+
+    // Observations on existing Frames; an unknown Frame or point is skipped.
+    for (const events::AddedObservation& added : created.added_observations) {
+        const auto it = keyframes_.find(added.frame_id);
+        if (it == keyframes_.end() || added.point.value >= positions_.size()) continue;
+        if (covisibility_.Contains(added.frame_id, added.point)) continue;
+        it->second.observations.emplace_back(added.feature, added.point);
+        covisibility_.Add(added.frame_id, added.feature, added.point);
+    }
+
+    // The Frame.
     ReplicaKeyFrame<TFeatureExtractor> keyframe;
     keyframe.id = created.frame_id;
     keyframe.T_cw = created.pose;
@@ -153,9 +171,11 @@ void MapReplica<TFeatureExtractor>::ApplyKeyFrameCreated(
     keyframe.observations.reserve(num);
     for (size_t i = 0; i < num; ++i) {
         keyframe.observations.emplace_back(created.observed_features[i], created.observed_points[i]);
+        covisibility_.Add(created.frame_id, created.observed_features[i], created.observed_points[i]);
     }
 
-    // For a binocular keyframe the reference level is the left feature's level.
+    // A point's reference is the first Frame whose own observations include
+    // it. For a binocular keyframe the reference level is the left feature's level.
     const auto& levels = std::visit(
         [](const auto& measurement) -> const features::TLevels& {
             if constexpr (requires { measurement.left(); }) return measurement.left().levels();
@@ -170,6 +190,22 @@ void MapReplica<TFeatureExtractor>::ApplyKeyFrameCreated(
             static_cast<double>((positions_[point.value] - centre).norm())};
     }
     keyframes_.insert_or_assign(created.frame_id, std::move(keyframe));
+}
+
+template <typename TFeatureExtractor>
+template <typename TPositions, typename TDescriptors, typename TNormals>
+void MapReplica<TFeatureExtractor>::UpdatePoints(const std::vector<map::MapPointId>& ids,
+                                                 const TPositions& positions,
+                                                 const TDescriptors& descriptors,
+                                                 const TNormals& normals) {
+    for (size_t i = 0; i < ids.size(); ++i) {
+        const uint32_t id = ids[i].value;
+        if (id >= positions_.size()) continue;
+        const auto col = static_cast<Eigen::Index>(i);
+        positions_[id] = positions.col(col);
+        descriptors_[id] = descriptors.col(col);
+        normals_[id] = normals.col(col);
+    }
 }
 
 template <typename TFeatureExtractor>
@@ -190,6 +226,7 @@ void MapReplica<TFeatureExtractor>::Clear() {
     alive_.clear();
     references_.clear();
     keyframes_.clear();
+    covisibility_.Clear();
 }
 
 } // namespace voyahslam::tracking

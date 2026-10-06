@@ -8,7 +8,7 @@
 #include <thread>
 #include <vector>
 #include <voyahslam/events/observable.h>
-#include <voyahslam/events/position_updated.h>
+#include <voyahslam/events/frame_tracked.h>
 #include <voyahslam/features/orb_feature_extractor.h>
 #include <voyahslam/memory/object_pool.h>
 
@@ -17,16 +17,17 @@ namespace {
 
 using namespace voyahslam;
 using TViewer = MapViewer<features::OrbFeatureExtractor>;
-using TPool = memory::ObjectPool<events::PositionUpdated, memory::ThreadSafePolicy>;
+using TFrameTracked = events::FrameTracked<features::OrbFeatureExtractor>;
+using TPool = memory::ObjectPool<TFrameTracked, memory::ThreadSafePolicy>;
 
 void Publish(events::Observable& out_producer, TPool& pool) {
-    events::PositionUpdated* event = pool.Create();
+    TFrameTracked* event = pool.Create();
     out_producer.Notify(event);
 }
 
 // True if a slot can be taken from the pool (i.e. it was returned); gives it back.
 bool SlotReturned(TPool& pool) {
-    events::PositionUpdated* event = pool.TryCreate();
+    TFrameTracked* event = pool.TryCreate();
     if (event == nullptr) return false;
     event->Recycle();
     return true;
@@ -120,7 +121,7 @@ TEST(MapViewerTest, ReceivesFromTwoProducers) {
     viewer.Stop();
     EXPECT_EQ(viewer.events_processed(), 20u);
     // Every slot came back: all 32 can be taken at once.
-    std::vector<events::PositionUpdated*> taken;
+    std::vector<TFrameTracked*> taken;
     for (int i = 0; i < 32; ++i) {
         taken.push_back(pool.TryCreate());
         ASSERT_NE(taken.back(), nullptr) << "slot " << i << " not returned";
@@ -190,7 +191,7 @@ TEST(MapViewerTest, StopEndsRunOnCurrentThread) {
     runner.join();
     // RunOnCurrentThread()'s own final drain acknowledged everything.
     EXPECT_EQ(viewer.events_processed(), 2u);
-    std::vector<events::PositionUpdated*> taken;
+    std::vector<TFrameTracked*> taken;
     for (int i = 0; i < 2; ++i) {
         taken.push_back(pool.TryCreate());
         ASSERT_NE(taken.back(), nullptr) << "slot " << i << " not returned";
