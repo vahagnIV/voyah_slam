@@ -21,16 +21,17 @@ else()
 endif()
 
 enable_testing()
-include(GoogleTest)
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+include(VoyahTests)
 
 # Libraries (each with its own include root)
 add_subdirectory(libs)
-
-# Tests
-add_subdirectory(tests)
 
 # Visualization (development tool, links OpenCV)
 add_subdirectory(vizualization)
 
 # Examples
 add_subdirectory(examples)
+
+# check (unit tests) and check_all (every test); after every test binary.
+voyah_add_check_targets()

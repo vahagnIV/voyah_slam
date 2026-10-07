@@ -87,11 +87,11 @@ Note: `voyahviz_tests` is not part of the top-level `ctest` run; it is run from 
 
 ## Integration list (`voyah_integration_tests`)
 
-Rule: every `SlamTest.*` test, plus every test above 1 s in (b).
+Rule: every `SlamTest.*` test, plus every test above 1 s in (b), except
+`ObjectPoolDeathTest.PoolExhaustion` (Ruling E: it stays `unit`). 10 tests.
 
 | Test | (b) s | Selected by |
 |---|---|---|
-| ObjectPoolDeathTest.PoolExhaustion | 1.09 | >1 s in (b) |
 | SlamTest.EndToEndInitializeTrackLoseReinitialize | 0.31 | SlamTest.* |
 | SlamTest.EndToEndStereoInitializeTrackLoseReinitialize | 0.16 | SlamTest.* |
 | SlamTest.ExternalObserversCanBeAddedToEveryComponent | 0.01 | SlamTest.* |
@@ -104,5 +104,6 @@ Rule: every `SlamTest.*` test, plus every test above 1 s in (b).
 | TrackerTest.TracksSyntheticStereo | 1.26 | >1 s in (b) |
 
 Notes:
-- `ObjectPoolDeathTest.PoolExhaustion` (1.09 s in both builds) is a fixed-cost death test, not compute-bound; it is selected by the literal rule.
+- `ObjectPoolDeathTest.PoolExhaustion` (1.09 s in both builds) is above 1 s in (b) but stays
+  `unit` (Ruling E): it is a fixed-cost death test, not compute-bound and not a pipeline test.
 - `TrackerTest.TracksSyntheticStereo` is the only Tracker/Mapper test above 1 s in (b). Other threaded Tracker/Mapper sequences (spec §3) are for the Task owner to pick by name from the 0.5 s table above (all are under 0.5 s in (b) except `TrackerTest.NewMapResetsTrackingState`, 0.51 s).

@@ -19,3 +19,5 @@ target_link_libraries(voyah_slam
     PUBLIC voyah_events
     PUBLIC voyah_algs
 )
+
+add_subdirectory(tests)
