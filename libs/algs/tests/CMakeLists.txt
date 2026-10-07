@@ -1,6 +1,7 @@
 voyah_add_test_binary(voyah_algs_tests
     LABEL unit
     SOURCES
+        bow/vocabulary_test.cpp
         estimators/essential_estimator_test.cpp
         estimators/homography_estimator_test.cpp
         estimators/ransac_test.cpp
