@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <voyahslam/features/instantiation.h>
@@ -147,13 +149,16 @@ void Tracker<TFeatureExtractor>::OnMapTransaction(
     if (transaction.replaced_points.empty() && transaction.removed_points.empty()) {
         return;
     }
+    // Loser -> winner; the Mapper resolves chains, so one lookup suffices.
+    std::unordered_map<uint32_t, uint32_t> winners;
+    winners.reserve(transaction.replaced_points.size());
+    for (const events::ReplacedPoint& replaced : transaction.replaced_points) {
+        winners.emplace(replaced.loser.value, replaced.winner.value);
+    }
     for (int64_t& match : last_frame_.matches) {
         if (match < 0) continue;
-        for (const events::ReplacedPoint& replaced : transaction.replaced_points) {
-            if (match == static_cast<int64_t>(replaced.loser.value)) {
-                match = static_cast<int64_t>(replaced.winner.value);
-                break;
-            }
+        if (const auto it = winners.find(static_cast<uint32_t>(match)); it != winners.end()) {
+            match = static_cast<int64_t>(it->second);
         }
         // The replica has dropped the removed points (and a winner removed in
         // the same transaction).

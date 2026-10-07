@@ -9,6 +9,7 @@
 #include <voyahslam/features/instantiation.h>
 #include <voyahslam/map/point_statistics.h>
 #include <voyahslam/mapping/mapper.h>
+#include "mapping/mapper_internal.h"
 
 namespace voyahslam::mapping {
 namespace {
@@ -21,21 +22,8 @@ const char* ToString(MapperState state) {
     return "?";
 }
 
-// The left image of a measurement (the image itself for a monocular one).
-template <typename TFeatureExtractor>
-const features::TMonocularMeasurement<TFeatureExtractor>& LeftOf(
-    const features::TMeasurement<TFeatureExtractor>& measurement) {
-    if (const auto* binocular =
-            std::get_if<features::TBinocularMeasurement<TFeatureExtractor>>(&measurement)) {
-        return binocular->left();
-    }
-    return std::get<features::TMonocularMeasurement<TFeatureExtractor>>(measurement);
-}
-
-// The distance between a rig's two cameras.
-inline double RigBaseline(const features::StereoRig& rig) {
-    return static_cast<double>(rig.T_rl.translation().norm());
-}
+using detail::LeftOf;
+using detail::RigBaseline;
 
 template <typename TFeatureExtractor>
 double TimestampOf(const features::TMeasurement<TFeatureExtractor>& measurement) {
@@ -135,6 +123,23 @@ void Mapper<TFeatureExtractor>::SkipFrameTracked(const events::Event& event) {
     }
     ++backlog_;
     backlog_skipped_.fetch_add(1, std::memory_order_acq_rel);
+    CountTrackedPoints(static_cast<const events::FrameTracked<TFeatureExtractor>&>(event));
+}
+
+template <typename TFeatureExtractor>
+void Mapper<TFeatureExtractor>::CountTrackedPoints(
+    const events::FrameTracked<TFeatureExtractor>& event) {
+    // Ids of a replica that is behind may be unknown here: skipped.
+    for (const map::MapPointId point : event.visible_points) {
+        if (point.value < num_visible_.size()) {
+            ++num_visible_[point.value];
+        }
+    }
+    for (const map::MapPointId point : event.observed_points) {
+        if (point.value < num_found_.size()) {
+            ++num_found_[point.value];
+        }
+    }
 }
 
 template <typename TFeatureExtractor>
@@ -154,9 +159,11 @@ void Mapper<TFeatureExtractor>::OnInitializationMeasurement(
         ++next_frame_id_.value;
     }
     map_points_ = {};
-    observations_ = {};
-    stereo_observations_ = {};
     covisibility_.Clear();
+    references_.clear();
+    num_visible_.clear();
+    num_found_.clear();
+    recent_points_.clear();
     AddInitialMapPoints(initial->map_points);
     num_keyframes_.store(keyframes_.size(), std::memory_order_release);
     num_map_points_.store(map_points_.size(), std::memory_order_release);
@@ -184,9 +191,11 @@ template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::ClearMap() {
     keyframes_.clear();
     map_points_ = {};
-    observations_ = {};
-    stereo_observations_ = {};
     covisibility_.Clear();
+    references_.clear();
+    num_visible_.clear();
+    num_found_.clear();
+    recent_points_.clear();
     backlog_ = 0;
     num_keyframes_.store(0, std::memory_order_release);
     num_map_points_.store(0, std::memory_order_release);
@@ -198,6 +207,7 @@ void Mapper<TFeatureExtractor>::OnFrameTracked(
     if (state() != MapperState::Mapping || event.map_id != current_map_id()) {
         return;  // no map yet, or an older map's
     }
+    CountTrackedPoints(event);
     const KeyFrameSignals signals = MeasureSignals(event);
     const bool create = ShouldCreateFrame(signals, options_.keyframe);
     num_frame_evaluations_.fetch_add(1, std::memory_order_acq_rel);
@@ -293,17 +303,27 @@ KeyFrameSignals Mapper<TFeatureExtractor>::MeasureSignals(
 
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureExtractor>& event) {
+    auto* created = transaction_pool_.Create();
+    created->map_id = current_map_id();
+    created->priority = false;
+    added_keys_.clear();
+    replaced_.clear();
+    losers_.clear();
+    touched_.clear();
+
+    // 1. Recent points, judged before the new Frame exists.
+    const size_t num_points_before = map_points_.size();
+    CullRecentPoints(*created);
+    const size_t num_culled = num_points_before - map_points_.size();
+
+    // 2. The Frame.
     const map::FrameId id = next_frame_id_;
     ++next_frame_id_.value;
     keyframes_.emplace_back(id, event.pose, TMeasurement(event.measurement));
     const TKeyFrame& keyframe = keyframes_.back();
     const auto num_features =
         static_cast<size_t>(LeftOf<TFeatureExtractor>(keyframe.measurement()).points().cols());
-
-    auto* created = transaction_pool_.Create();
-    created->map_id = current_map_id();
-    created->priority = false;
-    events::NewFrame<TFeatureExtractor>& frame_part = AddFramePart(keyframe, *created);
+    AddFramePart(keyframe, *created);
     // New points take the contiguous ids from here.
     const map::MapPointId first_new{map_points_.num_ids()};
     created->new_points_start_id = first_new;
@@ -311,10 +331,9 @@ void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureE
     // The tracked observations. The Tracker's replica may be behind or the
     // pairs malformed: a point that is not alive or is already observed by
     // this Frame, and a feature out of range or already paired, is skipped.
-    std::vector<map::MapPointId> touched;
-    touched.reserve(event.observed_points.size());
     std::vector<bool> has_point(num_features, false);
     assert(event.observed_features.size() == event.observed_points.size());
+    size_t num_tracked = 0;
     for (size_t i = 0; i < event.observed_points.size(); ++i) {
         const map::MapPointId point = event.observed_points[i];
         const uint32_t feature = event.observed_features[i];
@@ -322,78 +341,123 @@ void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureE
             feature >= num_features || has_point[feature]) {
             continue;
         }
-        AddObservation(keyframe, feature, point);
+        AddObservation(keyframe, feature, point, *created);
         has_point[feature] = true;
-        frame_part.observed_features.push_back(feature);
-        frame_part.observed_points.push_back(point);
-        touched.push_back(point);
+        touched_.push_back(point);
+        ++num_tracked;
     }
-    const size_t num_tracked = frame_part.observed_points.size();
 
     // New points: stereo close points first, so triangulation skips their
     // features.
-    if (std::holds_alternative<features::TBinocularMeasurement<TFeatureExtractor>>(
-            keyframe.measurement())) {
+    const bool stereo = detail::BinocularOf<TFeatureExtractor>(keyframe.measurement()) != nullptr;
+    if (stereo) {
         AddClosePoints(keyframe, has_point, *created);
     }
     const size_t num_close = map_points_.num_ids() - first_new.value;
     TriangulateWithNeighbours(keyframe, std::move(has_point), *created);
-
-    UpdatePointStatistics(touched, *created);
     const uint32_t num_new = map_points_.num_ids() - first_new.value;
-    created->ResizeNewPoints(num_new);
     for (uint32_t i = 0; i < num_new; ++i) {
-        const map::MapPointId point{first_new.value + i};
-        created->new_positions.col(i) = map_points_.Position(point);
-        created->new_descriptors.col(i) = map_points_.Descriptor(point);
-        created->new_normals.col(i) = map_points_.Normal(point);
+        recent_points_.push_back({map::MapPointId{first_new.value + i}, id, stereo});
     }
-    log_->debug("Frame {}: {} tracked observations, {} close points, {} triangulated points",
-                id.value, num_tracked, num_close, num_new - num_close);
+
+    // 3. Fusion with the neighbours.
+    Fuse(keyframe, *created);
+    FinishTransaction(first_new, *created);
+
+    log_->debug(
+        "Frame {}: {} points culled, {} tracked observations, {} close points, {} triangulated "
+        "points, {} points merged",
+        id.value, num_culled, num_tracked, num_close, num_new - num_close, losers_.size());
     num_keyframes_.store(keyframes_.size(), std::memory_order_release);
     num_map_points_.store(map_points_.size(), std::memory_order_release);
     observable_.Notify(created);
 }
 
 template <typename TFeatureExtractor>
-events::TransactionObservation Mapper<TFeatureExtractor>::AddObservation(const TKeyFrame& frame,
-                                                                         uint32_t feature,
-                                                                         map::MapPointId point) {
-    assert(feature < 65536);
-    const auto feature_index = static_cast<uint16_t>(feature);
+void Mapper<TFeatureExtractor>::AddObservation(
+    const TKeyFrame& frame, uint32_t feature, map::MapPointId point,
+    events::MapTransaction<TFeatureExtractor>& out_event) {
     events::TransactionObservation added{frame.id(), feature, point};
-    if (const auto* binocular =
-            std::get_if<features::TBinocularMeasurement<TFeatureExtractor>>(&frame.measurement())) {
+    if (const auto* binocular = detail::BinocularOf<TFeatureExtractor>(frame.measurement())) {
         const auto f = static_cast<int>(feature);
         const int right = binocular->right_indices()(f);
         assert(right <= 32767);
         if (right >= 0) {
             added.depth = binocular->depth(f);
             added.right_index = static_cast<int16_t>(right);
-            stereo_observations_.Add(point, frame.id(), feature_index, added.depth,
-                                     added.right_index);
-        } else {
-            stereo_observations_.Add(point, frame.id(), feature_index);
         }
-    } else {
-        observations_.Add(point, frame.id(), feature_index);
     }
     covisibility_.Add(frame.id(), feature, point);
-    return added;
+    added_keys_.insert(detail::ObservationKey(frame.id(), point));
+    if (!references_[point.value]) {
+        SetReference(point, frame, feature);
+    }
+    if (!out_event.added_frames.empty() && out_event.added_frames.back().id == frame.id()) {
+        events::NewFrame<TFeatureExtractor>& part = out_event.added_frames.back();
+        part.observed_features.push_back(feature);
+        part.observed_points.push_back(point);
+    } else {
+        out_event.added_observations.push_back(added);
+    }
 }
 
 template <typename TFeatureExtractor>
 map::MapPointId Mapper<TFeatureExtractor>::AddNewPoint(
     const geometry::TPoint3DF& position, const TKeyFrame& keyframe, uint32_t feature,
     const std::vector<geometry::TPoint3DF>& centres,
-    events::NewFrame<TFeatureExtractor>& out_frame) {
+    events::MapTransaction<TFeatureExtractor>& out_event) {
     const map::MapPointId point = map_points_.Add(
         position, LeftOf<TFeatureExtractor>(keyframe.measurement()).descriptors().col(feature),
         map::MeanViewingDirection(position, centres));
-    AddObservation(keyframe, feature, point);
-    out_frame.observed_features.push_back(feature);
-    out_frame.observed_points.push_back(point);
+    OnPointAdded(point);
+    AddObservation(keyframe, feature, point, out_event);
     return point;
+}
+
+template <typename TFeatureExtractor>
+void Mapper<TFeatureExtractor>::OnPointAdded(map::MapPointId point) {
+    // Ids are issued in order, so the per-point vectors grow by one.
+    assert(point.value == references_.size());
+    references_.emplace_back();
+    num_visible_.push_back(1);
+    num_found_.push_back(1);
+}
+
+template <typename TFeatureExtractor>
+void Mapper<TFeatureExtractor>::SetReference(map::MapPointId point, const TKeyFrame& frame,
+                                             uint32_t feature) {
+    const features::TLevels& levels = LeftOf<TFeatureExtractor>(frame.measurement()).levels();
+    const geometry::TPoint3DF centre = frame.pose().Inverse().translation();
+    const geometry::TPoint3DF position = map_points_.Position(point);
+    references_[point.value] =
+        map::PointReference{frame.id(), static_cast<Eigen::Index>(feature),
+                            static_cast<int>(levels(static_cast<Eigen::Index>(feature))),
+                            static_cast<double>((position - centre).norm())};
+}
+
+template <typename TFeatureExtractor>
+void Mapper<TFeatureExtractor>::RemovePoint(map::MapPointId point,
+                                            events::MapTransaction<TFeatureExtractor>& out_event) {
+    covisibility_.RemovePoint(point);
+    map_points_.Remove(point);
+    references_[point.value].reset();
+    out_event.removed_points.push_back(point);
+}
+
+template <typename TFeatureExtractor>
+std::optional<map::PointReference> Mapper<TFeatureExtractor>::Reference(
+    map::MapPointId point) const {
+    return point.value < references_.size() ? references_[point.value] : std::nullopt;
+}
+
+template <typename TFeatureExtractor>
+uint32_t Mapper<TFeatureExtractor>::NumVisible(map::MapPointId point) const {
+    return point.value < num_visible_.size() ? num_visible_[point.value] : 0;
+}
+
+template <typename TFeatureExtractor>
+uint32_t Mapper<TFeatureExtractor>::NumFound(map::MapPointId point) const {
+    return point.value < num_found_.size() ? num_found_[point.value] : 0;
 }
 
 template <typename TFeatureExtractor>
@@ -426,7 +490,7 @@ void Mapper<TFeatureExtractor>::AddClosePoints(
         }
         const geometry::TPoint3DF position = T_wc.Transform(geometry::TPoint3DF(
             binocular.left().normalized_points().col(feature) * depth));
-        AddNewPoint(position, keyframe, feature, centres, out_event.added_frames.back());
+        AddNewPoint(position, keyframe, feature, centres, out_event);
         out_has_point[feature] = true;
         ++count;
     }
@@ -466,10 +530,8 @@ void Mapper<TFeatureExtractor>::TriangulateWithNeighbours(
         for (const TriangulatedPoint& triangulated :
              TriangulateMatches(view, neighbour_view, matches, options_.triangulation)) {
             const map::MapPointId point = AddNewPoint(triangulated.position, keyframe,
-                                                      triangulated.feature_a, centres,
-                                                      out_event.added_frames.back());
-            out_event.added_observations.push_back(
-                AddObservation(*neighbour, triangulated.feature_b, point));
+                                                      triangulated.feature_a, centres, out_event);
+            AddObservation(*neighbour, triangulated.feature_b, point, out_event);
             // Taken for the next neighbours.
             view.has_point[triangulated.feature_a] = true;
         }
@@ -525,32 +587,18 @@ std::optional<double> Mapper<TFeatureExtractor>::SceneMedianDepth(const TKeyFram
 }
 
 template <typename TFeatureExtractor>
-void Mapper<TFeatureExtractor>::UpdatePointStatistics(
-    const std::vector<map::MapPointId>& points,
-    events::MapTransaction<TFeatureExtractor>& out_event) {
-    out_event.ResizeUpdatedPoints(static_cast<uint32_t>(points.size()));
+void Mapper<TFeatureExtractor>::UpdatePointStatistics(map::MapPointId point) {
     std::vector<geometry::TPoint3DF> centres;
     std::vector<typename TFeatureExtractor::TDescriptor> descriptors;
-    for (size_t i = 0; i < points.size(); ++i) {
-        const map::MapPointId point = points[i];
-        centres.clear();
-        descriptors.clear();
-        for (const map::PointObservation& observation : covisibility_.Observations(point)) {
-            const TKeyFrame* keyframe = FindKeyFrame(observation.frame);
-            assert(keyframe != nullptr);
-            centres.push_back(keyframe->pose().Inverse().translation());
-            descriptors.push_back(
-                LeftOf<TFeatureExtractor>(keyframe->measurement()).descriptors().col(observation.feature));
-        }
-        const geometry::TPoint3DF position = map_points_.Position(point);
-        map_points_.Normal(point) = map::MeanViewingDirection(position, centres);
-        map_points_.Descriptor(point) = map::DistinctiveDescriptor<TFeatureExtractor>(descriptors);
-
-        out_event.updated_ids[i] = point;
-        out_event.updated_positions.col(i) = position;
-        out_event.updated_normals.col(i) = map_points_.Normal(point);
-        out_event.updated_descriptors.col(i) = map_points_.Descriptor(point);
+    for (const map::PointObservation& observation : covisibility_.Observations(point)) {
+        const TKeyFrame* keyframe = FindKeyFrame(observation.frame);
+        assert(keyframe != nullptr);
+        centres.push_back(keyframe->pose().Inverse().translation());
+        descriptors.push_back(
+            LeftOf<TFeatureExtractor>(keyframe->measurement()).descriptors().col(observation.feature));
     }
+    map_points_.Normal(point) = map::MeanViewingDirection(map_points_.Position(point), centres);
+    map_points_.Descriptor(point) = map::DistinctiveDescriptor<TFeatureExtractor>(descriptors);
 }
 
 template <typename TFeatureExtractor>
@@ -581,7 +629,7 @@ void Mapper<TFeatureExtractor>::AddInitialMapPoints(
     }
 
     for (const InitialMapPoint& point : map_points) {
-        assert(point.feature_in_first >= 0 && point.feature_in_first < 65536);
+        assert(point.feature_in_first >= 0);
         // The normalized mean of the viewing directions of the keyframes.
         geometry::TPoint3DF normal = geometry::TPoint3DF::Zero();
         for (const geometry::TVector3DF& centre : centres) {
@@ -590,21 +638,13 @@ void Mapper<TFeatureExtractor>::AddInitialMapPoints(
         normal.normalize();
         const map::MapPointId id =
             map_points_.Add(point.position, descriptors.col(point.feature_in_first), normal);
-        const auto feature = static_cast<uint16_t>(point.feature_in_first);
-        if (binocular) {
-            const auto i = static_cast<int>(point.feature_in_first);
-            const int right = binocular->right_indices()(i);
-            assert(right <= 32767);
-            stereo_observations_.Add(id, first.id(), feature, binocular->depth(i),
-                                     static_cast<int16_t>(right));
-            covisibility_.Add(first.id(), feature, id);
-        } else {
-            assert(point.feature_in_second >= 0 && point.feature_in_second < 65536);
-            const auto feature_in_second = static_cast<uint16_t>(point.feature_in_second);
-            observations_.Add(id, first.id(), feature);
-            observations_.Add(id, keyframes_[1].id(), feature_in_second);
-            covisibility_.Add(first.id(), feature, id);
-            covisibility_.Add(keyframes_[1].id(), feature_in_second, id);
+        OnPointAdded(id);
+        const auto feature = static_cast<uint32_t>(point.feature_in_first);
+        covisibility_.Add(first.id(), feature, id);
+        SetReference(id, first, feature);
+        if (!binocular) {
+            assert(point.feature_in_second >= 0);
+            covisibility_.Add(keyframes_[1].id(), static_cast<uint32_t>(point.feature_in_second), id);
         }
     }
 }
@@ -630,16 +670,10 @@ void Mapper<TFeatureExtractor>::PublishNewMap() {
         events::NewFrame<TFeatureExtractor>& part = AddFramePart(keyframe, *event);
         // (left) feature index, point id; a stereo keyframe's depths and
         // right indices are in its measurement.
-        const auto add_observations = [&](const auto& observations) {
-            for (size_t i = 0; i < observations.size(); ++i) {
-                if (observations.frame_id(i) == keyframe.id()) {
-                    part.observed_features.push_back(observations.feature_index(i));
-                    part.observed_points.push_back(observations.mappoint_id(i));
-                }
-            }
-        };
-        add_observations(observations_);
-        add_observations(stereo_observations_);
+        for (const map::MapPointId point : covisibility_.Points(keyframe.id())) {
+            part.observed_features.push_back(*FeatureOf(keyframe.id(), point));
+            part.observed_points.push_back(point);
+        }
     }
     // Fresh storage of a new map: the ids are exactly [0, num_ids()).
     const uint32_t count = map_points_.num_ids();

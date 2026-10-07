@@ -4,6 +4,7 @@ add_library(voyah_slam STATIC
     src/voyahslam.cpp
     src/tracking/tracker.cpp
     src/mapping/mapper.cpp
+    src/mapping/mapper_quality.cpp
     src/mapping/map_initializer.cpp
     src/loop_closing/loop_closer.cpp
     src/slam/slam.cpp
