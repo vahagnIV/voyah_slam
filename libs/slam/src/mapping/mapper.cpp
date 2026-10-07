@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <variant>
@@ -37,8 +38,10 @@ double TimestampOf(const features::TMeasurement<TFeatureExtractor>& measurement)
 } // namespace
 
 template <typename TFeatureExtractor>
-Mapper<TFeatureExtractor>::Mapper(MapperOptions options)
+Mapper<TFeatureExtractor>::Mapper(MapperOptions options,
+                                  std::shared_ptr<const TVocabulary> vocabulary)
     : options_(options)
+    , vocabulary_(std::move(vocabulary))
     , initializer_(std::move(options.initializer)) {}
 
 template <typename TFeatureExtractor>
@@ -159,8 +162,7 @@ void Mapper<TFeatureExtractor>::OnInitializationMeasurement(
     }
 
     for (auto& keyframe : initial->keyframes) {
-        keyframes_.emplace_back(std::in_place, next_frame_id_, keyframe.T_cw,
-                                std::move(keyframe.measurement));
+        AddKeyFrame(next_frame_id_, keyframe.T_cw, std::move(keyframe.measurement));
         ++next_frame_id_.value;
     }
     map_points_ = {};
@@ -229,7 +231,24 @@ void Mapper<TFeatureExtractor>::OnFrameTracked(
 }
 
 template <typename TFeatureExtractor>
-auto Mapper<TFeatureExtractor>::FindKeyFrame(map::FrameId id) const -> const TKeyFrame* {
+auto Mapper<TFeatureExtractor>::AddKeyFrame(map::FrameId id,
+                                            const geometry::RigidTransformation& pose,
+                                            TMeasurement&& measurement) -> const TKeyFrame& {
+    KeyFrameRecord& record =
+        *keyframes_.emplace_back(KeyFrameRecord{TKeyFrame(id, pose, std::move(measurement)), {}, {}});
+    if (vocabulary_) {
+        const auto start = Clock::now();
+        vocabulary_->Transform(LeftOf<TFeatureExtractor>(record.frame.measurement()).descriptors(),
+                               kBowLevelsUp, record.bow, record.features);
+        log_->debug("Frame {}: BoW {:.2f} ms ({} words, {} nodes)", id.value,
+                    MillisecondsSince(start), record.bow.entries.size(),
+                    record.features.nodes.size());
+    }
+    return record.frame;
+}
+
+template <typename TFeatureExtractor>
+auto Mapper<TFeatureExtractor>::FindRecord(map::FrameId id) const -> const KeyFrameRecord* {
     // A map's Frame ids are consecutive from its first Frame's, which is
     // never culled.
     if (keyframes_.empty() || id < FirstKeyFrame().id()) {
@@ -239,13 +258,35 @@ auto Mapper<TFeatureExtractor>::FindKeyFrame(map::FrameId id) const -> const TKe
     if (index >= keyframes_.size() || !keyframes_[index]) {
         return nullptr;
     }
-    assert(keyframes_[index]->id() == id);
+    assert(keyframes_[index]->frame.id() == id);
     return &*keyframes_[index];
+}
+
+template <typename TFeatureExtractor>
+auto Mapper<TFeatureExtractor>::FindKeyFrame(map::FrameId id) const -> const TKeyFrame* {
+    const KeyFrameRecord* record = FindRecord(id);
+    return record != nullptr ? &record->frame : nullptr;
 }
 
 template <typename TFeatureExtractor>
 auto Mapper<TFeatureExtractor>::FindKeyFrame(map::FrameId id) -> TKeyFrame* {
     return const_cast<TKeyFrame*>(std::as_const(*this).FindKeyFrame(id));
+}
+
+template <typename TFeatureExtractor>
+const bow::FeatureVector* Mapper<TFeatureExtractor>::BowFeaturesOf(map::FrameId id) const {
+    if (!vocabulary_) {
+        return nullptr;
+    }
+    const KeyFrameRecord* record = FindRecord(id);
+    assert(record != nullptr);
+    return &record->features;
+}
+
+template <typename TFeatureExtractor>
+const bow::BowVector* Mapper<TFeatureExtractor>::BowVectorOf(map::FrameId frame) const {
+    const KeyFrameRecord* record = vocabulary_ ? FindRecord(frame) : nullptr;
+    return record != nullptr ? &record->bow : nullptr;
 }
 
 template <typename TFeatureExtractor>
@@ -330,8 +371,7 @@ void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureE
     // out of range or already paired, is skipped.
     const map::FrameId id = next_frame_id_;
     ++next_frame_id_.value;
-    keyframes_.emplace_back(std::in_place, id, event.pose, TMeasurement(event.measurement));
-    const TKeyFrame& keyframe = LastKeyFrame();
+    const TKeyFrame& keyframe = AddKeyFrame(id, event.pose, TMeasurement(event.measurement));
     const auto num_features =
         static_cast<size_t>(LeftOf<TFeatureExtractor>(keyframe.measurement()).points().cols());
     AddFramePart(keyframe, *created);
@@ -560,7 +600,9 @@ void Mapper<TFeatureExtractor>::TriangulateWithNeighbours(
 
         const TriangulationView<TFeatureExtractor> neighbour_view =
             ViewOf(*neighbour, FeaturesWithPoints(*neighbour));
-        const auto matches = SearchForTriangulation(view, neighbour_view, options_.triangulation);
+        const auto matches =
+            SearchForTriangulation(view, neighbour_view, options_.triangulation,
+                                   BowFeaturesOf(keyframe.id()), BowFeaturesOf(neighbour_id));
         const std::vector<geometry::TPoint3DF> centres = {centre, neighbour_centre};
         for (const TriangulatedPoint& triangulated :
              TriangulateMatches(view, neighbour_view, matches, options_.triangulation)) {
@@ -659,8 +701,8 @@ void Mapper<TFeatureExtractor>::AddInitialMapPoints(
                                   ? binocular->left().descriptors()
                                   : std::get<TMonocularMeasurement>(first.measurement()).descriptors();
     std::vector<geometry::TVector3DF> centres;
-    for (const std::optional<TKeyFrame>& keyframe : keyframes_) {
-        centres.push_back(keyframe->pose().Inverse().translation());
+    for (const std::optional<KeyFrameRecord>& keyframe : keyframes_) {
+        centres.push_back(keyframe->frame.pose().Inverse().translation());
     }
 
     for (const InitialMapPoint& point : map_points) {
@@ -679,7 +721,8 @@ void Mapper<TFeatureExtractor>::AddInitialMapPoints(
         SetReference(id, first, feature);
         if (!binocular) {
             assert(point.feature_in_second >= 0);
-            covisibility_.Add(keyframes_[1]->id(), static_cast<uint32_t>(point.feature_in_second), id);
+            covisibility_.Add(keyframes_[1]->frame.id(), static_cast<uint32_t>(point.feature_in_second),
+                              id);
         }
     }
 }
@@ -701,12 +744,13 @@ void Mapper<TFeatureExtractor>::PublishNewMap() {
     event->priority = false;
     event->new_map = true;
     event->start_frame = LastKeyFrame().id();
-    for (const std::optional<TKeyFrame>& keyframe : keyframes_) {
-        events::NewFrame<TFeatureExtractor>& part = AddFramePart(*keyframe, *event);
+    for (const std::optional<KeyFrameRecord>& record : keyframes_) {
+        const TKeyFrame& keyframe = record->frame;
+        events::NewFrame<TFeatureExtractor>& part = AddFramePart(keyframe, *event);
         // (left) feature index, point id; a stereo keyframe's depths and
         // right indices are in its measurement.
-        for (const map::MapPointId point : covisibility_.Points(keyframe->id())) {
-            part.observed_features.push_back(*FeatureOf(keyframe->id(), point));
+        for (const map::MapPointId point : covisibility_.Points(keyframe.id())) {
+            part.observed_features.push_back(*FeatureOf(keyframe.id(), point));
             part.observed_points.push_back(point);
         }
     }

@@ -25,6 +25,8 @@ int main(int argc, char** argv) {
     // Debug logs (e.g. initialization and bundle adjustment) are shown by the examples.
     voyahslam::Logger::SetLevel(spdlog::level::debug);
     full_slam::Options options = full_slam::ParseOptions(argc, argv);
+    // Before anything starts: a bad file exits with status 1.
+    const auto vocabulary = full_slam::LoadVocabulary<TFeatureExtractor>(options.vocabulary);
     try {
         dataset_reader::EurocDatasetReader reader(options.dataset);
         if (!reader.has_stereo()) {
@@ -50,7 +52,7 @@ int main(int argc, char** argv) {
         // Declared before slam for the same reason as the viewer.
         std::optional<full_slam::TrajectoryWriter<TFeatureExtractor>> trajectory;
         if (!options.trajectory_out.empty()) trajectory.emplace(options.trajectory_out);
-        TSlam slam;
+        TSlam slam({}, {}, vocabulary);
         // Also when an exception unwinds: stop the producers, then the viewer
         // and the trajectory (their final drains recycle events into slam's
         // pools), all before ~Slam destroys those pools. Stop() and Poll()

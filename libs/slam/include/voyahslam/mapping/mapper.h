@@ -4,10 +4,13 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <voyahslam/bow/bow_vector.h>
+#include <voyahslam/bow/vocabulary.h>
 #include <voyahslam/events/event_node.h>
 #include <voyahslam/events/event_types.h>
 #include <voyahslam/events/frame_tracked.h>
@@ -80,13 +83,26 @@ enum class MapperState : uint8_t {
 // BA, Frame culling). A TrackingLost of the current map discards it.
 // LoopDetected is not consumed yet. Runs on its own thread; each
 // ProcessPending() pass drains the inbox.
+//
+// With a vocabulary (immutable, shared read-only with other threads), every
+// Frame, the initial ones included, keeps the BowVector and FeatureVector of
+// its (left) descriptors, which are not published, and triangulation takes
+// its candidate pairs from the FeatureVector nodes two Frames share (spec
+// section 3). Without one, Frames have no bag of words and triangulation
+// stays brute force.
 template <typename TFeatureExtractor>
 class Mapper : public events::EventNode {
 public:
     using TMeasurement = features::TMeasurement<TFeatureExtractor>;
     using TKeyFrame = map::Frame<TFeatureExtractor, TMeasurement>;
+    using TVocabulary = bow::Vocabulary<TFeatureExtractor>;
 
-    explicit Mapper(MapperOptions options = {});
+    // FeatureVector nodes are this many levels above the words (ORB-SLAM3).
+    static constexpr int kBowLevelsUp = 4;
+
+    // `vocabulary` may be null: no bags of words.
+    explicit Mapper(MapperOptions options = {},
+                    std::shared_ptr<const TVocabulary> vocabulary = nullptr);
     // Stops the worker before any member it uses is destroyed.
     ~Mapper();
 
@@ -133,8 +149,19 @@ public:
     [[nodiscard]] uint32_t NumFound(map::MapPointId point) const;
     // The local BA of the last created Frame. Same thread rule.
     [[nodiscard]] const LocalBaSummary& last_local_ba() const { return last_local_ba_; }
+    // The BowVector of the current map's Frame `frame`; nullptr without a
+    // vocabulary or if the Frame is not in the map. Same thread rule.
+    [[nodiscard]] const bow::BowVector* BowVectorOf(map::FrameId frame) const;
 
 private:
+    // A Frame of the current map with its bag of words (empty without a
+    // vocabulary).
+    struct KeyFrameRecord {
+        TKeyFrame frame;
+        bow::BowVector bow;
+        bow::FeatureVector features;
+    };
+
     // A point created with Frame `created`, culled or graduated by
     // CullRecentPoints (spec section 4.1).
     struct RecentPoint {
@@ -159,14 +186,24 @@ private:
     // Empties the current map (Frames, points, observations).
     void ClearMap();
 
+    // Appends Frame `id` to the current map, with its bag of words when there
+    // is a vocabulary; returns it.
+    const TKeyFrame& AddKeyFrame(map::FrameId id, const geometry::RigidTransformation& pose,
+                                 TMeasurement&& measurement);
+    // The current map's Frame `id` with its bag of words; nullptr if it is not
+    // in the map (or was culled).
+    [[nodiscard]] const KeyFrameRecord* FindRecord(map::FrameId id) const;
     // The current map's Frame `id`; nullptr if it is not in the map (or was
     // culled).
     [[nodiscard]] const TKeyFrame* FindKeyFrame(map::FrameId id) const;
     [[nodiscard]] TKeyFrame* FindKeyFrame(map::FrameId id);
+    // The FeatureVector of the current map's Frame `id` for SearchByBoW;
+    // nullptr without a vocabulary.
+    [[nodiscard]] const bow::FeatureVector* BowFeaturesOf(map::FrameId id) const;
     // The current map's first Frame, never culled.
-    [[nodiscard]] const TKeyFrame& FirstKeyFrame() const { return *keyframes_.front(); }
+    [[nodiscard]] const TKeyFrame& FirstKeyFrame() const { return keyframes_.front()->frame; }
     // The current map's newest Frame, never culled.
-    [[nodiscard]] const TKeyFrame& LastKeyFrame() const { return *keyframes_.back(); }
+    [[nodiscard]] const TKeyFrame& LastKeyFrame() const { return keyframes_.back()->frame; }
     // `point`'s observations as ORB-SLAM3 counts them for ref_points: 2 for a
     // stereo-matched one (right index >= 0), 1 otherwise. Unlike
     // CovisibilityIndex::NumObservations, which counts Frames.
@@ -214,7 +251,8 @@ private:
                         events::MapTransaction<TFeatureExtractor>& out_event);
     // Triangulates `keyframe`'s features without a point (`has_point` false)
     // against its covisible neighbour Frames, skipping a neighbour with too
-    // small a baseline. The neighbour's observation of each new point goes
+    // small a baseline; with a vocabulary, the candidate pairs share a
+    // FeatureVector node. The neighbour's observation of each new point goes
     // into `out_event`'s added_observations.
     void TriangulateWithNeighbours(const TKeyFrame& keyframe, std::vector<bool> has_point,
                                    events::MapTransaction<TFeatureExtractor>& out_event);
@@ -322,6 +360,7 @@ private:
         const TKeyFrame& keyframe, events::MapTransaction<TFeatureExtractor>& out_event) const;
 
     MapperOptions options_;
+    std::shared_ptr<const TVocabulary> vocabulary_;  // may be null
     // One ProcessPending() batch: the events drained from the inbox and, per
     // event, whether it is a superseded FrameTracked.
     std::vector<events::Event*> batch_;
@@ -336,7 +375,7 @@ private:
     map::FrameId next_frame_id_{0};  // never reset: frame ids are unique across maps
     // The current map's Frames by id from its first one; a culled Frame is
     // empty. The first and the last one are never culled.
-    std::vector<std::optional<TKeyFrame>> keyframes_;
+    std::vector<std::optional<KeyFrameRecord>> keyframes_;
     // Frames in the current map (culled ones excluded), readable from any thread.
     std::atomic<size_t> num_keyframes_{0};
     // The current map's points; ids restart at 0 per map.
