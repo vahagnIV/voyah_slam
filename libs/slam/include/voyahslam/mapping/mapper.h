@@ -44,6 +44,21 @@ struct MapperOptions {
     features::FuseOptions fuse;          // the fusion match gate
 };
 
+// What the local BA of the last created Frame did (spec section 5).
+struct LocalBaSummary {
+    // False when it was skipped: no free Frame with an observation, no fixed
+    // Frame, or input BundleAdjust rejected.
+    bool ran = false;
+    bool interrupted = false;  // stopped by an urgent event
+    int stage_reached = 2;     // BaResult::stage_reached
+    int iterations = 0;
+    size_t num_free = 0;       // optimized Frames
+    size_t num_fixed = 0;
+    size_t num_points = 0;
+    size_t num_observations = 0;
+    size_t num_outliers = 0;   // observations removed as outliers
+};
+
 enum class MapperState : uint8_t {
     Initializing,  // no map: builds one from the Tracker's InitializationMeasurements
     Mapping,       // extends the current map
@@ -57,10 +72,12 @@ enum class MapperState : uint8_t {
 // evaluated or skipped, counts its visible and found points. Around a Frame's
 // creation the Mapper culls poor recent points once the Frame's tracked
 // observations are in, then fuses the new Frame with its neighbours (spec
-// sections 3, 4.1). Every change is published
-// as one MapTransaction: a new map with all its Frames and points, or
-// transaction 1 of a created Frame (creation, culling, fusion). A
-// TrackingLost of the current map discards it.
+// sections 3, 4.1). It then runs a local bundle adjustment around the new
+// Frame, which an urgent FrameTracked interrupts, and culls its redundant
+// covisible Frames (spec sections 5, 4.2). Every change is published as one
+// MapTransaction: a new map with all its Frames and points, or, per created
+// Frame, transaction 1 (creation, culling, fusion) and transaction 2 (local
+// BA, Frame culling). A TrackingLost of the current map discards it.
 // LoopDetected is not consumed yet. Runs on its own thread; each
 // ProcessPending() pass drains the inbox.
 template <typename TFeatureExtractor>
@@ -114,6 +131,8 @@ public:
     [[nodiscard]] std::optional<map::PointReference> Reference(map::MapPointId point) const;
     [[nodiscard]] uint32_t NumVisible(map::MapPointId point) const;
     [[nodiscard]] uint32_t NumFound(map::MapPointId point) const;
+    // The local BA of the last created Frame. Same thread rule.
+    [[nodiscard]] const LocalBaSummary& last_local_ba() const { return last_local_ba_; }
 
 private:
     // A point created with Frame `created`, culled or graduated by
@@ -140,8 +159,14 @@ private:
     // Empties the current map (Frames, points, observations).
     void ClearMap();
 
-    // The current map's Frame `id`; nullptr if it is not in the map.
+    // The current map's Frame `id`; nullptr if it is not in the map (or was
+    // culled).
     [[nodiscard]] const TKeyFrame* FindKeyFrame(map::FrameId id) const;
+    [[nodiscard]] TKeyFrame* FindKeyFrame(map::FrameId id);
+    // The current map's first Frame, never culled.
+    [[nodiscard]] const TKeyFrame& FirstKeyFrame() const { return *keyframes_.front(); }
+    // The current map's newest Frame, never culled.
+    [[nodiscard]] const TKeyFrame& LastKeyFrame() const { return *keyframes_.back(); }
     // `point`'s observations as ORB-SLAM3 counts them for ref_points: 2 for a
     // stereo-matched one (right index >= 0), 1 otherwise. Unlike
     // CovisibilityIndex::NumObservations, which counts Frames.
@@ -154,7 +179,8 @@ private:
     // observations, culls poor recent points (the new observations counted),
     // adds new points (stereo close points, then points triangulated against
     // neighbour Frames), fuses the Frame with its neighbours, and publishes
-    // all of it as one MapTransaction.
+    // all of it as one MapTransaction; then publishes transaction 2
+    // (RefineAroundFrame).
     void CreateFrame(const events::FrameTracked<TFeatureExtractor>& event);
     // Stores `frame`'s observation of `point` through its (left) feature
     // `feature` (a stereo-matched feature of a binocular Frame with its depth
@@ -232,6 +258,44 @@ private:
     void FinishTransaction(map::MapPointId first_new,
                            events::MapTransaction<TFeatureExtractor>& out_event);
 
+    // Transaction 2 of the new Frame `frame` (spec section 1, steps 4-5):
+    // local BA, then Frame culling, published as one MapTransaction even if
+    // both change nothing. Returns the milliseconds of each step and the
+    // number of culled Frames and removed points.
+    struct Refinement {
+        double ba_ms = 0.0;
+        double cull_ms = 0.0;
+        size_t num_culled_frames = 0;
+        size_t num_removed_points = 0;
+    };
+    Refinement RefineAroundFrame(map::FrameId frame);
+    // Local BA (spec section 5): the new Frame `frame` and its covisible
+    // Frames with enough shared points are optimized with all their points,
+    // the other observers of those points are fixed, as is the map's first
+    // Frame. Skipped without a free Frame that has an observation or without a
+    // fixed Frame. Poses and points are applied; outliers are removed only
+    // once the robust stage has finished. The optimized points, and those
+    // that lost an observation, are appended to `out_changed`.
+    void LocalBundleAdjust(map::FrameId frame, events::MapTransaction<TFeatureExtractor>& out_event,
+                           std::vector<map::MapPointId>& out_changed);
+    // Frame culling (spec section 4.2): removes each covisible Frame of
+    // `frame` that IsRedundantFrame judges redundant, never the map's first
+    // Frame. The points that lost an observation are appended to
+    // `out_changed`.
+    void CullFrames(map::FrameId frame, events::MapTransaction<TFeatureExtractor>& out_event,
+                    std::vector<map::MapPointId>& out_changed);
+    // Drops the Frame and its observations; a point left with fewer than 2
+    // observations is removed, the others are appended to `out_changed`.
+    void RemoveFrame(map::FrameId frame, events::MapTransaction<TFeatureExtractor>& out_event,
+                     std::vector<map::MapPointId>& out_changed);
+    // After transaction 2's removals: each changed point still alive whose
+    // reference observation is gone takes the remaining observation with the
+    // smallest Frame id (current pose and position), as the replica does; its
+    // statistics are recomputed and it is written to `out_event`'s updated
+    // points.
+    void FinishRefinement(std::vector<map::MapPointId> changed,
+                          events::MapTransaction<TFeatureExtractor>& out_event);
+
     // `frame`'s side of a triangulation, with `has_point` per feature.
     [[nodiscard]] TriangulationView<TFeatureExtractor> ViewOf(const TKeyFrame& frame,
                                                               std::vector<bool> has_point) const;
@@ -270,8 +334,11 @@ private:
     std::atomic<map::MapId> current_map_id_{map::MapId{0}};
     map::MapId next_map_id_{1};
     map::FrameId next_frame_id_{0};  // never reset: frame ids are unique across maps
-    std::vector<TKeyFrame> keyframes_;
-    std::atomic<size_t> num_keyframes_{0};  // keyframes_.size(), readable from any thread
+    // The current map's Frames by id from its first one; a culled Frame is
+    // empty. The first and the last one are never culled.
+    std::vector<std::optional<TKeyFrame>> keyframes_;
+    // Frames in the current map (culled ones excluded), readable from any thread.
+    std::atomic<size_t> num_keyframes_{0};
     // The current map's points; ids restart at 0 per map.
     map::MapPointStorage<TFeatureExtractor> map_points_;
     std::atomic<size_t> num_map_points_{0};  // map_points_.size(), readable from any thread
@@ -293,6 +360,7 @@ private:
     std::unordered_map<uint32_t, map::MapPointId> replaced_;
     std::vector<map::MapPointId> losers_;
     std::vector<map::MapPointId> touched_;
+    LocalBaSummary last_local_ba_;
     MapInitializer<TFeatureExtractor> initializer_;
 
     memory::ObjectPool<events::MapTransaction<TFeatureExtractor>, memory::ThreadSafePolicy>

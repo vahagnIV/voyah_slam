@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <variant>
 #include <vector>
@@ -67,6 +68,8 @@ struct Published {
     std::vector<events::RemovedObservation> removed_observations;
     std::vector<events::ReplacedPoint> replaced_points;
     std::vector<map::MapPointId> removed_points;
+    std::vector<std::pair<map::FrameId, geometry::RigidTransformation>> updated_poses;
+    std::vector<map::FrameId> removed_frames;
 
     // The `k`th added Frame.
     [[nodiscard]] const PublishedFrame& frame(size_t k = 0) const { return frames.at(k); }
@@ -103,8 +106,10 @@ protected:
         tracker_.Notify(event);
     }
 
-    // Everything captured so far.
-    std::vector<Published> TakeCaptured() {
+    // Everything captured so far; `after_each` runs once each event has been
+    // applied to the replica.
+    std::vector<Published> TakeCaptured(
+        const std::function<void(const Published&)>& after_each = {}) {
         std::vector<Published> published;
         while (events::Event* event = listener_.GetNextEvent()) {
             replica_.Apply(*event);
@@ -150,11 +155,20 @@ protected:
                 p.removed_observations = transaction->removed_observations;
                 p.replaced_points = transaction->replaced_points;
                 p.removed_points = transaction->removed_points;
+                p.updated_poses = transaction->updated_poses;
+                p.removed_frames = transaction->removed_frames;
+            }
+            ExpectApplied(p);
+            if (after_each) {
+                after_each(p);
             }
             published.push_back(p);
         }
         return published;
     }
+
+    // Checks the replica just after `published` was applied to it.
+    virtual void ExpectApplied(const Published& /*published*/) const {}
 
     // A transaction of map `map` that adds exactly Frames `frames` and
     // removes nothing; a new map starts tracking from its last Frame.
@@ -780,6 +794,9 @@ protected:
         }
     }
 
+    // Every transaction leaves no dead ids behind.
+    void ExpectApplied(const Published& published) const override { ExpectNoDeadIds(published); }
+
     // Every point `created` names as observed, updated or a merge winner is
     // alive once it is applied; every loser and removed point is not.
     void ExpectNoDeadIds(const Published& created) const {
@@ -804,6 +821,13 @@ protected:
         }
         for (const map::MapPointId point : created.removed_points) {
             EXPECT_FALSE(replica_.IsAlive(point)) << "removed point " << point.value;
+        }
+        // Posed Frames exist, removed ones do not.
+        for (const auto& [frame, pose] : created.updated_poses) {
+            EXPECT_NE(replica_.keyframe(frame), nullptr) << "posed Frame " << frame.value;
+        }
+        for (const map::FrameId frame : created.removed_frames) {
+            EXPECT_EQ(replica_.keyframe(frame), nullptr) << "removed Frame " << frame.value;
         }
     }
 };
@@ -863,7 +887,7 @@ TEST_F(MapperFrameCreationTest, CreatesFrameWhenWeak) {
     Drain();
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 1u);
+    ASSERT_EQ(published.size(), 2u);
     const Published& created = published[0];
     ExpectPublished(created, /*new_map=*/false, 1, {second_.frame_id.value + 1});
     const PublishedFrame& frame = created.frame();
@@ -949,7 +973,7 @@ TEST_F(MapperFrameCreationTest, SkipsInvalidAndDuplicatePoints) {
     Drain();
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 1u);
+    ASSERT_EQ(published.size(), 2u);
     const Published& created = published[0];
     ASSERT_EQ(created.type, events::EventType::MapTransaction);
     const PublishedFrame& frame = created.frame();
@@ -971,7 +995,7 @@ TEST_F(MapperFrameCreationTest, RefPointsUsesMinObs) {
     const size_t half = num_points_ / 2;
     PublishFrameTracked(1, next_, TrackedPairs(next_, half));
     Drain();
-    ASSERT_EQ(TakeCaptured().size(), 1u);
+    ASSERT_EQ(TakeCaptured().size(), 2u);
     ASSERT_EQ(mapper_.num_keyframes(), 3u);
     const size_t evaluations = mapper_.num_frame_evaluations();
 
@@ -1015,7 +1039,7 @@ TEST_F(MapperFrameCreationTest, CreatesStereoFrame) {
     Drain();
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 1u);
+    ASSERT_EQ(published.size(), 2u);
     ExpectPublished(published[0], /*new_map=*/false, 1, {first.frame_id.value + 1});
     // The tracked observations, then the close points (Frame 0 shares the
     // pose: nothing is triangulated).
@@ -1078,7 +1102,7 @@ TEST_F(MapperFrameCreationTest, RefPointsCountsStereoObservationsTwice) {
     Drain();
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 1u);
+    ASSERT_EQ(published.size(), 2u);
     ExpectPublished(published[0], /*new_map=*/false, 1, {first.frame_id.value + 1});
     EXPECT_EQ(published[0].frame().observed_points.size(), count + published[0].count);
     EXPECT_EQ(mapper_.num_keyframes(), 2u);
@@ -1098,7 +1122,7 @@ TEST_F(MapperFrameCreationTest, StereoClosePointsFromDepth) {
     Drain();
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 1u);
+    ASSERT_EQ(published.size(), 2u);
     const Published& created = published[0];
     ExpectPublished(created, /*new_map=*/false, 1, {first.frame_id.value + 1});
     const PublishedFrame& added = created.frame();
@@ -1179,7 +1203,7 @@ TEST_F(MapperFrameCreationTest, StereoWithoutMatchesCreatesNoClosePoints) {
     Drain();
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 1u);
+    ASSERT_EQ(published.size(), 2u);
     ExpectPublished(published[0], /*new_map=*/false, 1, {first.frame_id.value + 1});
     EXPECT_EQ(published[0].count, 0u);
     EXPECT_EQ(published[0].num_added_observations, 0u);
@@ -1203,7 +1227,7 @@ TEST_F(MapperFrameCreationTest, MonoTriangulatesAgainstNeighbours) {
                         std::nullopt, MapPose(frame_2));
     Drain();
     const auto before = TakeCaptured();
-    ASSERT_EQ(before.size(), 1u);
+    ASSERT_EQ(before.size(), 2u);
     const map::FrameId frame_2_id = before[0].frame().frame_id;
     const size_t num_points = mapper_.num_map_points();
 
@@ -1218,7 +1242,7 @@ TEST_F(MapperFrameCreationTest, MonoTriangulatesAgainstNeighbours) {
     Drain();
 
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 1u);
+    ASSERT_EQ(published.size(), 2u);
     const Published& created = published[0];
     const PublishedFrame& added_frame = created.frame();
     ASSERT_GT(created.count, 0u);
@@ -1277,7 +1301,7 @@ TEST_F(MapperFrameCreationTest, ReplicaStaysConsistent) {
                             MapPose(index));
         Drain();
         const auto published = TakeCaptured();
-        ASSERT_EQ(published.size(), 1u) << "frame " << index;
+        ASSERT_EQ(published.size(), 2u) << "frame " << index;
         num_added += published[0].num_added_observations;
         ExpectReplicaConsistent();
         // Every new point's reference is (new Frame, its feature there).
@@ -1345,7 +1369,7 @@ TEST_F(MapperFrameCreationTest, StereoNeighbourObservationCarriesDepth) {
         tracker_.Notify(event);
         Drain();
         const auto published = TakeCaptured();
-        ASSERT_EQ(published.size(), 1u) << "frame " << index;
+        ASSERT_EQ(published.size(), 2u) << "frame " << index;
         frames.push_back(published[0]);
         ExpectReplicaConsistent();
     }
@@ -1414,15 +1438,64 @@ protected:
     }
 
     // Creates one Frame from `PublishFrameTracked(1, index, ...)`, weak at 20
-    // inliers and posed truly, and returns its transaction.
+    // inliers and posed truly, and returns its transaction 1.
     Published CreateMonoFrame(size_t index) {
-        EXPECT_LT(index, sequence_.frames.size());
-        PublishFrameTracked(1, index, AllTrackedPairs(index), map::FrameId{1}, 20, MapPose(index));
-        Drain();
-        const auto published = TakeCaptured();
-        EXPECT_EQ(published.size(), 1u) << "frame " << index;
+        const std::vector<Published> published = CreateMonoFrame(index, AllTrackedPairs(index));
         return published.empty() ? Published{} : published[0];
     }
+    // Creates one Frame of sequence frame `index` tracking `pairs` at `pose`
+    // (the true one by default), weak at 20 inliers against `reference`;
+    // returns its two transactions.
+    std::vector<Published> CreateMonoFrame(
+        size_t index, const std::vector<Pair>& pairs,
+        std::optional<geometry::RigidTransformation> pose = std::nullopt,
+        map::FrameId reference = map::FrameId{1},
+        const std::function<void(const Published&)>& after_each = {}) {
+        EXPECT_LT(index, sequence_.frames.size());
+        PublishFrameTracked(1, index, pairs, reference, 20, pose.value_or(MapPose(index)));
+        Drain();
+        std::vector<Published> published = TakeCaptured(after_each);
+        EXPECT_EQ(published.size(), 2u) << "frame " << index;
+        return published.size() == 2 ? published : std::vector<Published>(2);
+    }
+
+    // The mean raw-pixel reprojection error, in the replica, of every
+    // observation of the alive points among `points`.
+    double MeanReprojectionError(const std::vector<map::MapPointId>& points) const {
+        double sum = 0.0;
+        size_t count = 0;
+        for (const map::MapPointId point : points) {
+            if (!replica_.IsAlive(point)) continue;
+            for (const map::PointObservation& o : replica_.covisibility().Observations(point)) {
+                const tracking::ReplicaKeyFrame<Extractor>* keyframe = replica_.keyframe(o.frame);
+                const auto& left = std::get<TMonocularMeasurement>(keyframe->measurement);
+                const geometry::TPoint2DF projected = left.camera().Project(
+                    keyframe->T_cw.Transform(geometry::TPoint3DF(replica_.Position(point))));
+                sum += (projected - left.distorted_points().col(o.feature)).norm();
+                ++count;
+            }
+        }
+        EXPECT_GT(count, 0u);
+        return count > 0 ? sum / static_cast<double>(count) : 0.0;
+    }
+
+    // Sync observer of the Mapper: on the first transaction 1 it publishes an
+    // urgent FrameTracked into the Mapper's inbox, as the Tracker would while
+    // the Mapper is about to run local BA.
+    static void PublishUrgentOnFrameCreated(void* ctx, events::Event* event) {
+        auto* self = static_cast<MapperQualityTest*>(ctx);
+        if (self->urgent_sent_ || event->type != events::EventType::MapTransaction) return;
+        const auto* transaction = static_cast<const TTransaction*>(event);
+        if (transaction->new_map || transaction->added_frames.empty()) return;
+        self->urgent_sent_ = true;
+        auto* urgent = self->frame_tracked_pool_.Create();
+        urgent->map_id = map::MapId{0};  // an old map's: ignored once drained
+        urgent->priority = true;
+        self->urgent_.Notify(urgent);
+    }
+
+    events::Observable urgent_;
+    bool urgent_sent_ = false;
 };
 using MapperFusionTest = MapperQualityTest;
 using MapperCullingTest = MapperQualityTest;
@@ -1451,10 +1524,9 @@ TEST_F(MapperFusionTest, MergesDuplicatePoints) {
     PublishStereoFrameTracked(first, StereoMeasurement(1.0), count);
     Drain();
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 1u);
+    ASSERT_EQ(published.size(), 2u);
     const Published& created = published[0];
     ExpectReplicaConsistent();
-    ExpectNoDeadIds(created);
 
     // Each new point lost to Frame 0's point of its feature (one stereo
     // observation each: the lower id wins) and was removed; except on a
@@ -1520,11 +1592,11 @@ TEST_F(MapperFusionTest, ChainedMergesPublishFinalWinner) {
     const PublishedFrame& first = initial.frame();
     PublishStereoFrameTracked(1.0, first.pose, PairsOf(first), first.frame_id, 20);
     Drain();
-    ASSERT_EQ(TakeCaptured().size(), 1u);
+    ASSERT_EQ(TakeCaptured().size(), 2u);
     PublishStereoFrameTracked(2.0, first.pose, {}, first.frame_id, 20);
     Drain();
     const auto duplicates = TakeCaptured();
-    ASSERT_EQ(duplicates.size(), 1u);
+    ASSERT_EQ(duplicates.size(), 2u);
     const PublishedFrame& b_frame = duplicates[0].frame();
     ASSERT_TRUE(duplicates[0].replaced_points.empty());
     ASSERT_GE(b_frame.observed_points.size(), 100u);
@@ -1544,10 +1616,9 @@ TEST_F(MapperFusionTest, ChainedMergesPublishFinalWinner) {
     PublishStereoFrameTracked(3.0, first.pose, pairs, first.frame_id, 20);
     Drain();
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 1u);
+    ASSERT_EQ(published.size(), 2u);
     const Published& created = published[0];
     ExpectReplicaConsistent();
-    ExpectNoDeadIds(created);
 
     // Every record names the final winner, an A point; no winner is a loser.
     size_t chained = 0;
@@ -1576,10 +1647,9 @@ TEST_F(MapperFusionTest, FusionRaisesObservationCounts) {
     // more.
     for (size_t k = 1; k <= 4; ++k) {
         const Published created = CreateMonoFrame(second_index + 3 * k);
+        ASSERT_EQ(created.frames.size(), 1u);
         ExpectReplicaConsistent();
-        ExpectNoDeadIds(created);
     }
-    ASSERT_EQ(mapper_.num_keyframes(), 6u);
     // Every point created after the initialization; a culled one counts as
     // under 3.
     const auto total = static_cast<uint32_t>(replica_.num_points() - num_points_);
@@ -1597,14 +1667,18 @@ TEST_F(MapperFusionTest, ReplicaStaysConsistent) {
     ExpectReplicaConsistent();
     const size_t second_index = next_ - 1;
     size_t num_removed = 0;
+    size_t num_culled = 0;
     for (size_t k = 1; k <= 6; ++k) {
-        const Published created = CreateMonoFrame(second_index + 2 * k);
+        const size_t index = second_index + 2 * k;
+        const std::vector<Published> published = CreateMonoFrame(index, AllTrackedPairs(index));
+        ASSERT_EQ(published[0].frames.size(), 1u);
         ExpectReplicaConsistent();
-        ExpectNoDeadIds(created);
-        num_removed += created.removed_points.size();
+        num_removed += published[0].removed_points.size() + published[1].removed_points.size();
+        num_culled += published[1].removed_frames.size();
     }
-    EXPECT_EQ(mapper_.num_keyframes(), 8u);
-    EXPECT_GT(num_removed, 0u);
+    EXPECT_EQ(mapper_.num_keyframes(), 8u - num_culled);
+    // Something was removed: points, or Frames with their observations.
+    EXPECT_GT(num_removed + num_culled, 0u);
 }
 
 TEST_F(MapperCullingTest, CountersIncludeSkippedFrameTracked) {
@@ -1663,7 +1737,6 @@ TEST_F(MapperCullingTest, RemovesPoorRecentPoint) {
     EXPECT_FALSE(replica_.IsAlive(*poor));
     EXPECT_FALSE(mapper_.Reference(*poor).has_value());
     ExpectReplicaConsistent();
-    ExpectNoDeadIds(next);
 }
 
 TEST_F(MapperFusionTest, StereoFusionKeepsPointIdentity) {
@@ -1732,11 +1805,10 @@ TEST_F(MapperFusionTest, StereoFusionKeepsPointIdentity) {
         tracker_.Notify(event);
         Drain();
         const auto published = TakeCaptured();
-        ASSERT_EQ(published.size(), 1u) << "frame " << index;
+        ASSERT_EQ(published.size(), 2u) << "frame " << index;
         frames.emplace_back(published[0].frame().frame_id, index);
         num_merged += published[0].replaced_points.size();
         ExpectReplicaConsistent();
-        ExpectNoDeadIds(published[0]);
         expect_one_scene_per_point(index);
     }
     EXPECT_GT(num_merged, 0u);
@@ -1754,7 +1826,7 @@ TEST_F(MapperFusionTest, LoserObservationDroppedWhereWinnerObserved) {
     PublishStereoFrameTracked(1.0, first.pose, {}, first.frame_id, 20);
     Drain();
     const auto duplicates = TakeCaptured();
-    ASSERT_EQ(duplicates.size(), 1u);
+    ASSERT_EQ(duplicates.size(), 2u);
     const PublishedFrame& b_frame = duplicates[0].frame();
     ASSERT_FALSE(b_frame.observed_points.empty());
     const uint32_t feature_s = b_frame.observed_features[0];
@@ -1775,10 +1847,9 @@ TEST_F(MapperFusionTest, LoserObservationDroppedWhereWinnerObserved) {
     PublishStereoFrameTracked(2.0, first.pose, pairs, first.frame_id, 20);
     Drain();
     const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 1u);
+    ASSERT_EQ(published.size(), 2u);
     const Published& created = published[0];
     ExpectReplicaConsistent();
-    ExpectNoDeadIds(created);
     const map::FrameId frame_2 = created.frame().frame_id;
 
     // B_s lost to A_s.
@@ -1877,15 +1948,219 @@ TEST_F(MapperCullingWithoutFusionTest, TrackedObservationCountsBeforeCulling) {
     pairs.push_back({static_cast<uint32_t>(feature - scene_of_feature.begin()), recent->first});
     PublishFrameTracked(1, index_4, pairs, map::FrameId{1}, 20, MapPose(index_4));
     Drain();
-    const auto published = TakeCaptured();
-    ASSERT_EQ(published.size(), 1u);
+    // Checked after transaction 1: transaction 2 may cull one of its Frames.
+    bool alive = false;
+    size_t num_observations = 0;
+    const auto published = TakeCaptured([&](const Published& p) {
+        if (p.frames.empty()) return;
+        alive = replica_.IsAlive(recent->first);
+        num_observations = replica_.covisibility().NumObservations(recent->first);
+    });
+    ASSERT_EQ(published.size(), 2u);
     EXPECT_EQ(std::find(published[0].removed_points.begin(), published[0].removed_points.end(),
                         recent->first),
               published[0].removed_points.end());
-    EXPECT_TRUE(replica_.IsAlive(recent->first));
-    EXPECT_EQ(mapper_.covisibility().NumObservations(recent->first), 3u);
+    EXPECT_TRUE(alive);
+    EXPECT_EQ(num_observations, 3u);
     ExpectReplicaConsistent();
-    ExpectNoDeadIds(published[0]);
+}
+
+// Transaction 2: local BA and Frame culling (spec sections 1, 4.2, 5).
+
+TEST_F(MapperQualityTest, PublishesTwoTransactionsPerFrame) {
+    SetUpMonoMap();
+    const size_t second_index = next_ - 1;
+    for (size_t k = 1; k <= 3; ++k) {
+        const std::vector<Published> published =
+            CreateMonoFrame(second_index + 3 * k, AllTrackedPairs(second_index + 3 * k));
+        ASSERT_EQ(published.size(), 2u);
+        const Published& created = published[0];
+        const Published& refined = published[1];
+        ASSERT_EQ(created.frames.size(), 1u);
+        const map::FrameId frame = created.frame().frame_id;
+        // Transaction 2 adds nothing: it moves Frames and points and removes.
+        EXPECT_EQ(refined.type, events::EventType::MapTransaction);
+        EXPECT_EQ(refined.map_id, map::MapId{1});
+        EXPECT_FALSE(refined.new_map);
+        EXPECT_TRUE(refined.frames.empty());
+        EXPECT_EQ(refined.count, 0u);
+        EXPECT_EQ(refined.num_added_observations, 0u);
+        EXPECT_TRUE(refined.replaced_points.empty());
+        // The new Frame is optimized, the first Frame never is.
+        ASSERT_TRUE(mapper_.last_local_ba().ran);
+        EXPECT_FALSE(mapper_.last_local_ba().interrupted);
+        EXPECT_EQ(mapper_.last_local_ba().stage_reached, 2);
+        std::vector<map::FrameId> posed;
+        for (const auto& [id, pose] : refined.updated_poses) posed.push_back(id);
+        EXPECT_NE(std::find(posed.begin(), posed.end(), frame), posed.end());
+        EXPECT_EQ(std::find(posed.begin(), posed.end(), first_.frame_id), posed.end());
+        EXPECT_FALSE(refined.updated_ids.empty());
+        ExpectReplicaConsistent();
+        // The replica holds the optimized poses.
+        for (const auto& [id, pose] : refined.updated_poses) {
+            ASSERT_NE(replica_.keyframe(id), nullptr);
+            EXPECT_TRUE(replica_.keyframe(id)->T_cw.ToMatrix34().isApprox(pose.ToMatrix34()));
+        }
+    }
+}
+
+TEST_F(MapperQualityTest, LocalBaReducesReprojectionError) {
+    // The default sequence has 0.5 px noise. The new Frame is posed off its
+    // true pose, as a drifting Tracker would pose it.
+    SetUpMonoMap();
+    const size_t index = next_ + 2;
+    const geometry::RigidTransformation truth = MapPose(index);
+    const geometry::RigidTransformation pose(
+        truth.rotation(), truth.translation() + map_scale_ * geometry::TVector3DF(0.08, -0.05, 0.06));
+    std::vector<map::MapPointId> local;
+    double before = 0.0;
+    const std::vector<Published> published =
+        CreateMonoFrame(index, AllTrackedPairs(index), pose, map::FrameId{1}, [&](const Published& p) {
+            if (p.frames.empty()) return;
+            // After transaction 1: the points of the new Frame.
+            local = p.frame().observed_points;
+            before = MeanReprojectionError(local);
+        });
+    ASSERT_FALSE(local.empty());
+    ASSERT_TRUE(mapper_.last_local_ba().ran);
+    const double after = MeanReprojectionError(local);
+    EXPECT_LT(after, before);
+    EXPECT_LT(after, 1.0) << "before " << before;
+    ExpectReplicaConsistent();
+}
+
+TEST_F(MapperQualityTest, RemovesBaOutliers) {
+    // The new Frame tracks a map point through an unmatched feature: a gross
+    // outlier that local BA removes.
+    SetUpMonoMap();
+    const size_t index = next_ + 2;
+    std::vector<Pair> pairs = AllTrackedPairs(index);
+    const map::MapPointId outlier = pairs[0].point;
+    pairs[0].feature = ExtraFeatures(index).at(0);
+    const std::vector<Published> published = CreateMonoFrame(index, pairs);
+    const map::FrameId frame = published[0].frame().frame_id;
+    ASSERT_TRUE(mapper_.last_local_ba().ran);
+    EXPECT_EQ(mapper_.last_local_ba().stage_reached, 2);
+    EXPECT_GE(mapper_.last_local_ba().num_outliers, 1u);
+    const auto& removed = published[1].removed_observations;
+    EXPECT_NE(std::find_if(removed.begin(), removed.end(),
+                           [&](const events::RemovedObservation& r) {
+                               return r.frame == frame && r.point == outlier;
+                           }),
+              removed.end());
+    EXPECT_FALSE(mapper_.covisibility().Contains(frame, outlier));
+    EXPECT_TRUE(replica_.IsAlive(outlier));
+    ExpectReplicaConsistent();
+}
+
+TEST_F(MapperQualityTest, UrgentEventStopsBa) {
+    // The same outlier, but an urgent FrameTracked arrives once transaction 1
+    // is out: BA stops before its first iteration and removes nothing.
+    urgent_.ConnectAsync(mapper_.inbox());
+    SetUpMonoMap();
+    mapper_.AddSyncObserver(&MapperQualityTest::PublishUrgentOnFrameCreated, this);
+    const size_t index = next_ + 2;
+    std::vector<Pair> pairs = AllTrackedPairs(index);
+    const map::MapPointId outlier = pairs[0].point;
+    pairs[0].feature = ExtraFeatures(index).at(0);
+    const std::vector<Published> published = CreateMonoFrame(index, pairs);
+    ASSERT_TRUE(urgent_sent_);
+    const map::FrameId frame = published[0].frame().frame_id;
+    const LocalBaSummary& ba = mapper_.last_local_ba();
+    ASSERT_TRUE(ba.ran);
+    EXPECT_TRUE(ba.interrupted);
+    EXPECT_EQ(ba.stage_reached, 0);
+    EXPECT_EQ(ba.num_outliers, 0u);
+    EXPECT_TRUE(published[1].removed_observations.empty());
+    EXPECT_TRUE(mapper_.covisibility().Contains(frame, outlier));
+    // Nothing moved: the new Frame keeps its tracked pose.
+    for (const auto& [id, pose] : published[1].updated_poses) {
+        if (id == frame) EXPECT_TRUE(pose.ToMatrix34().isApprox(MapPose(index).ToMatrix34()));
+    }
+    EXPECT_EQ(mapper_.inbox().pending_priority(), 0u);  // drained
+    ExpectReplicaConsistent();
+}
+
+TEST_F(MapperQualityTest, CullsRedundantFrame) {
+    // Frames repeating Frame 1's view, each tracking every initial point: once
+    // three other Frames observe its points, a repeated Frame is redundant.
+    SetUpMonoMap();
+    const size_t second_index = next_ - 1;
+    std::vector<map::FrameId> removed;
+    for (size_t k = 0; k < 4; ++k) {
+        const std::vector<Published> published =
+            CreateMonoFrame(second_index, AllTrackedPairs(second_index));
+        const map::FrameId frame = published[0].frame().frame_id;
+        for (const map::FrameId culled : published[1].removed_frames) {
+            EXPECT_NE(culled, frame);
+            EXPECT_NE(culled, first_.frame_id);
+            EXPECT_EQ(replica_.keyframe(culled), nullptr);
+            removed.push_back(culled);
+        }
+        ExpectReplicaConsistent();
+    }
+    EXPECT_FALSE(removed.empty());
+    EXPECT_EQ(mapper_.num_keyframes(), 2 + 4 - removed.size());
+    EXPECT_NE(replica_.keyframe(first_.frame_id), nullptr);
+}
+
+TEST_F(MapperQualityTest, CullsFrameHoldingReferences) {
+    // Frame F triangulates points, which take F as their reference. Frames
+    // repeating F's view track all of F's points until F is redundant; its
+    // points' references move to their observation in the smallest remaining
+    // Frame, on both sides.
+    SetUpMonoMap();
+    const size_t index = next_ + 5;
+    const Published created = CreateMonoFrame(index);
+    const map::FrameId f = created.frame().frame_id;
+    std::vector<map::MapPointId> referenced;
+    for (const map::MapPointId point : created.frame().observed_points) {
+        const auto reference = mapper_.Reference(point);
+        if (reference && reference->keyframe == f) referenced.push_back(point);
+    }
+    ASSERT_FALSE(referenced.empty());
+    const std::vector<Pair> pairs = PairsOf(created.frame());
+
+    bool culled = false;
+    for (size_t k = 0; k < 4 && !culled; ++k) {
+        const std::vector<Published> published = CreateMonoFrame(index, pairs, std::nullopt, f);
+        const auto& frames = published[1].removed_frames;
+        culled = std::find(frames.begin(), frames.end(), f) != frames.end();
+        ExpectReplicaConsistent();
+    }
+    ASSERT_TRUE(culled);
+    EXPECT_EQ(replica_.keyframe(f), nullptr);
+    size_t num_alive = 0;
+    for (const map::MapPointId point : referenced) {
+        if (!replica_.IsAlive(point)) continue;
+        ++num_alive;
+        const auto reference = mapper_.Reference(point);
+        ASSERT_TRUE(reference.has_value());
+        EXPECT_NE(reference->keyframe, f);
+        map::FrameId smallest = reference->keyframe;
+        for (const map::PointObservation& o : mapper_.covisibility().Observations(point)) {
+            smallest = std::min(smallest, o.frame);
+        }
+        EXPECT_EQ(reference->keyframe, smallest) << "point " << point.value;
+    }
+    EXPECT_GT(num_alive, 0u);
+}
+
+TEST_F(MapperQualityTest, SkipsBaWithoutFreeFrames) {
+    // A Frame created without any observation: nothing to optimize.
+    SetUpMonoMap();
+    const size_t index = next_ + 2;
+    const std::vector<Published> published = CreateMonoFrame(index, {});
+    EXPECT_TRUE(published[0].frame().observed_points.empty());
+    EXPECT_FALSE(mapper_.last_local_ba().ran);
+    // Transaction 2 is still published, empty.
+    const Published& refined = published[1];
+    EXPECT_EQ(refined.type, events::EventType::MapTransaction);
+    EXPECT_TRUE(refined.frames.empty());
+    EXPECT_EQ(refined.num_other_parts, 0u);
+    EXPECT_EQ(refined.num_updated, 0u);
+    EXPECT_EQ(mapper_.num_keyframes(), 3u);
+    ExpectReplicaConsistent();
 }
 
 } // namespace

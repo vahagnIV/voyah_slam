@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cassert>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -24,6 +25,9 @@ const char* ToString(MapperState state) {
 
 using detail::LeftOf;
 using detail::RigBaseline;
+
+using Clock = std::chrono::steady_clock;
+using detail::MillisecondsSince;
 
 template <typename TFeatureExtractor>
 double TimestampOf(const features::TMeasurement<TFeatureExtractor>& measurement) {
@@ -155,7 +159,8 @@ void Mapper<TFeatureExtractor>::OnInitializationMeasurement(
     }
 
     for (auto& keyframe : initial->keyframes) {
-        keyframes_.emplace_back(next_frame_id_, keyframe.T_cw, std::move(keyframe.measurement));
+        keyframes_.emplace_back(std::in_place, next_frame_id_, keyframe.T_cw,
+                                std::move(keyframe.measurement));
         ++next_frame_id_.value;
     }
     map_points_ = {};
@@ -225,16 +230,22 @@ void Mapper<TFeatureExtractor>::OnFrameTracked(
 
 template <typename TFeatureExtractor>
 auto Mapper<TFeatureExtractor>::FindKeyFrame(map::FrameId id) const -> const TKeyFrame* {
-    // A map's Frame ids are consecutive from its first Frame's.
-    if (keyframes_.empty() || id < keyframes_.front().id()) {
+    // A map's Frame ids are consecutive from its first Frame's, which is
+    // never culled.
+    if (keyframes_.empty() || id < FirstKeyFrame().id()) {
         return nullptr;
     }
-    const size_t index = id.value - keyframes_.front().id().value;
-    if (index >= keyframes_.size()) {
+    const size_t index = id.value - FirstKeyFrame().id().value;
+    if (index >= keyframes_.size() || !keyframes_[index]) {
         return nullptr;
     }
-    assert(keyframes_[index].id() == id);
-    return &keyframes_[index];
+    assert(keyframes_[index]->id() == id);
+    return &*keyframes_[index];
+}
+
+template <typename TFeatureExtractor>
+auto Mapper<TFeatureExtractor>::FindKeyFrame(map::FrameId id) -> TKeyFrame* {
+    return const_cast<TKeyFrame*>(std::as_const(*this).FindKeyFrame(id));
 }
 
 template <typename TFeatureExtractor>
@@ -257,18 +268,19 @@ KeyFrameSignals Mapper<TFeatureExtractor>::MeasureSignals(
     const events::FrameTracked<TFeatureExtractor>& event) const {
     assert(!keyframes_.empty());
     KeyFrameSignals signals;
-    signals.num_frames = keyframes_.size();
+    signals.num_frames = num_keyframes_.load(std::memory_order_relaxed);
     signals.backlog = backlog_;
     signals.inliers = event.num_inliers;
-    signals.since_last = event.timestamp - TimestampOf<TFeatureExtractor>(keyframes_.back().measurement());
+    signals.since_last =
+        event.timestamp - TimestampOf<TFeatureExtractor>(LastKeyFrame().measurement());
 
     // The reference Frame, or the newest one if it is unknown or gone.
     const TKeyFrame* reference =
         event.reference_frame_id ? FindKeyFrame(*event.reference_frame_id) : nullptr;
     if (reference == nullptr) {
-        reference = &keyframes_.back();
+        reference = &LastKeyFrame();
     }
-    const size_t min_observations = keyframes_.size() <= 2 ? 2 : 3;
+    const size_t min_observations = signals.num_frames <= 2 ? 2 : 3;
     for (const map::MapPointId point : covisibility_.Points(reference->id())) {
         if (map_points_.IsValid(point) &&
             WeightedObservations(point) >= min_observations) {
@@ -303,6 +315,7 @@ KeyFrameSignals Mapper<TFeatureExtractor>::MeasureSignals(
 
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureExtractor>& event) {
+    auto start = Clock::now();
     auto* created = transaction_pool_.Create();
     created->map_id = current_map_id();
     created->priority = false;
@@ -317,8 +330,8 @@ void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureE
     // out of range or already paired, is skipped.
     const map::FrameId id = next_frame_id_;
     ++next_frame_id_.value;
-    keyframes_.emplace_back(id, event.pose, TMeasurement(event.measurement));
-    const TKeyFrame& keyframe = keyframes_.back();
+    keyframes_.emplace_back(std::in_place, id, event.pose, TMeasurement(event.measurement));
+    const TKeyFrame& keyframe = LastKeyFrame();
     const auto num_features =
         static_cast<size_t>(LeftOf<TFeatureExtractor>(keyframe.measurement()).points().cols());
     AddFramePart(keyframe, *created);
@@ -369,17 +382,30 @@ void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureE
         recent_points_.push_back({map::MapPointId{first_new.value + i}, id, stereo});
     }
 
+    const double create_ms = MillisecondsSince(start);
+
     // Fusion with the neighbours.
+    start = Clock::now();
     Fuse(keyframe, *created);
     FinishTransaction(first_new, *created);
-
-    log_->debug(
-        "Frame {}: {} points culled, {} tracked observations, {} close points, {} triangulated "
-        "points, {} points merged",
-        id.value, num_culled, num_tracked, num_close, num_new - num_close, losers_.size());
-    num_keyframes_.store(keyframes_.size(), std::memory_order_release);
+    const double fuse_ms = MillisecondsSince(start);
+    num_keyframes_.fetch_add(1, std::memory_order_acq_rel);
     num_map_points_.store(map_points_.size(), std::memory_order_release);
     observable_.Notify(created);
+
+    // Transaction 2: local BA and Frame culling.
+    const Refinement refinement = RefineAroundFrame(id);
+    const LocalBaSummary& ba = last_local_ba_;
+    log_->debug(
+        "Frame {}: create {:.1f} ms ({} points culled, {} tracked observations, {} close points, "
+        "{} triangulated points), fuse {:.1f} ms ({} points merged), local BA {:.1f} ms ({}: "
+        "{} free / {} fixed Frames, {} points, {} iterations, interrupted {}, stage {}, {} "
+        "outliers), Frame culling {:.1f} ms ({} Frames culled), {} points removed after BA",
+        id.value, create_ms, num_culled, num_tracked, num_close, num_new - num_close, fuse_ms,
+        losers_.size(), refinement.ba_ms, ba.ran ? "ran" : "skipped", ba.num_free, ba.num_fixed,
+        ba.num_points, ba.iterations, ba.interrupted ? "yes" : "no", ba.stage_reached,
+        ba.num_outliers, refinement.cull_ms, refinement.num_culled_frames,
+        refinement.num_removed_points);
 }
 
 template <typename TFeatureExtractor>
@@ -614,7 +640,7 @@ template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::SetState(MapperState state) {
     const MapperState previous = state_.exchange(state, std::memory_order_acq_rel);
     log_->info("{} -> {} (map {}, {} keyframes, {} points)", ToString(previous), ToString(state),
-               current_map_id().value, keyframes_.size(), map_points_.size());
+               current_map_id().value, num_keyframes(), map_points_.size());
 }
 
 template <typename TFeatureExtractor>
@@ -625,7 +651,7 @@ void Mapper<TFeatureExtractor>::AddInitialMapPoints(
     }
     using TMonocularMeasurement = features::TMonocularMeasurement<TFeatureExtractor>;
     using TBinocularMeasurement = features::TBinocularMeasurement<TFeatureExtractor>;
-    const TKeyFrame& first = keyframes_[0];
+    const TKeyFrame& first = FirstKeyFrame();
     const auto* binocular = std::get_if<TBinocularMeasurement>(&first.measurement());
     // Monocular: a two-view initialization; binocular: one stereo keyframe.
     assert(keyframes_.size() == (binocular ? 1u : 2u));
@@ -633,8 +659,8 @@ void Mapper<TFeatureExtractor>::AddInitialMapPoints(
                                   ? binocular->left().descriptors()
                                   : std::get<TMonocularMeasurement>(first.measurement()).descriptors();
     std::vector<geometry::TVector3DF> centres;
-    for (const TKeyFrame& keyframe : keyframes_) {
-        centres.push_back(keyframe.pose().Inverse().translation());
+    for (const std::optional<TKeyFrame>& keyframe : keyframes_) {
+        centres.push_back(keyframe->pose().Inverse().translation());
     }
 
     for (const InitialMapPoint& point : map_points) {
@@ -653,7 +679,7 @@ void Mapper<TFeatureExtractor>::AddInitialMapPoints(
         SetReference(id, first, feature);
         if (!binocular) {
             assert(point.feature_in_second >= 0);
-            covisibility_.Add(keyframes_[1].id(), static_cast<uint32_t>(point.feature_in_second), id);
+            covisibility_.Add(keyframes_[1]->id(), static_cast<uint32_t>(point.feature_in_second), id);
         }
     }
 }
@@ -674,13 +700,13 @@ void Mapper<TFeatureExtractor>::PublishNewMap() {
     event->map_id = current_map_id();
     event->priority = false;
     event->new_map = true;
-    event->start_frame = keyframes_.back().id();
-    for (const TKeyFrame& keyframe : keyframes_) {
-        events::NewFrame<TFeatureExtractor>& part = AddFramePart(keyframe, *event);
+    event->start_frame = LastKeyFrame().id();
+    for (const std::optional<TKeyFrame>& keyframe : keyframes_) {
+        events::NewFrame<TFeatureExtractor>& part = AddFramePart(*keyframe, *event);
         // (left) feature index, point id; a stereo keyframe's depths and
         // right indices are in its measurement.
-        for (const map::MapPointId point : covisibility_.Points(keyframe.id())) {
-            part.observed_features.push_back(*FeatureOf(keyframe.id(), point));
+        for (const map::MapPointId point : covisibility_.Points(keyframe->id())) {
+            part.observed_features.push_back(*FeatureOf(keyframe->id(), point));
             part.observed_points.push_back(point);
         }
     }

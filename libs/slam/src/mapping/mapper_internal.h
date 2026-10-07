@@ -1,6 +1,7 @@
 #ifndef VOYAHSLAM_MAPPING_MAPPER_INTERNAL_H
 #define VOYAHSLAM_MAPPING_MAPPER_INTERNAL_H
 
+#include <chrono>
 #include <cstdint>
 #include <variant>
 #include <voyahslam/features/measurement.h>
@@ -37,6 +38,12 @@ inline double RigBaseline(const features::StereoRig& rig) {
 // A key of the observation of `point` by `frame`.
 inline uint64_t ObservationKey(map::FrameId frame, map::MapPointId point) {
     return (static_cast<uint64_t>(frame.value) << 32) | point.value;
+}
+
+// Milliseconds elapsed since `start`.
+inline double MillisecondsSince(std::chrono::steady_clock::time_point start) {
+    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+        .count();
 }
 
 } // namespace voyahslam::mapping::detail
