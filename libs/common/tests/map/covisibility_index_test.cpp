@@ -62,5 +62,53 @@ TEST(CovisibilityIndexTest, UnknownIdsAreEmpty) {
     EXPECT_TRUE(index.Covisible(FrameId{1}, 10).empty());  // excludes the frame itself
 }
 
+TEST(CovisibilityIndexTest, RemoveVariants) {
+    const FrameId a{1};
+    const FrameId b{2};
+    const FrameId c{3};
+    CovisibilityIndex index;
+    for (uint32_t p = 0; p < 4; ++p) index.Add(a, p, MapPointId{p});
+    for (uint32_t p = 0; p < 3; ++p) index.Add(b, 10 + p, MapPointId{p});
+    for (uint32_t p = 1; p < 4; ++p) index.Add(c, 20 + p, MapPointId{p});
+    ASSERT_EQ(index.Covisible(a, 10), (TCovisible{{b, 3}, {c, 3}}));
+
+    // One observation: both directions, and the shared counts.
+    index.Remove(b, MapPointId{0});
+    EXPECT_FALSE(index.Contains(b, MapPointId{0}));
+    EXPECT_EQ(index.NumObservations(MapPointId{0}), 1u);
+    EXPECT_EQ(index.Points(b), (std::vector<MapPointId>{MapPointId{1}, MapPointId{2}}));
+    EXPECT_EQ(index.Covisible(a, 10), (TCovisible{{c, 3}, {b, 2}}));
+    index.Remove(b, MapPointId{0});  // absent: no-op
+    index.Remove(FrameId{9}, MapPointId{1});
+    index.Remove(a, MapPointId{99});
+    EXPECT_EQ(index.NumObservations(MapPointId{1}), 3u);
+
+    // A point: every Frame's side.
+    index.RemovePoint(MapPointId{1});
+    EXPECT_TRUE(index.Observations(MapPointId{1}).empty());
+    EXPECT_FALSE(index.Contains(a, MapPointId{1}));
+    EXPECT_EQ(index.Points(a),
+              (std::vector<MapPointId>{MapPointId{0}, MapPointId{2}, MapPointId{3}}));
+    EXPECT_EQ(index.Points(b), std::vector<MapPointId>{MapPointId{2}});
+    EXPECT_EQ(index.Covisible(a, 10), (TCovisible{{c, 2}, {b, 1}}));
+    index.RemovePoint(MapPointId{1});  // already gone
+    index.RemovePoint(MapPointId{99});
+
+    // A Frame: every point's side.
+    index.RemoveFrame(c);
+    EXPECT_TRUE(index.Points(c).empty());
+    EXPECT_EQ(index.NumObservations(MapPointId{2}), 2u);
+    EXPECT_EQ(index.NumObservations(MapPointId{3}), 1u);
+    EXPECT_FALSE(index.Contains(c, MapPointId{3}));
+    EXPECT_EQ(index.Covisible(a, 10), (TCovisible{{b, 1}}));
+    EXPECT_EQ(index.Covisible(b, 10), (TCovisible{{a, 1}}));
+    index.RemoveFrame(c);  // already gone
+    index.RemoveFrame(FrameId{9});
+
+    // Re-adding after removal works.
+    index.Add(c, 5, MapPointId{3});
+    EXPECT_EQ(index.Covisible(a, 10), (TCovisible{{b, 1}, {c, 1}}));
+}
+
 } // namespace
 } // namespace voyahslam::map

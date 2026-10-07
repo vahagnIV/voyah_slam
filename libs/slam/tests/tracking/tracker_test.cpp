@@ -76,9 +76,9 @@ TEST_F(TrackerTest, StereoMatchedBeforeForwarding) {
     EXPECT_GT((binocular.depths().array() > 0).count(), 0);
 }
 
-TEST_F(TrackerTest, InitialMapEventsBeforeMapCreatedAreKept) {
-    // The Mapper publishes KeyFrameCreated (with the points) before MapCreated;
-    // both reach the replica, and the keyframe becomes the last frame.
+TEST_F(TrackerTest, NewMapTransactionStartsTracking) {
+    // The Mapper publishes the new map as one transaction (Frame and points):
+    // the replica applies it, and its start Frame becomes the last frame.
     EXPECT_EQ(tracker_.state(), TrackerState::WaitingForMap);
     EXPECT_EQ(tracker_.current_map_id(), map::MapId{0});
     const auto sequence = StereoSequence();
@@ -105,7 +105,7 @@ TEST_F(TrackerTest, TracksAndPublishesFrameTracked) {
     ASSERT_EQ(captured[0].type, events::EventType::FrameTracked);
     EXPECT_EQ(captured[0].map_id, map::MapId{1});
     ASSERT_TRUE(captured[0].has_reference);
-    EXPECT_EQ(captured[0].frame_id, keyframe);  // the MapCreated keyframe
+    EXPECT_EQ(captured[0].frame_id, keyframe);  // the new map's start Frame
     EXPECT_GE(captured[0].num_inliers, TrackingOptions{}.min_local_map_inliers);
     // The published observations are the last frame's matches.
     size_t num_last_matches = 0;
@@ -163,20 +163,20 @@ TEST_F(TrackerTest, MergesOwnFrameObservationsIntoLastFrame) {
 
     // A Frame of the last frame's measurement: feature unmatched[0] observes
     // a new point, unmatched[1] an existing one.
-    memory::ObjectPool<events::KeyFrameCreated<Extractor>, memory::ThreadSafePolicy> pool(2);
     const auto inject = [&](uint32_t frame, const auto& measurement) {
-        auto* created = pool.Create();
+        auto* created = transaction_pool_.Create();
         created->map_id = map::MapId{1};
-        created->frame_id = map::FrameId{frame};
-        created->pose = sequence.frames[1].T_cw;
-        created->measurement = measurement;
+        auto& added = created->added_frames.emplace_back();
+        added.id = map::FrameId{frame};
+        added.T_cw = sequence.frames[1].T_cw;
+        added.measurement = measurement;
+        added.observed_features = unmatched;
+        added.observed_points = {map::MapPointId{new_id}, map::MapPointId{0}};
         created->new_points_start_id = map::MapPointId{new_id};
         created->ResizeNewPoints(1);
         created->new_positions.col(0) = geometry::TPoint3DF(0, 0, 5);
         created->new_descriptors.col(0).setZero();
         created->new_normals.col(0) = geometry::TPoint3DF(0, 0, 1);
-        created->observed_features = unmatched;
-        created->observed_points = {map::MapPointId{new_id}, map::MapPointId{0}};
         injector_.Notify(created);
         Drain();
     };
@@ -190,6 +190,52 @@ TEST_F(TrackerTest, MergesOwnFrameObservationsIntoLastFrame) {
     expected[unmatched[0]] = new_id;
     expected[unmatched[1]] = 0;
     EXPECT_EQ(tracker_.last_matches(), expected);
+}
+
+TEST_F(TrackerTest, RemovedAndReplacedPointsInLastFrame) {
+    const auto sequence = StereoSequence();
+    ASSERT_EQ(InitializeStereo(sequence, 0), 0u);
+    ASSERT_EQ(Feed(sequence.frames[1].measurement).size(), 1u);
+    const std::vector<int64_t> before = tracker_.last_matches();
+    // Two matched points of the last frame, and an alive point it does not match.
+    std::vector<int64_t> matched;
+    for (const int64_t id : before) {
+        if (id >= 0 && matched.size() < 2) matched.push_back(id);
+    }
+    ASSERT_EQ(matched.size(), 2u);
+    const auto loser = map::MapPointId{static_cast<uint32_t>(matched[0])};
+    const auto removed = map::MapPointId{static_cast<uint32_t>(matched[1])};
+    std::optional<map::MapPointId> winner;
+    for (uint32_t p = 0; p < tracker_.replica().num_points() && !winner; ++p) {
+        if (tracker_.replica().IsAlive({p}) &&
+            std::find(before.begin(), before.end(), int64_t{p}) == before.end()) {
+            winner = map::MapPointId{p};
+        }
+    }
+    ASSERT_TRUE(winner.has_value());
+
+    auto* transaction = transaction_pool_.Create();
+    transaction->map_id = map::MapId{1};
+    transaction->replaced_points = {{loser, *winner}};
+    transaction->removed_points = {removed};
+    injector_.Notify(transaction);
+    Drain();
+
+    EXPECT_FALSE(tracker_.replica().IsAlive(loser));
+    EXPECT_FALSE(tracker_.replica().IsAlive(removed));
+    EXPECT_TRUE(tracker_.replica().CheckConsistency());
+    std::vector<int64_t> expected = before;
+    for (int64_t& id : expected) {
+        if (id == matched[0]) id = static_cast<int64_t>(winner->value);
+        if (id == matched[1]) id = -1;
+    }
+    EXPECT_EQ(tracker_.last_matches(), expected);
+
+    // The next frame tracks without failing.
+    const auto captured = Feed(sequence.frames[2].measurement);
+    ExpectTrackedMetric(captured, sequence.frames[2].T_cw,
+                        test::MapAlignment(sequence.frames[0].T_cw), 2);
+    EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
 }
 
 TEST_F(TrackerMonoAccuracyTest, TracksSyntheticMono) {
@@ -344,7 +390,7 @@ TEST_F(TrackerTest, StateIsLostWhenTrackingLostIsPublished) {
     EXPECT_EQ(probe.state, TrackerState::Lost);
 }
 
-TEST_F(TrackerTest, IgnoresStaleMapCreated) {
+TEST_F(TrackerTest, IgnoresStaleNewMap) {
     const auto sequence = StereoSequence();
     const auto truth = TruePoses(sequence);
     ASSERT_EQ(InitializeStereo(sequence, 0), 0u);
@@ -353,10 +399,10 @@ TEST_F(TrackerTest, IgnoresStaleMapCreated) {
     ASSERT_EQ(tracker_.current_map_id(), map::MapId{2});
     const map::FrameId keyframe = tracker_.replica().keyframe_ids().front();
 
-    auto* stale = map_created_pool_.Create();
+    auto* stale = transaction_pool_.Create();
     stale->map_id = map::MapId{1};
-    stale->frame_id = map::FrameId{0};
-    stale->pose = geometry::RigidTransformation::Identity();
+    stale->new_map = true;
+    stale->start_frame = map::FrameId{0};
     injector_.Notify(stale);
     Drain();
 

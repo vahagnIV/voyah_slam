@@ -33,7 +33,7 @@ using voyahslam::test::TestImageFeatures;
 using Measurement = TMonocularMeasurement<TestExtractor>;
 using Descriptor = TestImageFeatures::TDescriptor;
 using TReplica = tracking::MapReplica<TestExtractor>;
-using TKeyFrameCreated = events::KeyFrameCreated<TestExtractor>;
+using TTransaction = events::MapTransaction<TestExtractor>;
 
 constexpr double kFocal = 500.0;
 constexpr double kCx = 320.0;
@@ -121,13 +121,13 @@ struct Point {
     Eigen::Vector3d normal = Eigen::Vector3d::Zero();  // zero: the view direction from the origin
 };
 
-// Adds the points through a KeyFrameCreated whose Frame (no features)
-// observes none of them, so they get no reference.
+// Adds the points through a transaction whose Frame (no features) observes
+// none of them, so they get no reference.
 void AddPoints(TReplica& out_replica, const std::vector<Point>& points) {
-    memory::ObjectPool<TKeyFrameCreated, memory::ThreadSafePolicy> pool(1);
-    TKeyFrameCreated* event = pool.Create();
+    memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> pool(1);
+    TTransaction* event = pool.Create();
     event->map_id = {1};
-    event->frame_id = {1000 + static_cast<uint32_t>(out_replica.num_points())};
+    event->added_frames.emplace_back().id = {1000 + static_cast<uint32_t>(out_replica.num_points())};
     event->new_points_start_id = {static_cast<uint32_t>(out_replica.num_points())};
     event->ResizeNewPoints(static_cast<uint32_t>(points.size()));
     for (size_t i = 0; i < points.size(); ++i) {
@@ -142,10 +142,10 @@ void AddPoints(TReplica& out_replica, const std::vector<Point>& points) {
 }
 
 void RemovePoint(TReplica& out_replica, uint32_t id) {
-    memory::ObjectPool<events::MapPointsRemoved, memory::ThreadSafePolicy> pool(1);
-    events::MapPointsRemoved* event = pool.Create();
+    memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> pool(1);
+    TTransaction* event = pool.Create();
     event->map_id = {1};
-    event->ids = {{id}};
+    event->removed_points = {{id}};
     out_replica.Apply(*event);
     event->Recycle();
 }
@@ -154,18 +154,18 @@ void RemovePoint(TReplica& out_replica, uint32_t id) {
 // level levels[i], observes point points[i]: gives those points their reference.
 void CreateKeyFrame(TReplica& out_replica, uint32_t frame, const Eigen::Vector3d& centre,
                     const std::vector<int>& levels, const std::vector<uint32_t>& points) {
-    memory::ObjectPool<TKeyFrameCreated, memory::ThreadSafePolicy> pool(1);
-    TKeyFrameCreated* event = pool.Create();
-    event->Reset();
+    memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> pool(1);
+    TTransaction* event = pool.Create();
     event->map_id = {1};
-    event->frame_id = {frame};
-    event->pose = geometry::RigidTransformation(geometry::TMatrix33F::Identity(), -centre);
+    events::NewFrame<TestExtractor>& added = event->added_frames.emplace_back();
+    added.id = {frame};
+    added.T_cw = geometry::RigidTransformation(geometry::TMatrix33F::Identity(), -centre);
     std::vector<Feature> features;
     for (const int level : levels) features.push_back({{kCx, kCy}, MakeDescriptor(9000), level, 0.0});
-    event->measurement = MakeMeasurement(features, {});
+    added.measurement = MakeMeasurement(features, {});
     for (size_t i = 0; i < points.size(); ++i) {
-        event->observed_features.push_back(static_cast<uint32_t>(i));
-        event->observed_points.push_back({points[i]});
+        added.observed_features.push_back(static_cast<uint32_t>(i));
+        added.observed_points.push_back({points[i]});
     }
     out_replica.Apply(*event);
     event->Recycle();
@@ -547,20 +547,21 @@ SyntheticMap BuildSyntheticMap() {
     std::map<map::FrameId, geometry::RigidTransformation> poses;
     while (events::Event* event = listener.GetNextEvent()) {
         result.replica.Apply(*event);
-        if (event->type != events::EventType::KeyFrameCreated) continue;
-        const auto* created = static_cast<const TKeyFrameCreated*>(event);
-        const auto& measurement = std::get<TMonocular>(created->measurement);
-        const auto k = static_cast<size_t>(
-            std::lround(measurement.timestamp() / test::SyntheticSequenceOptions{}.frame_interval));
-        EXPECT_EQ(measurement.points().cols(), frames[k].measurement.points().cols());
-        result.keyframe_frames.push_back(k);
-        result.keyframe_ids.push_back(created->frame_id);
-        poses[created->frame_id] = created->pose;
+        if (event->type != events::EventType::MapTransaction) continue;
         result.scene_of_point.resize(result.replica.num_points(), -1);
-        for (size_t o = 0; o < created->observed_features.size(); ++o) {
-            const Eigen::Index scene = frames[k].point_of_feature[created->observed_features[o]];
-            Eigen::Index& known = result.scene_of_point[created->observed_points[o].value];
-            if (known < 0) known = scene;
+        for (const auto& created : static_cast<const TTransaction*>(event)->added_frames) {
+            const auto& measurement = std::get<TMonocular>(created.measurement);
+            const auto k = static_cast<size_t>(std::lround(
+                measurement.timestamp() / test::SyntheticSequenceOptions{}.frame_interval));
+            EXPECT_EQ(measurement.points().cols(), frames[k].measurement.points().cols());
+            result.keyframe_frames.push_back(k);
+            result.keyframe_ids.push_back(created.id);
+            poses[created.id] = created.T_cw;
+            for (size_t o = 0; o < created.observed_features.size(); ++o) {
+                const Eigen::Index scene = frames[k].point_of_feature[created.observed_features[o]];
+                Eigen::Index& known = result.scene_of_point[created.observed_points[o].value];
+                if (known < 0) known = scene;
+            }
         }
     }
     EXPECT_EQ(result.keyframe_frames.size(), 2u);

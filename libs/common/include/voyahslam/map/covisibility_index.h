@@ -20,11 +20,18 @@ struct PointObservation {
 // The observations of one map, indexed both ways: per point, the Frames that
 // observe it; per Frame, the points it observes. Covisibility between two
 // Frames is the number of points they share, computed on demand. Point ids are
-// dense per map, so the per-point side is a vector.
+// dense per map, so the per-point side is a vector. Removals keep the order of
+// the remaining observations.
 class CovisibilityIndex {
 public:
     // Ignores an observation whose (frame, point) is already present.
     void Add(FrameId frame, uint32_t feature, MapPointId point);
+    // Removes the observation of `point` by `frame`; a no-op if absent.
+    void Remove(FrameId frame, MapPointId point);
+    // Removes every observation of `point`.
+    void RemovePoint(MapPointId point);
+    // Removes every observation by `frame`.
+    void RemoveFrame(FrameId frame);
     void Clear();
 
     // Empty if the point is unknown.
@@ -43,6 +50,9 @@ public:
                                                                       size_t max_count) const;
 
 private:
+    // Drops `point` from `frame`'s side only; drops an emptied Frame.
+    void ErasePointOfFrame(FrameId frame, MapPointId point);
+
     std::vector<std::vector<PointObservation>> observations_;  // by MapPointId::value
     std::unordered_map<uint32_t, std::vector<MapPointId>> points_;  // by FrameId::value
 };

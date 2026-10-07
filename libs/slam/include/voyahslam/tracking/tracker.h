@@ -12,9 +12,8 @@
 #include <voyahslam/events/event_node.h>
 #include <voyahslam/events/frame_tracked.h>
 #include <voyahslam/events/initialization_measurement.h>
-#include <voyahslam/events/key_frame_created.h>
 #include <voyahslam/events/listener.h>
-#include <voyahslam/events/map_created.h>
+#include <voyahslam/events/map_transaction.h>
 #include <voyahslam/events/tracking_lost.h>
 #include <voyahslam/events/worker_thread.h>
 #include <voyahslam/features/measurement.h>
@@ -84,9 +83,12 @@ struct TrackerOptions {
 // the local points passing the projection gate, and the reference Frame (the
 // local Frame observing the most final inliers).
 //
-// A KeyFrameCreated whose measurement is the last tracked one (same
-// timestamp) merges its observations into the last frame's matches, so the
-// next motion-model search uses the Mapper's new points at once.
+// MapTransactions. A new map starts tracking from its start Frame. An added
+// Frame whose measurement is the last tracked one (same timestamp) merges its
+// observations into the last frame's matches, so the next motion-model search
+// uses the Mapper's new points at once. Then the last frame's matches follow
+// the transaction's replaced points (loser -> winner) and drop its removed
+// points.
 template <typename TFeatureExtractor>
 class Tracker : public events::EventNode {
 public:
@@ -153,10 +155,12 @@ private:
     // Applies the consumer rule; returns false if the event is stale.
     bool AdoptMapOf(const events::Event& event);
     void ApplyEvent(const events::Event& event);
-    void OnMapCreated(const events::MapCreated& created);
-    // Merges the Frame's observations into last_frame_.matches if the Frame is
-    // made of last_frame_'s measurement.
-    void OnKeyFrameCreated(const events::KeyFrameCreated<TFeatureExtractor>& created);
+    void OnMapTransaction(const events::MapTransaction<TFeatureExtractor>& transaction);
+    // Makes the replica's Frame `start_frame` the last frame and starts tracking.
+    void StartTracking(map::FrameId start_frame);
+    // Merges `frame`'s observations into last_frame_.matches if it is made of
+    // last_frame_'s measurement.
+    void MergeOwnFrame(const events::NewFrame<TFeatureExtractor>& frame);
     void ProcessMeasurement(TMeasurement& measurement);
     // Steps 1-3 of the tracking flow; on success T_cw and the inlier matches.
     std::optional<PoseResult> TrackFrame(const TMeasurement& measurement);

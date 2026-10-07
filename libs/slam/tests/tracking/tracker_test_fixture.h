@@ -105,10 +105,12 @@ protected:
         }
     }
 
+    // Tracks `measurement`; the replica must stay consistent.
     template <typename TMeasurement>
     std::vector<Captured> Feed(TMeasurement measurement) {
         tracker_.Track(std::move(measurement));
         Drain();
+        EXPECT_TRUE(tracker_.replica().CheckConsistency());
         return TakeCaptured();
     }
 
@@ -271,7 +273,7 @@ protected:
         return run;
     }
 
-    memory::ObjectPool<events::MapCreated, memory::ThreadSafePolicy> map_created_pool_{16};
+    memory::ObjectPool<events::MapTransaction<Extractor>, memory::ThreadSafePolicy> transaction_pool_{16};
     // Declaration order: the components outlive every queue that can hold
     // their events (capture_), and each other's inboxes are drained in TearDown.
     TMapper mapper_;

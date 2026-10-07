@@ -2,7 +2,6 @@
 #include <cmath>
 #include <utility>
 #include <variant>
-#include <voyahslam/events/map_created.h>
 #include <voyahslam/features/instantiation.h>
 #include <voyahslam/tracking/tracker.h>
 
@@ -127,23 +126,46 @@ bool Tracker<TFeatureExtractor>::AdoptMapOf(const events::Event& event) {
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
     replica_.Apply(event);
-    if (event.type == events::EventType::MapCreated) {
-        OnMapCreated(static_cast<const events::MapCreated&>(event));
-    } else if (event.type == events::EventType::KeyFrameCreated) {
-        OnKeyFrameCreated(static_cast<const events::KeyFrameCreated<TFeatureExtractor>&>(event));
+    if (event.type == events::EventType::MapTransaction) {
+        OnMapTransaction(static_cast<const events::MapTransaction<TFeatureExtractor>&>(event));
     }
 }
 
 template <typename TFeatureExtractor>
-void Tracker<TFeatureExtractor>::OnMapCreated(const events::MapCreated& created) {
-    if (state() == TrackerState::Tracking) {
-        return;  // duplicate
+void Tracker<TFeatureExtractor>::OnMapTransaction(
+    const events::MapTransaction<TFeatureExtractor>& transaction) {
+    if (transaction.new_map) {
+        if (!transaction.start_frame) {
+            log_->warn("New map {} without a start Frame", transaction.map_id.value);
+        } else if (state() != TrackerState::Tracking) {  // else a duplicate
+            StartTracking(*transaction.start_frame);
+        }
     }
-    // The keyframe (published before MapCreated) is the last frame; its
-    // observations are its matches.
+    for (const events::NewFrame<TFeatureExtractor>& frame : transaction.added_frames) {
+        MergeOwnFrame(frame);
+    }
+    if (transaction.replaced_points.empty() && transaction.removed_points.empty()) {
+        return;
+    }
+    for (int64_t& match : last_frame_.matches) {
+        if (match < 0) continue;
+        for (const events::ReplacedPoint& replaced : transaction.replaced_points) {
+            if (match == static_cast<int64_t>(replaced.loser.value)) {
+                match = static_cast<int64_t>(replaced.winner.value);
+                break;
+            }
+        }
+        // The replica has dropped the removed points (and a winner removed in
+        // the same transaction).
+        if (!replica_.IsAlive(map::MapPointId{static_cast<uint32_t>(match)})) match = -1;
+    }
+}
+
+template <typename TFeatureExtractor>
+void Tracker<TFeatureExtractor>::StartTracking(map::FrameId start_frame) {
+    // The start Frame is the last frame; its observations are its matches.
     last_frame_ = {};
-    last_frame_.T_cw = created.pose;
-    if (const auto* keyframe = replica_.keyframe(created.frame_id)) {
+    if (const auto* keyframe = replica_.keyframe(start_frame)) {
         last_frame_.measurement = keyframe->measurement;
         last_frame_.T_cw = keyframe->T_cw;
         last_frame_.matches.assign(static_cast<size_t>(LeftOf<TFeatureExtractor>(keyframe->measurement)
@@ -156,8 +178,8 @@ void Tracker<TFeatureExtractor>::OnMapCreated(const events::MapCreated& created)
             }
         }
     } else {
-        log_->warn("MapCreated: keyframe {} of map {} is not in the replica",
-                   created.frame_id.value, created.map_id.value);
+        log_->warn("New map {}: start Frame {} is not in the replica", current_map_id().value,
+                   start_frame.value);
     }
     velocity_.reset();
     tracked_frames_ = 0;
@@ -165,17 +187,16 @@ void Tracker<TFeatureExtractor>::OnMapCreated(const events::MapCreated& created)
 }
 
 template <typename TFeatureExtractor>
-void Tracker<TFeatureExtractor>::OnKeyFrameCreated(
-    const events::KeyFrameCreated<TFeatureExtractor>& created) {
+void Tracker<TFeatureExtractor>::MergeOwnFrame(const events::NewFrame<TFeatureExtractor>& frame) {
     if (last_frame_.matches.empty() ||
-        TimestampOf(created.measurement) != TimestampOf(last_frame_.measurement)) {
+        TimestampOf(frame.measurement) != TimestampOf(last_frame_.measurement)) {
         return;
     }
-    const size_t num = std::min(created.observed_features.size(), created.observed_points.size());
+    const size_t num = std::min(frame.observed_features.size(), frame.observed_points.size());
     for (size_t i = 0; i < num; ++i) {
-        const uint32_t feature = created.observed_features[i];
+        const uint32_t feature = frame.observed_features[i];
         if (feature < last_frame_.matches.size()) {
-            last_frame_.matches[feature] = static_cast<int64_t>(created.observed_points[i].value);
+            last_frame_.matches[feature] = static_cast<int64_t>(frame.observed_points[i].value);
         }
     }
 }

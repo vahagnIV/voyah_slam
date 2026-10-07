@@ -10,8 +10,7 @@
 #include <voyahslam/events/event_types.h>
 #include <voyahslam/events/frame_tracked.h>
 #include <voyahslam/events/initialization_measurement.h>
-#include <voyahslam/events/key_frame_created.h>
-#include <voyahslam/events/map_created.h>
+#include <voyahslam/events/map_transaction.h>
 #include <voyahslam/events/tracking_lost.h>
 #include <voyahslam/events/worker_thread.h>
 #include <voyahslam/features/measurement.h>
@@ -48,9 +47,9 @@ enum class MapperState : uint8_t {
 // Tracker's InitializationMeasurements; then, per FrameTracked, decides
 // (ShouldCreateFrame) whether the tracked measurement becomes a Frame and
 // creates it with its tracked observations, stereo close points and points
-// triangulated against covisible Frames. Each Frame insertion is published
-// as one KeyFrameCreated (a new map is then announced by MapCreated). A
-// TrackingLost of the current map discards it.
+// triangulated against covisible Frames. Every change is published as one
+// MapTransaction: a new map with all its Frames and points, or a Frame
+// insertion. A TrackingLost of the current map discards it.
 // LoopDetected is not consumed yet. Runs on its own thread; each
 // ProcessPending() pass drains the inbox.
 template <typename TFeatureExtractor>
@@ -128,28 +127,29 @@ private:
     void CreateFrame(const events::FrameTracked<TFeatureExtractor>& event);
     // Stores `frame`'s observation of `point` through its (left) feature
     // `feature`, a stereo-matched feature of a binocular Frame with its depth
-    // and right index, and indexes it in covisibility_. Returns it as an
-    // AddedObservation.
-    events::AddedObservation AddObservation(const TKeyFrame& frame, uint32_t feature,
-                                            map::MapPointId point);
+    // and right index, and indexes it in covisibility_. Returns it as a
+    // TransactionObservation.
+    events::TransactionObservation AddObservation(const TKeyFrame& frame, uint32_t feature,
+                                                  map::MapPointId point);
     // Adds a point at `position` observed by `keyframe`'s `feature`: that
     // feature's descriptor, the mean viewing direction from `centres` as its
-    // normal; the observation goes into `out_event`'s Frame part.
+    // normal; the observation goes into `out_frame`, `keyframe`'s part of the
+    // transaction.
     map::MapPointId AddNewPoint(const geometry::TPoint3DF& position, const TKeyFrame& keyframe,
                                 uint32_t feature, const std::vector<geometry::TPoint3DF>& centres,
-                                events::KeyFrameCreated<TFeatureExtractor>& out_event);
+                                events::NewFrame<TFeatureExtractor>& out_frame);
     // Binocular `keyframe`: a point per untracked stereo-matched feature
     // closer than the close depth, and at least for the min_close_points
     // closest, at its stereo back-projection. Marks their features in
     // `out_has_point`.
     void AddClosePoints(const TKeyFrame& keyframe, std::vector<bool>& out_has_point,
-                        events::KeyFrameCreated<TFeatureExtractor>& out_event);
+                        events::MapTransaction<TFeatureExtractor>& out_event);
     // Triangulates `keyframe`'s features without a point (`has_point` false)
     // against its covisible neighbour Frames, skipping a neighbour with too
     // small a baseline. The neighbour's observation of each new point goes
     // into `out_event`'s added_observations.
     void TriangulateWithNeighbours(const TKeyFrame& keyframe, std::vector<bool> has_point,
-                                   events::KeyFrameCreated<TFeatureExtractor>& out_event);
+                                   events::MapTransaction<TFeatureExtractor>& out_event);
     // `frame`'s side of a triangulation, with `has_point` per feature.
     [[nodiscard]] TriangulationView<TFeatureExtractor> ViewOf(const TKeyFrame& frame,
                                                               std::vector<bool> has_point) const;
@@ -162,16 +162,19 @@ private:
     // their observations, stores them and writes them, with the unchanged
     // positions, into `out_event`'s updated part.
     void UpdatePointStatistics(const std::vector<map::MapPointId>& points,
-                               events::KeyFrameCreated<TFeatureExtractor>& out_event);
+                               events::MapTransaction<TFeatureExtractor>& out_event);
 
     // Stores the initial map points and their observations: in both keyframes
     // (monocular) or in the one stereo keyframe, with depth and right index.
     void AddInitialMapPoints(const std::vector<InitialMapPoint>& map_points);
 
-    // Publishes the insertion of `keyframe`; with `with_new_points`, every
-    // point of the (fresh) map is new in it.
-    void PublishKeyFrameCreated(const TKeyFrame& keyframe, bool with_new_points);
-    void PublishMapCreated(const TKeyFrame& keyframe);
+    // Publishes the fresh map as one transaction: every Frame with its
+    // observations, every point; tracking starts from the last Frame.
+    void PublishNewMap();
+    // Appends `keyframe`, with its pose and measurement, to `out_event`'s
+    // added Frames; returns that part.
+    events::NewFrame<TFeatureExtractor>& AddFramePart(
+        const TKeyFrame& keyframe, events::MapTransaction<TFeatureExtractor>& out_event) const;
 
     MapperOptions options_;
     // One ProcessPending() batch: the events drained from the inbox and, per
@@ -199,9 +202,8 @@ private:
     map::CovisibilityIndex covisibility_;
     MapInitializer<TFeatureExtractor> initializer_;
 
-    memory::ObjectPool<events::KeyFrameCreated<TFeatureExtractor>, memory::ThreadSafePolicy>
-        key_frame_created_pool_{256};
-    memory::ObjectPool<events::MapCreated, memory::ThreadSafePolicy> map_created_pool_{256};
+    memory::ObjectPool<events::MapTransaction<TFeatureExtractor>, memory::ThreadSafePolicy>
+        transaction_pool_{256};
 
     CLASS_LOGGER(Mapper);
 

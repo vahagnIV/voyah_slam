@@ -9,6 +9,7 @@
 #include <vector>
 #include <voyahslam/defs.h>
 #include <voyahslam/events/event_types.h>
+#include <voyahslam/events/map_transaction.h>
 #include <voyahslam/geometry/rigid_transformation.h>
 #include <voyahslam/map/frame_id.h>
 #include <voyahslam/map/map_id.h>
@@ -25,7 +26,10 @@ enum class TrackingStatus : uint8_t { None, Tracking, Lost };
 //
 // It decodes map points, keyframe poses (T_cw), the current camera pose and its
 // trajectory for the newest map seen; events of older maps are ignored and an
-// event of a newer map clears the scene first. Events with map 0 are counted only.
+// event of a newer map clears the scene first. Events with map 0 are counted
+// only. Of a MapTransaction it applies every part it holds: points and Frames
+// are added, moved and dropped. It keeps no observations, so it relies on the
+// Mapper listing a point left without observations in removed_points.
 template <typename TFeatureExtractor>
 class SceneState {
 public:
@@ -76,7 +80,10 @@ private:
     // Applies the multi-map rule; returns false if the event must not be applied.
     bool AdmitMap(voyahslam::map::MapId map_id);
     void ClearScene();
+    void ApplyTransaction(const voyahslam::events::MapTransaction<TFeatureExtractor>& transaction);
     void SetPoint(uint32_t id, const voyahslam::geometry::TPoint3DF& position);
+    // Marks the point dead; an unknown or dead point is skipped.
+    void RemovePoint(uint32_t id);
     // Moves point ids[i] to column i of `positions`; unknown ids are skipped.
     void UpdatePositions(const std::vector<voyahslam::map::MapPointId>& ids,
                          const voyahslam::memory::ColumnBuffer<voyahslam::precision_t, 3>& positions);

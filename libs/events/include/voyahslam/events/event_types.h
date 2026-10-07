@@ -7,14 +7,10 @@
 namespace voyahslam::events {
 
 enum class EventType : uint8_t {
-    MapPointsUpdated,
-    MapPointsRemoved,
-    KeyFrameCreated,
-    KeyFramePoseUpdated,
+    MapTransaction,  // every Mapper change (map_transaction.h)
     LoopDetected,
     FrameTracked,
     InitializationMeasurement,
-    MapCreated,
     TrackingLost,  // keep last: consumers size per-type tables by it
 };
 

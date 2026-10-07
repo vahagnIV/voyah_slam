@@ -15,7 +15,7 @@ namespace {
 
 using Extractor = features::OrbFeatureExtractor;
 using TReplica = MapReplica<Extractor>;
-using TKeyFrameCreated = events::KeyFrameCreated<Extractor>;
+using TTransaction = events::MapTransaction<Extractor>;
 using TMono = features::TMonocularMeasurement<Extractor>;
 
 constexpr uint32_t kMap = 1;
@@ -37,19 +37,20 @@ TMono MakeMeasurement(int n) {
     return TMono(std::move(features), K, nullptr, 1.0);
 }
 
-// Applies a KeyFrameCreated of Frame `frame` whose feature i observes points[i],
-// and which adds `num_new` points from id `start`.
+// Applies a transaction that adds Frame `frame`, whose feature i observes
+// points[i], and `num_new` points from id `start`.
 void CreateFrame(TReplica& out_replica, uint32_t frame, const std::vector<uint32_t>& points,
                  uint32_t num_new = 0, uint32_t start = 0) {
-    memory::ObjectPool<TKeyFrameCreated, memory::ThreadSafePolicy> pool(1);
-    TKeyFrameCreated* event = pool.Create();
+    memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> pool(1);
+    TTransaction* event = pool.Create();
     event->map_id = {kMap};
-    event->frame_id = {frame};
-    event->pose = geometry::RigidTransformation::Identity();
-    event->measurement = MakeMeasurement(static_cast<int>(points.size()));
+    events::NewFrame<Extractor>& added = event->added_frames.emplace_back();
+    added.id = {frame};
+    added.T_cw = geometry::RigidTransformation::Identity();
+    added.measurement = MakeMeasurement(static_cast<int>(points.size()));
     for (size_t i = 0; i < points.size(); ++i) {
-        event->observed_features.push_back(static_cast<uint32_t>(i));
-        event->observed_points.push_back({points[i]});
+        added.observed_features.push_back(static_cast<uint32_t>(i));
+        added.observed_points.push_back({points[i]});
     }
     event->new_points_start_id = {start};
     event->ResizeNewPoints(num_new);
@@ -63,10 +64,10 @@ void CreateFrame(TReplica& out_replica, uint32_t frame, const std::vector<uint32
 }
 
 void RemovePoint(TReplica& out_replica, uint32_t id) {
-    memory::ObjectPool<events::MapPointsRemoved, memory::ThreadSafePolicy> pool(1);
-    events::MapPointsRemoved* event = pool.Create();
+    memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> pool(1);
+    TTransaction* event = pool.Create();
     event->map_id = {kMap};
-    event->ids = {{id}};
+    event->removed_points = {{id}};
     out_replica.Apply(*event);
     event->Recycle();
 }
