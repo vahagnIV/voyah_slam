@@ -85,8 +85,8 @@ with `SearchByBoW`. Smoke on corridor1 (Release, two runs each):
 | Mono 400 | triangulation 178–182 ms per Frame, Mapper pass 292–294 ms; 1 map, 277–278 tracked, ATE Sim3 0.034 m | triangulation **6.5–6.8 ms (26–28×)**, Mapper pass 140–143 ms; 1 map, 278 tracked, ATE Sim3 0.031–0.033 m |
 | Stereo 1000 | triangulation 146–149 ms, Mapper pass 286–287 ms; 1 map, no loss, ATE SE3 0.037–0.038 m | triangulation **3.7–3.8 ms (39×)**, Mapper pass 137–138 ms; 1 map, no loss, **ATE SE3 0.056 / 0.189 m** |
 
-The 3× target is met. Stereo accuracy regressed (fewer triangulated points
-per Frame; TODO), and an extra stereo run lost tracking at the known
+The 3× target is met. Stereo accuracy regressed (timing-dependent drift when
+the Mapper is fast, not fewer triangulated points; TODO), and an extra stereo run lost tracking at the known
 fast-rotation frame (325). Spec: `docs/superpowers/specs/2026-10-07-bow-design.md`;
 see DESIGN "Bag of Words" and the 2026-10-07 decisions-log entries. Out of
 scope and in TODO: vocabulary training, the `ORBvoc.txt` licence, the Frame

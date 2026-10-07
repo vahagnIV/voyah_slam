@@ -305,15 +305,21 @@ Spec `docs/superpowers/specs/2026-10-07-bow-design.md`; DESIGN "Bag of Words"
 (smoke table there). Triangulation matching cost is solved there
 (`SearchByBoW`: 26–28× faster per Frame mono, 39× stereo).
 
-- [ ] **Stereo ATE regressed with the vocabulary** (smoke 2026-10-07): SE3
-      0.056 / 0.189 m (and 0.206 m on the second map of an extra run) vs
-      0.037–0.038 m without, growing over the run (drift; Sim3 scale
-      0.91–0.97). Mono is unaffected (0.031–0.033 vs 0.034 m). Not tuned.
-      Suspect: `SearchByBoW` finds 29 % fewer triangulation matches per Frame
-      (median 145 vs 204) and fusion merges a third fewer, so local BA has
-      fewer multi-view points. Check: matches per pair BoW vs brute force on
-      the same Frames, our filters against ORB-SLAM3's `SearchForTriangulation`,
-      and more stereo runs for the spread.
+- [ ] **Stereo drift when the Mapper is fast (with `--vocabulary`):**
+      timing-dependent (smoke 2026-10-07: SE3 ATE 0.056 / 0.189 m vs
+      0.037–0.038 m without; mono unaffected). Not a BoW matching defect:
+      a 150 ms sleep after triangulation gives 0.037 / 0.037 m at 157–161
+      points per Frame; BoW restricted to brute-force-accepted matches gives
+      0.036 / 0.037 m at 116 points; ratio test off gives 170 points but
+      0.050 / 0.235 m. Candidates: Frame-creation rate (idle Mapper -> `c1b`
+      creates more Frames with less parallax), BA interruption frequency,
+      fusion/culling cadence. Reproduce with/without a sleep after
+      triangulation.
+- [ ] **`SearchForTriangulation` ratio test:** it applies a 0.6
+      best/second-best ratio test that ORB-SLAM3's `SearchForTriangulation`
+      does not. Predates the BoW branch; with BoW it often passes trivially
+      because only one candidate is left. Evaluate it when diagnosing the
+      item above.
 - [ ] **Extra stereo BoW run lost tracking at frame 325** (fast rotation, the
       known weakness below; runs without the vocabulary dip to 38 / 52 inliers
       at frames 325 / 355). Count losses over more runs with and without the

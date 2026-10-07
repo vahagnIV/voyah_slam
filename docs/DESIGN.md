@@ -1510,9 +1510,18 @@ mono), so compare against the "without" rows.
   scale 0.91–0.97 vs 0.97. The error grows over the run (run 1: 0.07 m in the
   first 50 matched poses, 0.30 m at 400–500), i.e. drift, not an offset.
   Tracking itself is stronger (median inliers about 400, minimum 190–216 vs
-  38–52 without). Nothing was tuned; a likely cause is the 29 % fewer
-  triangulated (multi-view) points and a third fewer fusion merges, so local
-  BA constrains the poses with fewer, mostly stereo close points (TODO).
+  38–52 without). Nothing was tuned. The final review ruled out
+  fewer triangulated points as the cause: BoW with a 150 ms sleep after
+  triangulation gives ATE 0.037 / 0.037 m with 157–161 points per Frame;
+  restricting BoW matches to those brute force also accepts gives
+  0.036 / 0.037 m with only 116 points; turning the ratio test off keeps the
+  Mapper fast and gives 170 points but ATE 0.050 / 0.235 m. The regression
+  follows Mapper speed: a faster Mapper exposes timing-dependent behaviour
+  elsewhere, not a BoW matching defect. Also ruled out: Frame/FeatureVector
+  pairing, the level-4 filing depth, the left-descriptor choice, and BoW
+  reused after a slot is reused. Our descriptors are as compatible with
+  ORBvoc as ORB-SLAM3's own extractor's (60.4 % vs 61.1 % of matches share a
+  depth-2 node). See TODO.
 - **The extra stereo run lost tracking at frame 325**, the known fast
   rotation (120–170°/s, TODO "Stereo loss at fast rotation"): motion model 64
   then 41 matches, local map 23 inliers (< 30). The runs without the
@@ -1775,7 +1784,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-07 | The Mapper keeps each Frame in a private `KeyFrameRecord { frame; bow; features; }` (ruling G); BoW (`levels_up` 4) is computed for every Frame, initial ones included, and never published. | No Frame record existed and `map::Frame` is shared with the replicas; the bags of words are Mapper-only until the Frame database (step 3) is designed. |
 | 2026-10-07 | `SearchForTriangulation` takes two optional FeatureVectors (`SearchByBoW`): candidates only from shared-node pairs, all other checks unchanged; its matches are drawn only from shared-node pairs and are not in general a subset of brute force (ruling F, spec §6 amended). A one-node vocabulary reproduces brute force exactly (ruling H, Mapper test). | ORB-SLAM3 `SearchForTriangulation`; fewer candidates can let the ratio test pass where brute force failed. |
 | 2026-10-07 | ORB rotated BRIEF offsets are rounded with `std::lround` (ORB-SLAM3 `cvRound`) instead of truncated. | Bit-compatibility with ORB-SLAM3's vocabulary. |
-| 2026-10-07 | BoW smoke result (corridor1, Release, two runs each with and without the vocabulary, plus one extra stereo run; "Bag of Words"): triangulation per Frame 26–28× faster mono (about 180 → 7 ms) and 39× stereo (about 148 → 4 ms), a Mapper pass about 290 → 140 ms. Mono: one map, 278 tracked, ATE Sim3 0.031–0.033 m (0.034 without). Stereo: one map and no loss in both planned runs, but ATE SE3 0.056 / 0.189 m (0.037–0.038 without); the extra run lost tracking at frame 325 (2 maps). The 3× Must is met; stereo accuracy regressed and nothing was tuned. | BoW finds 29 % fewer triangulation matches per Frame (stereo), so fewer multi-view points constrain local BA (likely cause, TODO). The frame-325 loss is the known fast-rotation weakness (runs without the vocabulary dip to 38 inliers there). |
+| 2026-10-07 | BoW smoke result (corridor1, Release, two runs each with and without the vocabulary, plus one extra stereo run; "Bag of Words"): triangulation per Frame 26–28× faster mono (about 180 → 7 ms) and 39× stereo (about 148 → 4 ms), a Mapper pass about 290 → 140 ms. Mono: one map, 278 tracked, ATE Sim3 0.031–0.033 m (0.034 without). Stereo: one map and no loss in both planned runs, but ATE SE3 0.056 / 0.189 m (0.037–0.038 without); the extra run lost tracking at frame 325 (2 maps). The 3× Must is met; stereo accuracy regressed and nothing was tuned. | Cause is not fewer triangulated points (final review: a 150 ms sleep after triangulation restores ATE 0.037 m at the same point count); the regression follows Mapper speed, i.e. timing-dependent behaviour elsewhere (TODO). The frame-325 loss is the known fast-rotation weakness (runs without the vocabulary dip to 38 inliers there). |
 
 ## 9. Open Questions
 
