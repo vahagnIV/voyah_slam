@@ -22,7 +22,6 @@ add_library(voyahslam
     loop_closing/loop_closer.cpp
     optimization/bundle_adjustment.cpp
     optimization/pose_optimization.cpp
-    events/worker_thread.cpp
     slam/slam.cpp
 )
 
@@ -33,6 +32,7 @@ target_include_directories(voyahslam
 
 target_link_libraries(voyahslam
     PUBLIC voyah_common
+    PUBLIC voyah_events
     PUBLIC Eigen3::Eigen
     PUBLIC spdlog::spdlog
     PUBLIC ${VOYAHSLAM_CONCURRENTQUEUE_TARGET}

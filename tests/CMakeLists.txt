@@ -26,9 +26,6 @@ add_executable(voyahslam_tests
     features/initialization_matcher_test.cpp
     features/projection_matcher_test.cpp
     features/stereo_matcher_test.cpp
-    events/event_system_test.cpp
-    events/wake_signal_test.cpp
-    events/worker_thread_test.cpp
     slam/slam_test.cpp
     tracking/tracker_test.cpp
     tracking/map_replica_test.cpp
