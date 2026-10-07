@@ -15,6 +15,11 @@ as soon as they come up.
       downloaded) — the resolution ORB-SLAM3's configs and timings use.
 - [ ] Optionally build ORB-SLAM3 against OpenCV 5.1 with `REGISTER_TIMES` and
       run it on the 512 dataset as a reference.
+- [ ] `check` / `check_all` build only test binaries, so an app-only build break
+      (examples) is not caught before a merge; add the apps as dependencies of
+      `check_all` or build `all` before merging (restructure final review,
+      2026-10-07). The "Library layout" block sits under DESIGN §7 "Coding
+      Conventions"; give it its own section.
 
 ## ORB extractor (OQ 21)
 
