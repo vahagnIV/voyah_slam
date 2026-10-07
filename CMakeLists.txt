@@ -20,16 +20,21 @@ else()
     set(VOYAHSLAM_CONCURRENTQUEUE_TARGET concurrentqueue::concurrentqueue)
 endif()
 
-# Main library
-add_subdirectory(src)
+option(VOYAHSLAM_OPTIMIZE_TESTS
+    "Compile voyah libraries and tests with -O2 in Debug" ON)
 
-# Tests
 enable_testing()
-include(GoogleTest)
-add_subdirectory(tests)
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+include(VoyahTests)
+
+# Libraries (each with its own include root)
+add_subdirectory(libs)
 
 # Visualization (development tool, links OpenCV)
 add_subdirectory(vizualization)
 
 # Examples
 add_subdirectory(examples)
+
+# check (unit tests) and check_all (every test); after every test binary.
+voyah_add_check_targets()

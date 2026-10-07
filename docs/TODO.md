@@ -15,6 +15,11 @@ as soon as they come up.
       downloaded) — the resolution ORB-SLAM3's configs and timings use.
 - [ ] Optionally build ORB-SLAM3 against OpenCV 5.1 with `REGISTER_TIMES` and
       run it on the 512 dataset as a reference.
+- [ ] `check` / `check_all` build only test binaries, so an app-only build break
+      (examples) is not caught before a merge; add the apps as dependencies of
+      `check_all` or build `all` before merging (restructure final review,
+      2026-10-07). The "Library layout" block sits under DESIGN §7 "Coding
+      Conventions"; give it its own section.
 
 ## ORB extractor (OQ 21)
 
@@ -115,7 +120,7 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
       the hot path (g2o edges, matchers); add an allocation-free path.
       `Unproject` also inverts K per call.
 - [ ] Deduplicate the TUM-VI Kannala-Brandt test fixture (copied in 5–9
-      test files) into `tests/support`.
+      test files) into `libs/test_support/support`.
 - [ ] Validate K beyond finiteness (fx, fy > 0) in `OptimizePose`,
       `BundleAdjust` and `Camera`.
 - [ ] Test that `BundleAdjust` uses each keyframe's own camera (keyframes with
@@ -138,7 +143,7 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
       argument and the stale "use ProjectToImage()" comment.
 - [ ] Test `Camera::ProjectJacobian` exactly on the optical axis
       (Xc = (0, 0, z) → K₂ₓ₂·[1/z, 0, 0; 0, 1/z, 0]).
-- [ ] Tests under `tests/geometry` for the moved distortion models still use
+- [ ] Tests under `libs/common/tests/geometry` for the moved distortion models still use
       namespace `test::features`; rename to `test::geometry`.
 
 ## Stereo (2026-10-04)
@@ -387,7 +392,7 @@ Deferred minor findings from the per-task and final reviews.
       `Wait` breaks (relies on ctest `--timeout`); `RunsUntilNoWorkThenSleeps`
       20 ms settle may flake on loaded CI and calls `Notify` needlessly;
       `ObservableDeliversThroughPush` doesn't assert the queue is empty;
-      unseeded `Random()` in `tests/support/test_measurements.h`.
+      unseeded `Random()` in `libs/test_support/support/test_measurements.h`.
 - [ ] Hygiene: include order / unused alias in `event_system_test.cpp`; missing
       `<type_traits>` / `<variant>` includes; `MapId::value` (like `FrameId`)
       has no default initializer; `tracker.h` and `full_slam_common.h` pull in
@@ -434,8 +439,37 @@ Deferred minor findings from the per-task reviews.
 
 - [ ] Tests: Debug runtime of the mono-init tests (~0.5 s per two-view
       attempt; `PureRotationNeverInitializes` ~18 s) — use cheaper
-      `TwoViewOptions` for tests or fewer frames.
+      `TwoViewOptions` for tests or fewer frames. (2026-10-07: with
+      `VOYAHSLAM_OPTIMIZE_TESTS` ON it is 0.24 s and the whole suite 2.3 s;
+      this matters only with the option OFF.)
 - [ ] Matcher: per-candidate descriptor copy (matters for SIFT cost).
+
+## Library structure (restructure, 2026-10-07)
+
+- [ ] **Descriptor-traits refactor:** template the event, map and viewer code on
+      descriptor traits instead of the extractor class, so `voyah_common` no
+      longer declares `OrbFeatureExtractor` / `SIFTFeatureExtractor` (their
+      definitions are in `voyah_algs`; code linking only common that calls
+      `DetectAndExtract` gets a link error, not a compile error).
+- [ ] **Conan packaging of the separate libraries:** `install()` / package
+      export per library (`voyah_common`, `voyah_events`, `voyah_algs`,
+      `voyah_slam`, umbrella `voyahslam`), with `find_dependency(OpenCV)` in the
+      config of the package that links it (DESIGN §7).
+- [ ] **`libs/test_support/support/synthetic_sequence.h` needs algs**
+      (`features/stereo_matcher.h`) but sits in the common-level support root
+      (`voyah_test_support` links only `voyah_common`). Only a compile failure in
+      a binary that does not link `voyah_algs` enforces it; move it to an
+      algs-level support target (or into `libs/algs/tests/support`).
+- [ ] **Narrow OpenCV in `voyah_common_tests`:** it links OpenCV only for the
+      `calib3d` reference in the Kannala-Brandt test; link just the needed
+      component (or replace the reference with stored values).
+- [ ] **Watch for a flaky unit test:** one `ctest -L unit` run in Task 7 ended
+      with "Errors while running CTest" and was not reproduced (5 × unit,
+      2 × integration and later runs green). If it recurs, keep the
+      `--output-on-failure` log and find the test.
+- [ ] **Clean stale pre-restructure build directories:** the Debug and Release
+      trees still contain `src/` and `tests/` build directories from the old
+      layout (no longer generated); delete them or re-create the trees.
 
 ## Environment
 
@@ -453,5 +487,7 @@ Deferred minor findings from the per-task reviews.
 - [ ] Second dev machine: build OpenCV 5.x from source into `/usr/local` with
       `WITH_GTK=ON` (Conan no longer provides OpenCV).
 - [ ] Recurring: syntax-check all sources with clang-18 + libc++ (clean on
-      2026-10-06, 92 sources + 82 public headers); later add an Android NDK
+      2026-10-06, 92 sources + 82 public headers; 2026-10-07 each library's
+      public headers with only its own and its dependencies' include roots:
+      common 37, events 17, algs 23, slam 8, viz 6, clean); later add an Android NDK
       arm64 cross-build.

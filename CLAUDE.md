@@ -18,3 +18,16 @@ Key rules (details in DESIGN.md):
   map (append-only); they restart per map, and `(map_id, id)` identifies a point.
 - Google style naming: `PascalCase` types/functions, `snake_case` variables,
   `snake_case_` members, `out_` prefix for non-const reference parameters.
+
+Layout: four libraries under `libs/<lib>/{include,src,tests}`: `voyah_common`;
+`voyah_events` and `voyah_algs` (each on common only); `voyah_slam` (on all
+three); `voyahslam` is the umbrella target. Each has its own include root, so a
+lower layer cannot include an upper one (DESIGN §7 "Library layout").
+
+Build and test (`cmake` from the CLion bundle or any CMake >= 3.23):
+- Debug: `cmake --build cmake-build-debug/build/Debug -j8`
+- Fast loop (449 unit tests, 1.5 s plus the build): `cmake --build cmake-build-debug/build/Debug --target check`
+- Every test (end of a task, before a merge; 2.3 s): `cmake --build cmake-build-debug/build/Debug --target check_all`
+  (459 tests, labels `unit` + `integration`). Both run in the Debug tree with `VOYAHSLAM_OPTIMIZE_TESTS=ON`
+  (default: `-O2 -g`, asserts on); turn it off to step through code in a debugger.
+- Release: `cmake --build build/build/Release -j8` (apps in `examples/full_slam/`).
