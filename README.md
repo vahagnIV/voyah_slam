@@ -3,6 +3,21 @@
 Lock-free, event-driven, ORB-SLAM3-inspired SLAM library (C++20, Eigen, Conan 2).
 Architecture and conventions: `docs/DESIGN.md`; pending work: `docs/TODO.md`.
 
+## Libraries
+
+| Target | Directory | Contents | Depends on |
+|---|---|---|---|
+| `voyah_common` | `libs/common` | ids, geometry types, cameras and distortion models, memory pools, logging, image and feature/measurement data types, map storage | Eigen, spdlog |
+| `voyah_events` | `libs/events` | event types, pub/sub (`Observable`, `AsyncObserver`, `WorkerThread`) | common, concurrentqueue |
+| `voyah_algs` | `libs/algs` | geometry algorithms, estimators, feature extractors and matchers, triangulation, optimization | common (OpenCV, stb, g2o private) |
+| `voyah_slam` | `libs/slam` | Tracker, Mapper, LoopCloser, `Slam` | common, events, algs |
+| `voyahslam` | `libs` | umbrella (INTERFACE) linking all four; what apps link | all of the above |
+| `voyahviz` | `vizualization` | map viewer and image windows (dev tool) | common, events (OpenCV, Pangolin private) |
+
+Each library has its own include root (`libs/<lib>/include/voyahslam/...`); headers are
+still included as `#include <voyahslam/...>`, and a library sees only its own root and
+its dependencies' roots, so a lower layer cannot include an upper one.
+
 ## Prerequisites
 
 - gcc 13 or clang 18, CMake >= 3.23 (Conan presets; 4.0 used), Conan 2 (`pip install conan`, then
@@ -54,8 +69,16 @@ Debug (tree `cmake-build-debug/build/Debug`):
 conan install . --output-folder=cmake-build-debug --build=missing -s build_type=Debug
 cmake --preset conan-debug
 cmake --build cmake-build-debug/build/Debug -j"$(nproc)"
-ctest --test-dir cmake-build-debug/build/Debug -j8 --timeout 120 --output-on-failure
+cmake --build cmake-build-debug/build/Debug --target check       # unit tests (449, ~1.5 s)
+cmake --build cmake-build-debug/build/Debug --target check_all   # every test (459, ~2.3 s)
 ```
+
+`check` runs `ctest -L unit`, `check_all` runs `unit` and `integration`; both build the
+test binaries first. With `VOYAHSLAM_OPTIMIZE_TESTS=ON` (the default) the Debug tree
+compiles the libraries and tests with `-O2 -g` and keeps asserts on; configure with
+`-DVOYAHSLAM_OPTIMIZE_TESTS=OFF` to step through the code in a debugger. Each library
+has its own test binary (`voyah_<lib>_tests`, plus `voyah_integration_tests`,
+`voyahviz_tests` and `dataset_reader_tests`).
 
 Release (tree `build/build/Release`):
 

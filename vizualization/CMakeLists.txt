@@ -1,5 +1,7 @@
-# voyahviz: visualization for voyahslam (development tool). Uses OpenCV
-# and Pangolin internally; the public API only exposes voyahslam types.
+# voyahviz: map viewer and image windows (development tool). Links only
+# voyah_common and voyah_events: it consumes the libraries' events and never
+# sees the algorithms or the SLAM components. Uses OpenCV and Pangolin
+# internally; the public API exposes only voyah_common / voyah_events types.
 find_package(Pangolin 0.9 REQUIRED)
 
 add_library(voyahviz STATIC

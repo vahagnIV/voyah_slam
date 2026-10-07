@@ -4,9 +4,21 @@ Agreed 2026-10-07. Each step gets its own spec → plan → subagent-driven
 execution; nothing is merged without an explicit "merge and push".
 
 Done: tracking (sub-project 1), camera model (raw-pixel residuals),
-keyframes and map growth (sub-project 2, merged b93fcf4).
+keyframes and map growth (sub-project 2, merged b93fcf4), restructure
+(step 0, branch `feat/restructure`).
 
-## 0. Restructure (next)
+## 0. Restructure (done 2026-10-07)
+
+**Result:** four libraries under `libs/` with separate include roots, one
+test binary per library plus `voyah_integration_tests`, `check` / `check_all`
+targets and `VOYAHSLAM_OPTIMIZE_TESTS`. Measured in the Debug tree (option
+ON, `-j8`): `check` 449 tests in 1.5 s (was 45.3 s without the option),
+`check_all` 459 tests in 2.3 s (was 66.7 s; the serial Debug baseline was
+381 s). Smoke runs unchanged. Spec:
+`docs/superpowers/specs/2026-10-07-restructure-design.md`; see DESIGN §7
+"Library layout" and the 2026-10-07 decisions-log entry.
+
+The plan as agreed:
 
 Mechanical, no behaviour change. Goal: architecture boundaries and a fast
 test loop.

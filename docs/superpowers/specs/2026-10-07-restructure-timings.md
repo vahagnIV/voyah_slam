@@ -13,6 +13,9 @@ Date: 2026-10-07. Measured with `ctest -j1 --timeout 300`, per-test times from t
 | `voyahviz_tests` | 43 | 0.41 s | 0.40 s |
 
 Note: `voyahviz_tests` is not part of the top-level `ctest` run; it is run from `vizualization/tests`.
+(amended in Task 8: wrong. `voyahviz_tests` is discovered into the top-level `ctest`; the "447" are
+404 `voyahslam_tests` + 43 `voyahviz_tests`, so the top-level total of 458 already includes the
+viewer tests and the viz row above double-counts them, Ruling F.)
 
 ## Tests above 0.5 s in either build (seconds)
 

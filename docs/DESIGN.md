@@ -8,7 +8,7 @@
 > `docs/superpowers/specs/` and `docs/superpowers/plans/`. When they disagree
 > with this document, **this document wins** — fix the spec or note the change here.
 
-Last updated: 2026-10-05
+Last updated: 2026-10-07
 
 ---
 
@@ -54,7 +54,7 @@ keyframes of different types share the map is still open (Open Question 17).
 7. **Structure-of-Arrays storage** for map points and observations, so the hot
    loops (projection, matching, BA) run over contiguous Eigen matrices.
 8. **OpenCV is an implementation detail.** Our public headers
-   (`include/voyahslam/`, `vizualization/include/voyahviz/`) never include
+   (`libs/<lib>/include/voyahslam/`, `vizualization/include/voyahviz/`) never include
    OpenCV; public APIs take and return our types (`images::Image`,
    measurements, `ImageFeatures`, ...) and OpenCV is linked `PRIVATE`, so a
    user of the library never needs its headers or `find_package(OpenCV)`.
@@ -106,7 +106,7 @@ Every component derives from `events::EventNode` (`events/event_node.h`, no
 virtuals): an `Observable` it publishes through, one `AsyncObserver` inbox it
 consumes, `AddObserver(AsyncObserver&)`, `AddSyncObserver(fn, ctx)`, `inbox()`.
 Components are templated on `TFeatureExtractor`, declared in headers and
-defined in `src/` with `INSTANTIATE_CLASS` (ORB + SIFT).
+defined in `libs/slam/src/` with `INSTANTIATE_CLASS` (ORB + SIFT).
 
 | Component | Header | Public API so far |
 |---|---|---|
@@ -335,7 +335,7 @@ that knows how to return itself to its pool, and pooled objects are **kept
 alive** between uses so their payload buffers are reused (steady state: zero
 allocations per event).
 
-**The building blocks (`include/voyahslam/memory/`):**
+**The building blocks (`libs/common/include/voyahslam/memory/`):**
 
 - `ObjectPool<T, SyncPolicy>` — one contiguous slab of `max_count` slots
   allocated once in the constructor. Free slots form a stack of slot indices
@@ -485,7 +485,7 @@ and OpenCV and Pangolin are linked `PRIVATE` (principle 8). Namespace / include 
 | `keypoint_drawing.h` | `KeypointStyle`; `DrawKeypoints(TColorImage& out_canvas, points, angles*)` and a gray-image overload returning a new canvas; `DrawFeatures(image, ImageFeatures)` for raw extractor output; `ProjectToImage(measurement, distortion)` / `DrawMeasurement(...)` |
 | `image_window.h` | `ImageWindow`: named window, `Show(TImageU8Gray / TColorImage)`, `WaitKey()`, `GuiBackend()`; throws if no GUI backend |
 
-Internally `src/opencv_wrapping.h` wraps our images as `cv::Mat` without
+Internally `vizualization/src/opencv_wrapping.h` wraps our images as `cv::Mat` without
 copying (channels interleaved, stride in pixels).
 
 **Pitfall:** `MonocularMeasurement::points()` are *undistorted* pixel
@@ -511,7 +511,7 @@ Spec: `docs/superpowers/specs/2026-10-03-map-viewer-design.md`.
 | `scene_state.h` | `SceneState<FE>`: `Apply(const Event&)`, per-`EventType` counters, and the decoded scene: map points (dense, indexed by per-map point id), keyframe poses (`T_cw`), current camera pose, trajectory, and from the latest `FrameTracked` the tracked and visible point ids and the local Frames. Built only from events; no threads/GUI |
 | `camera_frustum.h` | Camera frustum geometry helper (corner points of a frustum of a given size) |
 | `map_viewer.h` | `MapViewer<FE>(MapViewerOptions{fps, show_window, width, height, camera_size})`: one `AsyncObserver` inbox, `Start()` / `Stop()` / `RunOnCurrentThread()` / `RequestStop()`, `inbox()`, `events_processed()`, `window_closed()`, `WaitForWindowClose()` |
-| `pangolin_renderer.h` (private, `src/`) | Pangolin window: points (tracked green, visible blue, others grey), keyframe frustums (local-map Frames orange, others blue), current camera (green, red when lost), trajectory, control panel (toggles, map id, counts, status) |
+| `pangolin_renderer.h` (private, `vizualization/src/`) | Pangolin window: points (tracked green, visible blue, others grey), keyframe frustums (local-map Frames orange, others blue), current camera (green, red when lost), trajectory, control panel (toggles, map id, counts, status) |
 
 Specs: `docs/superpowers/specs/2026-10-04-pangolin-viewer-design.md`
 (Pangolin viewer), `docs/superpowers/specs/2026-10-03-map-viewer-design.md`.
@@ -673,7 +673,8 @@ not camera-model classes and not free functions):
 **`DistortionModel` in `geometry/`.** The models moved from
 `features/distortion_models/` to `include/voyahslam/geometry/distortion_models/`
 (namespace `voyahslam::geometry::distortion_models`, sources in
-`src/geometry/distortion_models/`, tests in `tests/geometry/distortion_models/`),
+`src/geometry/distortion_models/`, tests in `tests/geometry/distortion_models/`;
+since the restructure all three under `libs/common/`),
 so `geometry` stays at the bottom of the dependency stack. The old headers are
 forwarding headers (`namespace features { namespace distortion_models =
 geometry::distortion_models; }`), so old includes and qualified names still
@@ -704,7 +705,7 @@ measurement, event and `Camera` copy.
    `PoseObservation::left/right` are raw pixels and `sigma` is in pixels. Mono
    e = `left.Project(T_cw·X) − z`, J = `left.ProjectJacobian(Xc)·[−[Xc]× | I]`;
    stereo rows through `right.Project(T_rl·Xc)`. A `right` observation without
-   `stereo` → `success = false`. The helpers in `src/optimization/projection.h`
+   `stereo` → `success = false`. The helpers in `libs/algs/src/optimization/projection.h`
    (`ProjectPixel`, `PixelJacobians`, `ProjectPixelRight`,
    `PixelJacobianRightPose`) take a `Camera`; the normalized-plane helpers were
    removed.
@@ -783,13 +784,13 @@ Spec: `docs/superpowers/specs/2026-10-05-init-bundle-adjustment-design.md`
 (amended during implementation; the decisions log has the changes).
 
 `optimization::BundleAdjust(BaProblem, BundleAdjustmentOptions) -> BaResult`
-(`include/voyahslam/optimization/bundle_adjustment.h`) jointly refines keyframe
+(`libs/algs/include/voyahslam/optimization/bundle_adjustment.h`) jointly refines keyframe
 poses (`T_cw`, some may be fixed) and world points from **raw (distorted)
 pixel observations**, each projected through its keyframe's `geometry::Camera`
 (`BaProblem::keyframe_cameras`, one per keyframe; per-observation sigma in
 pixels; normalized-plane residuals until 2026-10-05). The public
 header uses only our types and Eigen; g2o is linked `PRIVATE` and never appears
-in `include/` (principle 8 applies to g2o as well). Internals: `src/optimization/`
+in a public header (principle 8 applies to g2o as well). Internals: `libs/algs/src/optimization/`
 (`projection.h` has the pixel projection helpers and analytic Jacobians through
 `Camera::ProjectJacobian`; the g2o
 edge/vertex glue lives in `bundle_adjustment.cpp`). Levenberg-Marquardt with
@@ -1146,6 +1147,15 @@ neighbour (brute force, 1500 features); mono 49-76 ms with 2-3 neighbours
 (0.75 s expected with 30), stereo 88 ms mean (max 124 ms) with 8.8 neighbours, about 10 ms each. A second stereo run lost map 1 at frame ~354 and map 2 right after its initialization (3 maps): the stereo result varies between runs (thread timing). ATE vs mocap: not measured —
 the apps do not write a trajectory (TODO).
 
+**Restructure re-run (2026-10-07, same apps after the library split, Release,
+idle machine).** Mono 400: 2 maps (129, 142 tracked), 1 re-initialization,
+3 Frames created (1 / 2), 329 / 582 points — identical to the table. Stereo
+200: 1 map, 198 tracked, no loss, median 478 inliers. Stereo 1000 (two runs):
+1 map, 999 / 998 tracked, no `TrackingLost`, 260 / 259 Frames created — better
+than the table's runs 1 and 2, but `master` rebuilt and run the same day gives
+the same (1 map, 999 tracked, 264 Frames; mono 400 identical too), so this is
+the known run-to-run variation (thread timing), not a change from the split.
+
 ## 7. Coding Conventions
 
 **Naming (Google C++ style):**
@@ -1159,28 +1169,75 @@ the apps do not write a trajectory (TODO).
 - Enums: `enum class` with `PascalCase` values.
 - Namespaces: `voyahslam::<module>` (`map`, `events`, `memory`, `features`, `geometry`, …).
 
+**Library layout (since 2026-10-07, roadmap step 0):**
+
+| Library (target) | Contents | Depends on |
+|---|---|---|
+| `voyah_common` | `defs.h`, ids, `memory/*`, `logging/*`, `algebra/*`, geometry types (`RigidTransformation`, `Camera`, distortion models), image types, feature/measurement data types, stereo rig, the extractor *declarations* (`OrbFeatureExtractor`, `SIFTFeatureExtractor`, `orb/image_pyramid.h`), map storage (`Frame`, `MapPointStorage`, `ObservationStorage`, `CovisibilityIndex`) | Eigen, spdlog (PUBLIC) |
+| `voyah_events` | `events/*`: event types, `Observable` / `AsyncObserver` / `EventNode`, `WakeSignal`, `WorkerThread` | common; concurrentqueue (PUBLIC) |
+| `voyah_algs` | estimators, two-view geometry, image filters, `io/read_image`, the extractor *definitions*, feature grid and matchers, point statistics, keyframe decision, triangulation, `optimization/*` | common; OpenCV, stb, g2o (PRIVATE) |
+| `voyah_slam` | `tracking/*`, `mapping/{mapper, map_initializer}`, `loop_closing/*`, `slam/*`, `voyahslam.h` | common, events, algs |
+| `voyahslam` (INTERFACE) | umbrella: links all four; the apps link it | all |
+| `voyahviz` | viewer, image windows (dev tool) | common, events; OpenCV, Pangolin (PRIVATE) |
+
+```
+libs/
+  CMakeLists.txt            the four libraries + the voyahslam umbrella
+  common/  events/  algs/  slam/
+    include/voyahslam/...   public headers (same relative paths as before)
+    src/...                 sources and private headers
+    tests/...               the library's unit tests (voyah_<lib>_tests)
+  slam/tests/integration/   voyah_integration_tests (SlamTest.*, TrackerTest.TracksSyntheticStereo)
+  test_support/             voyah_test_support (STATIC, links voyah_common only):
+                            utils_test.*, support/*.h
+cmake/VoyahTests.cmake      voyah_add_test_binary, voyah_optimize_target, check / check_all
+vizualization/              voyahviz (+ voyahviz_tests)
+```
+
+- **Dependency rule:** a target's include path holds only its own root and
+  the roots of the libraries it depends on, so a lower layer that includes an
+  upper-layer header fails to compile ("No such file or directory"; verified
+  by a one-off experiment: `map/frame.h` including
+  `features/projection_matcher.h` breaks `voyah_common_tests`). `#include
+  <voyahslam/...>` paths are unchanged by the split. common is the base;
+  events and algs each depend only on common; slam depends on all three.
+- **Placement:** a data type needed by a lower layer moves down; an algorithm
+  that needs an upper layer moves up. The extractor classes are declared in
+  common (every template, events and the viewer included, is parameterised on
+  the extractor type) and defined in algs; code linking only common that calls
+  `DetectAndExtract` gets a link error, not a compile error (descriptor-traits
+  refactor in TODO).
+- **Tests follow their code's library.** Each library has a `voyah_<lib>_tests`
+  binary labelled `unit`; tests above 1 s in the optimized build and the
+  whole-pipeline tests go to `voyah_integration_tests` (label `integration`).
+  Test helpers that need slam (the Tracker fixture) live in that library's
+  `tests/` directory, not in `voyah_test_support`.
+
 **Structure:**
 - C++20.
 - Include guards `VOYAHSLAM_<PATH>_H` (no `#pragma once`).
 - One event type per header; file name is the event name in `snake_case`.
 - Every header is self-contained: it compiles when included first and alone.
 - No OpenCV in public headers (principle 8): OpenCV usage lives in `.cpp` files
-  and private headers under `src/` (e.g. `src/opencv_bindings/`,
+  and private headers under `src/` (e.g. `libs/algs/src/opencv_bindings/`,
   `vizualization/src/opencv_wrapping.h`).
-- Link-level note: `voyahslam` is a static library, so its consumers still
-  *link* OpenCV's shared libraries. In-tree, CMake propagates that
+- Link-level note: `voyah_algs` is a static library, so its consumers
+  (`voyah_slam`, the `voyahslam` umbrella) still *link* OpenCV's shared
+  libraries. In-tree, CMake propagates that
   automatically. When we add `install()`/package export, the package config must
   do `find_dependency(OpenCV)` itself (or `voyahslam` becomes a shared
   library) so the user still never calls `find_package(OpenCV)`.
 - Public headers included as `#include <voyahslam/...>`.
-- Template classes header-only; non-template classes have a `.cpp` in `src/` mirroring `include/`.
+- Template classes header-only; non-template classes have a `.cpp` in `libs/<lib>/src/` mirroring `libs/<lib>/include/`.
 - `[[nodiscard]]` on const accessors.
 - Move semantics throughout.
 - Templates over the feature extractor are explicitly instantiated with
   `INSTANTIATE_CLASS` (`features/instantiation.h`) for ORB and SIFT.
 - Formatting: `.clang-format` in repo root (4-space indent).
-- New sources go in `src/CMakeLists.txt`, new tests in `tests/CMakeLists.txt`
-  (mirroring the `include/` layout under `tests/`).
+- New sources go in `libs/<lib>/CMakeLists.txt`, new tests in
+  `libs/<lib>/tests/CMakeLists.txt` (mirroring the `include/` layout under
+  `tests/`); a test above 1 s in the optimized build goes to
+  `libs/slam/tests/integration/`.
 
 **Build & test (Conan 2 + CMake):**
 - Dependencies (`conanfile.txt`): gtest, eigen, stb, spdlog, concurrentqueue,
@@ -1191,14 +1248,26 @@ the apps do not write a trajectory (TODO).
   Build it with a GUI backend for voyahviz (`WITH_GTK=ON`; GTK2 dev files are
   enough). OpenCV 5 renamed `features2d` → `features` and split `calib3d` into
   `calib` / `geometry` / `stereo` (compat headers `features2d.hpp`,
-  `calib3d.hpp` exist). Linked as: `voyahslam` → core, imgproc, features;
-  `voyahviz` → core (public), imgproc, highgui; tests → all.
+  `calib3d.hpp` exist). Linked as: `voyah_algs` → core, imgproc, features
+  (PRIVATE); `voyahviz` → core, imgproc, highgui (PRIVATE);
+  `voyah_common_tests` → all (calib3d reference).
 - **g2o is a local Conan package:** vendored in `third_party/g2o/` and built with
   `conan create third_party/g2o --build=missing -s build_type=Debug|Release` once per
   machine, before the project's `conan install` (`conanfile.txt` requires
   `g2o/20241228@voyah/stable`). Step-by-step build instructions: `README.md`
   (checked on a fresh `CONAN_HOME` on 2026-10-05).
-- Debug: `cmake --build cmake-build-debug/build/Debug && ctest --test-dir cmake-build-debug/build/Debug --output-on-failure`
+- Debug: `cmake --build cmake-build-debug/build/Debug -j8`.
+- **Tests:** `cmake --build cmake-build-debug/build/Debug --target check`
+  runs the unit tests (`ctest -L unit -j8`; 449 tests, 1.5 s) — the
+  edit-and-test loop. `--target check_all` runs every test (`unit` +
+  `integration`, `ctest -j8`; 459 tests, 2.3 s) — at the end of each task and
+  before every merge. Both build the test binaries first and run in the
+  **Debug tree** with `VOYAHSLAM_OPTIMIZE_TESTS=ON` (default): the voyah
+  libraries, `voyah_test_support`, `voyahviz` and the test binaries get
+  `-O2` on top of `-g`, `NDEBUG` stays undefined (asserts on;
+  `BuildConfigTest.AssertsEnabled` checks it), Conan dependencies (g2o) keep
+  their Debug build. Configure with `-DVOYAHSLAM_OPTIMIZE_TESTS=OFF` to step
+  through code in a debugger.
 - Release: `conan install . --output-folder=build --build=missing -s build_type=Release`, then the `conan-release` preset.
 
 **Workflow:** brainstorm → spec (`docs/superpowers/specs/`) → plan
@@ -1285,7 +1354,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-05 | Monocular initialization runs a two-keyframe BA after the two-view reconstruction; outlier points are dropped; fewer than 50 survivors fail the attempt. | Accuracy (the reconstruction is limited by the RANSAC models; see TODO "refinement lock-in"); ORB-SLAM3 does the same (`Optimizer::GlobalBundleAdjustemnt` in `CreateInitialMapMonocular`). |
 | 2026-10-05 | Init-time error at low parallax is noise-limited (synthetic seeds initialize at frame 3, baseline 0.15 vs depth 4-8; ML optimum 0.3-2.7 degrees), so tests check convergence to the maximum-likelihood optimum (oracle from ground truth) rather than an absolute error bound. Mean error 2.11 -> 1.34 degrees with BA. | An absolute bound would test the noise, not the optimizer. |
 | 2026-10-05 | Init BA uses 5 + 40 iterations and runs on the unscaled problem (baseline 1, depths ~40), before the median-depth rescale (ORB-SLAM3 order). | The plain stage needs about 40 iterations to converge there; LM stops at convergence so runtime is barely affected. Rescaling first would converge faster (TODO, tuning). |
-| 2026-10-05 | The root `CMakeLists.txt` picks the concurrentqueue target (`VOYAHSLAM_CONCURRENTQUEUE_TARGET`); `src/CMakeLists.txt` only uses it. The choice is between `moodycamel::concurrentqueue` and `concurrentqueue::concurrentqueue`. | Found by the clean-machine build: the revision of concurrentqueue/1.0.4 that Conan Center serves today declares only `concurrentqueue::concurrentqueue`. |
+| 2026-10-05 | The root `CMakeLists.txt` picks the concurrentqueue target (`VOYAHSLAM_CONCURRENTQUEUE_TARGET`); `src/CMakeLists.txt` (now `libs/events/CMakeLists.txt`) only uses it. The choice is between `moodycamel::concurrentqueue` and `concurrentqueue::concurrentqueue`. | Found by the clean-machine build: the revision of concurrentqueue/1.0.4 that Conan Center serves today declares only `concurrentqueue::concurrentqueue`. |
 | 2026-10-05 | Tracking against the map (sub-project 1): `MapReplica` fed by Mapper events; motion model -> zero-motion fallback (window x4) -> local map -> `OptimizePose`; the `PoseEstimator` stub is deleted. | Spec `2026-10-05-tracking-design.md`; keyframes, local BA, relocalization are sub-projects 2-4. |
 | 2026-10-05 | (Q) The projection matcher takes the point source as a template parameter; `features/` does not depend on `tracking/`. `PointReference` lives in `map/point_reference.h`; the rotation histogram is shared in `features/rotation_histogram.h`. | No dependency cycle between features and tracking; one histogram implementation for the initialization and projection matchers. |
 | 2026-10-05 | (R) The replica does not count events (spec said it would, as `SceneState`). | Nothing consumes the counters; the replica stays a pure map copy. |
@@ -1319,6 +1388,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-06 | (L) The reference Frame is the Frame sharing the most inliers among **all** observing Frames, not only K1. | Includes Frames reached through local-map matches, a better reference; occasionally a K2 Frame. |
 | 2026-10-06 | Viewer colours: tracked points green, visible points blue, other points grey; local-map Frames orange, other Frames blue. | Debugging the local map and the matcher at a glance. |
 | 2026-10-07 | Keyframes smoke result (corridor1, Release; "Keyframes and Map Growth"): mono 2 maps in 400 frames, first map 129 tracked frames, median lifetime 135.5, 1 re-initialization (was 82 tracked / 18 re-initializations); stereo 2 maps in 1000 frames (lost once at frame ~360; a second run: 3 maps, lost at frame ~354 and again on the new map's first frame). Both bars (first mono map ≥ 150; stereo no loss) are missed; nothing was tuned. Synthetic end-to-end error bounds loosened to 30 % of the path / 0.3 m. | Mono: the Frame rule stalls without fusion (`ref_points` stuck at 36); stereo: motion-model failure at 120-170 deg/s without a reference-Frame fallback. The synthetic error is noise random-walk without local BA (0 without noise). All in TODO. |
+| 2026-10-07 | Restructure (roadmap step 0, approach C): split `voyahslam` into `voyah_common`, `voyah_events`, `voyah_algs`, `voyah_slam` under `libs/<lib>/{include,src,tests}`, each with its **own include root but unchanged `#include <voyahslam/...>` paths**; `voyahslam` is an INTERFACE umbrella; `voyahviz` links only common + events. The `OrbFeatureExtractor` / `SIFTFeatureExtractor` declarations (and `orb/image_pyramid.h`, held by value) stay in common, their definitions in algs. One test binary per library (label `unit`) plus `voyah_integration_tests` (label `integration`: every `SlamTest.*` and every test above **1 s** in the optimized build, except the fixed-cost `ObjectPoolDeathTest.PoolExhaustion`); `check` / `check_all` targets. `VOYAHSLAM_OPTIMIZE_TESTS` (default ON) adds `-O2` to the voyah libraries and tests in Debug, asserts on, dependencies unchanged; `check_all` runs from the Debug tree. | Boundaries enforced by the compiler (a wrong-direction include is "file not found") without touching a single include line or namespace; `voyah_events` usable by outside observers such as the viewer. The extractor declarations stay in common because every template, events and the viewer included, is parameterised on the extractor type (descriptor-traits refactor in TODO). Unoptimized Eigen/g2o dominated the suite: serial Debug 381 s → `check_all` 2.3 s (459 tests, `-j8`; 66.7 s at `-j8` before the option), `check` 1.5 s (449 tests); smoke runs unchanged. Spec `docs/superpowers/specs/2026-10-07-restructure-design.md`. |
 
 ## 9. Open Questions
 
@@ -1431,7 +1501,7 @@ branch → review → merge to `master`. Update this document at the end.
     pools) — and the viewer's destructor drain then recycles into freed pools
     too. The apps now guard against this: a guard declared right after `slam`
     runs `slam.Stop(); viewer.Stop()` on every exit path, so the viewer is
-    stopped and fully drained before `~Slam` (as `tests/slam/slam_test.cpp`
+    stopped and fully drained before `~Slam` (as `libs/slam/tests/integration/slam_test.cpp`
     does). This is a caller-side workaround; the library-level design stays
     open: pools that outlive all producers and consumers.
 
@@ -1493,6 +1563,11 @@ branch → review → merge to `master`. Update this document at the end.
   (stereo close points, triangulation against neighbours) as one
   `KeyFrameCreated`, covisibility local map and reference Frame, viewer
   highlights (see "Keyframes and Map Growth").
+
+- Restructure, roadmap step 0 (branch `feat/restructure`, merge pending):
+  four libraries with separate include roots, per-library test binaries with
+  `unit` / `integration` labels, `check` / `check_all`,
+  `VOYAHSLAM_OPTIMIZE_TESTS` (see §7 "Library layout"; `check_all` 2.3 s).
 
 **Required follow-up:**
 - Decide `MapPointStorage` growth / compaction (Open Question 2); ids are
