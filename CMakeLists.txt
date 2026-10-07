@@ -20,12 +20,16 @@ else()
     set(VOYAHSLAM_CONCURRENTQUEUE_TARGET concurrentqueue::concurrentqueue)
 endif()
 
+enable_testing()
+include(GoogleTest)
+
+# Libraries (each with its own include root)
+add_subdirectory(libs)
+
 # Main library
 add_subdirectory(src)
 
 # Tests
-enable_testing()
-include(GoogleTest)
 add_subdirectory(tests)
 
 # Visualization (development tool, links OpenCV)

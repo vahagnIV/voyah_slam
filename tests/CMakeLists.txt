@@ -9,13 +9,10 @@ target_link_libraries(voyah_test_support
 
 add_executable(voyahslam_tests
     test_voyahslam.cpp
-    algebra/algebra_test.cpp
     estimators/essential_estimator_test.cpp
     estimators/homography_estimator_test.cpp
     estimators/ransac_test.cpp
-    geometry/camera_test.cpp
     geometry/geometry_test.cpp
-    geometry/rigid_transformation_test.cpp
     geometry/two_view_decomposition_test.cpp
     geometry/two_view_reconstruction_test.cpp
     geometry/two_view_scene_test.cpp
@@ -23,25 +20,12 @@ add_executable(voyahslam_tests
     images/filter_tests.cpp
     images/gaussian_blur_tests.cpp
     images/resizer_tests.cpp
-    features/monocular_measurement_test.cpp
-    features/image_features_test.cpp
     features/feature_extractor_levels_test.cpp
     features/keypoint_matches_test.cpp
     features/feature_grid_test.cpp
     features/initialization_matcher_test.cpp
     features/projection_matcher_test.cpp
-    geometry/distortion_models/distortion_model_test.cpp
-    geometry/distortion_models/kannala_brandt_distortion_model_test.cpp
-    memory/object_pool_test.cpp
-    memory/column_buffer_test.cpp
-    map/id_types_test.cpp
-    features/stereo_rig_test.cpp
-    features/binocular_measurement_test.cpp
     features/stereo_matcher_test.cpp
-    map/map_point_storage_test.cpp
-    map/frame_test.cpp
-    map/observation_storage_test.cpp
-    map/covisibility_index_test.cpp
     events/event_system_test.cpp
     events/wake_signal_test.cpp
     events/worker_thread_test.cpp

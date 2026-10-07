@@ -2,20 +2,15 @@ find_package(g2o REQUIRED)
 
 add_library(voyahslam
     voyahslam.cpp
-    algebra/algebra.cpp
     estimators/essential_estimator.cpp
     estimators/homography_estimator.cpp
-    geometry/camera.cpp
     geometry/geometry.cpp
     geometry/two_view_decomposition.cpp
     geometry/two_view_reconstruction.cpp
     io/read_image.cpp
-    logging/logger.cpp
     features/feature_grid.cpp
     features/orb_feature_extractor.cpp
     features/sift_feature_extractor.cpp
-    geometry/distortion_models/dummy_distortion_model.cpp
-    geometry/distortion_models/kannala_brandt_distortion_model.cpp
     features/orb/image_pyramid.cpp
     features/orb/extract_node.cpp
     features/orb/quad_tree_distributor.cpp
@@ -25,7 +20,6 @@ add_library(voyahslam
     mapping/keyframe_decision.cpp
     map/point_statistics.cpp
     loop_closing/loop_closer.cpp
-    map/covisibility_index.cpp
     optimization/bundle_adjustment.cpp
     optimization/pose_optimization.cpp
     events/worker_thread.cpp
@@ -38,6 +32,7 @@ target_include_directories(voyahslam
 )
 
 target_link_libraries(voyahslam
+    PUBLIC voyah_common
     PUBLIC Eigen3::Eigen
     PUBLIC spdlog::spdlog
     PUBLIC ${VOYAHSLAM_CONCURRENTQUEUE_TARGET}
