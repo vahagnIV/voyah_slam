@@ -2,16 +2,22 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
+#include <optional>
 #include <random>
+#include <vector>
 
 #include <Eigen/Dense>
 
+#include "optimization/projection.h"
+#include "support/synthetic_sequence.h"
 #include "support/two_view_scene.h"
 #include "voyahslam/geometry/camera.h"
 #include "voyahslam/geometry/distortion_models/kannala_brandt_distortion_model.h"
 #include "voyahslam/geometry/rigid_transformation.h"
 #include "voyahslam/optimization/bundle_adjustment.h"
+#include "voyahslam/optimization/pose_optimization.h"
 
 namespace voyahslam::optimization {
 namespace {
@@ -387,6 +393,293 @@ TEST(BundleAdjustTest, FisheyeRecoversPerturbedNoiseFree) {
     EXPECT_LE(result.final_cost, result.initial_cost);
     ASSERT_EQ(result.points.cols(), scene.points.cols());
     ExpectMatchesScene(result, scene, scene.points.cols(), 1e-6);
+}
+
+/// exp(delta) * T with delta = (omega, upsilon), the g2o SE3Expmap left update.
+RigidTransformation LeftPerturbed(const RigidTransformation& pose, int k, double step) {
+    Eigen::Matrix<double, 6, 1> delta = Eigen::Matrix<double, 6, 1>::Zero();
+    delta[k] = step;
+    const TMatrix33F dr(Eigen::AngleAxisd(delta.head<3>().norm(),
+                                          delta.head<3>().norm() == 0.0
+                                              ? TVector3DF(TVector3DF::UnitX())
+                                              : TVector3DF(delta.head<3>().normalized())));
+    return RigidTransformation(dr * pose.rotation(), dr * pose.translation() + delta.tail<3>());
+}
+
+template <typename TMatrix>
+double RelativeError(const TMatrix& analytic, const TMatrix& numeric) {
+    return (analytic - numeric).cwiseAbs().maxCoeff() / numeric.cwiseAbs().maxCoeff();
+}
+
+// The stereo edge's residual and Jacobians are StereoPixel / StereoPixelJacobians verbatim.
+TEST(BundleAdjustTest, StereoEdgeJacobianMatchesFiniteDifference) {
+    const auto model = TumViModel();
+    const Camera left = TumViCamera(&model);
+    const Camera right = TumViCamera(&model);
+    // A rig with a 5 degree yaw between the cameras and a 0.11 m baseline.
+    const RigidTransformation T_rl(
+        TMatrix33F(Eigen::AngleAxisd(5.0 * M_PI / 180.0, Eigen::Vector3d::UnitY())),
+        TVector3DF(-0.11, 0.0, 0.0));
+    std::mt19937 rng(5);
+    std::uniform_real_distribution<double> unit(-1.0, 1.0);
+    const double h = 1e-6;
+
+    for (int trial = 0; trial < 10; ++trial) {
+        const RigidTransformation pose(
+            TMatrix33F(Eigen::AngleAxisd(0.5 * unit(rng), RandomUnit(rng))),
+            TVector3DF(unit(rng), unit(rng), unit(rng)));
+        // Up to 60 degrees off the left axis, 2-10 m away: in front of both cameras.
+        const double theta = 60.0 * M_PI / 180.0 * 0.5 * (unit(rng) + 1.0);
+        const double phi = M_PI * unit(rng);
+        const double range = 2.0 + 4.0 * (unit(rng) + 1.0);
+        const TPoint3DF xc = range * TPoint3DF(std::sin(theta) * std::cos(phi),
+                                               std::sin(theta) * std::sin(phi), std::cos(theta));
+        const TPoint3DF x = pose.Inverse().Transform(xc);
+
+        const Eigen::Vector3d pixel = StereoPixel(left, right, pose, T_rl, x);
+        EXPECT_TRUE(pixel.head<2>().isApprox(left.Project(xc), 1e-12));
+        EXPECT_NEAR(pixel.z(), right.Project(T_rl.Transform(xc)).x(), 1e-9);
+
+        Eigen::Matrix<precision_t, 3, 6> pose_jacobian;
+        Eigen::Matrix<precision_t, 3, 3> point_jacobian;
+        StereoPixelJacobians(left, right, pose, T_rl, x, pose_jacobian, point_jacobian);
+
+        Eigen::Matrix<precision_t, 3, 6> pose_numeric;
+        for (int k = 0; k < 6; ++k) {
+            pose_numeric.col(k) = (StereoPixel(left, right, LeftPerturbed(pose, k, h), T_rl, x) -
+                                   StereoPixel(left, right, LeftPerturbed(pose, k, -h), T_rl, x)) /
+                                  (2.0 * h);
+        }
+        Eigen::Matrix<precision_t, 3, 3> point_numeric;
+        for (int k = 0; k < 3; ++k) {
+            TPoint3DF xp = x;
+            TPoint3DF xm = x;
+            xp[k] += h;
+            xm[k] -= h;
+            point_numeric.col(k) = (StereoPixel(left, right, pose, T_rl, xp) -
+                                    StereoPixel(left, right, pose, T_rl, xm)) /
+                                   (2.0 * h);
+        }
+
+        EXPECT_LT(RelativeError(pose_jacobian, pose_numeric), 1e-6) << "trial " << trial;
+        EXPECT_LT(RelativeError(point_jacobian, point_numeric), 1e-6) << "trial " << trial;
+    }
+}
+
+struct StereoScene {
+    std::vector<RigidTransformation> T_cw;   ///< Ground truth.
+    TPoints3DF points;                       ///< Ground truth.
+    BaProblem problem;                       ///< Perturbed start.
+};
+
+/// Three pinhole stereo keyframes (keyframe 0 = world, fixed) moving sideways, num_points
+/// points 4-8 m away observed noise-free by all of them (left pixel + right x, sigma 1 px).
+/// The start perturbs keyframes 1-2 by 2 degrees and 0.1 m, the points by 2 %.
+StereoScene MakeStereoScene(size_t num_points, uint32_t seed) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> unit(-1.0, 1.0);
+    const Camera camera{test::SyntheticStereoIntrinsics(), nullptr};
+    const StereoCameras stereo{camera, test::SyntheticStereoRig(0.11).T_rl};
+
+    StereoScene scene;
+    scene.T_cw = {RigidTransformation::Identity(),
+                  RigidTransformation(TMatrix33F(Eigen::AngleAxisd(0.05, TVector3DF::UnitY())),
+                                      TVector3DF(-0.3, 0.02, 0.05)),
+                  RigidTransformation(TMatrix33F(Eigen::AngleAxisd(0.1, TVector3DF::UnitY())),
+                                      TVector3DF(-0.6, 0.05, 0.1))};
+    scene.points.resize(3, static_cast<Eigen::Index>(num_points));
+    for (Eigen::Index i = 0; i < scene.points.cols(); ++i) {
+        const double depth = 6.0 + 2.0 * unit(rng);
+        scene.points.col(i) = TPoint3DF(depth * 0.5 * unit(rng), depth * 0.5 * unit(rng), depth);
+    }
+
+    BaProblem& problem = scene.problem;
+    problem.keyframe_poses = scene.T_cw;
+    for (size_t k = 1; k < problem.keyframe_poses.size(); ++k) {
+        const RigidTransformation& truth = scene.T_cw[k];
+        problem.keyframe_poses[k] = RigidTransformation(
+            TMatrix33F(Eigen::AngleAxisd(2.0 * M_PI / 180.0, RandomUnit(rng))) * truth.rotation(),
+            truth.translation() + 0.1 * RandomUnit(rng));
+    }
+    problem.keyframe_fixed = {true, false, false};
+    problem.keyframe_cameras = {camera, camera, camera};
+    problem.keyframe_stereo = {stereo, stereo, stereo};
+    problem.points = scene.points;
+    for (Eigen::Index i = 0; i < problem.points.cols(); ++i) {
+        problem.points.col(i) += 0.02 * scene.points.col(i).norm() * RandomUnit(rng);
+    }
+    for (size_t k = 0; k < scene.T_cw.size(); ++k) {
+        for (Eigen::Index i = 0; i < scene.points.cols(); ++i) {
+            const TPoint3DF xc = scene.T_cw[k].Transform(TPoint3DF(scene.points.col(i)));
+            problem.observations.push_back(
+                {k, static_cast<size_t>(i), camera.Project(xc), 1.0,
+                 stereo.right.Project(stereo.T_rl.Transform(xc)).x()});
+        }
+    }
+    return scene;
+}
+
+TEST(BundleAdjustTest, StereoRecoversPerturbedNoiseFree) {
+    const StereoScene scene = MakeStereoScene(100, 31);
+    BundleAdjustmentOptions options;
+    options.iterations = 50;
+
+    const BaResult result = BundleAdjust(scene.problem, options);
+
+    ASSERT_TRUE(result.success);
+    EXPECT_FALSE(result.interrupted);
+    EXPECT_EQ(result.stage_reached, 2);
+    EXPECT_LE(result.final_cost, result.initial_cost);
+    ASSERT_EQ(result.keyframe_poses.size(), scene.T_cw.size());
+    // Stereo fixes the scale: the metric poses and points are recovered.
+    for (size_t k = 0; k < scene.T_cw.size(); ++k) {
+        EXPECT_LT(RotationAngle(result.keyframe_poses[k].rotation(), scene.T_cw[k].rotation()),
+                  1e-6) << "keyframe " << k;
+        EXPECT_LT((result.keyframe_poses[k].translation() - scene.T_cw[k].translation()).norm(),
+                  1e-6) << "keyframe " << k;
+    }
+    ASSERT_EQ(result.points.cols(), scene.points.cols());
+    for (Eigen::Index i = 0; i < scene.points.cols(); ++i) {
+        EXPECT_LT((result.points.col(i) - scene.points.col(i)).norm(), 1e-6) << "point " << i;
+    }
+    ASSERT_EQ(result.inlier.size(), scene.problem.observations.size());
+    EXPECT_EQ(std::count(result.inlier.begin(), result.inlier.end(), false), 0);
+}
+
+// A right x off by 5 px (chi2 25 > 7.815) is an outlier only through the stereo threshold.
+TEST(BundleAdjustTest, StereoOutlierUsesStereoThreshold) {
+    StereoScene scene = MakeStereoScene(100, 32);
+    scene.problem.observations[17].right_x = *scene.problem.observations[17].right_x + 5.0;
+
+    const BaResult result = BundleAdjust(scene.problem, BundleAdjustmentOptions{});
+
+    ASSERT_TRUE(result.success);
+    EXPECT_GT(result.chi2[17], 7.815);
+    EXPECT_FALSE(result.inlier[17]);
+    EXPECT_EQ(std::count(result.inlier.begin(), result.inlier.end(), false), 1);
+}
+
+TEST(BundleAdjustTest, StereoInvalidInputFails) {
+    const StereoScene scene = MakeStereoScene(20, 33);
+    ASSERT_TRUE(BundleAdjust(scene.problem, BundleAdjustmentOptions{}).success);
+
+    BaProblem wrong_size = scene.problem;
+    wrong_size.keyframe_stereo.pop_back();
+    EXPECT_FALSE(BundleAdjust(wrong_size, BundleAdjustmentOptions{}).success);
+
+    BaProblem right_without_rig = scene.problem;
+    right_without_rig.keyframe_stereo[1] = std::nullopt;
+    EXPECT_FALSE(BundleAdjust(right_without_rig, BundleAdjustmentOptions{}).success);
+
+    BaProblem right_without_any_rig = scene.problem;
+    right_without_any_rig.keyframe_stereo.clear();
+    EXPECT_FALSE(BundleAdjust(right_without_any_rig, BundleAdjustmentOptions{}).success);
+
+    BaProblem nan_right = scene.problem;
+    nan_right.observations[4].right_x = std::numeric_limits<double>::quiet_NaN();
+    EXPECT_FALSE(BundleAdjust(nan_right, BundleAdjustmentOptions{}).success);
+
+    BaProblem nan_rig = scene.problem;
+    nan_rig.keyframe_stereo[2]->T_rl =
+        RigidTransformation(TMatrix33F::Identity(),
+                            TVector3DF(std::numeric_limits<double>::quiet_NaN(), 0.0, 0.0));
+    EXPECT_FALSE(BundleAdjust(nan_rig, BundleAdjustmentOptions{}).success);
+
+    // A rig without right observations is fine (the keyframe is used as mono).
+    BaProblem mono_with_rig = scene.problem;
+    for (BaObservation& observation : mono_with_rig.observations) {
+        observation.right_x = std::nullopt;
+    }
+    EXPECT_TRUE(BundleAdjust(mono_with_rig, BundleAdjustmentOptions{}).success);
+}
+
+TEST(BundleAdjustTest, PreSetStopInterruptsAtStageZero) {
+    const StereoScene scene = MakeStereoScene(50, 34);
+    BundleAdjustmentOptions options;
+    int calls = 0;
+    options.should_stop = [&calls] {
+        ++calls;
+        return true;
+    };
+
+    const BaResult result = BundleAdjust(scene.problem, options);
+
+    ASSERT_TRUE(result.success);
+    EXPECT_TRUE(result.interrupted);
+    EXPECT_EQ(result.stage_reached, 0);
+    EXPECT_EQ(result.iterations, 0);
+    EXPECT_EQ(calls, 1);
+    ASSERT_EQ(result.keyframe_poses.size(), scene.problem.keyframe_poses.size());
+    for (size_t k = 0; k < result.keyframe_poses.size(); ++k) {
+        EXPECT_LT((result.keyframe_poses[k].rotation() - scene.problem.keyframe_poses[k].rotation())
+                      .cwiseAbs().maxCoeff(), 1e-12) << "keyframe " << k;
+        EXPECT_LT((result.keyframe_poses[k].translation() -
+                   scene.problem.keyframe_poses[k].translation()).cwiseAbs().maxCoeff(), 1e-12)
+            << "keyframe " << k;
+    }
+    EXPECT_EQ(result.points, scene.problem.points);
+    EXPECT_EQ(result.chi2.size(), scene.problem.observations.size());
+    EXPECT_EQ(result.inlier.size(), scene.problem.observations.size());
+}
+
+// should_stop is evaluated once before the first iteration (call 1) and after every LM
+// iteration (calls 2, 3, ...): true from the 3rd call stops after the 2nd iteration.
+TEST(BundleAdjustTest, StopMidRunStopsWithinOneIteration) {
+    const StereoScene scene = MakeStereoScene(50, 35);
+    BundleAdjustmentOptions options;
+    int calls = 0;
+    options.should_stop = [&calls] { return ++calls >= 3; };
+
+    const BaResult result = BundleAdjust(scene.problem, options);
+
+    ASSERT_TRUE(result.success);
+    EXPECT_TRUE(result.interrupted);
+    EXPECT_EQ(result.stage_reached, 0);
+    EXPECT_LE(result.iterations, 3);
+    EXPECT_EQ(result.iterations, 2);
+    EXPECT_EQ(calls, 3);
+    EXPECT_LT(result.final_cost, result.initial_cost);
+}
+
+TEST(BundleAdjustTest, StopInPlainStageReportsStageOne) {
+    const StereoScene scene = MakeStereoScene(50, 36);
+    BundleAdjustmentOptions options;
+    int calls = 0;
+    // Call 1 before the start, calls 2-6 after the 5 robust iterations, call 8 after the
+    // 2nd plain iteration.
+    options.should_stop = [&calls] { return ++calls >= 8; };
+
+    const BaResult result = BundleAdjust(scene.problem, options);
+
+    ASSERT_TRUE(result.success);
+    EXPECT_TRUE(result.interrupted);
+    EXPECT_EQ(result.stage_reached, 1);
+    EXPECT_EQ(result.iterations, options.robust_iterations + 2);
+}
+
+TEST(BundleAdjustTest, NeverStoppingCallbackChangesNothing) {
+    const test::TwoViewScene scene = test::MakeGeneralScene(
+        300, 0.10, test::NormalizedSigma(0.5), 2, test::DefaultTransform());
+    const BaProblem problem = MakePerturbedProblem(scene, 12);
+    BundleAdjustmentOptions with_callback;
+    with_callback.should_stop = [] { return false; };
+
+    const BaResult a = BundleAdjust(problem, BundleAdjustmentOptions{});
+    const BaResult b = BundleAdjust(problem, with_callback);
+
+    ASSERT_TRUE(a.success);
+    ASSERT_TRUE(b.success);
+    EXPECT_FALSE(b.interrupted);
+    EXPECT_EQ(a.stage_reached, 2);
+    EXPECT_EQ(b.stage_reached, 2);
+    EXPECT_EQ(a.iterations, b.iterations);
+    EXPECT_EQ(a.points, b.points);
+    EXPECT_EQ(a.chi2, b.chi2);
+    EXPECT_EQ(a.inlier, b.inlier);
+    for (size_t k = 0; k < a.keyframe_poses.size(); ++k) {
+        EXPECT_EQ(a.keyframe_poses[k].rotation(), b.keyframe_poses[k].rotation());
+        EXPECT_EQ(a.keyframe_poses[k].translation(), b.keyframe_poses[k].translation());
+    }
 }
 
 }  // namespace
