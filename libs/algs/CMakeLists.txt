@@ -18,6 +18,7 @@ add_library(voyah_algs STATIC
     src/io/read_image.cpp
     src/map/point_statistics.cpp
     src/mapping/keyframe_decision.cpp
+    src/mapping/map_quality.cpp
     src/optimization/bundle_adjustment.cpp
     src/optimization/pose_optimization.cpp
 )

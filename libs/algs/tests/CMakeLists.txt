@@ -19,6 +19,7 @@ voyah_add_test_binary(voyah_algs_tests
         images/resizer_tests.cpp
         map/point_statistics_test.cpp
         mapping/keyframe_decision_test.cpp
+        mapping/map_quality_test.cpp
         mapping/triangulation_test.cpp
         optimization/bundle_adjustment_test.cpp
         optimization/pose_optimization_test.cpp
