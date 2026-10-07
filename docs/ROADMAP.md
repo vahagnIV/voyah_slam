@@ -6,7 +6,7 @@ execution; nothing is merged without an explicit "merge and push".
 Done: tracking (sub-project 1), camera model (raw-pixel residuals),
 keyframes and map growth (sub-project 2, merged b93fcf4), restructure
 (step 0, merged 7426697), map quality (step 1, merged 9da7081), own DBoW2
-(step 2, branch `feat/bow`, merge pending).
+(step 2, merged 6fb863a).
 
 ## 0. Restructure (done 2026-10-07)
 
