@@ -84,7 +84,7 @@ enum class MapperState : uint8_t {
 // LoopDetected is not consumed yet. Runs on its own thread; each
 // ProcessPending() pass drains the inbox.
 //
-// With a vocabulary (immutable, shared read-only with other threads), every
+// With a vocabulary (immutable, so it may be shared read-only), every
 // Frame, the initial ones included, keeps the BowVector and FeatureVector of
 // its (left) descriptors, which are not published, and triangulation takes
 // its candidate pairs from the FeatureVector nodes two Frames share (spec
@@ -198,7 +198,7 @@ private:
     [[nodiscard]] const TKeyFrame* FindKeyFrame(map::FrameId id) const;
     [[nodiscard]] TKeyFrame* FindKeyFrame(map::FrameId id);
     // The FeatureVector of the current map's Frame `id` for SearchByBoW;
-    // nullptr without a vocabulary.
+    // nullptr without a vocabulary or if the Frame is not in the map.
     [[nodiscard]] const bow::FeatureVector* BowFeaturesOf(map::FrameId id) const;
     // The current map's first Frame, never culled.
     [[nodiscard]] const TKeyFrame& FirstKeyFrame() const { return keyframes_.front()->frame; }

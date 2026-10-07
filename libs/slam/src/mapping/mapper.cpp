@@ -278,9 +278,10 @@ const bow::FeatureVector* Mapper<TFeatureExtractor>::BowFeaturesOf(map::FrameId 
     if (!vocabulary_) {
         return nullptr;
     }
+    // A Frame not in the map (never the case today): brute force.
     const KeyFrameRecord* record = FindRecord(id);
     assert(record != nullptr);
-    return &record->features;
+    return record != nullptr ? &record->features : nullptr;
 }
 
 template <typename TFeatureExtractor>

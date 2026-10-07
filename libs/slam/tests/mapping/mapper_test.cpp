@@ -2419,12 +2419,27 @@ TEST(MapperBowTest, TriangulationUsesBowPath) {
     EXPECT_GT(bow_unsplit, 0u);
 }
 
-TEST(MapperBowTest, NullVocabularyUnchanged) {
+// k = 1, L = 1: one word under the root. With levels_up = 4 >= L every
+// feature is filed under the root, the one node, so SearchByBoW's candidates
+// are brute force's.
+std::shared_ptr<const TVocabulary> MakeOneNodeVocabulary() {
+    std::mt19937 rng(7);
+    TDescriptors descriptors = TDescriptors::Zero(Extractor::DescriptorSize, 2);
+    descriptors.col(1) = test::detail::RandomDescriptor(rng);
+    return std::make_shared<const TVocabulary>(
+        TVocabulary::FromTree(1, 1, {0, 0}, std::move(descriptors), {0.0, 1.0}));
+}
+
+TEST(MapperBowTest, OneNodeVocabularyMatchesNull) {
+    // A vocabulary changes only triangulation's candidate pairs (its bags of
+    // words are not published): with one node, the transactions are those of
+    // a run without one.
     MapperBowRun without;
-    MapperBowRun null(MapperOptions{}, nullptr);
+    MapperBowRun one_node(MapperOptions{}, MakeOneNodeVocabulary());
     const std::vector<Published> expected = without.RunMono();
-    const std::vector<Published> actual = null.RunMono();
-    // The scene exercises every step.
+    const std::vector<Published> actual = one_node.RunMono();
+    ASSERT_NE(one_node.mapper().BowVectorOf(map::FrameId{0}), nullptr);  // the BoW path ran
+    // The scene triangulates (and exercises every other step).
     size_t num_new_points = 0;
     for (const Published& p : expected) {
         if (!p.new_map) num_new_points += p.count;
