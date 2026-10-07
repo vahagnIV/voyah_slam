@@ -621,10 +621,12 @@ OrbFeatureExtractor::ComputePointsPerLevel(size_t level, int n_features) const {
 }
 
 geometry::TPoint2DI OrbFeatureExtractor::RotatedPatternOffset(int index, float angle) {
-  const float sin = std::sin(angle);
-  const float cos = std::cos(angle);
+  return RotatedPatternOffset(index, std::cos(angle), std::sin(angle));
+}
+
+geometry::TPoint2DI OrbFeatureExtractor::RotatedPatternOffset(int index, float cos_a, float sin_a) {
   Eigen::Matrix<float, 2, 2> rotation;
-  rotation << cos, -sin, sin, cos;
+  rotation << cos_a, -sin_a, sin_a, cos_a;
   const Eigen::Vector2f rotated = rotation * PATTERN[index].cast<float>();
   return geometry::TPoint2DI(std::lround(rotated.x()), std::lround(rotated.y()));
 }
@@ -638,6 +640,9 @@ OrbFeatureExtractor::TDescriptors OrbFeatureExtractor::ComputeDescriptors(
   TDescriptors result;
   result.resize(DescriptorSize, points.cols());
   for (Eigen::Index i = 0; i < points.cols(); ++i) {
+
+    const float sin = std::sin(angles(i));
+    const float cos = std::cos(angles(i));
 
     auto center = &blurred.At(points(1, i), points(0, i), 0);
 
@@ -653,10 +658,10 @@ OrbFeatureExtractor::TDescriptors OrbFeatureExtractor::ComputeDescriptors(
       OrbFeatureExtractor::TDescriptorScalarType val = 0;
       for (int j = 0; j < pattern_bit_count; ++j) {
         geometry::TPoint2DI dx =
-            RotatedPatternOffset(pattern_start_idx + 2 * j, angles(i));
+            RotatedPatternOffset(pattern_start_idx + 2 * j, cos, sin);
         int d = dx.y() * blurred.Stride() + dx.x();
         typename decltype(blurred)::TScalar t0 = center[d], t1;
-        dx = RotatedPatternOffset(pattern_start_idx + 2 * j + 1, angles(i));
+        dx = RotatedPatternOffset(pattern_start_idx + 2 * j + 1, cos, sin);
         d = dx.y() * blurred.Stride() + dx.x();
         t1 = center[d];
         val |= (t0 < t1) << j;

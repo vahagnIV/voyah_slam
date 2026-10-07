@@ -26,8 +26,10 @@ public:
   [[nodiscard]] double ScaleFactor(uint8_t level) const;
   [[nodiscard]] size_t num_levels() const;
 
-  // Pattern point `index` (0..511) rotated by `angle` and rounded per component
-  // (ORB-SLAM3 cvRound). Public for tests.
+  // Pattern point `index` (0..511) rotated by the angle with the given cosine
+  // and sine, rounded per component (ORB-SLAM3 cvRound). Public for tests.
+  static geometry::TPoint2DI RotatedPatternOffset(int index, float cos_a, float sin_a);
+  // Convenience overload; computes sin/cos per call, not for hot loops.
   static geometry::TPoint2DI RotatedPatternOffset(int index, float angle);
 
   // Public for tests.
