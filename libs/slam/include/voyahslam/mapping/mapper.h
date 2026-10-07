@@ -55,10 +55,11 @@ enum class MapperState : uint8_t {
 // creates it with its tracked observations, stereo close points and points
 // triangulated against covisible Frames. Every FrameTracked of the current map,
 // evaluated or skipped, counts its visible and found points. Around a Frame's
-// creation the Mapper first culls poor recent points, then fuses the new
-// Frame with its neighbours (spec sections 3, 4.1). Every change is published
+// creation the Mapper culls poor recent points once the Frame's tracked
+// observations are in, then fuses the new Frame with its neighbours (spec
+// sections 3, 4.1). Every change is published
 // as one MapTransaction: a new map with all its Frames and points, or
-// transaction 1 of a created Frame (culling, creation, fusion). A
+// transaction 1 of a created Frame (creation, culling, fusion). A
 // TrackingLost of the current map discards it.
 // LoopDetected is not consumed yet. Runs on its own thread; each
 // ProcessPending() pass drains the inbox.
@@ -148,11 +149,12 @@ private:
     // The inputs to ShouldCreateFrame for `event` (spec section 3.2).
     [[nodiscard]] KeyFrameSignals MeasureSignals(
         const events::FrameTracked<TFeatureExtractor>& event) const;
-    // Transaction 1 of a new Frame (spec section 1, steps 1-3): culls poor
-    // recent points, inserts `event`'s measurement as a new Frame with its
-    // tracked observations and new points (stereo close points, then points
-    // triangulated against neighbour Frames), fuses it with its neighbours,
-    // and publishes all of it as one MapTransaction.
+    // Transaction 1 of a new Frame (spec section 1, steps 1-3, in ORB-SLAM3's
+    // order): inserts `event`'s measurement as a new Frame with its tracked
+    // observations, culls poor recent points (the new observations counted),
+    // adds new points (stereo close points, then points triangulated against
+    // neighbour Frames), fuses the Frame with its neighbours, and publishes
+    // all of it as one MapTransaction.
     void CreateFrame(const events::FrameTracked<TFeatureExtractor>& event);
     // Stores `frame`'s observation of `point` through its (left) feature
     // `feature` (a stereo-matched feature of a binocular Frame with its depth
@@ -193,9 +195,10 @@ private:
 
     // Map quality (mapper_quality.cpp).
 
-    // Step 1 (spec section 4.1), before the Frame with id next_frame_id_ is
-    // created: judges every recent point, removes the poor ones into
-    // `out_event` and drops the graduated ones from the list.
+    // Recent-point culling (spec section 4.1), once the new Frame (the last
+    // one) has its tracked observations: judges every recent point, removes
+    // the poor ones into `out_event` and drops the graduated ones from the
+    // list.
     void CullRecentPoints(events::MapTransaction<TFeatureExtractor>& out_event);
     // Step 3 (spec section 3): the forward pass projects `keyframe`'s points
     // into each fusion target, the backward pass the targets' other points

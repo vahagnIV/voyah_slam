@@ -311,12 +311,10 @@ void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureE
     losers_.clear();
     touched_.clear();
 
-    // 1. Recent points, judged before the new Frame exists.
-    const size_t num_points_before = map_points_.size();
-    CullRecentPoints(*created);
-    const size_t num_culled = num_points_before - map_points_.size();
-
-    // 2. The Frame.
+    // The Frame and its tracked observations (ORB-SLAM3 ProcessNewKeyFrame).
+    // The Tracker's replica may be behind or the pairs malformed: a point
+    // that is not alive or is already observed by this Frame, and a feature
+    // out of range or already paired, is skipped.
     const map::FrameId id = next_frame_id_;
     ++next_frame_id_.value;
     keyframes_.emplace_back(id, event.pose, TMeasurement(event.measurement));
@@ -324,16 +322,9 @@ void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureE
     const auto num_features =
         static_cast<size_t>(LeftOf<TFeatureExtractor>(keyframe.measurement()).points().cols());
     AddFramePart(keyframe, *created);
-    // New points take the contiguous ids from here.
-    const map::MapPointId first_new{map_points_.num_ids()};
-    created->new_points_start_id = first_new;
-
-    // The tracked observations. The Tracker's replica may be behind or the
-    // pairs malformed: a point that is not alive or is already observed by
-    // this Frame, and a feature out of range or already paired, is skipped.
     std::vector<bool> has_point(num_features, false);
     assert(event.observed_features.size() == event.observed_points.size());
-    size_t num_tracked = 0;
+    std::vector<std::pair<uint32_t, map::MapPointId>> tracked;
     for (size_t i = 0; i < event.observed_points.size(); ++i) {
         const map::MapPointId point = event.observed_points[i];
         const uint32_t feature = event.observed_features[i];
@@ -344,8 +335,26 @@ void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureE
         AddObservation(keyframe, feature, point, *created);
         has_point[feature] = true;
         touched_.push_back(point);
-        ++num_tracked;
+        tracked.emplace_back(feature, point);
     }
+
+    // Recent points, judged with the new Frame's observations counted
+    // (ORB-SLAM3 MapPointCulling). A culled tracked point frees its feature.
+    const size_t num_points_before = map_points_.size();
+    CullRecentPoints(*created);
+    const size_t num_culled = num_points_before - map_points_.size();
+    size_t num_tracked = 0;
+    for (const auto& [feature, point] : tracked) {
+        if (map_points_.IsValid(point)) {
+            ++num_tracked;
+        } else {
+            has_point[feature] = false;
+        }
+    }
+
+    // New points take the contiguous ids from here.
+    const map::MapPointId first_new{map_points_.num_ids()};
+    created->new_points_start_id = first_new;
 
     // New points: stereo close points first, so triangulation skips their
     // features.
@@ -360,7 +369,7 @@ void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureE
         recent_points_.push_back({map::MapPointId{first_new.value + i}, id, stereo});
     }
 
-    // 3. Fusion with the neighbours.
+    // Fusion with the neighbours.
     Fuse(keyframe, *created);
     FinishTransaction(first_new, *created);
 

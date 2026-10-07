@@ -20,9 +20,9 @@ namespace voyahslam::mapping {
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::CullRecentPoints(
     events::MapTransaction<TFeatureExtractor>& out_event) {
-    // ORB-SLAM3 LocalMapping::MapPointCulling, with the Frame being created
-    // as the current one.
-    const map::FrameId current = next_frame_id_;
+    // ORB-SLAM3 LocalMapping::MapPointCulling: the new Frame, with its
+    // tracked observations already added, is the current one.
+    const map::FrameId current = keyframes_.back().id();
     std::erase_if(recent_points_, [&](const RecentPoint& recent) {
         if (!map_points_.IsValid(recent.id)) {
             return true;  // merged away
@@ -116,9 +116,11 @@ void Mapper<TFeatureExtractor>::FuseInto(const TKeyFrame& frame,
         candidates, options_.fuse);
 
     for (const features::FuseDecision& decision : decisions) {
-        // Earlier decisions of this call may have merged the point away, or
-        // moved it into this Frame.
-        const map::MapPointId point = Resolve(decision.point);
+        // A point merged away or removed since the candidates were taken is
+        // skipped, not redirected to its winner, which this feature's gate
+        // never tested (ORB-SLAM3 Fuse skips bad points). A point an earlier
+        // merge moved into this Frame is skipped too.
+        const map::MapPointId point = decision.point;
         if (!map_points_.IsValid(point) || covisibility_.Contains(frame.id(), point)) {
             continue;
         }
