@@ -5,7 +5,7 @@ execution; nothing is merged without an explicit "merge and push".
 
 Done: tracking (sub-project 1), camera model (raw-pixel residuals),
 keyframes and map growth (sub-project 2, merged b93fcf4), restructure
-(step 0, branch `feat/restructure`).
+(step 0, merged 7426697).
 
 ## 0. Restructure (done 2026-10-07)
 
