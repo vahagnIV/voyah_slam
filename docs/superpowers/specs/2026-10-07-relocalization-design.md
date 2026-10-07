@@ -1,7 +1,7 @@
 # Relocalization and Reference-Frame Tracking — Design Spec
 
 Date: 2026-10-07
-Status: approved in conversation, pending spec review
+Status: approved in conversation, pending spec review (amended with the stereo-drift spike result)
 Roadmap: step 3 in `docs/ROADMAP.md`
 
 ## Context and Scope
@@ -30,10 +30,39 @@ data per Frame, but it never publishes it.
 - Residuals are in raw pixels, with σ = sigma_px·1.2^level.
 - No vocabulary means behaviour exactly as today.
 
-**Stereo drift with `--vocabulary`.** This is diagnosed by a separate spike
-(`.superpowers/spikes/2026-10-07-stereo-drift.md`). Its fix is added to this
-spec as an amendment once the spike reports. It is not part of the design
-below.
+**Stereo drift with `--vocabulary` (amended: spike result,
+`.superpowers/spikes/2026-10-07-stereo-drift.md`).**
+
+*What happens.*
+- The damage is not gradual drift. It happens in fast-rotation stretches
+  (corridor1 frames 324–378).
+- There the motion model is accepted with only 10–29 inliers, so the pose is
+  wrong.
+- `need_close` turns that frame into a Frame whose roughly 320 stereo close
+  points carry the wrong pose.
+- With BoW the Mapper publishes it before the next frame is tracked. The
+  Tracker locks onto the misplaced points, and the run either jumps for good
+  or is lost.
+
+*Fix (§0 below).* Gate the motion-model result at 30 inliers, so the
+existing zero-motion fallback runs instead.
+
+*Measured with `--vocabulary`, stereo 1000:*
+- 0.0361, 0.0363 and 0.0369 m, one map each;
+- previously 0.056 and 0.189 m, and two lost runs today.
+
+*Measured mono 400:* 0.032 m, unchanged.
+
+## 0. Motion-model inlier gate (prerequisite)
+
+- `TrackingOptions` gains `min_motion_model_inliers` = 30.
+- A motion-model pose with fewer final inliers counts as failed, so
+  zero-motion (whose minimum stays 10), then reference-Frame tracking (§3)
+  run next.
+- **Smoke acceptance:**
+  - stereo 1000 with `--vocabulary`: ATE ≤ 0.04 m and one map in each of 2
+    runs;
+  - mono 400: no regression.
 
 **Out of scope.**
 - Relocalization into other maps (step 5).
