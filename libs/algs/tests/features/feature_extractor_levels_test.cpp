@@ -83,3 +83,55 @@ TEST(SiftLevelsTest, DetectAndExtractRespectsCountAndRadians) {
         if (i > 0) EXPECT_LE(features.strengths()(i), features.strengths()(i - 1));
     }
 }
+
+// ORB-SLAM3 rounds the rotated BRIEF offsets (cvRound); truncation picks other
+// pixels. Pattern point 1 is (9, 5): at 30 degrees it rotates to (5.29, 8.83).
+TEST(OrbDescriptorTest, RotatedOffsetsAreRounded) {
+    const float angle = static_cast<float>(M_PI / 6.0);
+    const auto offset = OrbFeatureExtractor::RotatedPatternOffset(1, angle);
+    EXPECT_EQ(offset.x(), 5);
+    EXPECT_EQ(offset.y(), 9);  // truncation would give 8
+
+    // Rotated by the ORB-SLAM3 formula over all 512 points.
+    // (x', y') = (x*a - y*b, x*b + y*a), a = cos, b = sin.
+    const float a = std::cos(angle), b = std::sin(angle);
+    int differing_from_truncation = 0;
+    for (int k = 0; k < 512; ++k) {
+        const auto o = OrbFeatureExtractor::RotatedPatternOffset(k, angle);
+        const auto base = OrbFeatureExtractor::RotatedPatternOffset(k, 0.f);
+        const float x = static_cast<float>(base.x()), y = static_cast<float>(base.y());
+        EXPECT_EQ(o.x(), std::lround(x * a - y * b));
+        EXPECT_EQ(o.y(), std::lround(x * b + y * a));
+        if (o.x() != static_cast<int>(x * a - y * b) || o.y() != static_cast<int>(x * b + y * a))
+            ++differing_from_truncation;
+    }
+    EXPECT_GT(differing_from_truncation, 0);
+}
+
+TEST(OrbDescriptorTest, DescriptorBitsUseRoundedOffsets) {
+    OrbFeatureExtractor extractor;
+    auto image = MakeNoiseImage(128);
+    const float angle = static_cast<float>(M_PI / 6.0);
+    geometry::TPoints2DF points(2, 1);
+    points << 64.f, 64.f;
+    geometry::TRowVectorF angles(1);
+    angles << angle;
+    auto descriptors = extractor.ComputeDescriptors(image, points, angles);
+
+    auto blurred = images::Filter<images::TWorkingImage::TScalar, 1, float>::ApplySeparable(
+        images::CreateGaussianKernelSeparableXFromSize(7, 2.),
+        images::CreateGaussianKernelSeparableYFromSize(7, 2.), image);
+    // Pair k uses pattern points 2k and 2k+1; bit j of byte i is pair 8i+j.
+    for (int byte = 0; byte < OrbFeatureExtractor::DescriptorSize; ++byte) {
+        uint8_t expected = 0;
+        for (int j = 0; j < 8; ++j) {
+            const int k = 8 * byte + j;
+            const auto p0 = OrbFeatureExtractor::RotatedPatternOffset(2 * k, angle);
+            const auto p1 = OrbFeatureExtractor::RotatedPatternOffset(2 * k + 1, angle);
+            const float t0 = blurred.At(64 + p0.y(), 64 + p0.x(), 0);
+            const float t1 = blurred.At(64 + p1.y(), 64 + p1.x(), 0);
+            expected |= static_cast<uint8_t>((t0 < t1) << j);
+        }
+        EXPECT_EQ(descriptors(byte, 0), expected) << "byte " << byte;
+    }
+}

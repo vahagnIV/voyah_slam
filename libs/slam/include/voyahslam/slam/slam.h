@@ -1,6 +1,7 @@
 #ifndef VOYAHSLAM_SLAM_SLAM_H
 #define VOYAHSLAM_SLAM_SLAM_H
 
+#include <memory>
 #include <voyahslam/loop_closing/loop_closer.h>
 #include <voyahslam/mapping/mapper.h>
 #include <voyahslam/tracking/tracker.h>
@@ -21,8 +22,11 @@ public:
     using TMapper = mapping::Mapper<TFeatureExtractor>;
     using TLoopCloser = loop_closing::LoopCloser<TFeatureExtractor>;
 
+    // `vocabulary` (may be null) goes to the Mapper; it is immutable, so the
+    // threads share it without locks.
     explicit Slam(mapping::MapperOptions mapper_options = {},
-                  tracking::TrackerOptions tracker_options = {});
+                  tracking::TrackerOptions tracker_options = {},
+                  std::shared_ptr<const typename TMapper::TVocabulary> vocabulary = nullptr);
     // Stops every component thread before any component is destroyed.
     ~Slam();
     Slam(const Slam&) = delete;

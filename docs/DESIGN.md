@@ -1003,6 +1003,8 @@ needs >= 3 inliers (decision S). `sigma = sigma_px * level_scale^level` pixels.
 so a lost frame cannot be tracked against the reference keyframe; the wide
 zero-motion projection search replaces it. It recovers only small
 frame-to-frame motion; real recovery is relocalization (sub-project 4).
+*(2026-10-07: a vocabulary exists now, see "Bag of Words", but only the
+Mapper uses it; the Tracker gets BoW with relocalization, roadmap step 3.)*
 
 **Measured behaviour** (TUM-VI `dataset-corridor1_1024_16`, Release, ORB,
 2026-10-05; details in `docs/TODO.md` smoke note): binocular tracks all 200
@@ -1362,6 +1364,170 @@ evaluates about 60 % of the `FrameTracked` (mono 164–187 of 281). Fusion
 merges about two thirds of the triangulated points (mono) / half of all new
 points (stereo).
 
+## Bag of Words (`bow/`, roadmap step 2)
+
+Spec: `docs/superpowers/specs/2026-10-07-bow-design.md` (amended in place for
+rulings B, D, F); plan `docs/superpowers/plans/2026-10-07-bow.md`.
+
+**Module** (`voyah_algs`, `bow/`, namespace `voyahslam::bow`, no OpenCV): an
+OpenCV-free port of DBoW2's `TemplatedVocabulary` (ORB-SLAM3
+`Thirdparty/DBoW2`), TF-IDF weighting and L1 scoring only.
+
+| Type | Header | Role |
+|---|---|---|
+| `WordId`, `NodeId`, `BowVector`, `FeatureVector` | `bow/bow_vector.h` | `BowVector`: (word, weight) sorted by word, L1-normalised. `FeatureVector`: feature indices grouped by node in CSR form (`nodes` sorted, `offsets`, `features`). |
+| `Vocabulary<FE>` | `bow/vocabulary.h` (I/O in `src/bow/vocabulary_io.cpp`) | `LoadText`, `LoadBinary`, `SaveBinary`, `FromTree`, `Transform(descriptors, levels_up, out_bow, out_features)`, `Score`, `num_words()`, `k()`, `L()` |
+
+- **Generic over the extractor:** descriptors are `FE::TDescriptors` (one
+  column per node), distances `FE::Distance`. It compiles for every
+  `INSTANTIATE_CLASS` extractor (ORB and SIFT, ruling A), because the Mapper is
+  instantiated for both; the loaders reject a descriptor size that does not
+  match `FE` at run time. Only ORB has a vocabulary.
+- **Storage:** nodes in id order as flat arrays (descriptor, parent, weight);
+  children (CSR) and word ids are derived from the parents at load. Node 0 is
+  the root.
+- **Transform:** each descriptor descends from the root to the closest child
+  (ties: first child in stored order) down to a leaf, its word; each
+  occurrence adds the word's idf weight, words of weight 0 are skipped (DBoW2),
+  then the vector is L1-normalised. The FeatureVector files the feature under
+  the node its descent passes at depth `L − levels_up` (DBoW2's definition): the
+  root when `levels_up ≥ L`, and **the leaf itself when the leaf is shallower
+  than that** (ruling B; DBoW2 leaves the node uninitialised there, which is
+  UB). ORBvoc (k 10, L 6) has no leaf shallower than depth 4, so this never
+  applies with `levels_up` 4.
+- **Score:** DBoW2 `L1Scoring`, `Σ (|a| + |b| − |a − b|) / 2` over shared
+  words, in [0, 1].
+- **Loaders never throw:** on any malformed or inconsistent file (other
+  scoring / weighting types, `is_leaf` disagreeing with childlessness, a wrong
+  size) they log the reason and return `std::nullopt`.
+- **Equivalence with DBoW2:** `VocabularyEquivalenceTest` (fixture
+  `libs/algs/tests/bow/data/dbow2_reference.bin`, made by the original DBoW2
+  on 3 corridor1 frames; `tools/dbow2_reference/README.md`) matches exactly:
+  the same words, the same feature filing, and bit-identical weights.
+
+**Text format** (DBoW2 / ORB-SLAM): a header `k L scoring weighting`, then one
+line per node from id 1: `parent is_leaf d0 … d31 weight`. Trailing blank
+lines are ignored. DBoW2's loader reads one more, empty line at the end of
+`ORBvoc.txt` and creates a phantom leaf from uninitialised values (UB): DBoW2
+has 971 815 words, ours 971 814. **Our tree omits the phantom** (ruling D); a
+feature DBoW2 would drop at that node gets a real sibling's word with us.
+
+**Binary format** (ours, little-endian):
+
+```
+magic "VOYBOW\0\1" | u32 k | u32 L | u32 descriptor_bytes | u64 node_count
+| u32 parent[node_count] | u8 descriptor[node_count][descriptor_bytes] | f64 weight[node_count]
+| u64 checksum (FNV-1a 64 of all preceding bytes)
+```
+
+A wrong magic or descriptor size, truncation, trailing bytes or a bad checksum
+fails the load. `tools/convert_vocabulary <in.txt> <out.bin>` converts, then
+reloads and verifies that the trees are identical. **The vocabulary file is
+never committed** (`ORBvoc.txt` licence: TODO).
+
+**Load times** (Release, ORBvoc: k 10, L 6, 1 082 073 nodes, 971 814 words):
+`LoadText` of the 145 MB text 0.51–0.55 s (DBoW2's `loadFromTextFile`
+2.7 s); `LoadBinary` of the 47.6 MB binary 0.13–0.14 s; `convert_vocabulary`
+end to end 0.75–0.77 s.
+
+**Ownership.** The app loads the vocabulary once (`--vocabulary <file.bin>`,
+binary only) and passes a `std::shared_ptr<const bow::Vocabulary<FE>>` to
+`Slam`, which passes it to the Mapper. It is immutable after load, so threads
+may share it read-only without locks (principle 1 is about mutable map data).
+The pointer may be null: then nothing computes a bag of words and the Mapper
+behaves exactly as before.
+
+**Mapper.** Frames are kept in a private `KeyFrameRecord { frame; bow;
+features; }` (ruling G): `map::Frame` is unchanged and the bags of words are
+never published. With a vocabulary, `AddKeyFrame` (initial Frames included)
+runs `Transform` on the left descriptors with `kBowLevelsUp` = 4 (ORB-SLAM3);
+about 5–8 ms per Frame. `BowVectorOf(frame)` exposes it to tests.
+
+**`SearchByBoW` for triangulation.** `mapping::SearchForTriangulation` takes
+two optional `const bow::FeatureVector*`. With both, candidate pairs come only
+from features filed under the same node in both Frames (the sorted node lists
+are walked side by side); every other check is unchanged (no point yet,
+distance ≤ 50, ratio 0.6, epipolar band, rotation histogram, one-to-one).
+The matches are therefore **drawn only from shared-node pairs**; they are not
+in general a subset of brute force's, because fewer candidates can let a
+match pass the ratio test that brute force rejected (ruling F). With every
+feature under one node the result equals brute force exactly (tested, and the
+Mapper's one-node-vocabulary test gives transactions identical to the
+null-vocabulary run, ruling H). Without FeatureVectors brute force runs as
+before. Fusion and the Tracker's projection matching are unchanged; the
+Tracker does not use BoW yet.
+
+**ORB rounding.** The rotated BRIEF offsets use `std::lround` (ORB-SLAM3's
+`cvRound`) instead of truncation, so our descriptors are bit-compatible with
+ORB-SLAM3's vocabulary.
+
+**Tests.** Unit tests on hand-built vocabularies (k 3, L 2 and others):
+transform, ties, weights, filing depth, score, binary round trip and
+rejections, text fixtures (one with trailing newlines); `SearchByBoW` against
+brute force; Mapper BoW per Frame, the BoW path taken, the one-node
+equivalence. The equivalence test has ctest label **`vocabulary`** (ruling E):
+`voyah_add_test_binary` accepts it, `check` (`-L unit`) excludes it,
+`check_all` runs it and it **skips unless `$VOYAHSLAM_ORBVOC`** points to
+`ORBvoc.txt`.
+
+**Smoke (corridor1 1024, Release, ORB 1500, debug logs, headless, real-time
+playback, 2026-10-07; each configuration twice, plus a third stereo run with
+the vocabulary).** Same apps and flags as the "Map Quality" table, with and
+without `--vocabulary ORBvoc.bin`. Triangulation time is
+`TriangulateWithNeighbours` (all neighbours: matching plus triangulation),
+measured with a temporary timer that was not committed; the BoW transform
+(about 7 ms per Frame) is outside it and inside "create". Feature extraction
+ran about 13 % slower on the day than in the map-quality runs (78 vs 69 ms
+mono), so compare against the "without" rows.
+
+| Run | Maps (tracked) | Lost | Frames created / culled | Points created / recent-culled / merged | Triangulation ms per Frame mean (median / max) | Local BA ms mean / median / max, interrupted | Mapper ms per pass mean / max | ATE | Must |
+|---|---|---|---|---|---|---|---|---|---|
+| Mono 400, without, run 1 | 1 (278: frames 122–399) | 0 | 62 / 40 | 26 683 / 6 302 / 17 448 | 178.3 (178.7 / 313.7) | 101 / 117 / 139, 0 | 292 / 455 | Sim3 0.034 m (278 / 278) | |
+| Mono 400, without, run 2 | 1 (277: 122–398) | 0 | 59 / 37 | 25 255 / 6 119 / 16 215 | 182.4 (183.3 / 316.7) | 100 / 117 / 137, 0 | 294 / 450 | Sim3 0.034 m (277 / 277) | |
+| Mono 400, **with**, run 1 | 1 (278: 122–399) | 0 | 81 / 56 | 28 281 / 5 411 / 19 585 | **6.8** (7.0 / 13.4) | 115 / 127 / 204, 0 | 143 / 243 | Sim3 0.031 m (278 / 278) | **met** (26×) |
+| Mono 400, **with**, run 2 | 1 (278: 122–399) | 0 | 81 / 55 | 28 438 / 5 443 / 19 660 | **6.5** (7.0 / 9.8) | 113 / 128 / 174, 0 | 140 / 212 | Sim3 0.033 m (278 / 278) | **met** (28×) |
+| Stereo 1000, without, run 1 | 1 (998: 1–998) | 0 | 280 / 70 | 104 569 / 36 602 / 52 832 | 149.0 (151.9 / 252.5) | 126 / 130 / 206, 2 (stage 0) | 287 / 443 | SE3 0.037 m (536 / 998) | |
+| Stereo 1000, without, run 2 | 1 (998) | 0 | 288 / 73 | 106 927 / 36 375 / 54 766 | 146.0 (151.9 / 228.9) | 128 / 132 / 202, 1 (stage 0) | 286 / 386 | SE3 0.038 m (536 / 998) | |
+| Stereo 1000, **with**, run 1 | 1 (998) | 0 | 269 / 59 | 80 732 / 30 711 / 35 112 | **3.8** (4.0 / 6.0) | 117 / 125 / 220, 0 | 138 / 245 | SE3 **0.189 m** (536 / 998) | **met** (39×); ATE worse |
+| Stereo 1000, **with**, run 2 | 1 (999) | 0 | 261 / 60 | 76 895 / 28 536 / 34 018 | **3.7** (3.9 / 5.1) | 116 / 125 / 214, 0 | 137 / 239 | SE3 **0.056 m** (536 / 999) | **met** (39×); ATE worse |
+| Stereo 1000, **with**, run 3 (extra) | **2** (324 + 673) | **1** (frame 325) | 283 / 58 | 85 437 / 31 784 / 37 071 | 3.7 (3.9 / 7.5) | 113 / 123 / 227, 0 | 134 / 253 | SE3 0.206 m (map 2) | missed (loss) |
+
+- **Speed:** triangulation per Frame is 26–28× faster (mono) and 39× faster
+  (stereo); with the BoW transform counted it is still about 12× (mono) /
+  14× (stereo). A Mapper pass halves (about 290 → 140 ms), so drain-to-latest
+  evaluates more `FrameTracked` (mono 241–242 of 278 instead of 163–171;
+  stereo 993–999 instead of 844–866).
+- **Fewer matches per pair:** BoW finds fewer triangulation matches (stereo
+  median 145 vs 204 new points per Frame; first mono Frame 291 vs 365), as
+  expected from restricting candidates to shared nodes. In mono this is offset
+  by more Frames (81 vs 59–62, with more culled); mono initializes at frame
+  122 in all runs (118 in the map-quality runs, before the ORB rounding
+  changed the descriptors) and tracks to the end. Both
+  mono BoW runs created no Frame for 27 frames early in the map (dataset
+  136–163; 11 without), while tracking stayed above 400 inliers.
+- **Stereo accuracy regressed:** SE3 ATE 0.056–0.206 m with the vocabulary
+  vs 0.037–0.038 m without (0.036–0.037 in the map-quality table); Sim3
+  scale 0.91–0.97 vs 0.97. The error grows over the run (run 1: 0.07 m in the
+  first 50 matched poses, 0.30 m at 400–500), i.e. drift, not an offset.
+  Tracking itself is stronger (median inliers about 400, minimum 190–216 vs
+  38–52 without). Nothing was tuned. The final review ruled out
+  fewer triangulated points as the cause: BoW with a 150 ms sleep after
+  triangulation gives ATE 0.037 / 0.037 m with 157–161 points per Frame;
+  restricting BoW matches to those brute force also accepts gives
+  0.036 / 0.037 m with only 116 points; turning the ratio test off keeps the
+  Mapper fast and gives 170 points but ATE 0.050 / 0.235 m. The regression
+  follows Mapper speed: a faster Mapper exposes timing-dependent behaviour
+  elsewhere, not a BoW matching defect. Also ruled out: Frame/FeatureVector
+  pairing, the level-4 filing depth, the left-descriptor choice, and BoW
+  reused after a slot is reused. Our descriptors are as compatible with
+  ORBvoc as ORB-SLAM3's own extractor's (60.4 % vs 61.1 % of matches share a
+  depth-2 node). See TODO.
+- **The extra stereo run lost tracking at frame 325**, the known fast
+  rotation (120–170°/s, TODO "Stereo loss at fast rotation"): motion model 64
+  then 41 matches, local map 23 inliers (< 30). The runs without the
+  vocabulary dip to 38 and 52 inliers at frames 325 / 355, so the margin was
+  already thin; the Tracker does not use BoW.
+
 ## 7. Coding Conventions
 
 **Naming (Google C++ style):**
@@ -1381,7 +1547,7 @@ points (stereo).
 |---|---|---|
 | `voyah_common` | `defs.h`, ids, `memory/*`, `logging/*`, `algebra/*`, geometry types (`RigidTransformation`, `Camera`, distortion models), image types, feature/measurement data types, stereo rig, the extractor *declarations* (`OrbFeatureExtractor`, `SIFTFeatureExtractor`, `orb/image_pyramid.h`), map storage (`Frame`, `MapPointStorage`, `ObservationStorage`, `CovisibilityIndex`) | Eigen, spdlog (PUBLIC) |
 | `voyah_events` | `events/*`: event types, `Observable` / `AsyncObserver` / `EventNode`, `WakeSignal`, `WorkerThread` | common; concurrentqueue (PUBLIC) |
-| `voyah_algs` | estimators, two-view geometry, image filters, `io/read_image`, the extractor *definitions*, feature grid and matchers, point statistics, keyframe decision, triangulation, `optimization/*` | common; OpenCV, stb, g2o (PRIVATE) |
+| `voyah_algs` | estimators, two-view geometry, image filters, `io/read_image`, the extractor *definitions*, feature grid and matchers, point statistics, keyframe decision, triangulation, `optimization/*`, bag of words (`bow/*`, no OpenCV) | common; OpenCV, stb, g2o (PRIVATE) |
 | `voyah_slam` | `tracking/*`, `mapping/{mapper, map_initializer}`, `loop_closing/*`, `slam/*`, `voyahslam.h` | common, events, algs |
 | `voyahslam` (INTERFACE) | umbrella: links all four; the apps link it | all |
 | `voyahviz` | viewer, image windows (dev tool) | common, events; OpenCV, Pangolin (PRIVATE) |
@@ -1416,6 +1582,10 @@ vizualization/              voyahviz (+ voyahviz_tests)
 - **Tests follow their code's library.** Each library has a `voyah_<lib>_tests`
   binary labelled `unit`; tests above 1 s in the optimized build and the
   whole-pipeline tests go to `voyah_integration_tests` (label `integration`).
+  Tests that need a file outside the repository get their own binary and
+  label (`vocabulary`: `voyah_vocabulary_tests`, the DBoW2 equivalence test;
+  it skips unless `$VOYAHSLAM_ORBVOC` is set, `check` excludes it and
+  `check_all` runs it; 2026-10-07).
   Test helpers that need slam (the Tracker fixture) live in that library's
   `tests/` directory, not in `voyah_test_support`.
 
@@ -1464,9 +1634,9 @@ vizualization/              voyahviz (+ voyahviz_tests)
   (checked on a fresh `CONAN_HOME` on 2026-10-05).
 - Debug: `cmake --build cmake-build-debug/build/Debug -j8`.
 - **Tests:** `cmake --build cmake-build-debug/build/Debug --target check`
-  runs the unit tests (`ctest -L unit -j8`; 449 tests, 1.5 s) — the
+  runs the unit tests (`ctest -L unit -j8`; 521 tests, 2.1 s on 2026-10-07) — the
   edit-and-test loop. `--target check_all` runs every test (`unit` +
-  `integration`, `ctest -j8`; 459 tests, 2.3 s) — at the end of each task and
+  `integration` + `vocabulary`, `ctest -j8`; 533 tests, 2.6 s) — at the end of each task and
   before every merge. Both build the test binaries first and run in the
   **Debug tree** with `VOYAHSLAM_OPTIMIZE_TESTS=ON` (default): the voyah
   libraries, `voyah_test_support`, `voyahviz` and the test binaries get
@@ -1605,6 +1775,16 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-07 | Local BA: the 20-Frame cap counts the new Frame (ruling I); BA is skipped with no free Frame or no fixed Frame (ruling J, ORB-SLAM3's gauge guard). σ comes from `MapperOptions::fuse` (ruling K). | Mono BA without a fixed Frame has a free gauge. Ruling K leaves two σ sources (Mapper and Tracker) to keep in sync: TODO. |
 | 2026-10-07 | Apps gain `--trajectory_out` (TUM, camera-to-world, one `# map <id>` section per map); `tools/ate.py` (pure Python, 20 ms association, Umeyama Sim3 / SE3, largest section). | The smoke runs now report ATE against the corridor1 mocap. |
 | 2026-10-07 | Map-quality smoke result (corridor1, Release, two runs each; "Map Quality"): mono 400 keeps **one map** from initialization (frame 118) to the end, 281–282 tracked frames, 64–68 Frames created / 41–45 culled, ATE Sim3 0.032–0.033 m; stereo 1000 one map, no loss, 999 tracked, 280–297 Frames created / 73–89 culled, ATE SE3 0.036–0.037 m. Both Musts met; nothing tuned. Synthetic bounds tightened to 0.249 m mono / 0.037 m stereo. | Fusion lifts points to >= 3 observations, so the Frame rule keeps creating Frames (was 2 maps, first lost after 129 frames); local BA removes the noise random walk. |
+| 2026-10-07 | Own OpenCV-free DBoW2 port in `voyah_algs` (`bow/`, `voyahslam::bow`): `Vocabulary<FE>` generic over the extractor's `TDescriptors` / `Distance`, flat node arrays in id order, TF-IDF + L1 only, child ties to the first child; the text loader and our checksummed binary format (`VOYBOW\0\1`, FNV-1a 64), `tools/convert_vocabulary`. Loaders never throw. Spec `docs/superpowers/specs/2026-10-07-bow-design.md`. | ORB-SLAM3's pretrained `ORBvoc.txt` applies to our ORB descriptors, without DBoW2's OpenCV dependency; the binary loads 4× faster than the text (0.13 vs 0.53 s; DBoW2's text loader 2.7 s). Reverses the 2026-10-06 "Faiss vs DBoW2/FBoW deferred" entry for matching. |
+| 2026-10-07 | `Vocabulary<FE>` compiles for every `INSTANTIATE_CLASS` extractor (ORB and SIFT); the loaders reject a descriptor-size mismatch at run time (ruling A). | The Mapper is instantiated for SIFT too; only ORB has a vocabulary. |
+| 2026-10-07 | The FeatureVector files a feature under the node its descent passes at depth `L − levels_up` (DBoW2); a leaf shallower than that files it under itself (ruling B, spec §1 amended). | DBoW2 leaves the node uninitialised there (UB). ORBvoc's shallowest leaf is at depth 4, so with `levels_up` 4 it never applies. |
+| 2026-10-07 | Our text loader ignores trailing blank lines and creates no phantom node; DBoW2 creates one from `ORBvoc.txt`'s trailing newline (971 815 vs 971 814 words) (ruling D, spec §2 amended; TODO). | The phantom is built from uninitialised values; ours is the correct tree. Equivalence on real frames is exact (words, filing, bit-identical weights). |
+| 2026-10-07 | ctest label `vocabulary` for `voyah_vocabulary_tests` (the DBoW2 equivalence test): `check` excludes it, `check_all` runs it, and it skips unless `$VOYAHSLAM_ORBVOC` is set (ruling E). | The 145 MB vocabulary is never committed; the test still compiles and runs everywhere. |
+| 2026-10-07 | The vocabulary is loaded once by the app (`--vocabulary <file.bin>`) and shared as an immutable `std::shared_ptr<const bow::Vocabulary<FE>>` through `Slam` to the Mapper; null means no BoW and exactly the old behaviour. | Immutable data needs no lock and no replica; the app owns the file choice. |
+| 2026-10-07 | The Mapper keeps each Frame in a private `KeyFrameRecord { frame; bow; features; }` (ruling G); BoW (`levels_up` 4) is computed for every Frame, initial ones included, and never published. | No Frame record existed and `map::Frame` is shared with the replicas; the bags of words are Mapper-only until the Frame database (step 3) is designed. |
+| 2026-10-07 | `SearchForTriangulation` takes two optional FeatureVectors (`SearchByBoW`): candidates only from shared-node pairs, all other checks unchanged; its matches are drawn only from shared-node pairs and are not in general a subset of brute force (ruling F, spec §6 amended). A one-node vocabulary reproduces brute force exactly (ruling H, Mapper test). | ORB-SLAM3 `SearchForTriangulation`; fewer candidates can let the ratio test pass where brute force failed. |
+| 2026-10-07 | ORB rotated BRIEF offsets are rounded with `std::lround` (ORB-SLAM3 `cvRound`) instead of truncated. | Bit-compatibility with ORB-SLAM3's vocabulary. |
+| 2026-10-07 | BoW smoke result (corridor1, Release, two runs each with and without the vocabulary, plus one extra stereo run; "Bag of Words"): triangulation per Frame 26–28× faster mono (about 180 → 7 ms) and 39× stereo (about 148 → 4 ms), a Mapper pass about 290 → 140 ms. Mono: one map, 278 tracked, ATE Sim3 0.031–0.033 m (0.034 without). Stereo: one map and no loss in both planned runs, but ATE SE3 0.056 / 0.189 m (0.037–0.038 without); the extra run lost tracking at frame 325 (2 maps). The 3× Must is met; stereo accuracy regressed and nothing was tuned. | Cause is not fewer triangulated points (final review: a 150 ms sleep after triangulation restores ATE 0.037 m at the same point count); the regression follows Mapper speed, i.e. timing-dependent behaviour elsewhere (TODO). The frame-325 loss is the known fast-rotation weakness (runs without the vocabulary dip to 38 inliers there). |
 
 ## 9. Open Questions
 
@@ -1670,9 +1850,10 @@ branch → review → merge to `master`. Update this document at the end.
     - Cells: ORB-SLAM3 grows each cell by 6 px so FAST's 3-px border doesn't
       leave blind strips; ours don't overlap → undetectable 6-px strips every
       35 px.
-    - Descriptor sampling: ORB-SLAM3 rounds rotated pattern offsets (`cvRound`),
+    - ~~Descriptor sampling: ORB-SLAM3 rounds rotated pattern offsets (`cvRound`),
       we truncate (`cast<int>`) → descriptors differ bit-wise (matters for using
-      ORB-SLAM3 DBoW2 vocabularies).
+      ORB-SLAM3 DBoW2 vocabularies).~~ — done 2026-10-07: `std::lround` (see
+      "Bag of Words").
     - ORB-SLAM3 keeps each keypoint's pyramid level (`octave`) and size;
       ~~`ImageFeatures` loses the level~~ — done: `ImageFeatures` carries
       `levels()` (used by the initialization matcher).
@@ -1682,7 +1863,7 @@ branch → review → merge to `master`. Update this document at the end.
 
     **Plan:** own FAST-9-16 run once per level, corners assigned to cells
     (≥ 20 if any, else ≥ 7) — fixes speed, blind strips, and drops OpenCV from
-    detection; preallocated blur/pyramid buffers; round descriptor offsets;
+    detection; preallocated blur/pyramid buffers; ~~round descriptor offsets~~ (done);
     keep the level in `ImageFeatures`. Then re-profile. Parallel left/right
     extraction after that.
 22. **Fisheye rays beyond 90°:** `MonocularMeasurement` stores undistorted
@@ -1792,6 +1973,13 @@ branch → review → merge to `master`. Update this document at the end.
   local BA, `--trajectory_out` and `tools/ate.py` (see "Map Quality"; mono
   corridor1 keeps one map for all 400 frames).
 
+- Bag of words, roadmap step 2 (branch `feat/bow`, merge pending): an
+  OpenCV-free DBoW2 port with text and binary loaders and
+  `convert_vocabulary`, exact equivalence with DBoW2 on corridor1 frames, ORB
+  offset rounding, BoW per Mapper Frame and `SearchByBoW` for triangulation,
+  `--vocabulary` in the apps (see "Bag of Words"; triangulation 26–39× faster per
+  Frame, stereo ATE regressed: TODO).
+
 **Required follow-up:**
 - Decide `MapPointStorage` growth / compaction (Open Question 2); ids are
   append-only since 2026-10-05.
@@ -1802,7 +1990,7 @@ branch → review → merge to `master`. Update this document at the end.
   rounding). Building OpenCV from source to link against
   (in progress, user).
 - Tracker measurement policy (19).
-- Roadmap (`docs/ROADMAP.md`): own DBoW2 (step 2), relocalization /
+- Roadmap (`docs/ROADMAP.md`): relocalization /
   reference-keyframe tracking via place recognition (step 3, tracking
   sub-project 4; the user has their own design, ask first), loop closing with
   global BA in its own thread (step 4).

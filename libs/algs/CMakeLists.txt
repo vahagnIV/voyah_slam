@@ -4,6 +4,7 @@
 find_package(g2o REQUIRED)
 
 add_library(voyah_algs STATIC
+    src/bow/vocabulary_io.cpp
     src/estimators/essential_estimator.cpp
     src/estimators/homography_estimator.cpp
     src/features/feature_grid.cpp

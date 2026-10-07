@@ -10,10 +10,13 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <Eigen/Geometry>
+#include <voyahslam/bow/vocabulary.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/frame_tracked.h>
 #include <voyahslam/mapping/mapper.h>
@@ -35,22 +38,24 @@ struct Options {
     bool show = false;  // display frames with keypoints (voyahviz)
     bool viewer = false;  // open the 3D map viewer (Pangolin)
     std::filesystem::path trajectory_out;  // empty: no trajectory file
+    std::filesystem::path vocabulary;  // binary bag-of-words vocabulary; empty: none
 };
 
 // True if the key returned by voyahviz::ImageWindow::WaitKey() asks to quit.
 inline bool IsQuitKey(int key) { return key == 'q' || key == 27; }
 
 // Usage: <program> <dataset_root> [--rate=R] [--max-frames=N] [--show] [--viewer]
-//                  [--trajectory_out <file>]
+//                  [--trajectory_out <file>] [--vocabulary <file.bin>]
 inline Options ParseOptions(int argc, char** argv) {
     auto usage = [argv]() {
         std::cerr << "Usage: " << argv[0] << " <dataset_root> [--rate=R] [--max-frames=N] [--show] [--viewer]"
-                  << " [--trajectory_out <file>]\n"
+                  << " [--trajectory_out <file>] [--vocabulary <file.bin>]\n"
                   << "  --rate=R                  playback speed (1 = real time, 0 = as fast as possible)\n"
                   << "  --max-frames=N            stop after N frames\n"
                   << "  --show                    show frames with keypoints (q / Esc to quit)\n"
                   << "  --viewer                  open the 3D map viewer (Pangolin)\n"
-                  << "  --trajectory_out <file>   write tracked poses (TUM format, camera-to-world)\n";
+                  << "  --trajectory_out <file>   write tracked poses (TUM format, camera-to-world)\n"
+                  << "  --vocabulary <file.bin>   bag-of-words vocabulary (binary, see convert_vocabulary)\n";
         std::exit(EXIT_FAILURE);
     };
     Options options;
@@ -68,6 +73,10 @@ inline Options ParseOptions(int argc, char** argv) {
             options.trajectory_out = argv[++i];
         } else if (arg.rfind("--trajectory_out=", 0) == 0) {
             options.trajectory_out = arg.substr(17);
+        } else if (arg == "--vocabulary" && i + 1 < argc) {
+            options.vocabulary = argv[++i];
+        } else if (arg.rfind("--vocabulary=", 0) == 0) {
+            options.vocabulary = arg.substr(13);
         } else if (arg.rfind("--", 0) == 0 || !options.dataset.empty()) {
             usage();
         } else {
@@ -76,6 +85,23 @@ inline Options ParseOptions(int argc, char** argv) {
     }
     if (options.dataset.empty()) usage();
     return options;
+}
+
+// The vocabulary at `path` (binary format); nullptr when `path` is empty.
+// Exits with status 1 if it cannot be loaded (the loader logs why).
+template <typename TFeatureExtractor>
+std::shared_ptr<const bow::Vocabulary<TFeatureExtractor>> LoadVocabulary(
+    const std::filesystem::path& path) {
+    if (path.empty()) return nullptr;
+    std::optional<bow::Vocabulary<TFeatureExtractor>> vocabulary =
+        bow::Vocabulary<TFeatureExtractor>::LoadBinary(path.string());
+    if (!vocabulary) {
+        std::cerr << "Error: cannot load vocabulary " << path << "\n";
+        std::exit(EXIT_FAILURE);
+    }
+    std::cout << "Vocabulary: " << path << ", " << vocabulary->num_words() << " words, k "
+              << vocabulary->k() << ", L " << vocabulary->L() << "\n";
+    return std::make_shared<const bow::Vocabulary<TFeatureExtractor>>(std::move(*vocabulary));
 }
 
 inline const char* StateName(tracking::TrackerState state) {

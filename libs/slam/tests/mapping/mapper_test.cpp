@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <support/synthetic_sequence.h>
 #include <support/test_measurements.h>
+#include <voyahslam/bow/vocabulary.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
 #include <voyahslam/events/observable.h>
@@ -12,7 +13,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <numeric>
 #include <optional>
+#include <random>
+#include <string>
+#include <tuple>
 #include <variant>
 #include <vector>
 
@@ -27,6 +33,7 @@ using TInitializationMeasurement = events::InitializationMeasurement<Extractor>;
 using TMonocularMeasurement = features::TMonocularMeasurement<Extractor>;
 using TBinocularMeasurement = features::TBinocularMeasurement<Extractor>;
 using TDescriptors = typename Extractor::TDescriptors;
+using TVocabulary = bow::Vocabulary<Extractor>;
 
 // One Frame a transaction adds.
 struct PublishedFrame {
@@ -82,6 +89,11 @@ class MapperTest : public ::testing::Test {
 protected:
     explicit MapperTest(MapperOptions options = {})
         : mapper_(options) {
+        tracker_.ConnectAsync(mapper_.inbox());
+        mapper_.AddObserver(capture_);
+    }
+    MapperTest(MapperOptions options, std::shared_ptr<const TVocabulary> vocabulary)
+        : mapper_(options, std::move(vocabulary)) {
         tracker_.ConnectAsync(mapper_.inbox());
         mapper_.AddObserver(capture_);
     }
@@ -710,6 +722,8 @@ protected:
         : MapperFrameCreationTest(CreationOnlyOptions()) {}
     explicit MapperFrameCreationTest(MapperOptions options)
         : MapperFrameTrackedTest(options) {}
+    MapperFrameCreationTest(MapperOptions options, std::shared_ptr<const TVocabulary> vocabulary)
+        : MapperFrameTrackedTest(options, std::move(vocabulary)) {}
 
     static MapperOptions CreationOnlyOptions() {
         MapperOptions options;
@@ -1396,6 +1410,8 @@ class MapperQualityTest : public MapperFrameCreationTest {
 protected:
     explicit MapperQualityTest(MapperOptions options = {})
         : MapperFrameCreationTest(options) {}
+    MapperQualityTest(MapperOptions options, std::shared_ptr<const TVocabulary> vocabulary)
+        : MapperFrameCreationTest(options, std::move(vocabulary)) {}
 
     using MapperFrameCreationTest::PublishStereoFrameTracked;
 
@@ -2161,6 +2177,275 @@ TEST_F(MapperQualityTest, SkipsBaWithoutFreeFrames) {
     EXPECT_EQ(refined.num_updated, 0u);
     EXPECT_EQ(mapper_.num_keyframes(), 3u);
     ExpectReplicaConsistent();
+}
+
+// Bag of words. The Mapper's Frames get their BowVector and FeatureVector
+// from the vocabulary, and triangulation takes its candidates from shared
+// FeatureVector nodes (spec sections 3, 4).
+
+// k = 2, L = 5, four words. The root's children split descriptors by bit 0
+// of byte 0: node 1 is all zeros and node 2 has only that bit, so a
+// descriptor descends to node 2 iff it has the bit (one Hamming unit closer,
+// never a tie). Below each, a chain of single children down to depth 4 ends
+// in two leaves of idf weight 1 with random descriptors. With levels_up = 4
+// the FeatureVector files every feature under node 1 or node 2.
+std::shared_ptr<const TVocabulary> MakeSplitVocabulary() {
+    constexpr Eigen::Index kNumNodes = 3 + 2 * (3 + 2);
+    std::vector<bow::NodeId> parents{0, 0, 0};
+    TDescriptors descriptors = TDescriptors::Zero(Extractor::DescriptorSize, kNumNodes);
+    descriptors(0, 2) = 1;
+    std::vector<double> weights(kNumNodes, 0.0);
+    std::mt19937 rng(7);
+    bow::NodeId next = 3;
+    for (const bow::NodeId branch : {bow::NodeId{1}, bow::NodeId{2}}) {
+        bow::NodeId parent = branch;
+        for (int depth = 2; depth <= 4; ++depth) {
+            parents.push_back(parent);
+            descriptors.col(next) = descriptors.col(branch);
+            parent = next++;
+        }
+        for (int leaf = 0; leaf < 2; ++leaf) {
+            parents.push_back(parent);
+            descriptors.col(next) = test::detail::RandomDescriptor(rng);
+            weights[next++] = 1.0;
+        }
+    }
+    return std::make_shared<const TVocabulary>(
+        TVocabulary::FromTree(2, 5, std::move(parents), std::move(descriptors), std::move(weights)));
+}
+
+// `measurement` with bit 0 of byte 0 of every descriptor set to `bit`: all
+// its features under node 1 (false) or node 2 (true) of
+// MakeSplitVocabulary.
+TMonocularMeasurement WithSplitBit(const TMonocularMeasurement& measurement, bool bit) {
+    TDescriptors descriptors = measurement.descriptors();
+    for (Eigen::Index j = 0; j < descriptors.cols(); ++j) {
+        descriptors(0, j) = static_cast<uint8_t>(bit ? descriptors(0, j) | 1 : descriptors(0, j) & ~1);
+    }
+    return TMonocularMeasurement(
+        test::TestImageFeatures(geometry::TPoints2DF(measurement.distorted_points()),
+                                geometry::TRowVectorF(measurement.strengths()),
+                                geometry::TRowVectorF(measurement.angles()), std::move(descriptors),
+                                features::TLevels(measurement.levels())),
+        measurement.K(), nullptr, measurement.timestamp());
+}
+
+// One Mapper run, so that a test can compare runs of differently constructed
+// Mappers: a MapperQualityTest driven by hand, outside gtest's fixture
+// lifecycle (TestBody is never run).
+class MapperBowRun : public MapperQualityTest {
+public:
+    // Without the vocabulary argument.
+    explicit MapperBowRun(MapperOptions options = {})
+        : MapperQualityTest(options) {}
+    MapperBowRun(MapperOptions options, std::shared_ptr<const TVocabulary> vocabulary)
+        : MapperQualityTest(options, std::move(vocabulary)) {}
+
+    void TestBody() override {}
+
+    using MapperFrameCreationTest::CreationOnlyOptions;
+
+    [[nodiscard]] const TMapper& mapper() const { return mapper_; }
+
+    // The default (noisy) mono sequence: the new map, then three Frames each
+    // tracking half of the initial points it sees, so that they triangulate,
+    // fuse, cull and run local BA. Returns every published transaction.
+    std::vector<Published> RunMono() {
+        SetUpMonoMap();
+        std::vector<Published> published{initial_};
+        for (size_t k = 0; k < 3; ++k) {
+            const size_t index = next_ + 2 + 3 * k;
+            std::vector<Pair> pairs = AllTrackedPairs(index);
+            pairs.resize(pairs.size() / 2);
+            for (Published& p : CreateMonoFrame(index, pairs)) published.push_back(std::move(p));
+        }
+        return published;
+    }
+
+    // MapperFrameCreationTest.MonoTriangulatesAgainstNeighbours' scene (run
+    // with CreationOnlyOptions): returns the number of points the third Frame
+    // triangulates against Frame 2. With `split`, every sequence frame's
+    // features are under node 1 of MakeSplitVocabulary and the third frame's
+    // under node 2: no node is shared, but a descriptor moves by one bit.
+    size_t RunTriangulation(bool split) {
+        UseNoiseFreeSequence();
+        if (split) {
+            for (test::SyntheticFrame& frame : sequence_.frames) {
+                frame.measurement = WithSplitBit(frame.measurement, false);
+            }
+        }
+        SetUpMonoMap();
+        const size_t second_index = next_ - 1;
+        const size_t frame_2 = second_index + 5;
+        const size_t third = second_index + 10;
+        EXPECT_LT(third, sequence_.frames.size());
+        if (split) {
+            sequence_.frames[third].measurement = WithSplitBit(sequence_.frames[third].measurement, true);
+        }
+        PublishFrameTracked(1, frame_2, TrackedPairs(frame_2, num_points_ / 2), map::FrameId{1},
+                            std::nullopt, MapPose(frame_2));
+        Drain();
+        const auto before = TakeCaptured();
+        EXPECT_EQ(before.size(), 2u);
+        if (before.size() != 2) return 0;
+        size_t num_visible = 0;
+        for (const Eigen::Index scene : sequence_.frames[third].point_of_feature) {
+            num_visible += scene >= 0 && point_of_scene_[static_cast<size_t>(scene)] >= 0;
+        }
+        std::vector<Pair> pairs = TrackedPairs(third, num_visible);
+        pairs.erase(pairs.begin(), pairs.begin() + static_cast<std::ptrdiff_t>(num_visible / 2));
+        PublishFrameTracked(1, third, pairs, before[0].frame().frame_id, 20, MapPose(third));
+        Drain();
+        const auto published = TakeCaptured();
+        EXPECT_EQ(published.size(), 2u);
+        return published.empty() ? 0 : published[0].count;
+    }
+};
+
+// Same size and coefficients.
+template <typename TMatrix>
+bool SameMatrix(const TMatrix& a, const TMatrix& b) {
+    return a.rows() == b.rows() && a.cols() == b.cols() && a == b;
+}
+
+// `a` and `b` are the same transactions, bit for bit.
+void ExpectSamePublished(const std::vector<Published>& a, const std::vector<Published>& b) {
+    ASSERT_EQ(a.size(), b.size());
+    const auto observation = [](const events::TransactionObservation& o) {
+        return std::tuple(o.frame, o.feature, o.point, o.depth, o.right_index);
+    };
+    for (size_t i = 0; i < a.size(); ++i) {
+        SCOPED_TRACE("transaction " + std::to_string(i));
+        const Published& x = a[i];
+        const Published& y = b[i];
+        EXPECT_EQ(x.type, y.type);
+        EXPECT_EQ(x.map_id, y.map_id);
+        EXPECT_EQ(x.new_map, y.new_map);
+        EXPECT_EQ(x.start_frame, y.start_frame);
+        ASSERT_EQ(x.frames.size(), y.frames.size());
+        for (size_t k = 0; k < x.frames.size(); ++k) {
+            const PublishedFrame& f = x.frames[k];
+            const PublishedFrame& g = y.frames[k];
+            EXPECT_EQ(f.frame_id, g.frame_id);
+            EXPECT_EQ(f.timestamp, g.timestamp);
+            EXPECT_TRUE(SameMatrix(f.pose.ToMatrix34(), g.pose.ToMatrix34()));
+            EXPECT_EQ(f.observed_features, g.observed_features);
+            EXPECT_EQ(f.observed_points, g.observed_points);
+            EXPECT_TRUE(SameMatrix(f.descriptors, g.descriptors));
+            EXPECT_TRUE(SameMatrix(f.depths, g.depths));
+        }
+        EXPECT_EQ(x.start_id, y.start_id);
+        EXPECT_EQ(x.count, y.count);
+        EXPECT_TRUE(SameMatrix(x.positions, y.positions));
+        EXPECT_TRUE(SameMatrix(x.point_descriptors, y.point_descriptors));
+        EXPECT_TRUE(SameMatrix(x.normals, y.normals));
+        ASSERT_EQ(x.added_observations.size(), y.added_observations.size());
+        for (size_t k = 0; k < x.added_observations.size(); ++k) {
+            EXPECT_EQ(observation(x.added_observations[k]), observation(y.added_observations[k]));
+        }
+        EXPECT_EQ(x.updated_ids, y.updated_ids);
+        EXPECT_TRUE(SameMatrix(x.updated_positions, y.updated_positions));
+        EXPECT_TRUE(SameMatrix(x.updated_descriptors, y.updated_descriptors));
+        EXPECT_TRUE(SameMatrix(x.updated_normals, y.updated_normals));
+        ASSERT_EQ(x.removed_observations.size(), y.removed_observations.size());
+        for (size_t k = 0; k < x.removed_observations.size(); ++k) {
+            EXPECT_EQ(x.removed_observations[k].frame, y.removed_observations[k].frame);
+            EXPECT_EQ(x.removed_observations[k].point, y.removed_observations[k].point);
+        }
+        ASSERT_EQ(x.replaced_points.size(), y.replaced_points.size());
+        for (size_t k = 0; k < x.replaced_points.size(); ++k) {
+            EXPECT_EQ(x.replaced_points[k].loser, y.replaced_points[k].loser);
+            EXPECT_EQ(x.replaced_points[k].winner, y.replaced_points[k].winner);
+        }
+        EXPECT_EQ(x.removed_points, y.removed_points);
+        ASSERT_EQ(x.updated_poses.size(), y.updated_poses.size());
+        for (size_t k = 0; k < x.updated_poses.size(); ++k) {
+            EXPECT_EQ(x.updated_poses[k].first, y.updated_poses[k].first);
+            EXPECT_TRUE(SameMatrix(x.updated_poses[k].second.ToMatrix34(),
+                                   y.updated_poses[k].second.ToMatrix34()));
+        }
+        EXPECT_EQ(x.removed_frames, y.removed_frames);
+    }
+}
+
+TEST(MapperBowTest, FramesGetBowWithVocabulary) {
+    const auto vocabulary = MakeSplitVocabulary();
+    MapperBowRun run(MapperOptions{}, vocabulary);
+    const std::vector<Published> published = run.RunMono();
+    ASSERT_FALSE(published.empty());
+    // Every Frame ever added, the initial ones included; each still in the
+    // map has the BowVector of its descriptors.
+    size_t num_checked = 0;
+    for (const Published& p : published) {
+        for (const PublishedFrame& frame : p.frames) {
+            const bow::BowVector* bow = run.mapper().BowVectorOf(frame.frame_id);
+            if (bow == nullptr) continue;  // culled
+            ++num_checked;
+            ASSERT_FALSE(bow->entries.empty()) << "Frame " << frame.frame_id.value;
+            const double sum = std::accumulate(
+                bow->entries.begin(), bow->entries.end(), 0.0,
+                [](double total, const auto& entry) { return total + entry.second; });
+            EXPECT_NEAR(sum, 1.0, 1e-12) << "Frame " << frame.frame_id.value;
+            bow::BowVector expected;
+            bow::FeatureVector features;
+            vocabulary->Transform(frame.descriptors, TMapper::kBowLevelsUp, expected, features);
+            EXPECT_EQ(bow->entries, expected.entries) << "Frame " << frame.frame_id.value;
+        }
+    }
+    EXPECT_EQ(num_checked, run.mapper().num_keyframes());
+    // The initial Frames included (Frame 0 is never culled).
+    EXPECT_NE(run.mapper().BowVectorOf(map::FrameId{0}), nullptr);
+}
+
+TEST(MapperBowTest, NoBowWithoutVocabulary) {
+    MapperBowRun run;
+    run.RunMono();
+    EXPECT_EQ(run.mapper().BowVectorOf(map::FrameId{0}), nullptr);
+}
+
+TEST(MapperBowTest, TriangulationUsesBowPath) {
+    // Signal: matches restricted to shared FeatureVector nodes. In the split
+    // scene the third Frame shares no node with its neighbours, so with the
+    // vocabulary it has no candidate pair and triangulates nothing; without
+    // it, brute force triangulates as usual (the split bit costs a distance
+    // of 1). Unsplit, the vocabulary still finds the matches.
+    const auto vocabulary = MakeSplitVocabulary();
+    const MapperOptions options = MapperBowRun::CreationOnlyOptions();
+    const size_t brute_force_split = MapperBowRun(options).RunTriangulation(true);
+    const size_t bow_split = MapperBowRun(options, vocabulary).RunTriangulation(true);
+    const size_t bow_unsplit = MapperBowRun(options, vocabulary).RunTriangulation(false);
+    EXPECT_GT(brute_force_split, 0u);
+    EXPECT_EQ(bow_split, 0u);
+    EXPECT_GT(bow_unsplit, 0u);
+}
+
+// k = 1, L = 1: one word under the root. With levels_up = 4 >= L every
+// feature is filed under the root, the one node, so SearchByBoW's candidates
+// are brute force's.
+std::shared_ptr<const TVocabulary> MakeOneNodeVocabulary() {
+    std::mt19937 rng(7);
+    TDescriptors descriptors = TDescriptors::Zero(Extractor::DescriptorSize, 2);
+    descriptors.col(1) = test::detail::RandomDescriptor(rng);
+    return std::make_shared<const TVocabulary>(
+        TVocabulary::FromTree(1, 1, {0, 0}, std::move(descriptors), {0.0, 1.0}));
+}
+
+TEST(MapperBowTest, OneNodeVocabularyMatchesNull) {
+    // A vocabulary changes only triangulation's candidate pairs (its bags of
+    // words are not published): with one node, the transactions are those of
+    // a run without one.
+    MapperBowRun without;
+    MapperBowRun one_node(MapperOptions{}, MakeOneNodeVocabulary());
+    const std::vector<Published> expected = without.RunMono();
+    const std::vector<Published> actual = one_node.RunMono();
+    ASSERT_NE(one_node.mapper().BowVectorOf(map::FrameId{0}), nullptr);  // the BoW path ran
+    // The scene triangulates (and exercises every other step).
+    size_t num_new_points = 0;
+    for (const Published& p : expected) {
+        if (!p.new_map) num_new_points += p.count;
+    }
+    EXPECT_GT(num_new_points, 0u);
+    ExpectSamePublished(expected, actual);
 }
 
 } // namespace

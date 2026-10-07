@@ -26,6 +26,17 @@ public:
   [[nodiscard]] double ScaleFactor(uint8_t level) const;
   [[nodiscard]] size_t num_levels() const;
 
+  // Pattern point `index` (0..511) rotated by the angle with the given cosine
+  // and sine, rounded per component (ORB-SLAM3 cvRound). Public for tests.
+  static geometry::TPoint2DI RotatedPatternOffset(int index, float cos_a, float sin_a);
+  // Convenience overload; computes sin/cos per call, not for hot loops.
+  static geometry::TPoint2DI RotatedPatternOffset(int index, float angle);
+
+  // Public for tests.
+  TDescriptors ComputeDescriptors(const images::TWorkingImage &image,
+                                  const geometry::TPoints2DF &points,
+                                  const geometry::TRowVectorF &angles) const;
+
 private:
   precision_t scale_factor_;
   precision_t log_scale_factor_;
@@ -52,9 +63,6 @@ private:
   static float ComputeOrientationSinglePoint(const images::TWorkingImage &image,
                                              const geometry::TPoint2DF &point);
 
-  TDescriptors ComputeDescriptors(const images::TWorkingImage &image,
-                                  const geometry::TPoints2DF &points,
-                                  const geometry::TRowVectorF &angles) const;
   images::Image<float, 1> gaussian_filter_x_, gaussian_filter_y_;
 };
 

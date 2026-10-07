@@ -7,8 +7,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <utility>
 #include <vector>
+#include <voyahslam/bow/bow_vector.h>
 #include <voyahslam/defs.h>
 #include <voyahslam/features/measurement.h>
 #include <voyahslam/features/rotation_histogram.h>
@@ -72,6 +74,12 @@ inline geometry::TVector3DF UnitRay(const geometry::THomogenousPointF& normalize
 // rotation-histogram consistency (top 3 bins). Returns (feature_a, feature_b)
 // pairs, ascending in feature_a; none when the Frames share a centre.
 //
+// With both FeatureVectors given (the Frames' features filed under vocabulary
+// nodes), only the b features under the same node as an a feature are
+// candidates (the two sorted node lists are walked side by side), and the
+// best / second best are taken among those, as in ORB-SLAM3. Every check is
+// the same; only the candidate enumeration differs.
+//
 // Epipolar band: the plane through b's centre containing a's centre and a's
 // ray has unit normal n = normalize(t_ba × R_ba·ray_a); the test angle is
 // asin(|n · ray_b|). For pixel noise e (σ_level per axis), b's unit ray moves
@@ -84,7 +92,8 @@ inline geometry::TVector3DF UnitRay(const geometry::THomogenousPointF& normalize
 template <typename TFeatureExtractor>
 [[nodiscard]] std::vector<std::pair<uint32_t, uint32_t>> SearchForTriangulation(
     const TriangulationView<TFeatureExtractor>& a, const TriangulationView<TFeatureExtractor>& b,
-    const TriangulationOptions& options) {
+    const TriangulationOptions& options, const bow::FeatureVector* a_features = nullptr,
+    const bow::FeatureVector* b_features = nullptr) {
     using TMeasurement = features::TMonocularMeasurement<TFeatureExtractor>;
     using TDescriptor = typename TMeasurement::TDescriptor;
     const TMeasurement& ma = *a.measurement;
@@ -114,6 +123,29 @@ template <typename TFeatureExtractor>
         band_b[j] = (options.epipolar_sigmas * detail::LevelSigma(options, mb.levels()(j))) * JJt.inverse() * J;
     }
 
+    // Candidate b features of a feature: with BoW, those under the node it
+    // shares with b; otherwise all of them.
+    const bool use_bow = a_features != nullptr && b_features != nullptr;
+    std::vector<std::span<const uint32_t>> bow_candidates;
+    if (use_bow) {
+        bow_candidates.assign(num_a, {});
+        size_t ia = 0;
+        size_t ib = 0;
+        while (ia < a_features->nodes.size() && ib < b_features->nodes.size()) {
+            if (a_features->nodes[ia] < b_features->nodes[ib]) {
+                ++ia;
+            } else if (b_features->nodes[ib] < a_features->nodes[ia]) {
+                ++ib;
+            } else {
+                for (const uint32_t i : a_features->FeaturesOf(ia)) {
+                    bow_candidates[i] = b_features->FeaturesOf(ib);
+                }
+                ++ia;
+                ++ib;
+            }
+        }
+    }
+
     // 1. Best epipolar-consistent candidate per a feature, with the ratio test.
     constexpr double kInfinity = std::numeric_limits<double>::infinity();
     std::vector<Eigen::Index> candidate(num_a, -1);
@@ -132,13 +164,14 @@ template <typename TFeatureExtractor>
         double best = kInfinity;
         double second_best = kInfinity;
         Eigen::Index best_index = -1;
-        for (Eigen::Index j = 0; j < num_b; ++j) {
+        // The one per-pair evaluation, shared by both enumerations.
+        const auto consider = [&](Eigen::Index j) {
             if (b.has_point[j]) {
-                continue;
+                return;
             }
             const double angle = std::asin(std::min(1.0, std::abs(n.dot(ray_b[j]))));
             if (angle > (band_b[j] * n).norm()) {
-                continue;
+                return;
             }
             const TDescriptor d_b = mb.descriptors().col(j);
             const double distance = static_cast<double>(TFeatureExtractor::Distance(d_a, d_b));
@@ -148,6 +181,15 @@ template <typename TFeatureExtractor>
                 best_index = j;
             } else if (distance < second_best) {
                 second_best = distance;
+            }
+        };
+        if (use_bow) {
+            for (const uint32_t j : bow_candidates[i]) {
+                consider(j);
+            }
+        } else {
+            for (Eigen::Index j = 0; j < num_b; ++j) {
+                consider(j);
             }
         }
         if (best_index >= 0 && best <= static_cast<double>(options.th_low) && best < options.nn_ratio * second_best) {
