@@ -1,9 +1,10 @@
 # Test binaries and the `check` / `check_all` targets.
 #
-# voyah_add_test_binary(<name> LABEL <unit|integration> SOURCES ... LIBS ...)
+# voyah_add_test_binary(<name> LABEL <unit|integration|vocabulary> SOURCES ... LIBS ...)
 #   Adds a GoogleTest binary linking LIBS and GTest::gtest_main; its tests are
 #   discovered with the ctest label LABEL. `check` and `check_all` depend on
-#   every binary added this way.
+#   every binary added this way. `vocabulary` tests need the real ORBvoc.txt
+#   ($VOYAHSLAM_ORBVOC) and skip without it; `check` (unit only) leaves them out.
 #
 # voyah_optimize_target(<target>)  (see below; applied to every test binary)
 #
@@ -24,8 +25,8 @@ endfunction()
 
 function(voyah_add_test_binary name)
     cmake_parse_arguments(PARSE_ARGV 1 ARG "" "LABEL" "SOURCES;LIBS")
-    if(NOT ARG_LABEL MATCHES "^(unit|integration)$")
-        message(FATAL_ERROR "voyah_add_test_binary(${name}): LABEL must be unit or integration")
+    if(NOT ARG_LABEL MATCHES "^(unit|integration|vocabulary)$")
+        message(FATAL_ERROR "voyah_add_test_binary(${name}): LABEL must be unit, integration or vocabulary")
     endif()
     add_executable(${name} ${ARG_SOURCES})
     voyah_optimize_target(${name})

@@ -41,3 +41,16 @@ target_include_directories(voyah_algs_tests
 target_compile_definitions(voyah_algs_tests
     PRIVATE VOYAH_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/bow/data"
 )
+
+# Equivalence with the original DBoW2 on the real ORBvoc.txt ($VOYAHSLAM_ORBVOC; skips
+# when unset). Its own binary and label, so `check` leaves it out.
+voyah_add_test_binary(voyah_vocabulary_tests
+    LABEL vocabulary
+    SOURCES
+        bow/vocabulary_equivalence_test.cpp
+    LIBS
+        voyah_algs
+)
+target_compile_definitions(voyah_vocabulary_tests
+    PRIVATE VOYAH_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/bow/data"
+)
