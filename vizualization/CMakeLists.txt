@@ -16,7 +16,8 @@ target_include_directories(voyahviz
 )
 
 target_link_libraries(voyahviz
-    PUBLIC voyahslam
+    PUBLIC voyah_common
+    PUBLIC voyah_events
     # OpenCV is an implementation detail: never in public headers, linked PRIVATE.
     PRIVATE opencv_core
     PRIVATE opencv_imgproc

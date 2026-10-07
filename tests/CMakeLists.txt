@@ -23,7 +23,7 @@ add_executable(voyahslam_tests
 
 target_include_directories(voyahslam_tests
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
-    PRIVATE ${PROJECT_SOURCE_DIR}/src
+    PRIVATE ${PROJECT_SOURCE_DIR}/libs/slam/src
 )
 
 target_link_libraries(voyahslam_tests

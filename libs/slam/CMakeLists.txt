@@ -1,22 +1,21 @@
-add_library(voyahslam
-    voyahslam.cpp
-    tracking/tracker.cpp
-    mapping/mapper.cpp
-    mapping/map_initializer.cpp
-    loop_closing/loop_closer.cpp
-    slam/slam.cpp
+# voyah_slam: the SLAM pipeline (tracking, mapping, loop closing, the Slam
+# facade). Builds on common, events and algs.
+add_library(voyah_slam STATIC
+    src/voyahslam.cpp
+    src/tracking/tracker.cpp
+    src/mapping/mapper.cpp
+    src/mapping/map_initializer.cpp
+    src/loop_closing/loop_closer.cpp
+    src/slam/slam.cpp
 )
 
-target_include_directories(voyahslam
-    PUBLIC ${CMAKE_SOURCE_DIR}/include
-    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+target_include_directories(voyah_slam
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_link_libraries(voyahslam
+target_link_libraries(voyah_slam
     PUBLIC voyah_common
     PUBLIC voyah_events
     PUBLIC voyah_algs
-    PUBLIC Eigen3::Eigen
-    PUBLIC spdlog::spdlog
-    PUBLIC ${VOYAHSLAM_CONCURRENTQUEUE_TARGET}
 )

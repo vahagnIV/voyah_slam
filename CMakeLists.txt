@@ -26,9 +26,6 @@ include(GoogleTest)
 # Libraries (each with its own include root)
 add_subdirectory(libs)
 
-# Main library
-add_subdirectory(src)
-
 # Tests
 add_subdirectory(tests)
 
