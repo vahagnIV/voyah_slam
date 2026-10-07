@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 #include "support/test_measurements.h"
+#include "voyahslam/bow/bow_vector.h"
 #include "voyahslam/geometry/camera.h"
 #include "voyahslam/geometry/distortion_models/kannala_brandt_distortion_model.h"
 #include "voyahslam/mapping/triangulation.h"
@@ -302,6 +303,79 @@ TEST(TriangulationTest, ScaleConsistencyFollowsOctaveRatio) {
             TriangulateMatches(MakeView(ma, scene.T_aw), MakeView(mb, scene.T_bw), {{0U, 0U}}, TriangulationOptions{});
         EXPECT_EQ(points.size(), accepted ? 1U : 0U) << "levels " << level_a << "/" << level_b;
     }
+}
+
+// A FeatureVector filing feature i under node_of[i].
+bow::FeatureVector MakeFeatureVector(const std::vector<bow::NodeId>& node_of) {
+    std::vector<std::vector<uint32_t>> by_node;
+    for (uint32_t i = 0; i < node_of.size(); ++i) {
+        if (by_node.size() <= node_of[i]) {
+            by_node.resize(node_of[i] + 1);
+        }
+        by_node[node_of[i]].push_back(i);
+    }
+    bow::FeatureVector fv;
+    fv.offsets.push_back(0);
+    for (bow::NodeId node = 0; node < by_node.size(); ++node) {
+        if (by_node[node].empty()) {
+            continue;
+        }
+        fv.nodes.push_back(node);
+        fv.features.insert(fv.features.end(), by_node[node].begin(), by_node[node].end());
+        fv.offsets.push_back(static_cast<uint32_t>(fv.features.size()));
+    }
+    return fv;
+}
+
+struct BowFixture {
+    geometry::Camera camera = PinholeCamera();
+    Scene scene = MakeScene(PinholePoints(200), Translation(0, 0, 0), Translation(0.3, 0, 0), camera);
+    Measurement ma = MakeMeasurement(scene.pixels_a, scene.descriptors, scene.levels_a, camera);
+    Measurement mb = MakeMeasurement(scene.pixels_b, scene.descriptors, scene.levels_b, camera);
+    View a = MakeView(ma, scene.T_aw);
+    View b = MakeView(mb, scene.T_bw);
+};
+
+TEST(TriangulationTest, BowMatchesAreSubsetOfBruteForce) {
+    const BowFixture f;
+    // Three nodes; the first 20 b features are filed under a different node
+    // than their a counterparts, so BoW loses those pairs.
+    std::vector<bow::NodeId> nodes_a(200);
+    std::vector<bow::NodeId> nodes_b(200);
+    for (uint32_t i = 0; i < 200; ++i) {
+        nodes_a[i] = i % 3;
+        nodes_b[i] = i < 20 ? (i + 1) % 3 : i % 3;
+    }
+    const bow::FeatureVector fa = MakeFeatureVector(nodes_a);
+    const bow::FeatureVector fb = MakeFeatureVector(nodes_b);
+
+    const Pairs brute = SearchForTriangulation(f.a, f.b, TriangulationOptions{});
+    const Pairs bow_matches = SearchForTriangulation(f.a, f.b, TriangulationOptions{}, &fa, &fb);
+    ASSERT_FALSE(bow_matches.empty());
+    EXPECT_LT(bow_matches.size(), brute.size());
+    for (const auto& match : bow_matches) {
+        EXPECT_NE(std::find(brute.begin(), brute.end(), match), brute.end());
+        EXPECT_EQ(match.first % 3, nodes_b[match.second]) << "pair from different nodes";
+    }
+}
+
+// Same list, order included: both enumerations fill the per-feature-of-a
+// candidate and emit in ascending feature_a.
+TEST(TriangulationTest, BowEqualsBruteForceWhenOneNode) {
+    const BowFixture f;
+    const bow::FeatureVector one_node = MakeFeatureVector(std::vector<bow::NodeId>(200, 5));
+    const Pairs brute = SearchForTriangulation(f.a, f.b, TriangulationOptions{});
+    const Pairs bow_matches = SearchForTriangulation(f.a, f.b, TriangulationOptions{}, &one_node, &one_node);
+    ASSERT_FALSE(brute.empty());
+    EXPECT_EQ(bow_matches, brute);
+}
+
+TEST(TriangulationTest, BowSkipsFeaturesUnderDifferentNodes) {
+    const BowFixture f;
+    const bow::FeatureVector fa = MakeFeatureVector(std::vector<bow::NodeId>(200, 1));
+    const bow::FeatureVector fb = MakeFeatureVector(std::vector<bow::NodeId>(200, 2));
+    EXPECT_FALSE(SearchForTriangulation(f.a, f.b, TriangulationOptions{}).empty());
+    EXPECT_TRUE(SearchForTriangulation(f.a, f.b, TriangulationOptions{}, &fa, &fb).empty());
 }
 
 }  // namespace
