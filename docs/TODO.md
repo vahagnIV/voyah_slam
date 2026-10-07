@@ -43,8 +43,6 @@ as soon as they come up.
       (≥ 20 if any, else ≥ 7). Removes OpenCV from detection and the blind
       strips at cell borders.
 - [ ] Preallocate blur and pyramid buffers (no per-frame image allocations).
-- [ ] Round rotated descriptor pattern offsets (ORB-SLAM3 uses `cvRound`; we
-      truncate).
 - [ ] Check border handling (ORB-SLAM3 pads levels by 19 px).
 - [ ] Remove the unused `cv::minMaxLoc` per cell.
 - [ ] Parallel left/right extraction for stereo.
@@ -81,8 +79,6 @@ as soon as they come up.
       the initialization is noise-limited at the first accepted pair (synthetic
       seeds initialize at frame 3, baseline 0.15 vs depth 4-8; the ML optimum is
       0.3-2.7 degrees off), so BA cannot improve on it.
-- [ ] `OrbFeatureExtractor::Distance` returns `uint8_t`, so a 256-bit
-      difference wraps to 0 — widen the return type.
 
 Smoke run note (2026-10-05, after the initialization bundle adjustment, same
 dataset/flags, Release): mono still initializes at frame 121 (not at 120) with
@@ -234,21 +230,13 @@ Spec `docs/superpowers/specs/2026-10-06-keyframes-design.md`; DESIGN
       (sub-project 4). Not seen since the restructure re-run: the two
       map-quality stereo runs (2026-10-07) tracked all 999 frames; the
       rotation is still uncovered by the zero-motion fallback.
-- [ ] **Measure triangulation matching cost; accelerate if needed.**
-      Brute force per neighbour: about 25 ms per neighbour on corridor1
-      (1500 features, Release); mono uses up to 30 neighbours (about 0.75 s
-      per Frame once the map has them). Faiss vs DBoW2/FBoW spike for place
-      recognition (sub-project 4) decides the index. Map-quality smoke
-      (2026-10-07): Frame creation (mostly triangulation) is about 135 ms
-      mono / 110 ms stereo of a 250 ms Mapper pass; `SearchByBoW` (roadmap
-      step 2) would replace it.
 - [ ] Faiss vs DBoW2/FBoW spike for place recognition (sub-project 4).
+      Roadmap step 2 ported DBoW2 (see "Bag of words" below); revisit only
+      if its recall or speed falls short in relocalization / loop detection.
 - [ ] ORB-SLAM3's busy-Mapper branch of the Frame rule (interruptible local BA
       is done; a Mapper pass now takes about 250 ms, so drain-to-latest skips
       about 40 % of the `FrameTracked` on corridor1).
 - [ ] The post-relocalization Frame guard (sub-project 4).
-- [ ] ORB `Distance` returns `uint8_t`: a 256-bit difference (all bits
-      differ) wraps to 0. Pre-existing; widen the return type.
 - [ ] The 80-Frame local-map cap can drop the only K1 Frame of a matched
       point, hiding it from the local points (`visible ⊇ matched` corner
       case): always include matched points in the mask.
@@ -310,6 +298,74 @@ Spec `docs/superpowers/specs/2026-10-06-keyframes-design.md`; DESIGN
     which cannot cover 6–8° per frame; the stereo loss in fast rotation
     (corridor1 ~frame 360) needs a rotation-aware fallback or reference-Frame
     tracking (sub-project 4).
+
+## Bag of words (roadmap step 2, 2026-10-07)
+
+Spec `docs/superpowers/specs/2026-10-07-bow-design.md`; DESIGN "Bag of Words"
+(smoke table there). Triangulation matching cost is solved there
+(`SearchByBoW`: 26–28× faster per Frame mono, 39× stereo).
+
+- [ ] **Stereo ATE regressed with the vocabulary** (smoke 2026-10-07): SE3
+      0.056 / 0.189 m (and 0.206 m on the second map of an extra run) vs
+      0.037–0.038 m without, growing over the run (drift; Sim3 scale
+      0.91–0.97). Mono is unaffected (0.031–0.033 vs 0.034 m). Not tuned.
+      Suspect: `SearchByBoW` finds 29 % fewer triangulation matches per Frame
+      (median 145 vs 204) and fusion merges a third fewer, so local BA has
+      fewer multi-view points. Check: matches per pair BoW vs brute force on
+      the same Frames, our filters against ORB-SLAM3's `SearchForTriangulation`,
+      and more stereo runs for the spread.
+- [ ] **Extra stereo BoW run lost tracking at frame 325** (fast rotation, the
+      known weakness below; runs without the vocabulary dip to 38 / 52 inliers
+      at frames 325 / 355). Count losses over more runs with and without the
+      vocabulary before blaming either.
+
+- [ ] **Vocabulary training** (out of scope of step 2): our own k-majority
+      tree builder, so we do not depend on ORB-SLAM3's `ORBvoc.txt`, and a
+      vocabulary for other extractors (SIFT has none).
+- [ ] **`ORBvoc.txt` licence** (deferred, user decision): the file is used
+      as is on the user's PC and never committed. Settle its terms before any
+      distribution; DBoW2's own code is BSD (keep its notice with the port).
+- [ ] **Frame database and relocalization** (roadmap step 3, sub-project 4;
+      ask the user first): an inverted index over the Frames' BowVectors,
+      candidate search by `Score`, BoW in the Tracker (`TrackReferenceKeyFrame`
+      / relocalization via `SearchByBoW`). The Mapper's bags of words are
+      private (`KeyFrameRecord`); the database's thread and ownership are
+      still to be designed.
+- [ ] **Phantom node vs ORB-SLAM3** (ruling D): DBoW2 turns the empty read
+      after `ORBvoc.txt`'s trailing newline into a phantom leaf (971 815 words
+      vs our 971 814; uninitialised values, UB). A feature DBoW2 drops at that
+      node (word weight 0) gets a real sibling's word with us. Ours is the
+      correct tree; remember it when comparing word ids or scores with
+      ORB-SLAM3 output.
+- [ ] ORB `Distance` returns `uint8_t`: a 256-bit difference (all bits
+      differ) wraps to 0, so a vocabulary descent or a matcher could take the
+      farthest candidate for the closest. Not seen on the DBoW2 fixture (no
+      child distance of 256). Widen the return type.
+- [ ] Mono smoke with BoW (2026-10-07): triangulation finds fewer matches per
+      pair at the start of a map (291 vs 365 new points for the first Frame),
+      so `ref_points` grows slower and both runs created no Frame for 27
+      frames (dataset 136–163; at most 11 without BoW). Tracking was unaffected
+      (inliers 410–450). Watch it; ORB-SLAM3 also triangulates via BoW.
+- [ ] Deferred review minors:
+  - `LoadBinary` reads through `istreambuf_iterator` (byte-wise; 0.13 s for
+    ORBvoc, fine); a bulk read or mmap if it ever matters.
+  - No NaN / inf check on float descriptors in the loaders (only ORB has a
+    vocabulary today).
+  - Vocabulary tests: none for a leaf with depth between `L − levels_up` and
+    `L`; two tests do not assert `offsets`.
+  - `RotatedOffsetsAreRounded`'s 512-point loop is partly self-referential;
+    only the (5, 9) case pins the rounding.
+  - The DBoW2 reference programs are described in
+    `tools/dbow2_reference/README.md` only, not committed; the fixture is
+    144 KB (planned about 100 KB).
+  - `SearchByBoW` tests: none pins the ratio test among shared-node
+    candidates or the fallback with only one FeatureVector pointer; no debug
+    assert that FeatureVector indices are below the feature counts; the
+    "subset of brute force" test name overstates (ruling F: holds for its
+    scene only).
+  - Mapper BoW tests: no stereo BoW test; the FeatureVector and `levels_up`
+    are asserted only indirectly; `MapperBowRun` is a hand-driven gtest
+    fixture subclass.
 
 ## Map quality (sub-project 3, 2026-10-07)
 

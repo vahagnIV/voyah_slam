@@ -69,11 +69,11 @@ Debug (tree `cmake-build-debug/build/Debug`):
 conan install . --output-folder=cmake-build-debug --build=missing -s build_type=Debug
 cmake --preset conan-debug
 cmake --build cmake-build-debug/build/Debug -j"$(nproc)"
-cmake --build cmake-build-debug/build/Debug --target check       # unit tests (449, ~1.5 s)
-cmake --build cmake-build-debug/build/Debug --target check_all   # every test (459, ~2.3 s)
+cmake --build cmake-build-debug/build/Debug --target check       # unit tests (521, ~2 s)
+cmake --build cmake-build-debug/build/Debug --target check_all   # every test (533, ~2.6 s)
 ```
 
-`check` runs `ctest -L unit`, `check_all` runs `unit` and `integration`; both build the
+`check` runs `ctest -L unit`, `check_all` runs every label (`unit`, `integration`, `vocabulary`); both build the
 test binaries first. With `VOYAHSLAM_OPTIMIZE_TESTS=ON` (the default) the Debug tree
 compiles the libraries and tests with `-O2 -g` and keeps asserts on; configure with
 `-DVOYAHSLAM_OPTIMIZE_TESTS=OFF` to step through the code in a debugger. Each library
@@ -98,11 +98,36 @@ includes (so the `conan install` must run first).
 Datasets are TUM-VI style directories (e.g. `dataset-corridor1_1024_16`).
 
 ```
-build/build/Release/examples/full_slam/monocular_full_slam <dataset_root> [--rate=R] [--max-frames=N] [--show] [--viewer]
-build/build/Release/examples/full_slam/binocular_full_slam <dataset_root> [--rate=R] [--max-frames=N] [--show] [--viewer]
+build/build/Release/examples/full_slam/monocular_full_slam <dataset_root> [options]
+build/build/Release/examples/full_slam/binocular_full_slam <dataset_root> [options]
 ```
 
 - `--rate=R`: playback speed (1 = real time, 0 = as fast as possible)
 - `--max-frames=N`: stop after N frames
 - `--show`: show frames with keypoints (q / Esc quits)
 - `--viewer`: open the Pangolin 3D map viewer
+- `--trajectory_out <file>`: write the tracked poses (TUM format, camera-to-world); `tools/ate.py
+  <file> <dataset_root>/mav0/mocap0/data.csv` reports the ATE against the mocap
+- `--vocabulary <file.bin>`: bag-of-words vocabulary in our binary format (see below); without it
+  the Mapper matches by brute force when triangulating, which is much slower
+
+### Vocabulary (ORB-SLAM3's `ORBvoc.txt`)
+
+The vocabulary is not in this repository. Download `Vocabulary/ORBvoc.txt.tar.gz` from
+[github.com/UZ-SLAMLab/ORB_SLAM3](https://github.com/UZ-SLAMLab/ORB_SLAM3), extract it, and convert
+it once to the binary format (about 0.8 s; the 145 MB text becomes a 48 MB binary that loads in
+about 0.13 s):
+
+```
+tar -xzf ORBvoc.txt.tar.gz
+build/build/Release/tools/convert_vocabulary/convert_vocabulary ORBvoc.txt ORBvoc.bin
+build/build/Release/examples/full_slam/monocular_full_slam <dataset_root> --vocabulary ORBvoc.bin
+```
+
+`convert_vocabulary` reloads the binary and verifies it against the text. Its licence terms are
+not settled (`docs/TODO.md`), so do not commit or redistribute it. The DBoW2 equivalence test
+(ctest label `vocabulary`) runs only when `VOYAHSLAM_ORBVOC` points to `ORBvoc.txt`:
+
+```
+VOYAHSLAM_ORBVOC=/path/to/ORBvoc.txt ctest --test-dir build/build/Release -L vocabulary
+```

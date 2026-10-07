@@ -79,9 +79,13 @@ public:
 - The leaf it reaches is its word.
 - Each occurrence of a word adds that word's idf weight. The BowVector is
   then L1-normalised.
-- The FeatureVector files the feature index under the word's ancestor
-  `levels_up` levels above the leaf, or under the root if the tree is
-  shallower.
+- The FeatureVector files the feature index under the node its descent
+  passes at depth `L − levels_up`, or under the root if `levels_up ≥ L`.
+  *(amended: the original "the word's ancestor `levels_up` levels above the
+  leaf" holds only for full-depth leaves (depth L). A leaf shallower than
+  `L − levels_up` files its feature under the leaf itself (ruling B; DBoW2
+  leaves the node uninitialised there). ORBvoc has no such leaf for
+  `levels_up` 4.)*
 
 **Score** (DBoW2 `L1Scoring`): over the words both vectors share,
 `s = Σ (|a| + |b| − |a − b|)`, and the result is `s / 2`, in [0, 1] for
@@ -99,6 +103,11 @@ normalised input.
 - The header line is `k L scoring weighting`.
 - Each following line is a node, in id order from 1:
   `parent is_leaf d0 … d31 weight`, with the descriptor as decimal bytes.
+- *(amended: trailing blank lines are ignored. DBoW2's loader turns the
+  empty read after `ORBvoc.txt`'s trailing newline into a phantom leaf built
+  from uninitialised values (971 815 words instead of 971 814); our loader
+  omits it (ruling D). A feature DBoW2 would drop at that node gets a real
+  sibling's word with us.)*
 
 **Binary format** (ours, little-endian):
 
@@ -161,7 +170,11 @@ ORB-SLAM3's `cvRound`. Tests that pin exact descriptor bits are updated.
 - Text loader: a tiny DBoW2-format fixture parses; other scoring or weighting
   types are rejected.
 - `SearchByBoW`:
-  - its result is a subset of brute force on the same views;
+  - its matches are drawn only from shared-node pairs *(amended: was "its
+    result is a subset of brute force on the same views"; that is not a
+    general property, since fewer candidates can let the ratio test pass
+    where brute force fails (ruling F). The subset test holds for its scene
+    only)*;
   - with every feature under one node it equals brute force exactly.
 
 **Equivalence with DBoW2.**
