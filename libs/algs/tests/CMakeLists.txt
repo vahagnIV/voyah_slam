@@ -1,6 +1,7 @@
 voyah_add_test_binary(voyah_algs_tests
     LABEL unit
     SOURCES
+        bow/vocabulary_io_test.cpp
         bow/vocabulary_test.cpp
         estimators/essential_estimator_test.cpp
         estimators/homography_estimator_test.cpp
@@ -34,4 +35,9 @@ voyah_add_test_binary(voyah_algs_tests
 # Private sources root, for tests of private headers (optimization/projection.h).
 target_include_directories(voyah_algs_tests
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src
+)
+
+# Fixture directory (bow/data), found at test time.
+target_compile_definitions(voyah_algs_tests
+    PRIVATE VOYAH_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/bow/data"
 )

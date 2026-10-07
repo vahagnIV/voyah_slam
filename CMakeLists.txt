@@ -33,6 +33,9 @@ add_subdirectory(libs)
 # Visualization (development tool, links OpenCV)
 add_subdirectory(vizualization)
 
+# Tools
+add_subdirectory(tools/convert_vocabulary)
+
 # Examples
 add_subdirectory(examples)
 

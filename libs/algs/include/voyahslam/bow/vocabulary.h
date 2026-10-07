@@ -7,6 +7,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 #include <voyahslam/bow/bow_vector.h>
@@ -33,6 +35,18 @@ public:
     static Vocabulary FromTree(int k, int L, std::vector<NodeId> parents, TDescriptors descriptors,
                                std::vector<double> weights);
 
+    /// Loads a DBoW2 / ORB-SLAM text vocabulary (`k L scoring weighting`, then one line per
+    /// node: `parent is_leaf descriptor bytes... weight`). Only L1 scoring with TF-IDF weighting
+    /// and byte descriptors (ORB) are supported. Returns nullopt, after logging the reason, on
+    /// any malformed or inconsistent file; trailing blank lines are ignored.
+    static std::optional<Vocabulary> LoadText(const std::string& path);
+    /// Loads the checksummed binary format written by `SaveBinary`. Returns nullopt, after
+    /// logging the reason, on a wrong magic or descriptor size, truncation, a bad checksum or
+    /// an invalid tree.
+    static std::optional<Vocabulary> LoadBinary(const std::string& path);
+    /// Writes the binary format (little-endian; see docs/superpowers/specs/2026-10-07-bow-design.md).
+    [[nodiscard]] bool SaveBinary(const std::string& path) const;
+
     /// Converts descriptors to a BowVector (each occurrence of a word adds its idf weight,
     /// then L1 normalisation) and a FeatureVector that files feature i under the node its
     /// descent passes at depth `L - levels_up` (the root when `levels_up >= L`, the leaf
@@ -46,6 +60,12 @@ public:
     [[nodiscard]] size_t num_words() const { return num_words_; }
     [[nodiscard]] int k() const { return k_; }
     [[nodiscard]] int L() const { return L_; }
+    [[nodiscard]] size_t num_nodes() const { return parents_.size(); }
+    /// The node arrays in id order; entry 0 (the root) has parent 0, a zero descriptor and weight 0
+    /// unless built that way.
+    [[nodiscard]] const std::vector<NodeId>& parents() const { return parents_; }
+    [[nodiscard]] const TDescriptors& descriptors() const { return descriptors_; }
+    [[nodiscard]] const std::vector<double>& weights() const { return weights_; }
 
 private:
     static constexpr WordId kNoWord = std::numeric_limits<WordId>::max();
