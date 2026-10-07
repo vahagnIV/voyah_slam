@@ -73,9 +73,11 @@ struct FuseDecision {
 // features at levels [l - 1, l] within radius_factor * level_scale^l px whose
 // raw-px chi2 (sigma from the feature's level) passes chi2_mono, or, for a
 // feature with a right match in `stereo`, chi2_stereo over left u, v and
-// right u. The best descriptor distance must be <= th_low. When several points
-// pick the same feature, the closest descriptor wins (the lower id on a tie)
-// and the others get no decision. Decisions are in candidate order.
+// right u (strictly below the threshold). The best descriptor distance must be
+// <= th_low. When several points pick the same feature, the closest descriptor
+// wins (the lower id on a tie); a losing point gets no decision at all, it does
+// not fall back to its next-best feature. Decisions are in candidate order.
+// Precondition: the ids in `points` are unique.
 template <typename FE>
 [[nodiscard]] std::vector<FuseDecision> FuseMatches(
     const TMonocularMeasurement<FE>& frame_left, const geometry::RigidTransformation& T_cw,
@@ -155,7 +157,7 @@ template <typename FE>
                 squared_error += e_right * e_right;
                 chi2_limit = options.chi2_stereo;
             }
-            if (squared_error / (sigma * sigma) > chi2_limit) {
+            if (!(squared_error / (sigma * sigma) < chi2_limit)) {
                 continue;
             }
             const typename FE::TDescriptor candidate = frame_left.descriptors().col(j);

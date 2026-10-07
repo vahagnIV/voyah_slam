@@ -209,10 +209,13 @@ TEST(FuseMatchesTest, RejectsBehindOutsideAngleScaleChi2Descriptor) {
 
     {
         SCOPED_TRACE("behind");
-        // Mirrored through the camera centre: the same pixel under a pinhole.
-        std::vector<Candidate> candidates = {scene.MakeCandidate(kPoint, -kXc, MakeDescriptor(1))};
-        candidates[0].normal = -candidates[0].normal;
-        EXPECT_TRUE(Fuse(scene, none, candidates).empty());
+        // Mirrored through the camera centre: the same pixel under a pinhole,
+        // the normal along the view ray. A 180° ray limit leaves depth > 0 as
+        // the only gate that can reject it.
+        FuseOptions options;
+        options.max_ray_angle_deg = 180.0;
+        ASSERT_EQ(Fuse(scene, none, {scene.MakeCandidate(kPoint, kXc, MakeDescriptor(1))}, options).size(), 1U);
+        EXPECT_TRUE(Fuse(scene, none, {scene.MakeCandidate(kPoint, -kXc, MakeDescriptor(1))}, options).empty());
     }
     {
         SCOPED_TRACE("outside the image");
@@ -258,10 +261,36 @@ TEST(FuseMatchesTest, RejectsBehindOutsideAngleScaleChi2Descriptor) {
     {
         SCOPED_TRACE("chi2");
         Scene off = scene;
-        off.features[0].pixel = scene.Project(kXc) + geometry::TPoint2DF(2.5, 0.0);  // chi2 6.25, inside radius 3
+        off.features[0].pixel = scene.Project(kXc) + geometry::TPoint2DF(2.448, 0.0);  // chi2 5.9927, inside radius 3
         EXPECT_TRUE(Fuse(off, none, base).empty());
-        off.features[0].pixel = scene.Project(kXc) + geometry::TPoint2DF(2.4, 0.0);  // chi2 5.76
+        off.features[0].pixel = scene.Project(kXc) + geometry::TPoint2DF(2.447, 0.0);  // chi2 5.9878
         EXPECT_EQ(Fuse(off, none, base).size(), 1U);
+    }
+    {
+        SCOPED_TRACE("chi2 at the threshold");
+        // Identity pose and the feature on the exact projection: chi2 is
+        // exactly 0, so a 0 threshold must reject it (strict <).
+        Scene exact = scene;
+        exact.T_cw = geometry::RigidTransformation(geometry::TMatrix33F::Identity(), geometry::TVector3DF::Zero());
+        exact.features[0].pixel = exact.Project(kXc);
+        const std::vector<Candidate> candidates = {exact.MakeCandidate(kPoint, kXc, MakeDescriptor(1))};
+        FuseOptions options;
+        EXPECT_EQ(Fuse(exact, none, candidates, options).size(), 1U);
+        options.chi2_mono = 0.0;
+        EXPECT_TRUE(Fuse(exact, none, candidates, options).empty());
+    }
+    {
+        SCOPED_TRACE("level window");
+        // Reference at level 2 and the same distance: predicted level 2, so
+        // features at levels 1 and 2 qualify, 0 and 3 do not.
+        std::vector<Candidate> candidates = base;
+        candidates[0].reference.level = 2;
+        for (const auto& [level, accepted] : {std::pair{0, false}, {1, true}, {2, true}, {3, false}}) {
+            SCOPED_TRACE(level);
+            Scene leveled = scene;
+            leveled.features[0].level = level;
+            EXPECT_EQ(Fuse(leveled, none, candidates).size(), accepted ? 1U : 0U);
+        }
     }
     {
         SCOPED_TRACE("descriptor");
@@ -327,6 +356,10 @@ TEST(FuseMatchesTest, StereoUsesRightResidual) {
     const StereoView stereo{&right_points, &right_indices, cameras};
 
     right_points.col(0) = right_exact;
+    EXPECT_EQ(Fuse(scene, none, candidates, {}, stereo).size(), 1U);
+
+    // chi2 6.76: above the mono threshold, below the stereo one.
+    right_points.col(0) = right_exact + geometry::TPoint2DF(2.6, 0.0);
     EXPECT_EQ(Fuse(scene, none, candidates, {}, stereo).size(), 1U);
 
     right_points.col(0) = right_exact + geometry::TPoint2DF(5.0, 0.0);
