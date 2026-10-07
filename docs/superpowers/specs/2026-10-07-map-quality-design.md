@@ -40,18 +40,21 @@ After keyframes and map growth, mono tracking on corridor1 keeps one map for
 
 ## 1. Pipeline
 
-For each created Frame, in the Mapper thread:
+For each created Frame, in the Mapper thread (amended: ruling H, ORB-SLAM3
+LocalMapping order; the original "culling before creation" judged fresh
+points one Frame short):
 
-1. **Recent-point culling** (§4.1).
-2. **Frame creation**, as today: tracked observations, stereo close points,
-   triangulation.
-3. **Fusion** (§3).
-4. **Local BA** (§5). It is interrupted only by an urgent `FrameTracked`.
-5. **Frame culling** (§4.2).
+1. **The new Frame and its tracked observations** (`ProcessNewKeyFrame`).
+2. **Recent-point culling** (§4.1).
+3. **New points**, as today: stereo close points, triangulation.
+4. **Fusion** (§3).
+5. **Local BA** (§5). It is interrupted only by an urgent `FrameTracked`.
+6. **Frame culling** (§4.2).
 
 Two transactions are published per created Frame:
-- **T1** after steps 1–3: the new Frame, new points, culled points and fusion.
-- **T2** after steps 4–5: BA results and culled Frames.
+- **T1** after steps 1–4: the new Frame, its observations, culled points, new
+  points and fusion.
+- **T2** after steps 5–6: BA results and culled Frames.
 
 ## 2. `MapTransaction<FE>` — the only Mapper event type
 
@@ -89,6 +92,11 @@ After every transaction:
 - every observation refers to an existing Frame and an alive point;
 - the covisibility index agrees with the observations;
 - every alive point has ≥ 1 observation.
+
+(amended: ruling C) **Every point the Mapper removes is listed in
+`removed_points`**, including implicit ones — points left with no observation
+after observation removals, Frame culling or BA outliers. Consumers without
+observation data (the viewer) rely on it.
 
 **Point references.** When the reference observation of a point (used for
 scale prediction) is removed, the new reference is the remaining observation
@@ -188,14 +196,23 @@ count) are observed by ≥ 3 other Frames at the same or a finer level (level
 - An optional right-image measurement per observation, plus the rig
   (`std::optional<optimization::StereoCameras>` per Frame), so stereo
   observations use full stereo residuals.
-- An optional `const std::atomic<bool>* stop`, checked after every LM
-  iteration via g2o's force-stop flag.
+- (amended: rulings A, D) An optional `std::function<bool()> should_stop`
+  (null = never), evaluated once before the first iteration and after every
+  LM iteration. A stop before iterating leaves the poses unchanged. A flag
+  could not work: the Mapper thread itself runs BA, so nobody would set it;
+  the Mapper's callback reads the inbox's urgent counter.
 - `BaResult` reports `interrupted` and `stage_reached`:
   - 0 = stopped in the robust stage;
   - 1 = stopped in the plain stage;
   - 2 = finished.
+  (amended: ruling E) A stop right after the last robust iteration but before
+  the outlier deactivation reports stage 0 (outliers kept).
 
-Init BA passes no stop flag and behaves exactly as before.
+Init BA passes no stop callback and behaves exactly as before.
+
+(amended: rulings I, J) The cap of 20 optimized Frames counts the new Frame.
+BA is skipped when no free Frame has an observation or when no Frame would be
+fixed (ORB-SLAM3's gauge guard); transaction 2 is still published.
 
 **Iterations:** 5 robust, then 10 plain.
 
@@ -209,8 +226,10 @@ when `stage_reached ≥ 1`. Points left with no observations are removed.
 - The Mapper's inbox keeps an atomic count of urgent events: incremented on
   enqueue, decremented when drained. This is event infrastructure, not map
   data.
-- The stop flag is set while the count is > 0, so BA stops within one
-  iteration.
+- The stop callback returns true while the count is > 0, so BA stops within
+  one iteration (amended: ruling A). Only `AsyncObserver::TryPop` (and a
+  `Listener`) decrement the count; popping from the raw `queue()` bypasses
+  it.
 - Ordinary `FrameTracked` events never stop BA; drain-to-latest absorbs the
   backlog.
 

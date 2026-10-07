@@ -43,22 +43,29 @@ int main(int argc, char** argv) {
         // and the viewer's constructor may setenv (so it must run first).
         std::optional<voyahviz::ImageWindow> window;
         if (options.show) window.emplace("monocular_full_slam");
+        // Declared before slam for the same reason as the viewer.
+        std::optional<full_slam::TrajectoryWriter<TFeatureExtractor>> trajectory;
+        if (!options.trajectory_out.empty()) trajectory.emplace(options.trajectory_out);
         TSlam slam;
         // Also when an exception unwinds: stop the producers, then the viewer
-        // (its final drain recycles events into slam's pools), all before
-        // ~Slam destroys those pools. Both Stop()s are idempotent, so the
-        // explicit stops below on the normal path are fine.
+        // and the trajectory (their final drains recycle events into slam's
+        // pools), all before ~Slam destroys those pools. Stop() and Poll()
+        // are idempotent, so the explicit calls below on the normal path are
+        // fine.
         struct StopAll {
             TSlam& slam;
             voyahviz::MapViewer<TFeatureExtractor>& viewer;
+            std::optional<full_slam::TrajectoryWriter<TFeatureExtractor>>& trajectory;
             ~StopAll() {
                 slam.Stop();
                 viewer.Stop();
+                if (trajectory) trajectory->Poll();
             }
-        } stop_all{slam, viewer};
+        } stop_all{slam, viewer, trajectory};
         // Wire before Start().
         slam.tracker().AddObserver(viewer.inbox());
         slam.mapper().AddObserver(viewer.inbox());
+        if (trajectory) slam.tracker().AddObserver(trajectory->inbox());
         viewer.Start();
         slam.Start();
 
@@ -82,6 +89,7 @@ int main(int argc, char** argv) {
                                                        camera.distortion));
             }
             slam.tracker().Track(std::move(measurement));
+            if (trajectory) trajectory->Poll();
 
             stats.Add(lateness, loaded - start, extracted - loaded, num_features);
             if (window && full_slam::IsQuitKey(window->WaitKey(1))) {
@@ -103,6 +111,11 @@ int main(int argc, char** argv) {
         slam.Stop();
         viewer.Stop();
         stats.Print(std::cout);
+        if (trajectory) {
+            trajectory->Poll();
+            std::cout << "trajectory: " << trajectory->num_poses() << " poses written to "
+                      << options.trajectory_out << "\n";
+        }
         std::cout << "tracker state: " << full_slam::StateName(slam.tracker().state()) << "\n"
                   << "mapper state: " << full_slam::StateName(slam.mapper().state()) << "\n";
         std::cout << "viewer: " << viewer.events_processed() << " events processed\n";

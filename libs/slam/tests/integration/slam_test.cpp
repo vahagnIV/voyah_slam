@@ -6,6 +6,7 @@
 #include <voyahslam/features/orb_feature_extractor.h>
 #include <voyahslam/features/sift_feature_extractor.h>
 #include <voyahslam/slam/slam.h>
+#include <voyahslam/tracking/map_replica.h>
 
 #include <gtest/gtest.h>
 
@@ -75,7 +76,8 @@ TEST(SlamTest, TrackEnqueuesMonocularAndBinocularMeasurements) {
 }
 
 // Records the map ids of the protocol events published by the Mapper and the
-// Tracker, read through external observers.
+// Tracker, read through external observers, and keeps a replica of the
+// Mapper's map.
 class ProtocolRecorder {
 public:
     // Before slam.Start().
@@ -92,6 +94,7 @@ public:
             }
             const auto& transaction =
                 *static_cast<events::MapTransaction<features::OrbFeatureExtractor>*>(event);
+            replica.Apply(*event);
             const uint32_t map = event->map_id.value;
             const bool announced = !map_created.empty() && map_created.back() == map;
             if (transaction.new_map) {
@@ -148,6 +151,8 @@ public:
     std::vector<StampedPose> keyframes;  // added Frames, in publication order
     std::vector<size_t> transaction_new_points;  // per transaction, in publication order
     std::vector<StampedPose> positions;
+    // The Mapper's current map, rebuilt from its transactions.
+    tracking::MapReplica<features::OrbFeatureExtractor> replica;
 
 private:
     // Listeners after their observers: destroyed first, releasing the
@@ -402,11 +407,10 @@ TEST(SlamTest, EndToEndStereoInitializeTrackLoseReinitialize) {
 // through a 10 m room and turns 90 deg towards +x, so the last frames see
 // only a wall the first frames never saw.
 //
-// Error bounds: without local BA (sub-project 3) every new Frame and point
-// inherits the pose noise, so the error random-walks with the 0.5 px pixel
-// noise. Measured: 1.21 m mono (20 % of the 5.95 m path) and 0.15 m stereo;
-// 0 for both without pixel noise. The bounds (30 % of the path, 0.3 m) leave
-// a 1.5x margin; the plan's 5 % and 2 cm wait for local BA (docs/TODO.md).
+// Error bounds: 1.5x the largest of three measured runs with local BA
+// (2026-10-07): mono 0.159 / 0.129 / 0.166 m (2.8 % of the 5.95 m path at
+// worst; 1.21 m without local BA), stereo 0.0247 / 0.0248 / 0.0248 m
+// (0.15 m without).
 test::SyntheticSequenceOptions LeavingInitialViewOptions() {
     test::SyntheticSequenceOptions options;
     options.num_frames = 120;
@@ -440,10 +444,61 @@ double MaxCentreError(const ProtocolRecorder& recorder, uint32_t map,
     return max_error;
 }
 
-// Feeds a sequence to a running Slam: the first `init_frames` frames build
-// the map, then every later frame must be tracked. Expects map 1 only, no
-// TrackingLost, more than the initial Frames and points, and a centre error
-// within `max_error`.
+// What a run left behind, read after the Slam stopped.
+struct RunCounts {
+    size_t tracked_before = 0;  // FrameTracked before the frames to track were fed
+    size_t num_keyframes = 0;   // the Mapper's
+    size_t num_map_points = 0;  // the Mapper's
+};
+
+// Feeds a sequence to a new Slam: the first `init_frames` frames build the
+// map, then every later frame is fed once it tracks. Returns when every frame
+// is tracked or tracking is lost, with the Slam stopped and `out_recorder`
+// drained.
+template <typename TSequence>
+void RunSequence(const TSequence& sequence, size_t init_frames,
+                 const mapping::MapperOptions& mapper_options, ProtocolRecorder& out_recorder,
+                 RunCounts& out_counts) {
+    // Lifetimes as in EndToEndInitializeTrackLoseReinitialize.
+    OrbSlam slam(mapper_options);
+    out_recorder.Attach(slam);
+    struct StopAndDrain {
+        OrbSlam& slam;
+        ProtocolRecorder& recorder;
+        ~StopAndDrain() {
+            slam.Stop();
+            recorder.Poll();
+        }
+    } stop_and_drain{slam, out_recorder};
+    slam.Start();
+
+    // The Tracker forwards frames to the Mapper until the map arrives, so the
+    // frames to track are fed only once it tracks.
+    for (size_t i = 0; i < init_frames; ++i) {
+        slam.tracker().Track(sequence.frames[i].measurement);
+    }
+    ASSERT_TRUE(out_recorder.WaitFor(
+        [&] { return slam.tracker().state() == tracking::TrackerState::Tracking; },
+        std::chrono::seconds(120)));
+    out_counts.tracked_before = out_recorder.positions.size();
+    for (size_t i = init_frames; i < sequence.frames.size(); ++i) {
+        slam.tracker().Track(sequence.frames[i].measurement);
+    }
+    const size_t to_track = sequence.frames.size() - init_frames;
+    ASSERT_TRUE(out_recorder.WaitFor(
+        [&] {
+            return !out_recorder.tracking_lost.empty() ||
+                   out_recorder.positions.size() >= out_counts.tracked_before + to_track;
+        },
+        std::chrono::seconds(120)));
+    slam.Stop();
+    out_recorder.Poll();
+    out_counts.num_keyframes = slam.mapper().num_keyframes();
+    out_counts.num_map_points = slam.mapper().num_map_points();
+}
+
+// Runs RunSequence and expects map 1 only, no TrackingLost, more than the
+// initial Frames and points, and a centre error within `max_error`.
 template <typename TSequence>
 void ExpectMapGrowsWhileLeavingInitialView(const TSequence& sequence, size_t init_frames,
                                            bool monocular,
@@ -452,50 +507,20 @@ void ExpectMapGrowsWhileLeavingInitialView(const TSequence& sequence, size_t ini
     std::vector<geometry::RigidTransformation> truth;
     for (const auto& frame : sequence.frames) truth.push_back(frame.T_cw);
 
-    // Lifetimes as in EndToEndInitializeTrackLoseReinitialize.
     ProtocolRecorder recorder;
-    OrbSlam slam(mapper_options);
-    recorder.Attach(slam);
-    struct StopAndDrain {
-        OrbSlam& slam;
-        ProtocolRecorder& recorder;
-        ~StopAndDrain() {
-            slam.Stop();
-            recorder.Poll();
-        }
-    } stop_and_drain{slam, recorder};
-    slam.Start();
-
-    // The Tracker forwards frames to the Mapper until the map arrives, so the
-    // frames to track are fed only once it tracks.
-    for (size_t i = 0; i < init_frames; ++i) {
-        slam.tracker().Track(sequence.frames[i].measurement);
-    }
-    ASSERT_TRUE(recorder.WaitFor(
-        [&] { return slam.tracker().state() == tracking::TrackerState::Tracking; },
-        std::chrono::seconds(120)));
-    const size_t tracked_before = recorder.positions.size();
-    for (size_t i = init_frames; i < sequence.frames.size(); ++i) {
-        slam.tracker().Track(sequence.frames[i].measurement);
-    }
-    const size_t to_track = sequence.frames.size() - init_frames;
-    ASSERT_TRUE(recorder.WaitFor(
-        [&] {
-            return !recorder.tracking_lost.empty() ||
-                   recorder.positions.size() >= tracked_before + to_track;
-        },
-        std::chrono::seconds(120)));
-    slam.Stop();
-    recorder.Poll();
+    RunCounts counts;
+    RunSequence(sequence, init_frames, mapper_options, recorder, counts);
+    if (::testing::Test::HasFatalFailure()) return;
 
     EXPECT_TRUE(recorder.tracking_lost.empty());
-    EXPECT_EQ(recorder.positions.size() - tracked_before, to_track);
+    EXPECT_EQ(recorder.positions.size() - counts.tracked_before,
+              sequence.frames.size() - init_frames);
     EXPECT_EQ(recorder.map_created, std::vector<uint32_t>{1});
     ASSERT_GE(recorder.keyframes.size(), monocular ? 2u : 1u);
     // The new-map transaction carries every initial point.
     const size_t initial_points = recorder.transaction_new_points.at(0);
-    EXPECT_GT(slam.mapper().num_keyframes(), 2u);
-    EXPECT_GT(slam.mapper().num_map_points(), initial_points);
+    EXPECT_GT(counts.num_keyframes, 2u);
+    EXPECT_GT(counts.num_map_points, initial_points);
     EXPECT_LE(MaxCentreError(recorder, 1, truth, monocular), max_error);
 }
 
@@ -505,11 +530,10 @@ TEST(SlamTest, MonoMapGrowsWhileLeavingInitialView) {
     // As in EndToEndInitializeTrackLoseReinitialize: a well-conditioned initial map.
     mapping::MapperOptions mapper_options;
     mapper_options.initializer.reconstruction.min_parallax_deg = 4.0;
-    const double path_length = static_cast<double>(options.num_frames - 1) * options.step;
     // The map is initialized within the first 30 frames. Error bound: see
     // LeavingInitialViewOptions.
     ExpectMapGrowsWhileLeavingInitialView(sequence, /*init_frames=*/30, /*monocular=*/true,
-                                          mapper_options, 0.3 * path_length);
+                                          mapper_options, 1.5 * 0.166);
 }
 
 TEST(SlamTest, StereoMapGrowsWhileLeavingInitialView) {
@@ -523,8 +547,57 @@ TEST(SlamTest, StereoMapGrowsWhileLeavingInitialView) {
     // The room's first view has about 200 features (a real stereo map needs
     // 500).
     mapper_options.initializer.stereo_min_features = 150;
+    // Error bound: see LeavingInitialViewOptions.
     ExpectMapGrowsWhileLeavingInitialView(sequence, /*init_frames=*/1, /*monocular=*/false,
-                                          mapper_options, 0.3);
+                                          mapper_options, 1.5 * 0.0248);
+}
+
+// The stereo leave-the-view run: every Frame adds close points for the
+// stereo features the Tracker did not match, and pixel noise makes it miss
+// some, so the map would gather duplicates and points seen by too few Frames
+// (measured without fusion: 43 % of the points with >= 3 observations, 112
+// point pairs with descriptors within 10 bits; with it 78-86 % and about 18
+// such pairs, which fusion's gates leave, see docs/TODO.md). Fusion merges
+// them. With pixel noise, twins lie centimetres apart, so the 1 mm
+// test only catches exact copies; without noise the run creates none.
+TEST(SlamTest, DuplicatesFusedInLongSequence) {
+    test::SyntheticStereoSequenceOptions options;
+    options.trajectory = LeavingInitialViewOptions();
+    options.trajectory.num_points = 700;  // as StereoMapGrowsWhileLeavingInitialView
+    const test::SyntheticStereoSequence sequence = test::MakeSyntheticStereoSequence(options);
+    mapping::MapperOptions mapper_options;
+    mapper_options.initializer.stereo_min_features = 150;
+
+    ProtocolRecorder recorder;
+    RunCounts counts;
+    RunSequence(sequence, /*init_frames=*/1, mapper_options, recorder, counts);
+    if (HasFatalFailure()) return;
+    EXPECT_TRUE(recorder.tracking_lost.empty());
+    EXPECT_EQ(recorder.map_created, std::vector<uint32_t>{1});
+
+    const auto& replica = recorder.replica;
+    ASSERT_TRUE(replica.CheckConsistency());
+    std::vector<map::MapPointId> alive;
+    for (uint32_t id = 0; id < replica.num_points(); ++id) {
+        if (replica.IsAlive(map::MapPointId{id})) alive.push_back(map::MapPointId{id});
+    }
+    ASSERT_EQ(alive.size(), counts.num_map_points);
+    const auto well_observed = std::count_if(alive.begin(), alive.end(), [&](map::MapPointId point) {
+        return replica.covisibility().NumObservations(point) >= 3;
+    });
+    EXPECT_GE(2 * static_cast<size_t>(well_observed), alive.size());
+
+    size_t duplicates = 0;
+    for (size_t i = 0; i < alive.size(); ++i) {
+        for (size_t j = i + 1; j < alive.size(); ++j) {
+            if ((replica.Position(alive[i]) - replica.Position(alive[j])).norm() < 1e-3 &&
+                features::OrbFeatureExtractor::Distance(replica.Descriptor(alive[i]),
+                                                        replica.Descriptor(alive[j])) <= 10) {
+                ++duplicates;
+            }
+        }
+    }
+    EXPECT_EQ(duplicates, 0u) << "of " << alive.size() << " points";
 }
 
 } // namespace

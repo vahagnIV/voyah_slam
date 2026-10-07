@@ -5,7 +5,8 @@ execution; nothing is merged without an explicit "merge and push".
 
 Done: tracking (sub-project 1), camera model (raw-pixel residuals),
 keyframes and map growth (sub-project 2, merged b93fcf4), restructure
-(step 0, merged 7426697).
+(step 0, merged 7426697), map quality (step 1, branch `feat/map-quality`,
+merge pending).
 
 ## 0. Restructure (done 2026-10-07)
 
@@ -41,7 +42,27 @@ test loop.
   Today the full suite is 458 tests / 76 s at `-j8`, dominated by ~5 tests of
   33–63 s each.
 
-## 1. Map quality (sub-project 3)
+## 1. Map quality (sub-project 3) (done 2026-10-07)
+
+**Result:** every Mapper change is one `MapTransaction` (two per created
+Frame); fusion (`SearchInNeighbors`), recent-point culling, observation
+removal, Frame culling and a local BA in the Mapper thread that an urgent
+`FrameTracked` interrupts. Apps write their trajectory (`--trajectory_out`)
+and `tools/ate.py` reports ATE against the mocap. Smoke on corridor1
+(Release, two runs each):
+
+| Run | Before | After |
+|---|---|---|
+| Mono 400 | 2 maps, first lost after 129 tracked frames, 3 Frames created | **1 map** from initialization (frame 118) to the end, 281–282 tracked, 64–68 Frames created / 41–45 culled, ATE Sim3 0.032–0.033 m |
+| Stereo 1000 | 1–3 maps (lost at ~360 in two of four runs) | 1 map, no loss, 999 tracked, 280–297 Frames created / 73–89 culled, ATE SE3 0.036–0.037 m |
+
+Local BA about 105 ms (mono) / 135 ms (stereo) per Frame, interrupted once
+per stereo run; a Mapper pass about 250 ms. Synthetic leave-the-view error
+bounds tightened from 30 % of the path / 0.3 m to 0.249 m (4.2 %) / 0.037 m.
+Spec: `docs/superpowers/specs/2026-10-07-map-quality-design.md`; see DESIGN
+"Map Quality" and the 2026-10-07 decisions-log entries.
+
+The step as agreed:
 
 Fusion (`SearchInNeighbors`), recent-point culling, `ObservationsRemoved`,
 Frame culling, interruptible local BA. Fixes the mono Frame-creation stall
@@ -65,6 +86,7 @@ Plus reference-Frame tracking. Fixes the stereo loss in fast rotation
 
 Detection in the LoopCloser thread (BoW + Sim3/SE3 verification); correction
 in the Mapper (fusion, essential graph, global BA).
+Global BA runs in its own thread (local BA stays in the Mapper; TODO).
 
 ## 5. Map merging (multi-map Atlas)
 
