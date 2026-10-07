@@ -25,3 +25,7 @@ voyah_add_test_binary(voyah_common_tests
         voyah_test_support
         ${OpenCV_LIBS}
 )
+
+# Tells BuildConfigTest.AssertsEnabled whether asserts must be on (Debug).
+target_compile_definitions(voyah_common_tests PRIVATE
+    VOYAH_EXPECT_ASSERTS=$<IF:$<CONFIG:Debug>,1,0>)

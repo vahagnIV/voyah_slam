@@ -38,13 +38,13 @@ function(voyah_add_check_targets)
     get_property(binaries GLOBAL PROPERTY VOYAH_TEST_BINARIES)
     # Fast loop: unit tests only.
     add_custom_target(check
-        COMMAND ${CMAKE_CTEST_COMMAND} -L unit -j8 --timeout 120 --output-on-failure
+        COMMAND ${CMAKE_CTEST_COMMAND} -L unit -C $<CONFIG> -j8 --timeout 120 --output-on-failure
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         USES_TERMINAL
     )
     # Every test: end of each task and before every merge.
     add_custom_target(check_all
-        COMMAND ${CMAKE_CTEST_COMMAND} -j8 --timeout 300 --output-on-failure
+        COMMAND ${CMAKE_CTEST_COMMAND} -C $<CONFIG> -j8 --timeout 300 --output-on-failure
         WORKING_DIRECTORY ${CMAKE_BINARY_DIR}
         USES_TERMINAL
     )

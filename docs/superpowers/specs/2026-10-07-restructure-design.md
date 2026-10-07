@@ -1,7 +1,7 @@
 # Restructure into Four Libraries and a Fast Test Loop — Design Spec
 
 Date: 2026-10-07
-Status: approved in conversation, pending spec review
+Status: approved; implemented on feat/restructure (2026-10-07)
 Roadmap: step 0 in `docs/ROADMAP.md`
 
 ## Context and Scope
