@@ -2,6 +2,7 @@
 
 Lock-free, event-driven, ORB-SLAM3-inspired SLAM library (C++20, Eigen, Conan 2).
 
+The ordered plan of next steps is in `docs/ROADMAP.md`.
 Pending work is tracked in `docs/TODO.md` — check it, and add items there
 whenever something is deferred.
 
