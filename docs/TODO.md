@@ -20,6 +20,22 @@ as soon as they come up.
       `check_all` or build `all` before merging (restructure final review,
       2026-10-07). The "Library layout" block sits under DESIGN §7 "Coding
       Conventions"; give it its own section.
+- [ ] Map-quality final-review follow-ups (2026-10-07):
+  - Long runs scale with point ids ever issued, not live points: fusion and
+    culling make ids ~6× the live points, the Tracker scans all ids per frame.
+    Estimate for 5000 stereo frames: ~140 MB and ~540k ids scanned per frame
+    (see OQ 2); compact or index live points.
+  - BA outlier removal keeps a point with 1 observation (removes only at 0);
+    Frame culling removes below 2. Align (ORB-SLAM3 removes < 2 in culling only).
+  - An urgent event during T1 stops BA before its first iteration, yet T2 still
+    republishes every unchanged pose and point; skip unchanged entries.
+  - Test the Mapper's fallback when `reference_frame_id` names a culled Frame.
+  - After a merge, `last_frame_` matches can hold one point on two features
+    (ORB-SLAM3 too); dedupe.
+  - Stale text: older DESIGN sections (initialization publication order,
+    "Keyframes and Map Growth" fast pickup / viewer lines) and some TODO items
+    still name `KeyFrameCreated` / `MapCreated` as current.
+  - `tools/ate.py` ignores the camera–body lever arm (few cm).
 
 ## ORB extractor (OQ 21)
 
