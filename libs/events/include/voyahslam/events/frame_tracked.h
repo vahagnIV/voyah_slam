@@ -36,6 +36,9 @@ struct FrameTracked
     TrackingStage stage = TrackingStage::MotionModel;
     uint32_t num_matches = 0;  // before the final pose optimization
     uint32_t num_inliers = 0;  // after it
+    // Weakly tracked (few inliers): the Mapper should answer promptly. Mirrors
+    // Event::priority; the Tracker sets both on every publish.
+    bool urgent = false;
 
     // Called by the pool on reuse; keeps the vectors' capacity.
     void Reset() {
@@ -48,6 +51,8 @@ struct FrameTracked
         stage = TrackingStage::MotionModel;
         num_matches = 0;
         num_inliers = 0;
+        urgent = false;
+        priority = false;
     }
 
     FrameTracked()

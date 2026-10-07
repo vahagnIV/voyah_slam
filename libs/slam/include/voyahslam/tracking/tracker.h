@@ -47,8 +47,16 @@ struct TrackingOptions {
     double fallback_window_scale = 4.0; // zero-motion fallback window factor
     double local_map_th = 1.0;          // local-map search window factor
     size_t min_local_map_inliers = 30;
+    // A frame with fewer than urgent_inlier_factor * min_local_map_inliers
+    // inliers is published urgent (default: below 45).
+    double urgent_inlier_factor = 1.5;
     size_t local_neighbours = 10;       // K2: top covisible Frames per K1 Frame
     size_t max_local_frames = 80;       // local-map Frames, K1 first
+
+    [[nodiscard]] bool IsUrgent(size_t num_inliers) const {
+        return static_cast<double>(num_inliers) <
+               urgent_inlier_factor * static_cast<double>(min_local_map_inliers);
+    }
 };
 
 struct TrackerOptions {

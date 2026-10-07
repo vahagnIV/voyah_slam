@@ -69,7 +69,7 @@ bool Mapper<TFeatureExtractor>::ProcessPending() {
     // The whole batch is drained first, so a FrameTracked can see whether a
     // newer one follows it (drain to latest, spec section 3.1).
     events::Event* event = nullptr;
-    while (inbox_.queue().try_dequeue(event)) {
+    while (inbox_.TryPop(event)) {
         batch_.push_back(event);
     }
     if (batch_.empty()) {
@@ -302,6 +302,7 @@ void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureE
 
     auto* created = transaction_pool_.Create();
     created->map_id = current_map_id();
+    created->priority = false;
     events::NewFrame<TFeatureExtractor>& frame_part = AddFramePart(keyframe, *created);
     // New points take the contiguous ids from here.
     const map::MapPointId first_new{map_points_.num_ids()};
@@ -622,6 +623,7 @@ template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::PublishNewMap() {
     auto* event = transaction_pool_.Create();
     event->map_id = current_map_id();
+    event->priority = false;
     event->new_map = true;
     event->start_frame = keyframes_.back().id();
     for (const TKeyFrame& keyframe : keyframes_) {

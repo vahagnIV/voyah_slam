@@ -117,6 +117,22 @@ TEST_F(TrackerTest, TracksAndPublishesFrameTracked) {
     EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
 }
 
+TEST_F(TrackerTest, UrgentWhenInliersNearGate) {
+    const TrackingOptions options;
+    EXPECT_TRUE(options.IsUrgent(40));
+    EXPECT_FALSE(options.IsUrgent(60));
+    EXPECT_TRUE(options.IsUrgent(44));
+    EXPECT_FALSE(options.IsUrgent(45));
+
+    // The published event mirrors the rule, in both flags.
+    const auto sequence = StereoSequence();
+    ASSERT_EQ(InitializeStereo(sequence, 0), 0u);
+    const auto captured = Feed(sequence.frames[1].measurement);
+    ASSERT_EQ(captured.size(), 1u);
+    EXPECT_EQ(captured[0].urgent, options.IsUrgent(captured[0].num_inliers));
+    EXPECT_EQ(captured[0].priority, captured[0].urgent);
+}
+
 TEST_F(TrackerTest, FrameTrackedCarriesLocalMap) {
     const test::SyntheticSequence sequence = test::MakeSyntheticSequence();
     size_t k = 0;

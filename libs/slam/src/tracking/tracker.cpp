@@ -389,6 +389,7 @@ template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::PublishInitializationMeasurement(TMeasurement& measurement) {
     auto* event = initialization_measurement_pool_.Create();
     event->map_id = map::MapId{0};
+    event->priority = false;
     event->measurement = std::move(measurement);
     observable_.Notify(event);
 }
@@ -397,6 +398,7 @@ template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::PublishFrameTracked(const PoseResult& pose) {
     auto* event = frame_tracked_pool_.Create();
     event->map_id = current_map_id();
+    event->priority = false;
     event->timestamp = TimestampOf(last_frame_.measurement);
     event->pose = last_frame_.T_cw;
     event->measurement = last_frame_.measurement;
@@ -413,6 +415,8 @@ void Tracker<TFeatureExtractor>::PublishFrameTracked(const PoseResult& pose) {
     event->stage = pose.stage;
     event->num_matches = static_cast<uint32_t>(pose.num_matches);
     event->num_inliers = static_cast<uint32_t>(pose.num_inliers);
+    event->urgent = options_.tracking.IsUrgent(pose.num_inliers);
+    event->priority = event->urgent;
     observable_.Notify(event);
 }
 
@@ -420,6 +424,7 @@ template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::PublishTrackingLost(double timestamp) {
     auto* event = tracking_lost_pool_.Create();
     event->map_id = current_map_id();
+    event->priority = false;
     event->timestamp = timestamp;
     observable_.Notify(event);
 }

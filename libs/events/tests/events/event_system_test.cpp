@@ -423,3 +423,66 @@ TEST(EventSystemTest, NewFrameHoldsMonoOrStereo) {
 
 } // namespace
 } // namespace voyahslam::events
+
+namespace voyahslam::events {
+namespace {
+
+TEST(AsyncObserverTest, PriorityCountTracksPushPop) {
+    memory::ObjectPool<OrbFrameTracked, memory::ThreadSafePolicy> pool(3);
+    AsyncObserver observer;
+    auto listener = observer.GetListener();
+    auto* a = pool.Create();
+    auto* b = pool.Create();
+    auto* c = pool.Create();
+    a->priority = true;
+    b->priority = false;
+    c->priority = true;
+    for (Event* e : {static_cast<Event*>(a), static_cast<Event*>(b), static_cast<Event*>(c)}) {
+        e->set_ref_count_(e, 1);
+    }
+    EXPECT_EQ(observer.pending_priority(), 0u);
+    observer.Push(a);
+    EXPECT_EQ(observer.pending_priority(), 1u);
+    observer.Push(b);
+    EXPECT_EQ(observer.pending_priority(), 1u);
+    observer.Push(c);
+    EXPECT_EQ(observer.pending_priority(), 2u);
+    EXPECT_EQ(&observer.pending_priority_counter(), &observer.pending_priority_counter());
+
+    EXPECT_EQ(listener.GetNextEvent(), a);
+    EXPECT_EQ(observer.pending_priority(), 1u);
+    EXPECT_EQ(listener.GetNextEvent(), b);
+    EXPECT_EQ(observer.pending_priority(), 1u);
+    EXPECT_EQ(listener.GetNextEvent(), c);
+    EXPECT_EQ(observer.pending_priority(), 0u);
+    EXPECT_EQ(listener.GetNextEvent(), nullptr);
+    EXPECT_EQ(observer.pending_priority(), 0u);
+}
+
+TEST(AsyncObserverTest, TryPopDecrementsAndReusedEventIsNotCounted) {
+    memory::ObjectPool<OrbFrameTracked, memory::ThreadSafePolicy> pool(1);
+    AsyncObserver observer;
+    auto* event = pool.Create();
+    event->priority = true;
+    event->set_ref_count_(event, 1);
+    observer.Push(event);
+    ASSERT_EQ(observer.pending_priority(), 1u);
+    Event* popped = nullptr;
+    ASSERT_TRUE(observer.TryPop(popped));
+    EXPECT_EQ(observer.pending_priority(), 0u);
+    popped->recycle_(popped);
+
+    auto* reused = pool.Create();
+    ASSERT_EQ(reused, event);
+    reused->priority = false;  // the producer resets it on every publish
+    reused->set_ref_count_(reused, 1);
+    observer.Push(reused);
+    EXPECT_EQ(observer.pending_priority(), 0u);
+    ASSERT_TRUE(observer.TryPop(popped));
+    EXPECT_EQ(observer.pending_priority(), 0u);
+    popped->recycle_(popped);
+    EXPECT_FALSE(observer.TryPop(popped));
+}
+
+}  // namespace
+}  // namespace voyahslam::events
