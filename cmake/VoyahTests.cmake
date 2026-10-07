@@ -5,10 +5,22 @@
 #   discovered with the ctest label LABEL. `check` and `check_all` depend on
 #   every binary added this way.
 #
+# voyah_optimize_target(<target>)  (see below; applied to every test binary)
+#
 # voyah_add_check_targets()
 #   Call once, after every test binary has been added.
 
 include(GoogleTest)
+
+# voyah_optimize_target(<target>)
+#   With VOYAHSLAM_OPTIMIZE_TESTS ON and a Debug build, compiles <target> with
+#   -O2 (keeping -g; NDEBUG stays undefined, so asserts remain on).
+function(voyah_optimize_target target)
+    if(VOYAHSLAM_OPTIMIZE_TESTS)
+        target_compile_options(${target} PRIVATE
+            $<$<CONFIG:Debug>:-O2>)
+    endif()
+endfunction()
 
 function(voyah_add_test_binary name)
     cmake_parse_arguments(PARSE_ARGV 1 ARG "" "LABEL" "SOURCES;LIBS")
@@ -16,6 +28,7 @@ function(voyah_add_test_binary name)
         message(FATAL_ERROR "voyah_add_test_binary(${name}): LABEL must be unit or integration")
     endif()
     add_executable(${name} ${ARG_SOURCES})
+    voyah_optimize_target(${name})
     target_link_libraries(${name} PRIVATE ${ARG_LIBS} GTest::gtest_main)
     gtest_discover_tests(${name} PROPERTIES LABELS ${ARG_LABEL} DISCOVERY_TIMEOUT 60)
     set_property(GLOBAL APPEND PROPERTY VOYAH_TEST_BINARIES ${name})

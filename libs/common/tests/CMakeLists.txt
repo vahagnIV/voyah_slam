@@ -3,6 +3,7 @@ voyah_add_test_binary(voyah_common_tests
     LABEL unit
     SOURCES
         algebra/algebra_test.cpp
+        build_config_test.cpp
         features/binocular_measurement_test.cpp
         features/image_features_test.cpp
         features/monocular_measurement_test.cpp

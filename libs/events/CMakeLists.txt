@@ -3,6 +3,8 @@ add_library(voyah_events STATIC
     src/events/worker_thread.cpp
 )
 
+voyah_optimize_target(voyah_events)
+
 target_include_directories(voyah_events
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
 )

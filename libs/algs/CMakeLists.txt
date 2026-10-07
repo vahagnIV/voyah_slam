@@ -22,6 +22,8 @@ add_library(voyah_algs STATIC
     src/optimization/pose_optimization.cpp
 )
 
+voyah_optimize_target(voyah_algs)
+
 target_include_directories(voyah_algs
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src

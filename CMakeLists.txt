@@ -20,6 +20,9 @@ else()
     set(VOYAHSLAM_CONCURRENTQUEUE_TARGET concurrentqueue::concurrentqueue)
 endif()
 
+option(VOYAHSLAM_OPTIMIZE_TESTS
+    "Compile voyah libraries and tests with -O2 in Debug" ON)
+
 enable_testing()
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 include(VoyahTests)

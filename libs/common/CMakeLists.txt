@@ -9,6 +9,8 @@ add_library(voyah_common STATIC
     src/map/covisibility_index.cpp
 )
 
+voyah_optimize_target(voyah_common)
+
 target_include_directories(voyah_common
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
 )

@@ -11,6 +11,8 @@ add_library(voyahviz STATIC
     src/pangolin_renderer.cpp
 )
 
+voyah_optimize_target(voyahviz)
+
 target_include_directories(voyahviz
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
 )

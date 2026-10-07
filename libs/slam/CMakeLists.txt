@@ -9,6 +9,8 @@ add_library(voyah_slam STATIC
     src/slam/slam.cpp
 )
 
+voyah_optimize_target(voyah_slam)
+
 target_include_directories(voyah_slam
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src

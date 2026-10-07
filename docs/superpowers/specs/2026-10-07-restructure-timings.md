@@ -107,3 +107,28 @@ Notes:
 - `ObjectPoolDeathTest.PoolExhaustion` (1.09 s in both builds) is above 1 s in (b) but stays
   `unit` (Ruling E): it is a fixed-cost death test, not compute-bound and not a pipeline test.
 - `TrackerTest.TracksSyntheticStereo` is the only Tracker/Mapper test above 1 s in (b). Other threaded Tracker/Mapper sequences (spec §3) are for the Task owner to pick by name from the 0.5 s table above (all are under 0.5 s in (b) except `TrackerTest.NewMapResetsTrackingState`, 0.51 s).
+
+## Task 7: `VOYAHSLAM_OPTIMIZE_TESTS` ON, Debug tree
+
+Date: 2026-10-07. Tree `cmake-build-debug/build/Debug` re-configured; the option (default ON) adds
+`-O2` after `-g` to `voyah_common`, `voyah_events`, `voyah_algs`, `voyah_slam`,
+`voyah_test_support`, `voyahviz` and every test binary. `NDEBUG` stays undefined;
+`BuildConfigTest.AssertsEnabled` reports PASSED (not SKIPPED). Dependencies (g2o etc.) and
+examples are unchanged.
+
+| Target | Before (Debug, no option) | After (Debug, option ON) | Spec target |
+|---|---|---|---|
+| `check` (`ctest -L unit -j8`) | 448 tests, 45.3 s | 449 tests, 1.5 s | < 15 s: met |
+| `check_all` (`ctest -j8`) | 458 tests, 66.7 s | 459 tests, 2.3 s | >= 2x faster than 76 s: met |
+| `ctest -j1` (serial, all) | 381.1 s (baseline (a)) | 13.5 s | |
+
+- `check_all` documented tree: **Debug** (option ON). The Release fallback is not needed
+  (Release `check_all` stays 1.7 s for reference).
+- Top-level test total: 458 + 1 (`BuildConfigTest.AssertsEnabled`) = **459**; `voyahviz_tests` 43 (not in
+  top-level ctest).
+- Slowest tests, serial, option ON: TrackerTest.TracksSyntheticStereo 1.12 s (integration),
+  ObjectPoolDeathTest.PoolExhaustion 1.08 s (unit, Ruling E), SlamTest.StereoMapGrowsWhileLeavingInitialView
+  0.91 s (integration), ObjectPoolTest.ConcurrentCreateRecycleNeverHandsOutSameSlotTwice 0.83 s (unit),
+  SlamTest.MonoMapGrowsWhileLeavingInitialView 0.52 s.
+- Ruling I: `check` is under 15 s, so no unit test was moved to the integration binary (the only unit test
+  above 1 s is the Ruling E death test).
