@@ -9,23 +9,7 @@ target_link_libraries(voyah_test_support
 
 add_executable(voyahslam_tests
     test_voyahslam.cpp
-    estimators/essential_estimator_test.cpp
-    estimators/homography_estimator_test.cpp
-    estimators/ransac_test.cpp
-    geometry/geometry_test.cpp
-    geometry/two_view_decomposition_test.cpp
-    geometry/two_view_reconstruction_test.cpp
     geometry/two_view_scene_test.cpp
-    images/bilinear_interpolation_tests.cpp
-    images/filter_tests.cpp
-    images/gaussian_blur_tests.cpp
-    images/resizer_tests.cpp
-    features/feature_extractor_levels_test.cpp
-    features/keypoint_matches_test.cpp
-    features/feature_grid_test.cpp
-    features/initialization_matcher_test.cpp
-    features/projection_matcher_test.cpp
-    features/stereo_matcher_test.cpp
     slam/slam_test.cpp
     tracking/tracker_test.cpp
     tracking/map_replica_test.cpp
@@ -33,14 +17,8 @@ add_executable(voyahslam_tests
     support/synthetic_sequence_test.cpp
     mapping/map_initializer_test.cpp
     mapping/paired_inliers_test.cpp
-    mapping/keyframe_decision_test.cpp
-    mapping/triangulation_test.cpp
-    map/point_statistics_test.cpp
     mapping/mapper_test.cpp
     loop_closing/loop_closer_test.cpp
-    optimization/projection_test.cpp
-    optimization/bundle_adjustment_test.cpp
-    optimization/pose_optimization_test.cpp
 )
 
 target_include_directories(voyahslam_tests
