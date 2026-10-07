@@ -14,48 +14,9 @@ void SceneState<TFeatureExtractor>::Apply(const voyahslam::events::Event& event)
     if (!AdmitMap(event.map_id)) return;
     // No default case: adding an EventType must produce a -Wswitch warning here.
     switch (event.type) {
-        case EventType::MapPointsUpdated: {
-            const auto& updated =
-                static_cast<const events::MapPointsUpdated<TFeatureExtractor>&>(event);
-            UpdatePositions(updated.ids, updated.positions);
+        case EventType::MapTransaction:
+            ApplyTransaction(static_cast<const events::MapTransaction<TFeatureExtractor>&>(event));
             break;
-        }
-        case EventType::MapPointsRemoved: {
-            const auto& removed = static_cast<const events::MapPointsRemoved&>(event);
-            for (const auto& id : removed.ids) {
-                if (id.value < point_alive_.size() && point_alive_[id.value]) {
-                    point_alive_[id.value] = false;
-                    --num_alive_points_;
-                }
-            }
-            break;
-        }
-        case EventType::KeyFrameCreated: {
-            const auto& created =
-                static_cast<const events::KeyFrameCreated<TFeatureExtractor>&>(event);
-            const uint32_t start = created.new_points_start_id.value;
-            const size_t end = static_cast<size_t>(start) + created.num_new_points();
-            if (end > point_positions_.size()) {
-                point_positions_.resize(end, voyahslam::geometry::TPoint3DF::Zero());
-                point_alive_.resize(end, false);
-            }
-            for (uint32_t i = 0; i < created.num_new_points(); ++i) {
-                SetPoint(start + i, created.new_positions.col(i));
-            }
-            UpdatePositions(created.updated_ids, created.updated_positions);
-            keyframes_.insert_or_assign(created.frame_id, created.pose);
-            break;
-        }
-        case EventType::KeyFramePoseUpdated: {
-            const auto& updated = static_cast<const events::KeyFramePoseUpdated&>(event);
-            keyframes_.insert_or_assign(updated.frame_id, updated.pose);
-            break;
-        }
-        case EventType::MapCreated: {
-            current_pose_ = static_cast<const events::MapCreated&>(event).pose;
-            status_ = TrackingStatus::Tracking;
-            break;
-        }
         case EventType::FrameTracked: {
             const auto& tracked = static_cast<const events::FrameTracked<TFeatureExtractor>&>(event);
             current_pose_ = tracked.pose;
@@ -75,6 +36,49 @@ void SceneState<TFeatureExtractor>::Apply(const voyahslam::events::Event& event)
         case EventType::LoopDetected:
         case EventType::InitializationMeasurement:
             break;
+    }
+}
+
+template <typename TFeatureExtractor>
+void SceneState<TFeatureExtractor>::ApplyTransaction(
+    const voyahslam::events::MapTransaction<TFeatureExtractor>& transaction) {
+    if (transaction.new_map) {
+        ClearScene();
+    }
+    for (const auto& frame : transaction.added_frames) {
+        keyframes_.insert_or_assign(frame.id, frame.T_cw);
+    }
+    const uint32_t start = transaction.new_points_start_id.value;
+    const size_t end = static_cast<size_t>(start) + transaction.num_new_points();
+    if (end > point_positions_.size()) {
+        point_positions_.resize(end, voyahslam::geometry::TPoint3DF::Zero());
+        point_alive_.resize(end, false);
+    }
+    for (uint32_t i = 0; i < transaction.num_new_points(); ++i) {
+        SetPoint(start + i, transaction.new_positions.col(i));
+    }
+    UpdatePositions(transaction.updated_ids, transaction.updated_positions);
+    for (const auto& [id, T_cw] : transaction.updated_poses) {
+        const auto it = keyframes_.find(id);
+        if (it != keyframes_.end()) {
+            it->second = T_cw;
+        }
+    }
+    for (const auto& replaced : transaction.replaced_points) {
+        RemovePoint(replaced.loser.value);
+    }
+    for (const auto& id : transaction.removed_points) {
+        RemovePoint(id.value);
+    }
+    for (const auto& id : transaction.removed_frames) {
+        keyframes_.erase(id);
+    }
+    if (transaction.new_map && transaction.start_frame) {
+        const auto it = keyframes_.find(*transaction.start_frame);
+        if (it != keyframes_.end()) {
+            current_pose_ = it->second;
+            status_ = TrackingStatus::Tracking;
+        }
     }
 }
 
@@ -109,6 +113,14 @@ void SceneState<TFeatureExtractor>::SetPoint(uint32_t id,
     if (!point_alive_[id]) {
         point_alive_[id] = true;
         ++num_alive_points_;
+    }
+}
+
+template <typename TFeatureExtractor>
+void SceneState<TFeatureExtractor>::RemovePoint(uint32_t id) {
+    if (id < point_alive_.size() && point_alive_[id]) {
+        point_alive_[id] = false;
+        --num_alive_points_;
     }
 }
 

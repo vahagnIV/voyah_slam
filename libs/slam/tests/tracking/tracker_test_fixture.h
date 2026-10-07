@@ -56,6 +56,8 @@ struct Captured {
     events::TrackingStage stage = events::TrackingStage::MotionModel;
     uint32_t num_matches = 0;
     uint32_t num_inliers = 0;
+    bool urgent = false;
+    bool priority = false;
     std::vector<map::MapPointId> observed_points;
     std::vector<map::MapPointId> visible_points;
     std::vector<map::FrameId> local_frames;
@@ -105,10 +107,12 @@ protected:
         }
     }
 
+    // Tracks `measurement`; the replica must stay consistent.
     template <typename TMeasurement>
     std::vector<Captured> Feed(TMeasurement measurement) {
         tracker_.Track(std::move(measurement));
         Drain();
+        EXPECT_TRUE(tracker_.replica().CheckConsistency());
         return TakeCaptured();
     }
 
@@ -129,6 +133,8 @@ protected:
                 c.stage = tracked.stage;
                 c.num_matches = tracked.num_matches;
                 c.num_inliers = tracked.num_inliers;
+                c.urgent = tracked.urgent;
+                c.priority = tracked.priority;
                 c.observed_points = tracked.observed_points;
                 c.visible_points = tracked.visible_points;
                 c.local_frames = tracked.local_frames;
@@ -271,7 +277,7 @@ protected:
         return run;
     }
 
-    memory::ObjectPool<events::MapCreated, memory::ThreadSafePolicy> map_created_pool_{16};
+    memory::ObjectPool<events::MapTransaction<Extractor>, memory::ThreadSafePolicy> transaction_pool_{16};
     // Declaration order: the components outlive every queue that can hold
     // their events (capture_), and each other's inboxes are drained in TearDown.
     TMapper mapper_;

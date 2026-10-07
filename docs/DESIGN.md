@@ -34,8 +34,9 @@ keyframes of different types share the map is still open (Open Question 17).
    communication only via events on `moodycamel::ConcurrentQueue`; event pools
    are lock-free (§6.1).
 2. **One replica of the map per thread.** Tracker, Mapper, LoopCloser (and later
-   the Visualizer) each own a local copy: `MapPointStorage`, `Frame`s,
-   `ObservationStorage`.
+   the Visualizer) each own a local copy: `MapPointStorage`, `Frame`s and a
+   `CovisibilityIndex` as the observation record (since 2026-10-07; before,
+   `ObservationStorage`).
 3. **Mapper is the single writer.** *All* changes to map objects — creating,
    updating, culling, fusing map points; creating keyframes; adjusting keyframe
    poses; closing loops — happen in the Mapper. The Mapper then publishes diff
@@ -68,7 +69,7 @@ keyframes of different types share the map is still open (Open Question 17).
 | `Frame` | KeyFrame | Only keyframes become `Frame` objects. |
 | current tracking state | Frame | Lives privately inside the Tracker; never published as a map object. |
 | `MapPointStorage` | set of MapPoints | SoA, indexed by `MapPointId`. |
-| `ObservationStorage` | MapPoint↔KeyFrame observations | Flat SoA table. |
+| `CovisibilityIndex` | MapPoint↔KeyFrame observations | Per point its observing Frames (with feature index), per Frame its points; the Mapper's and the replicas' observation record (2026-10-07). |
 | `MonocularMeasurement` / `BinocularMeasurement` | Frame (features part) | Features of one image / a stereo pair at a timestamp. Input to `Track()`. |
 | `StereoRig` | camera calibration | Immutable, shared by all threads. |
 
@@ -143,8 +144,8 @@ stub was deleted on 2026-10-05.
   `WaitingForMap` -> `Tracking` -> `Lost` -> `Tracking`...
   One `ProcessPending()` pass: (1) drain the whole inbox applying the `map_id`
   consumer rule (§6) — every Mapper diff of the current map is applied to the
-  Tracker's `tracking::MapReplica`; `MapCreated` sets `last_frame_` to the
-  keyframe's replica entry (measurement, `T_cw`, observations as matches),
+  Tracker's `tracking::MapReplica`; a `MapTransaction` with `new_map` sets
+  `last_frame_` to its `start_frame`'s replica entry (measurement, `T_cw`, observations as matches),
   resets the velocity, sets the map's frame id and moves
   `WaitingForMap`/`Lost` to `Tracking`; (2) take **one**
   measurement: in `WaitingForMap`/`Lost` publish it as
@@ -184,11 +185,16 @@ stub was deleted on 2026-10-05.
   counts (§6). It does **not** decide on keyframes: the Mapper decides from
   `FrameTracked` (see "Keyframes and Map Growth").
 - Its replica only changes when Mapper diff events arrive. Between publishing a
-  `FrameTracked` and receiving the resulting `KeyFrameCreated` it simply keeps
+  `FrameTracked` and receiving the resulting `MapTransaction` it simply keeps
   tracking with the map it has. This lag is accepted (ORB-SLAM3 behaves
-  similarly while LocalMapping processes a keyframe); the next `KeyFrameCreated`
-  for the last tracked measurement is merged into `last_frame_` at once (fast
-  pickup).
+  similarly while LocalMapping processes a keyframe); a transaction adding the
+  Frame of the last tracked measurement is merged into `last_frame_` at once
+  (fast pickup). Replaced points are remapped in `last_frame_` (loser ->
+  winner) and removed ones dropped from it.
+- Marks a `FrameTracked` **urgent** (`urgent` and `Event::priority`) when its
+  final inliers are below `urgent_inlier_factor` (1.5) x
+  `min_local_map_inliers`: the Mapper then cuts its local BA short (see "Map
+  Quality").
 - Any temporary helper points the Tracker uses (e.g. ORB-SLAM3's stereo "temporal
   points" for the last frame) are Tracker-private and never part of the map.
 
@@ -202,10 +208,10 @@ stub was deleted on 2026-10-05.
   (reference + a later frame), stereo one measurement. On success the Mapper
   creates a `Frame` per initial keyframe (ids from a monotonic counter, never
   reused across maps), takes `current_map_id_ = next_map_id_++`, moves to
-  `Mapping`, then publishes one `KeyFrameCreated` per initial keyframe (mono:
-  the first carries every initial point, stereo: one event) and then
-  `MapCreated(map_id, frame id, pose)`; the Tracker switches to `Tracking` on
-  `MapCreated`. `InitializationMeasurement` is ignored while `Mapping`.
+  `Mapping`, then publishes **one** `MapTransaction` with `new_map`, every
+  initial Frame and point and `start_frame` (the last initial Frame); the
+  Tracker switches to `Tracking` on it. `InitializationMeasurement` is ignored
+  while `Mapping`.
   `TrackingLost` for the current map (in `Mapping`) clears keyframes and the
   map-point and observation storage, resets
   the initializer and returns to `Initializing`, so the next success starts
@@ -214,12 +220,14 @@ stub was deleted on 2026-10-05.
 - Consumes `FrameTracked` (current map, `Mapping` only): drains to the latest
   per map, decides with `ShouldCreateFrame` whether the measurement becomes a
   Frame, and creates it — tracked observations, stereo close points,
-  triangulation against covisible neighbour Frames — published as **one**
-  `KeyFrameCreated` (see "Keyframes and Map Growth"). Local BA, point fusion
-  and culling of points and Frames follow in sub-project 3.
+  triangulation against covisible neighbour Frames (see "Keyframes and Map
+  Growth") — then fuses, culls and runs local BA around it, publishing two
+  `MapTransaction`s per Frame (see "Map Quality"). Every `FrameTracked` of the
+  current map, evaluated or skipped, updates the points' visible / found
+  counters.
 - Consumes `LoopDetected`: performs the **entire** loop closure — validation,
   Sim3/SE3 correction, map point fusion, essential graph optimization, global BA.
-- Publishes diff events after every change (see §6).
+- Publishes every change as one `MapTransaction` (see §6).
 - Validates incoming IDs against its own replica: events from other threads were
   computed on a lagging replica, so referenced points/frames may already be culled.
   Thanks to ID non-reuse this is a plain `IsValid()` check.
@@ -255,13 +263,14 @@ Detailed spec: `docs/superpowers/specs/2026-09-30-core-slam-data-structures-desi
 | `MapPointStorage<FE>` | `map/map_point_storage.h` | SoA: positions, descriptors, normals, num observations, valid flags. |
 | `MonocularMeasurement<T, L>` | `features/monocular_measurement.h` | `ImageFeatures` + K, raw keypoints (`distorted_points()`), undistorted & normalized points, `camera()` (`geometry::Camera`: K + distortion pointer), `timestamp()`. |
 | `Frame<FE, TMeasurement>` | `map/frame.h` | Keyframe: id, pose, measurement; `timestamp()` comes from the measurement. `MonoFrame<FE>`, `StereoFrame<FE>` aliases. |
-| `ObservationStorage<Type>` | `map/observation_storage.h` | SoA observation table; stereo fields compiled out for mono. |
+| `ObservationStorage<Type>` | `map/observation_storage.h` | SoA observation table; stereo fields compiled out for mono. Unused by the Mapper since 2026-10-07 (the `CovisibilityIndex` is its observation record). |
+| `CovisibilityIndex` | `map/covisibility_index.h` | Per point its observing Frames, per Frame its points; `Remove`, `RemovePoint`, `RemoveFrame` keep both sides in step. |
 | `StereoRig` | `features/stereo_rig.h` | K left/right, `T_rl` (left → right: `p_r = T_rl p_l`), baseline, distortion models. |
 | `BinocularMeasurement<T, L>` | `features/binocular_measurement.h` | Left/right `MonocularMeasurement`, copy of its `StereoRig`, stereo matches (`SetStereoMatches`; per-feature depth, right index); `timestamp()` = left's. |
 | `Event`, `EventType` | `events/event_types.h` | Base event: type tag + `recycle_` / `set_ref_count_` fn pointers. |
-| concrete events | `events/<event_name>.h` | One header per event (e.g. `events/key_frame_created.h`); `events/events.h` includes all. See §6. |
+| concrete events | `events/<event_name>.h` | One header per event (e.g. `events/map_transaction.h`); `events/events.h` includes all. See §6. |
 | `Observable` | `events/observable.h` | Sync handlers (inline, fn ptr + ctx) run first, then async enqueue with ref count = #async queues. |
-| `AsyncObserver` | `events/async_observer.h` | One queue per observer (1:1 channel). |
+| `AsyncObserver` | `events/async_observer.h` | One queue per observer (1:1 channel); counts the pending priority events (`pending_priority()`). |
 | `Listener` | `events/listener.h` | Iterates a queue; auto-recycles previous/last event; move-only. |
 
 Ported from slamlab2: `images/`, `io/`, `algebra/`, `geometry/`, `features/`
@@ -273,14 +282,10 @@ The distortion models now live in `geometry/distortion_models/` (moved from
 
 | Event | Producer → Consumer | Payload |
 |---|---|---|
-| `FrameTracked<FE>` | Tracker → Mapper, viewer | every tracked measurement: timestamp, pose (`T_cw` after `OptimizePose`), measurement copy (binocular: stereo-matched), inlier pairs `observed_features[i]` -> `observed_points[i]`, `visible_points` (local points passing the projection gate, matched ones included), `reference_frame_id` (optional), `local_frames`, `stage` (`MotionModel` / `ZeroMotion` / `LocalMap`), `num_matches`, `num_inliers` |
-| `KeyFrameCreated<FE>` | Mapper → all | **one Frame insertion as one transaction**: the Frame (frame_id, pose `T_cw`, measurement, its observations `observed_features[i]` -> `observed_points[i]`); new points (`new_points_start_id`, contiguous ids, `new_positions` / `new_descriptors` / `new_normals`); `added_observations` on existing Frames (`frame_id`, feature, point; stereo Frames also depth and right index, -1 when absent); updated points (`updated_ids`, positions, descriptors, normals). Used by initialization too |
-| `MapPointsUpdated<FE>` | Mapper → all | ids, positions, descriptors, normals (`Resize(n)`, `count()`); changes that create no Frame (sub-project 3) |
-| `MapPointsRemoved` | Mapper → all | ids (sub-project 3) |
-| `KeyFramePoseUpdated` | Mapper → all | frame_id, pose |
+| `FrameTracked<FE>` | Tracker → Mapper, viewer | every tracked measurement: timestamp, pose (`T_cw` after `OptimizePose`), measurement copy (binocular: stereo-matched), inlier pairs `observed_features[i]` -> `observed_points[i]`, `visible_points` (local points passing the projection gate, matched ones included), `reference_frame_id` (optional), `local_frames`, `stage` (`MotionModel` / `ZeroMotion` / `LocalMap`), `num_matches`, `num_inliers`, `urgent` (mirrored in `Event::priority`) |
+| `MapTransaction<FE>` | Mapper → all | **every Mapper change, as one atomic transaction** (since 2026-10-07; replaces `KeyFrameCreated`, `MapCreated`, `MapPointsUpdated`, `MapPointsRemoved`, `KeyFramePoseUpdated`). Parts, each possibly empty: `new_map` + `start_frame`; added Frames (id, `T_cw`, measurement, own observations); new points (`new_points_start_id`, contiguous ids, positions / normals / descriptors); `added_observations` (frame, feature, point, depth and right index, -1 when absent); updated points (ids, positions, normals, descriptors); `replaced_points` (loser, winner); `removed_points`; `updated_poses`; `removed_observations`; `removed_frames`. Apply order and contract: see "Map Quality" |
 | `LoopDetected` | LoopCloser → Mapper | query/match frames + verification data (TBD) |
 | `InitializationMeasurement<FE>` | Tracker → Mapper (+ other Tracker observers) | `features::TMeasurement<FE>` (`map_id` 0) |
-| `MapCreated` | Mapper → all | frame_id, pose of the keyframe the Tracker continues from; marks the initial map complete |
 | `TrackingLost` | Tracker → all | timestamp (`map_id` = the lost map) |
 
 Rules:
@@ -289,12 +294,26 @@ Rules:
 - Consumers never call `Recycle()` — the `Listener` does.
 - Per channel delivery is FIFO, so a replica applying diffs in order always ends
   up identical to the Mapper's map as of the last applied event.
-- Because IDs are never reused, a `KeyFrameCreated` allocates its new points a
+- Because IDs are never reused, a `MapTransaction` allocates its new points a
   contiguous id range `[new_points_start_id, new_points_start_id + count)` and
   every replica stores point `i` at the same slot.
-- **Atomic application:** a consumer applies a `KeyFrameCreated` in one step,
-  in the order new points, updated points, observations on existing Frames,
-  the Frame — the Tracker never tracks against a half-applied insertion.
+- **Atomic application:** a consumer applies a `MapTransaction` in one step, in
+  the fixed order of "Map Quality" (new map, add Frames, add points, add
+  observations, update points, update poses, remove observations, remove
+  points, remove Frames) — the Tracker never tracks against a half-applied
+  change.
+- **Priority events and the inbox counter.** A producer sets
+  `Event::priority` before publishing (the Tracker: on urgent `FrameTracked`).
+  `AsyncObserver::Push` increments the inbox's `pending_priority` counter
+  before the enqueue; **only `AsyncObserver::TryPop` (and a `Listener` from
+  `GetListener()`) decrement it** — popping from the raw `queue()` bypasses
+  the counter and leaves it too high (TODO: make `queue()` private). The
+  counter is event infrastructure, not map data, so it does not break the
+  no-locks-on-map-data rule.
+- **Older event names.** Sections written before 2026-10-07 name
+  `KeyFrameCreated`, `MapCreated`, `MapPointsUpdated` / `MapPointsRemoved` and
+  `KeyFramePoseUpdated`; read them as the corresponding `MapTransaction`
+  parts (added Frame, `new_map`, updated / removed points, updated poses).
 - **Pointer rule:** an event may point only at data that never changes and lives
   for the whole run (calibration and configuration, e.g. a `DistortionModel` or
   `StereoRig`). Measurements and every `geometry::Camera` copy hold the
@@ -305,19 +324,19 @@ Rules:
   e.g. a pointer to a reused Tracker buffer is never allowed.
 - **Measurement variant (resolves OQ 24).** `features/measurement.h` defines
   `TMonocularMeasurement<FE>`, `TBinocularMeasurement<FE>` and
-  `TMeasurement<FE> = std::variant<mono, binocular>`. `KeyFrameCreated`,
-  `FrameTracked` and `InitializationMeasurement` hold a
+  `TMeasurement<FE> = std::variant<mono, binocular>`. `MapTransaction` (per
+  added Frame), `FrameTracked` and `InitializationMeasurement` hold a
   `TMeasurement<FE>`, so mono and stereo share one event type each.
 - **`map_id`.** `map::MapId` (`map/map_id.h`, strong `uint32_t`; ids start at
   1, only increase, `MapId{0}` = not tied to a map). `Event` has a public
   `map_id` field that **producers must set on every publish** (pooled events
-  are reused without reset). It is the map the Mapper is building (diffs,
-  `MapCreated`), the map the Tracker tracks against (`FrameTracked`,
+  are reused without reset). It is the map the Mapper is building
+  (`MapTransaction`), the map the Tracker tracks against (`FrameTracked`,
   `TrackingLost`) or 0 (`InitializationMeasurement`).
   **Consumer rule** (`map_id == 0` exempt): `< current` -> stale, acknowledge
   and ignore; `> current` -> first event of a newer map: reset the replica,
-  adopt `current = map_id`, apply (the initial map's `KeyFrameCreated`
-  events arrive *before* its `MapCreated`, so they must not be dropped); `== current`
+  adopt `current = map_id`, apply (a new map arrives as one `new_map`
+  transaction since 2026-10-07); `== current`
   -> apply. The Mapper builds map n+1 only after `TrackingLost(n)`, so a newer
   map never appears while the Tracker tracks an older one.
 - **No subscription filtering:** an `Observable` delivers every event to every
@@ -419,9 +438,9 @@ pointer returned by `GetNextEvent()` is a **borrow**, valid until the next
    (back-pressure) and `Create()` where it indicates a bug.
 5. A created event may be a reused one. Events with a `Reset()` come back
    cleared (counts 0, ids empty, capacity kept). Events **without** `Reset()`
-   (`KeyFramePoseUpdated`, `LoopDetected`, `MapCreated`, `TrackingLost`,
-   `InitializationMeasurement`) still hold the previous values: the producer
-   must set every field. `FrameTracked` and `KeyFrameCreated` have `Reset()`.
+   (`LoopDetected`, `TrackingLost`, `InitializationMeasurement`) still hold
+   the previous values: the producer must set every field. `FrameTracked` and
+   `MapTransaction` have `Reset()` (every part cleared, capacity kept).
 6. Fill batched payloads with `e->Resize(n)` and then write into
    `e->positions.matrix()` / `.col(i)` etc. — never assign a freshly built
    `Eigen::Matrix` to a buffer's storage, that would throw away the reuse.
@@ -905,7 +924,10 @@ Test rigs put the right camera at +x, so the translation is `(-b, 0, 0)`.
 **Observation storage.** Each map keeps a mono `ObservationStorage` and a
 stereo one; stereo keyframes store `depth` and `right_feature_index`
 (`int16_t`) there. Both are cleared on a new map and on `TrackingLost`. Keeping
-both allows mixed mono/stereo sessions later (TODO).
+both allows mixed mono/stereo sessions later (TODO). *(Superseded
+2026-10-07: the Mapper's storages are removed; the `CovisibilityIndex` is its
+observation record and the depth / right index come from each Frame's
+measurement — see "Map Quality".)*
 
 **Depth limit.** `max_parallax_cos = 0.99998` rejects rays closer than about
 0.36 degrees; with the 0.11 m baseline this caps stereo depth at about 17 m.
@@ -1103,7 +1125,9 @@ tracked points **green**, visible-but-unmatched points **blue**, other points
 Frame culling, local BA (duplicates accumulate; tracking tolerates them through
 the pose outlier rejection), `ObservationsRemoved`, interruptible BA and the
 busy-Mapper branch, the post-relocalization Frame guard, the Faiss vs
-DBoW2/FBoW index for matching.
+DBoW2/FBoW index for matching. *(2026-10-07: fusion, culling, observation
+removal, local BA and its urgent interruption are done — see "Map Quality";
+the busy-Mapper branch, the relocalization guard and the index remain.)*
 
 **Synthetic end-to-end tests** (`SlamTest.{Mono,Stereo}MapGrowsWhileLeavingInitialView`):
 120 frames, 6 m along +x through a 10 m room (`surround_scene`: points on the
@@ -1114,7 +1138,9 @@ Both track every frame
 with no `TrackingLost`, create Frames and grow the map. The error bounds are
 looser than planned (30 % of the path mono, 0.3 m stereo instead of 5 % and
 2 cm): without local BA the error random-walks with the 0.5 px pixel noise
-(measured 20 % / 0.15 m; 0 / 0 without noise). Tighten with local BA (TODO).
+(measured 20 % / 0.15 m; 0 / 0 without noise). *(Tightened 2026-10-07 with
+local BA to 0.249 m mono (4.2 % of the path) / 0.037 m stereo — see "Map
+Quality".)*
 ThreadSanitizer (`Tracker*:Mapper*:Slam*`, 55 tests, 2026-10-07): clean.
 
 **Smoke (corridor1 1024, Release, ORB 1500, debug logs, headless, 2026-10-07).**
@@ -1155,6 +1181,186 @@ idle machine).** Mono 400: 2 maps (129, 142 tracked), 1 re-initialization,
 than the table's runs 1 and 2, but `master` rebuilt and run the same day gives
 the same (1 map, 999 tracked, 264 Frames; mono 400 identical too), so this is
 the known run-to-run variation (thread timing), not a change from the split.
+
+## Map Quality (sub-project 3: `MapTransaction`, fusion, culling, interruptible local BA)
+
+Spec: `docs/superpowers/specs/2026-10-07-map-quality-design.md` (amended in
+place for rulings A, C, D, E, H, I, J); plan
+`docs/superpowers/plans/2026-10-07-map-quality.md`. Roadmap step 1.
+
+**`MapTransaction<FE>` — the only Mapper event** (`events/map_transaction.h`;
+parts in §6). Every consumer — the Mapper's own writes, the Tracker's
+`MapReplica`, the viewer's `SceneState` — applies the parts in one fixed
+order:
+
+1. new map (clears the replica);
+2. add Frames;
+3. add points;
+4. add observations;
+5. update points;
+6. update poses;
+7. remove observations;
+8. remove points (replaced losers included);
+9. remove Frames (their observations go implicitly).
+
+**Contract** (checked by `MapReplica::CheckConsistency()` in tests): after
+every transaction each observation refers to an existing Frame and an alive
+point, the covisibility index agrees with the observations, and every alive
+point has at least one observation. **Every point the Mapper removes is listed
+in `removed_points`**, including implicit ones (no observation left after
+observation removals, Frame culling or BA outliers): consumers without
+observation data, such as the viewer, rely on it (ruling C). **Point
+references:** when the observation a point's scale prediction refers to is
+removed, the reference moves to the remaining observation with the smallest
+Frame id; Mapper and replica apply the same rule, computed after the
+transaction's pose and point updates.
+
+**Initialization** is one transaction: `new_map`, `start_frame`, both mono
+Frames (or the one stereo Frame) and every point.
+
+**Pipeline per created Frame** (Mapper thread; ORB-SLAM3 LocalMapping order,
+ruling H):
+
+1. the new Frame and its tracked observations (`ProcessNewKeyFrame`);
+2. recent-point culling (`MapPointCulling`);
+3. new points: stereo close points and triangulation (see "Keyframes and Map
+   Growth");
+4. fusion (`SearchInNeighbors`);
+5. local BA, interruptible;
+6. Frame culling (`KeyFrameCulling`).
+
+**Transaction 1** (steps 1–4) carries the Frame, its observations, the culled
+recent points, the new points and the fusion results (added observations,
+replaced and removed points, updated points). **Transaction 2** (steps 5–6)
+carries the BA poses and points, the outlier observations removed, the culled
+Frames and the points they leave behind. The Tracker can use the new points
+while BA runs.
+
+**Observation record (ruling G).** The Mapper's `ObservationStorage`s are
+removed: its `CovisibilityIndex` (per point the observing Frames and feature
+indices, per Frame its points, with `Remove` / `RemovePoint` / `RemoveFrame`)
+is the only observation record; a stereo observation's depth and right index
+come from the Frame's measurement. This reverses the 2026-10-04 decision to
+store stereo observations in an `ObservationStorage<Stereo>`.
+
+**Visible / found counters.** Every `FrameTracked` of the current map,
+including those drain-to-latest skips, adds 1 to `visible` for each of its
+`visible_points` and to `found` for each inlier point.
+
+**Recent-point culling** (`JudgeRecentPoint`, `mapping/map_quality.h`). A
+point is recent for the 3 Frames after its creation. It is removed when
+`found / visible < 0.25`, or when, 2 Frames after its creation, its weighted
+observations (stereo counts 2) are ≤ 2 (mono) / ≤ 3 (stereo); after 3 Frames
+it graduates.
+
+**Fusion** (`features::FuseMatches`, pure, in algs; the Mapper applies its
+decisions). Targets: the new Frame's top 30 (mono) / 10 (stereo) covisible
+Frames plus each one's top 20. Forward pass: the new Frame's points into each
+target; backward pass: the targets' points the new Frame does not observe into
+the new Frame. Gate per point and Frame: not already observed; positive depth
+and inside the image; ray ≤ 85°; cos(view, normal) ≥ 0.5; distance within the
+reference-implied scale range ±20 % (gives the predicted level); grid search
+within 3 · 1.2^level raw px at the predicted level or one below; raw-pixel
+χ² < 5.991 (mono) / < 7.815 (stereo, with the right x); best descriptor
+distance ≤ 50. A match on a free feature adds an observation; on a feature
+with another point it merges: the point with more weighted observations wins
+(lower id on a tie), the loser's observations move to the winner (dropped in
+Frames that already observe it), the loser is listed in `replaced_points` and
+removed. Points already replaced in this pass are skipped. Touched points get
+their normal and descriptor recomputed. The Tracker remaps its `last_frame_`
+matches from loser to winner.
+
+**Frame culling** (`IsRedundantFrame`). Candidates are the new Frame's
+covisible Frames, never the map's first Frame or the new one. A Frame is
+redundant when ≥ 90 % of its points (stereo: only its close points) are seen
+by ≥ 3 other Frames at the same or a finer level (level ≤ its level + 1).
+Removing it drops its observations and removes points left with < 2.
+Each candidate is judged on the map as the earlier ones left it. Culled Frames
+leave an empty slot in the Mapper's Frame array (lookup by id stays O(1);
+TODO).
+
+**Local BA** (`optimization::BundleAdjust`, 5 robust + 10 plain iterations).
+Optimized: the new Frame plus covisible Frames with ≥ 15 shared points,
+**capped at 20 including the new Frame** (ruling I). Points: all points of the
+optimized Frames. Fixed: the other Frames observing them; the map's first
+Frame is always fixed when present. BA is **skipped** when no free Frame has
+an observation **or no Frame would be fixed** (ruling J; ORB-SLAM3's gauge
+guard — mono needs a fixed Frame). Stereo observations get a full stereo
+residual (left u, v and right u) with `optimization::StereoCameras`; σ =
+`sigma_px · 1.2^level` raw px from `MapperOptions::fuse` (ruling K; a second σ
+source beside the Tracker's — TODO). Poses and points are always applied;
+outlier observations (χ² > 5.991 mono / 7.815 stereo, or depth ≤ 0) are
+removed only when `stage_reached ≥ 1`; points left without observations are
+removed.
+
+**Stopping BA (rulings A, D, E).** `BundleAdjustmentOptions::should_stop` is a
+`std::function<bool()>` (null = never), evaluated **once before the first
+iteration and after every iteration**; a stop before iterating leaves the
+poses unchanged. `BaResult` reports `interrupted` and `stage_reached` (0 =
+stopped in the robust stage, 1 = in the plain stage, 2 = finished). A stop
+right after the last robust iteration but before outlier deactivation reports
+stage 0, so outliers are kept (conservative). Initialization BA passes no
+callback and is unchanged. A callback instead of the spec's
+`const std::atomic<bool>*`: the Mapper thread itself runs BA, so nobody could
+set a flag; the callback reads the inbox counter instead.
+
+**Urgent interruption.** The Tracker publishes a `FrameTracked` with
+`urgent` = `priority` = true when its final inliers are below
+`urgent_inlier_factor` (1.5) × `min_local_map_inliers` (30), i.e. 45. The
+Mapper's inbox counts pending priority events (§6 "Priority events");
+the local-BA callback is `inbox().pending_priority() > 0`, so an urgent event
+stops BA within one iteration. Ordinary `FrameTracked` never stop BA;
+drain-to-latest absorbs the backlog. Only `TryPop` decrements the counter, so
+the Mapper drains through it.
+
+**Options.** `MapperOptions::map_quality` (`MapQualityOptions`: fusion
+targets, recent-point window / ratio / observations, Frame redundancy, local
+BA sizes and iterations) and `MapperOptions::fuse` (`FuseOptions`: the match
+gate and σ), ORB-SLAM3 defaults; `TrackerOptions::urgent_inlier_factor`.
+
+**Synthetic end-to-end tests.** `SlamTest.{Mono,Stereo}MapGrowsWhileLeavingInitialView`
+bounds tightened to 1.5 × the largest of three runs with local BA: mono
+0.159 / 0.129 / 0.166 m → 0.249 m (4.2 % of the 5.95 m path; 1.21 m without
+local BA), stereo 0.0247 / 0.0248 / 0.0248 m → 0.037 m (0.15 m without).
+`SlamTest.DuplicatesFusedInLongSequence` (stereo leave-the-view run,
+0.5 px noise): ≥ 50 % of the alive points have ≥ 3 observations (78–86 % with
+fusion, 43 % without) and no two alive points lie within 1 mm with
+descriptors within 10 bits. With pixel noise the twins fusion leaves lie
+centimetres apart (about 18 pairs within 10 bits remain; 112 without fusion),
+so the 1 mm test only catches exact copies (TODO). ThreadSanitizer
+(`voyah_slam_tests` 113 tests, `voyah_integration_tests` 11, 2026-10-07):
+clean.
+
+**Smoke (corridor1 1024, Release, ORB 1500, debug logs, headless, real-time
+playback, 2026-10-07; two runs each).** Feature extraction (69 ms mono /
+149 ms stereo per frame) is slower than the 50 ms frame gap, so playback runs
+behind real time, as in earlier smoke runs. ATE: `tools/ate.py` on the
+`--trajectory_out` file against `mav0/mocap0/data.csv` (20 ms association,
+Umeyama; the mocap covers only the first 26.8 s, the room). Frames
+created / culled are after initialization; points created = triangulated +
+stereo close points.
+
+| Run | Maps (tracked) | Lost | Frames created / culled | Points created / recent-culled / merged | Local BA ms mean / median / max, interrupted | Mapper ms per pass mean / max | ATE | Must |
+|---|---|---|---|---|---|---|---|---|
+| Mono 400, run 1 | 1 (282: frames 118–399) | 0 | 64 / 41 (max gap 10 frames) | 28 034 / 6 490 / 18 572 | 104 / 120 / 157, 0 | 255 / 413 | Sim3 0.033 m (282 / 282 matched, scale 1.856) | **met** |
+| Mono 400, run 2 | 1 (281: 118–398) | 0 | 68 / 45 (max gap 13) | 29 378 / 6 505 / 19 763 | 105 / 121 / 141, 0 | 249 / 401 | Sim3 0.032 m (281 / 281) | **met** |
+| Stereo 1000, run 1 | 1 (999: 1–999) | 0 | 297 / 89 | 107 971 / 34 530 / 57 356 | 134 / 138 / 245, 1 (stage 1) | 251 / 405 | SE3 0.036 m (536 / 999) | **met** |
+| Stereo 1000, run 2 | 1 (999) | 0 | 280 / 73 | 102 481 / 34 463 / 52 637 | 133 / 136 / 215, 1 (stage 1) | 259 / 380 | SE3 0.037 m (536 / 999) | **met** |
+| *Before (keyframes table above)* | mono 2 (129, 142+); stereo 1–3 | mono 1; stereo 0–2 | mono 3; stereo 260–270 | no culling or fusion | – | – | not measured | |
+
+Mono initializes at frame 118 (as before) and now keeps that map to the end
+of the run: every frame after it is tracked, a Frame is created at least every
+13 frames, and 41–45 of the 64–68 created Frames are culled as redundant.
+Mono run 2 did not track frame 399: the measurement was still queued when the
+app stopped the Tracker (known, `Tracker::Stop()` TODO), not a loss. Every
+local BA ran (none skipped); median 19 free / 1 fixed Frames mono, 20 / 36–39
+stereo. Only two `FrameTracked` per run fell below the urgent threshold (45),
+so BA was interrupted once per stereo run and never in mono. A Mapper pass
+(create + fuse + BA + Frame culling) costs about 250 ms, of which triangulation
+is about 130 ms (mono) and local BA about 105–135 ms, so drain-to-latest
+evaluates about 60 % of the `FrameTracked` (mono 164–187 of 281). Fusion
+merges about two thirds of the triangulated points (mono) / half of all new
+points (stereo).
 
 ## 7. Coding Conventions
 
@@ -1345,7 +1551,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-04 | `StereoMatches` is in its own header (`features/stereo_matches.h`). | Avoids an include cycle between `BinocularMeasurement` and the matcher. |
 | 2026-10-04 | Stereo initialization: one identity keyframe; every valid depth becomes a metric map point (ORB-SLAM3); thresholds 500 features / 100 points. | One stereo pair already carries scale and depth; no median normalization. |
 | 2026-10-04 | `InitialMapPoint::feature_in_second = -1` means a single-keyframe map. | The result type serves both mono (two keyframes) and stereo (one). |
-| 2026-10-04 | Stereo observations are stored per map in an `ObservationStorage<Stereo>` beside the mono one. | Keeps mixed mono/stereo sessions possible. |
+| 2026-10-04 | Stereo observations are stored per map in an `ObservationStorage<Stereo>` beside the mono one. (Reversed for the Mapper 2026-10-07: the `CovisibilityIndex` is its observation record.) | Keeps mixed mono/stereo sessions possible. |
 | 2026-10-04 | Stereo depth is capped at about 17 m by `max_parallax_cos = 0.99998` at the 0.11 m baseline. | Accepted for now; the limit is a matcher option, tune later. |
 | 2026-10-05 | g2o is vendored pristine in `third_party/g2o/src/` and packaged by a local Conan recipe; linked `PRIVATE`; the public API stays on Eigen types. | Reproducible build across machines (no system g2o), no g2o in public headers (principle 8), adaptations live in the recipe so upstream updates are a directory swap. |
 | 2026-10-05 | Local Conan package `g2o/20241228@voyah/stable`: `user`/`channel` set in the recipe (not passed on the command line). | A plain `conan create third_party/g2o` yields the reference `conanfile.txt` requires; a missing package gives Conan's "ERROR: Package 'g2o/20241228@voyah/stable' not resolved: Unable to find 'g2o/20241228@voyah/stable' in remotes." error, which the README explains. |
@@ -1389,6 +1595,16 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-06 | Viewer colours: tracked points green, visible points blue, other points grey; local-map Frames orange, other Frames blue. | Debugging the local map and the matcher at a glance. |
 | 2026-10-07 | Keyframes smoke result (corridor1, Release; "Keyframes and Map Growth"): mono 2 maps in 400 frames, first map 129 tracked frames, median lifetime 135.5, 1 re-initialization (was 82 tracked / 18 re-initializations); stereo 2 maps in 1000 frames (lost once at frame ~360; a second run: 3 maps, lost at frame ~354 and again on the new map's first frame). Both bars (first mono map ≥ 150; stereo no loss) are missed; nothing was tuned. Synthetic end-to-end error bounds loosened to 30 % of the path / 0.3 m. | Mono: the Frame rule stalls without fusion (`ref_points` stuck at 36); stereo: motion-model failure at 120-170 deg/s without a reference-Frame fallback. The synthetic error is noise random-walk without local BA (0 without noise). All in TODO. |
 | 2026-10-07 | Restructure (roadmap step 0, approach C): split `voyahslam` into `voyah_common`, `voyah_events`, `voyah_algs`, `voyah_slam` under `libs/<lib>/{include,src,tests}`, each with its **own include root but unchanged `#include <voyahslam/...>` paths**; `voyahslam` is an INTERFACE umbrella; `voyahviz` links only common + events. The `OrbFeatureExtractor` / `SIFTFeatureExtractor` declarations (and `orb/image_pyramid.h`, held by value) stay in common, their definitions in algs. One test binary per library (label `unit`) plus `voyah_integration_tests` (label `integration`: every `SlamTest.*` and every test above **1 s** in the optimized build, except the fixed-cost `ObjectPoolDeathTest.PoolExhaustion`); `check` / `check_all` targets. `VOYAHSLAM_OPTIMIZE_TESTS` (default ON) adds `-O2` to the voyah libraries and tests in Debug, asserts on, dependencies unchanged; `check_all` runs from the Debug tree. | Boundaries enforced by the compiler (a wrong-direction include is "file not found") without touching a single include line or namespace; `voyah_events` usable by outside observers such as the viewer. The extractor declarations stay in common because every template, events and the viewer included, is parameterised on the extractor type (descriptor-traits refactor in TODO). Unoptimized Eigen/g2o dominated the suite: serial Debug 381 s → `check_all` 2.3 s (459 tests, `-j8`; 66.7 s at `-j8` before the option), `check` 1.5 s (449 tests); smoke runs unchanged. Spec `docs/superpowers/specs/2026-10-07-restructure-design.md`. |
+| 2026-10-07 | Every Mapper event is one `MapTransaction` (map, Frames, points, observations added; points updated / replaced / removed; poses updated; observations and Frames removed), applied by every consumer in one fixed order (new map, add Frames, add points, add observations, update points, update poses, remove observations, remove points, remove Frames). Replaces `KeyFrameCreated`, `MapCreated`, `MapPointsUpdated`, `MapPointsRemoved`, `KeyFramePoseUpdated`. | Fusion and culling change many objects at once; one transaction keeps every replica consistent after each event (spec §2) and makes the apply order a single rule instead of a per-event convention. |
+| 2026-10-07 | Two transactions per created Frame: T1 (tracked observations, recent-point culling, new points, fusion), T2 (local BA, Frame culling). | The Tracker gets the new Frame and points before the slow BA finishes. |
+| 2026-10-07 | Local BA runs in the Mapper thread and is interrupted only by an urgent `FrameTracked` (final inliers < 1.5 x `min_local_map_inliers`), through a priority counter in the Mapper's inbox (incremented by `Push`, decremented only by `TryPop` / `Listener`). A separate BA thread is reserved for global BA (roadmap step 4). | No second writer, no locks; ordinary frames are absorbed by drain-to-latest, and only a weakly tracked frame needs the Mapper promptly. |
+| 2026-10-07 | `BundleAdjust` takes `std::function<bool()> should_stop` (null = never) instead of `const std::atomic<bool>*` (ruling A), evaluated once before the first iteration and after every iteration (ruling D); a stop after the last robust iteration but before outlier deactivation reports `stage_reached` 0 and keeps the outliers (ruling E). Outliers are removed only when `stage_reached >= 1`. | The Mapper thread runs BA itself, so nobody could set a flag; the callback reads the inbox counter. A pre-set stop must leave the poses unchanged. Conservative: an outlier survives one more BA at most. |
+| 2026-10-07 | The Mapper's `ObservationStorage`s are removed; its `CovisibilityIndex` is its only observation record; stereo depth and right index come from the Frame's measurement (ruling G). Reverses the 2026-10-04 storage entry. | Fusion and culling remove observations; one structure with removal support instead of two kept in sync. |
+| 2026-10-07 | Pass order as ORB-SLAM3 LocalMapping (ruling H): tracked observations, then recent-point culling, then new points, then fusion. The spec's "culling before creation" was wrong. | Culling must see the new Frame's observations, or fresh points are judged one Frame short. |
+| 2026-10-07 | Every point the Mapper removes, including implicit ones (no observation left), is listed in `removed_points` (ruling C). | Consumers without observation data (the viewer) would otherwise keep ghost points. |
+| 2026-10-07 | Local BA: the 20-Frame cap counts the new Frame (ruling I); BA is skipped with no free Frame or no fixed Frame (ruling J, ORB-SLAM3's gauge guard). σ comes from `MapperOptions::fuse` (ruling K). | Mono BA without a fixed Frame has a free gauge. Ruling K leaves two σ sources (Mapper and Tracker) to keep in sync: TODO. |
+| 2026-10-07 | Apps gain `--trajectory_out` (TUM, camera-to-world, one `# map <id>` section per map); `tools/ate.py` (pure Python, 20 ms association, Umeyama Sim3 / SE3, largest section). | The smoke runs now report ATE against the corridor1 mocap. |
+| 2026-10-07 | Map-quality smoke result (corridor1, Release, two runs each; "Map Quality"): mono 400 keeps **one map** from initialization (frame 118) to the end, 281–282 tracked frames, 64–68 Frames created / 41–45 culled, ATE Sim3 0.032–0.033 m; stereo 1000 one map, no loss, 999 tracked, 280–297 Frames created / 73–89 culled, ATE SE3 0.036–0.037 m. Both Musts met; nothing tuned. Synthetic bounds tightened to 0.249 m mono / 0.037 m stereo. | Fusion lifts points to >= 3 observations, so the Frame rule keeps creating Frames (was 2 maps, first lost after 129 frames); local BA removes the noise random walk. |
 
 ## 9. Open Questions
 
@@ -1569,6 +1785,13 @@ branch → review → merge to `master`. Update this document at the end.
   `unit` / `integration` labels, `check` / `check_all`,
   `VOYAHSLAM_OPTIMIZE_TESTS` (see §7 "Library layout"; `check_all` 2.3 s).
 
+- Map quality, roadmap step 1 / tracking sub-project 3 (branch
+  `feat/map-quality`, merge pending): `MapTransaction` as the only Mapper
+  event, urgent `FrameTracked` and the inbox priority counter, stereo and
+  interruptible `BundleAdjust`, `FuseMatches`, recent-point and Frame culling,
+  local BA, `--trajectory_out` and `tools/ate.py` (see "Map Quality"; mono
+  corridor1 keeps one map for all 400 frames).
+
 **Required follow-up:**
 - Decide `MapPointStorage` growth / compaction (Open Question 2); ids are
   append-only since 2026-10-05.
@@ -1579,9 +1802,9 @@ branch → review → merge to `master`. Update this document at the end.
   rounding). Building OpenCV from source to link against
   (in progress, user).
 - Tracker measurement policy (19).
-- Sub-projects 3-4 of tracking (the user has their own designs; ask before
-  designing): local BA, fusion and culling (fixes the mono Frame-rule stall,
-  see "Keyframes and Map Growth"), relocalization / reference-keyframe
-  tracking via place recognition.
+- Roadmap (`docs/ROADMAP.md`): own DBoW2 (step 2), relocalization /
+  reference-keyframe tracking via place recognition (step 3, tracking
+  sub-project 4; the user has their own design, ask first), loop closing with
+  global BA in its own thread (step 4).
 - Event pool lifetime (Open Question 25).
 - Then the Mapper, then the LoopCloser.

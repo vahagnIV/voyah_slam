@@ -12,7 +12,7 @@ namespace {
 using namespace voyahslam;
 using events::EventType;
 using TOrbScene = SceneState<features::OrbFeatureExtractor>;
-using TOrbKeyFrameCreated = events::KeyFrameCreated<features::OrbFeatureExtractor>;
+using TOrbTransaction = events::MapTransaction<features::OrbFeatureExtractor>;
 using TOrbFrameTracked = events::FrameTracked<features::OrbFeatureExtractor>;
 
 template <typename TEvent>
@@ -30,24 +30,25 @@ TEST(SceneStateTest, StartsEmpty) {
 
 TEST(SceneStateTest, CountsAppliedEventsPerType) {
     memory::ObjectPool<TOrbFrameTracked, memory::ThreadSafePolicy> positions(2);
-    memory::ObjectPool<TOrbKeyFrameCreated, memory::ThreadSafePolicy> added(1);
-    memory::ObjectPool<events::MapPointsRemoved, memory::ThreadSafePolicy> removed(1);
+    memory::ObjectPool<TOrbTransaction, memory::ThreadSafePolicy> added(1);
+    memory::ObjectPool<events::LoopDetected, memory::ThreadSafePolicy> loops(1);
 
     TOrbScene scene;
     ApplyOne(scene, positions);
     ApplyOne(scene, positions);
     ApplyOne(scene, added);
-    ApplyOne(scene, removed);
+    ApplyOne(scene, added);
+    ApplyOne(scene, loops);
 
     EXPECT_EQ(scene.applied_count(EventType::FrameTracked), 2u);
-    EXPECT_EQ(scene.applied_count(EventType::KeyFrameCreated), 1u);
-    EXPECT_EQ(scene.applied_count(EventType::MapPointsRemoved), 1u);
-    EXPECT_EQ(scene.applied_count(EventType::MapPointsUpdated), 0u);
-    EXPECT_EQ(scene.total_applied(), 4u);
+    EXPECT_EQ(scene.applied_count(EventType::MapTransaction), 2u);
+    EXPECT_EQ(scene.applied_count(EventType::LoopDetected), 1u);
+    EXPECT_EQ(scene.applied_count(EventType::TrackingLost), 0u);
+    EXPECT_EQ(scene.total_applied(), 5u);
 }
 
 TEST(SceneStateTest, CountsNewEventTypes) {
-    memory::ObjectPool<events::MapCreated, memory::ThreadSafePolicy> created(1);
+    memory::ObjectPool<TOrbTransaction, memory::ThreadSafePolicy> created(1);
     memory::ObjectPool<events::TrackingLost, memory::ThreadSafePolicy> lost(1);
     memory::ObjectPool<events::InitializationMeasurement<features::OrbFeatureExtractor>,
                        memory::ThreadSafePolicy> init(1);
@@ -57,12 +58,11 @@ TEST(SceneStateTest, CountsNewEventTypes) {
     ApplyOne(scene, lost);
     ApplyOne(scene, init);
 
-    EXPECT_EQ(scene.applied_count(EventType::MapCreated), 1u);
+    EXPECT_EQ(scene.applied_count(EventType::MapTransaction), 1u);
     EXPECT_EQ(scene.applied_count(EventType::TrackingLost), 1u);
     EXPECT_EQ(scene.applied_count(EventType::InitializationMeasurement), 1u);
 }
 
-using TOrbMapPointsUpdated = events::MapPointsUpdated<features::OrbFeatureExtractor>;
 using TOrbInit = events::InitializationMeasurement<features::OrbFeatureExtractor>;
 
 geometry::RigidTransformation MakePose(double angle, double tx, double ty, double tz) {
@@ -71,15 +71,31 @@ geometry::RigidTransformation MakePose(double angle, double tx, double ty, doubl
                                          Eigen::Vector3d(tx, ty, tz).cast<precision_t>());
 }
 
-// Applies a KeyFrameCreated of Frame `frame` that adds `new_points` from id `start`.
+// Applies one transaction of map `map`, filled by `fill`.
+template <typename TFill>
+void ApplyTransaction(TOrbScene& out_scene, uint32_t map, TFill fill) {
+    memory::ObjectPool<TOrbTransaction, memory::ThreadSafePolicy> pool(1);
+    TOrbTransaction* event = pool.Create();
+    event->map_id = {map};
+    fill(*event);
+    out_scene.Apply(*event);
+    event->Recycle();
+}
+
+void AddFrame(TOrbTransaction& out_event, uint32_t frame, const geometry::RigidTransformation& pose) {
+    auto& added = out_event.added_frames.emplace_back();
+    added.id = {frame};
+    added.T_cw = pose;
+}
+
+// Applies a transaction that adds Frame `frame` and `new_points` from id `start`.
 void CreateKeyFrame(TOrbScene& out_scene, uint32_t map, uint32_t frame,
                     const geometry::RigidTransformation& pose,
                     const std::vector<Eigen::Vector3d>& new_points = {}, uint32_t start = 0) {
-    memory::ObjectPool<TOrbKeyFrameCreated, memory::ThreadSafePolicy> pool(1);
-    TOrbKeyFrameCreated* event = pool.Create();
+    memory::ObjectPool<TOrbTransaction, memory::ThreadSafePolicy> pool(1);
+    TOrbTransaction* event = pool.Create();
     event->map_id = {map};
-    event->frame_id = {frame};
-    event->pose = pose;
+    AddFrame(*event, frame, pose);
     event->new_points_start_id = {start};
     event->ResizeNewPoints(static_cast<uint32_t>(new_points.size()));
     for (size_t i = 0; i < new_points.size(); ++i) {
@@ -122,39 +138,30 @@ TEST(SceneStateTest, PointsAddedUpdatedRemoved) {
     EXPECT_EQ(scene.num_alive_points(), 3u);
     EXPECT_TRUE(scene.point_positions()[2].isApprox(kThreePoints[2].cast<precision_t>()));
 
-    memory::ObjectPool<TOrbMapPointsUpdated, memory::ThreadSafePolicy> updated(1);
-    TOrbMapPointsUpdated* up = updated.Create();
-    up->map_id = {1};
-    up->Resize(2);
-    up->ids[0] = {1};
-    up->ids[1] = {7};
-    up->positions.col(0) = Eigen::Vector3d(10, 20, 30).cast<precision_t>();
-    up->positions.col(1) = Eigen::Vector3d(-1, -1, -1).cast<precision_t>();
-    scene.Apply(*up);
-    up->Recycle();
+    ApplyTransaction(scene, 1, [](TOrbTransaction& up) {
+        up.ResizeUpdatedPoints(2);
+        up.updated_ids[0] = {1};
+        up.updated_ids[1] = {7};
+        up.updated_positions.col(0) = Eigen::Vector3d(10, 20, 30).cast<precision_t>();
+        up.updated_positions.col(1) = Eigen::Vector3d(-1, -1, -1).cast<precision_t>();
+    });
     EXPECT_TRUE(scene.point_positions()[1].isApprox(Eigen::Vector3d(10, 20, 30).cast<precision_t>()));
     EXPECT_EQ(scene.point_positions().size(), 3u);
 
-    memory::ObjectPool<events::MapPointsRemoved, memory::ThreadSafePolicy> removed(1);
-    events::MapPointsRemoved* rm = removed.Create();
-    rm->map_id = {1};
-    rm->ids = {{0}, {9}};
-    scene.Apply(*rm);
-    rm->Recycle();
+    ApplyTransaction(scene, 1, [](TOrbTransaction& rm) { rm.removed_points = {{0}, {9}}; });
     EXPECT_FALSE(scene.point_alive()[0]);
     EXPECT_TRUE(scene.point_alive()[1]);
     EXPECT_EQ(scene.num_alive_points(), 2u);
 }
 
-TEST(SceneStateTest, KeyFrameCreatedUpdatesPoints) {
+TEST(SceneStateTest, TransactionAddsFrameAndUpdatesPoints) {
     TOrbScene scene;
     CreateKeyFrame(scene, 1, 0, MakePose(0, 0, 0, 0), kThreePoints);
 
-    memory::ObjectPool<TOrbKeyFrameCreated, memory::ThreadSafePolicy> pool(1);
-    TOrbKeyFrameCreated* event = pool.Create();
+    memory::ObjectPool<TOrbTransaction, memory::ThreadSafePolicy> pool(1);
+    TOrbTransaction* event = pool.Create();
     event->map_id = {1};
-    event->frame_id = {1};
-    event->pose = MakePose(0.1, 1, 0, 0);
+    AddFrame(*event, 1, MakePose(0.1, 1, 0, 0));
     event->new_points_start_id = {3};
     event->ResizeNewPoints(1);
     event->new_positions.col(0) = Eigen::Vector3d(0, 0, 5).cast<precision_t>();
@@ -189,13 +196,10 @@ TEST(SceneStateTest, KeyFramesInsertedAndUpdated) {
     ASSERT_EQ(scene.keyframes().size(), 1u);
 
     const auto updated_pose = MakePose(0.4, 5, 6, 7);
-    memory::ObjectPool<events::KeyFramePoseUpdated, memory::ThreadSafePolicy> pool(1);
-    events::KeyFramePoseUpdated* event = pool.Create();
-    event->map_id = {1};
-    event->frame_id = {3};
-    event->pose = updated_pose;
-    scene.Apply(*event);
-    event->Recycle();
+    ApplyTransaction(scene, 1, [&](TOrbTransaction& event) {
+        event.updated_poses = {{map::FrameId{3}, updated_pose},
+                               {map::FrameId{8}, updated_pose}};  // unknown: ignored
+    });
 
     ASSERT_EQ(scene.keyframes().size(), 1u);
     EXPECT_TRUE(scene.keyframes().at({3}).ToMatrix34().isApprox(updated_pose.ToMatrix34()));
@@ -272,33 +276,29 @@ TEST(SceneStateTest, NewerMapClearsTrackedSets) {
     EXPECT_TRUE(scene.local_frames().empty());
 }
 
-TEST(SceneStateTest, KeyFrameCreatedAppliesUpdatedPoints) {
+TEST(SceneStateTest, TransactionAppliesUpdatedPoints) {
     TOrbScene scene;
     CreateKeyFrame(scene, 1, 0, MakePose(0, 0, 0, 0), kThreePoints);
 
-    memory::ObjectPool<TOrbKeyFrameCreated, memory::ThreadSafePolicy> pool(1);
-    TOrbKeyFrameCreated* event = pool.Create();
-    event->map_id = {1};
-    event->frame_id = {1};
-    event->new_points_start_id = {3};
-    event->ResizeUpdatedPoints(1);
-    event->updated_ids[0] = {1};
-    event->updated_positions.col(0) = Eigen::Vector3d(7, 7, 7).cast<precision_t>();
-    scene.Apply(*event);
-    event->Recycle();
+    ApplyTransaction(scene, 1, [](TOrbTransaction& event) {
+        event.new_points_start_id = {3};
+        event.ResizeUpdatedPoints(1);
+        event.updated_ids[0] = {1};
+        event.updated_positions.col(0) = Eigen::Vector3d(7, 7, 7).cast<precision_t>();
+    });
     EXPECT_TRUE(scene.point_positions()[1].isApprox(Eigen::Vector3d(7, 7, 7).cast<precision_t>()));
     EXPECT_EQ(scene.num_alive_points(), 3u);
 }
 
-TEST(SceneStateTest, MapCreatedSetsCurrentPose) {
+TEST(SceneStateTest, NewMapSetsCurrentPose) {
     TOrbScene scene;
-    memory::ObjectPool<events::MapCreated, memory::ThreadSafePolicy> pool(1);
-    events::MapCreated* event = pool.Create();
-    event->map_id = {1};
-    event->frame_id = {0};
-    event->pose = MakePose(0.2, 1, 0, 0);
-    scene.Apply(*event);
-    event->Recycle();
+    ApplyTransaction(scene, 1, [](TOrbTransaction& event) {
+        event.new_map = true;
+        event.start_frame = map::FrameId{1};
+        AddFrame(event, 0, MakePose(0.0, 0, 0, 0));
+        AddFrame(event, 1, MakePose(0.2, 1, 0, 0));
+    });
+    EXPECT_EQ(scene.keyframes().size(), 2u);
     ASSERT_TRUE(scene.current_pose().has_value());
     EXPECT_TRUE(scene.current_pose()->ToMatrix34().isApprox(MakePose(0.2, 1, 0, 0).ToMatrix34()));
     EXPECT_EQ(scene.status(), TrackingStatus::Tracking);
@@ -322,7 +322,7 @@ TEST(SceneStateTest, OlderMapIgnored) {
     AddPoints(scene, 1, 0, {{9, 9, 9}});
     EXPECT_EQ(scene.current_map_id().value, 2u);
     EXPECT_EQ(scene.point_positions().size(), 3u);
-    EXPECT_EQ(scene.applied_count(EventType::KeyFrameCreated), 2u);
+    EXPECT_EQ(scene.applied_count(EventType::MapTransaction), 2u);
 }
 
 TEST(SceneStateTest, NewerMapClearsAndAdopts) {
@@ -361,6 +361,50 @@ TEST(SceneStateTest, MapZeroCountedOnly) {
     EXPECT_EQ(scene.current_map_id().value, 1u);
     EXPECT_EQ(scene.num_alive_points(), 3u);
     EXPECT_EQ(scene.applied_count(EventType::InitializationMeasurement), 1u);
+}
+
+TEST(SceneStateTest, AppliesTransactionRemovals) {
+    TOrbScene scene;
+    ApplyTransaction(scene, 1, [](TOrbTransaction& event) {
+        event.new_map = true;
+        AddFrame(event, 0, MakePose(0, 0, 0, 0));
+        AddFrame(event, 1, MakePose(0.1, 1, 0, 0));
+        AddFrame(event, 2, MakePose(0.2, 2, 0, 0));
+        event.ResizeNewPoints(4);
+        for (Eigen::Index i = 0; i < 4; ++i) {
+            event.new_positions.col(i) = Eigen::Vector3d(static_cast<double>(i), 0, 5).cast<precision_t>();
+        }
+    });
+    ASSERT_EQ(scene.num_alive_points(), 4u);
+
+    const auto moved = MakePose(0.3, 0, 1, 0);
+    ApplyTransaction(scene, 1, [&](TOrbTransaction& event) {
+        event.ResizeUpdatedPoints(1);
+        event.updated_ids[0] = {3};
+        event.updated_positions.col(0) = Eigen::Vector3d(9, 9, 9).cast<precision_t>();
+        event.updated_poses = {{map::FrameId{1}, moved}};
+        event.replaced_points = {{map::MapPointId{0}, map::MapPointId{3}}};
+        event.removed_points = {map::MapPointId{1}, map::MapPointId{7}};  // 7 unknown
+        event.removed_frames = {map::FrameId{2}, map::FrameId{5}};       // 5 unknown
+    });
+
+    EXPECT_EQ(scene.num_alive_points(), 2u);
+    EXPECT_FALSE(scene.point_alive()[0]);  // the loser of a replacement
+    EXPECT_FALSE(scene.point_alive()[1]);
+    EXPECT_TRUE(scene.point_alive()[2]);
+    EXPECT_TRUE(scene.point_alive()[3]);
+    EXPECT_TRUE(scene.point_positions()[3].isApprox(Eigen::Vector3d(9, 9, 9).cast<precision_t>()));
+    ASSERT_EQ(scene.keyframes().size(), 2u);
+    EXPECT_EQ(scene.keyframes().count(map::FrameId{2}), 0u);
+    EXPECT_TRUE(scene.keyframes().at(map::FrameId{1}).ToMatrix34().isApprox(moved.ToMatrix34()));
+
+    // Removing again changes nothing.
+    ApplyTransaction(scene, 1, [](TOrbTransaction& event) {
+        event.removed_points = {map::MapPointId{1}};
+        event.removed_frames = {map::FrameId{2}};
+    });
+    EXPECT_EQ(scene.num_alive_points(), 2u);
+    EXPECT_EQ(scene.keyframes().size(), 2u);
 }
 
 } // namespace

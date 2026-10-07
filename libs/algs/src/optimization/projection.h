@@ -69,6 +69,41 @@ inline void PixelJacobianRightPose(const geometry::Camera& right_camera,
                internal::PointPoseJacobian(xc);
 }
 
+/// Stereo pixel (u_l, v_l, u_r) of the world point X: ProjectPixel through the left camera
+/// stacked over the x of ProjectPixelRight. Both depths must be positive.
+[[nodiscard]] inline Eigen::Matrix<precision_t, 3, 1> StereoPixel(
+    const geometry::Camera& left_camera, const geometry::Camera& right_camera,
+    const geometry::RigidTransformation& T_cw, const geometry::RigidTransformation& T_rl,
+    const geometry::TPoint3DF& X) {
+    const geometry::TPoint3DF xc = T_cw.Transform(X);
+    Eigen::Matrix<precision_t, 3, 1> pixel;
+    pixel.head<2>() = left_camera.Project(xc);
+    pixel.z() = right_camera.Project(T_rl.Transform(xc)).x();
+    return pixel;
+}
+
+/// Jacobians of StereoPixel: the rows of PixelJacobians over the u row of the right camera,
+/// right_camera.ProjectJacobian(Xr).row(0) * R_rl * [-[Xc]x | I] (pose, left perturbation as
+/// in PixelJacobians) and right_camera.ProjectJacobian(Xr).row(0) * R_rl * R_cw (point).
+inline void StereoPixelJacobians(const geometry::Camera& left_camera,
+                                 const geometry::Camera& right_camera,
+                                 const geometry::RigidTransformation& T_cw,
+                                 const geometry::RigidTransformation& T_rl,
+                                 const geometry::TPoint3DF& X,
+                                 Eigen::Matrix<precision_t, 3, 6>& out_pose,
+                                 Eigen::Matrix<precision_t, 3, 3>& out_point) {
+    const geometry::TPoint3DF xc = T_cw.Transform(X);
+    const geometry::TPoint3DF xr = T_rl.Transform(xc);
+    const Eigen::Matrix<precision_t, 2, 3> left_jacobian = left_camera.ProjectJacobian(xc);
+    const Eigen::Matrix<precision_t, 1, 3> right_u =
+        right_camera.ProjectJacobian(xr).row(0) * T_rl.rotation();
+    const Eigen::Matrix<precision_t, 3, 6> point_pose = internal::PointPoseJacobian(xc);
+    out_pose.topRows<2>() = left_jacobian * point_pose;
+    out_pose.row(2) = right_u * point_pose;
+    out_point.topRows<2>() = left_jacobian * T_cw.rotation();
+    out_point.row(2) = right_u * T_cw.rotation();
+}
+
 }  // namespace voyahslam::optimization
 
 #endif  // VOYAHSLAM_OPTIMIZATION_PROJECTION_H

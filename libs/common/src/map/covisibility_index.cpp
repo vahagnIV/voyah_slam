@@ -20,6 +20,53 @@ void CovisibilityIndex::Add(FrameId frame, uint32_t feature, MapPointId point) {
     points_[frame.value].push_back(point);
 }
 
+void CovisibilityIndex::Remove(FrameId frame, MapPointId point) {
+    if (point.value >= observations_.size()) {
+        return;
+    }
+    std::vector<PointObservation>& observations = observations_[point.value];
+    const auto it = std::find_if(observations.begin(), observations.end(),
+                                 [&](const PointObservation& o) { return o.frame == frame; });
+    if (it == observations.end()) {
+        return;
+    }
+    observations.erase(it);
+    ErasePointOfFrame(frame, point);
+}
+
+void CovisibilityIndex::RemovePoint(MapPointId point) {
+    if (point.value >= observations_.size()) {
+        return;
+    }
+    for (const PointObservation& observation : observations_[point.value]) {
+        ErasePointOfFrame(observation.frame, point);
+    }
+    observations_[point.value].clear();
+}
+
+void CovisibilityIndex::RemoveFrame(FrameId frame) {
+    const auto it = points_.find(frame.value);
+    if (it == points_.end()) {
+        return;
+    }
+    for (const MapPointId point : it->second) {
+        std::erase_if(observations_[point.value],
+                      [&](const PointObservation& o) { return o.frame == frame; });
+    }
+    points_.erase(it);
+}
+
+void CovisibilityIndex::ErasePointOfFrame(FrameId frame, MapPointId point) {
+    const auto it = points_.find(frame.value);
+    if (it == points_.end()) {
+        return;
+    }
+    std::erase(it->second, point);
+    if (it->second.empty()) {
+        points_.erase(it);
+    }
+}
+
 void CovisibilityIndex::Clear() {
     observations_.clear();
     points_.clear();

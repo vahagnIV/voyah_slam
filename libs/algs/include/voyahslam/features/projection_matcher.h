@@ -17,6 +17,7 @@
 #include <voyahslam/geometry/camera.h>
 #include <voyahslam/geometry/rigid_transformation.h>
 #include <voyahslam/map/map_point_id.h>
+#include <voyahslam/map/point_reference.h>
 
 namespace voyahslam::features {
 
@@ -75,6 +76,15 @@ private:
     geometry::TPoint2DF min_;
     geometry::TPoint2DF max_;
 };
+
+// Pyramid level at which a point at `distance` from the camera is expected,
+// from its reference observation: the reference level shifted by the log-scale
+// distance ratio, clamped to [0, max_level].
+[[nodiscard]] inline int PredictLevel(const map::PointReference& reference, double distance, double level_scale,
+                                      int max_level) {
+    const double shift = std::log(reference.distance / distance) / std::log(level_scale);
+    return std::clamp(reference.level + static_cast<int>(std::lround(shift)), 0, max_level);
+}
 
 }  // namespace detail
 
@@ -189,7 +199,6 @@ size_t SearchFromLocalMap(const TMonocularMeasurement<TFeatureExtractor>& curren
     const FeatureGrid grid(current.distorted_points(), current.levels());
     const detail::ProjectionGate gate(current.camera(), current.distorted_points(), options.max_ray_angle_deg);
     const geometry::TPoint3DF centre = T_cw.Inverse().translation();
-    const double log_scale = std::log(options.level_scale);
     constexpr double kInfinity = std::numeric_limits<double>::infinity();
 
     size_t added = 0;
@@ -223,10 +232,7 @@ size_t SearchFromLocalMap(const TMonocularMeasurement<TFeatureExtractor>& curren
         if (out_visible) {
             out_visible->push_back(id);
         }
-        const int level = std::clamp(
-            reference->level +
-                static_cast<int>(std::lround(std::log(reference->distance / distance) / log_scale)),
-            0, options.max_level);
+        const int level = detail::PredictLevel(*reference, distance, options.level_scale, options.max_level);
         const double radius =
             th * (view_cos > 0.998 ? 2.5 : 4.0) * std::pow(options.level_scale, level);
         const std::vector<Eigen::Index> candidates = grid.FeaturesInArea(*uv, radius, level - 1, level);

@@ -11,7 +11,7 @@ namespace {
 using Extractor = test::TestExtractor;
 
 TEST(LoopCloserTest, AcknowledgesEverything) {
-    memory::ObjectPool<events::MapCreated, memory::ThreadSafePolicy> pool{1};
+    memory::ObjectPool<events::MapTransaction<Extractor>, memory::ThreadSafePolicy> pool{1};
     events::Observable mapper;
     LoopCloser<Extractor> loop_closer;
     mapper.ConnectAsync(loop_closer.inbox());

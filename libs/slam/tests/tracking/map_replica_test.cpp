@@ -14,8 +14,7 @@ namespace {
 
 using Extractor = features::OrbFeatureExtractor;
 using TReplica = MapReplica<Extractor>;
-using TUpdated = events::MapPointsUpdated<Extractor>;
-using TKeyFrameCreated = events::KeyFrameCreated<Extractor>;
+using TTransaction = events::MapTransaction<Extractor>;
 using TMono = features::TMonocularMeasurement<Extractor>;
 
 geometry::RigidTransformation MakePose(double angle, double tx, double ty, double tz) {
@@ -25,9 +24,20 @@ geometry::RigidTransformation MakePose(double angle, double tx, double ty, doubl
                                          Eigen::Vector3d(tx, ty, tz).cast<precision_t>());
 }
 
+// Applies one transaction of map `map`, filled by `fill`.
+template <typename TFill>
+void ApplyTransaction(TReplica& out_replica, uint32_t map, TFill fill) {
+    memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> pool(1);
+    TTransaction* event = pool.Create();
+    event->map_id = {map};
+    fill(*event);
+    out_replica.Apply(*event);
+    event->Recycle();
+}
+
 // Sets the new-points part of `out_event`: ids [start, start + points.size()),
 // point i with position points[i], a descriptor filled with i + 1 and normal (0, 0, i + 1).
-void SetNewPoints(TKeyFrameCreated& out_event, uint32_t start,
+void SetNewPoints(TTransaction& out_event, uint32_t start,
                   const std::vector<Eigen::Vector3d>& points) {
     out_event.new_points_start_id = {start};
     out_event.ResizeNewPoints(static_cast<uint32_t>(points.size()));
@@ -60,35 +70,33 @@ TMono MakeMeasurement(const std::vector<uint8_t>& levels) {
     return TMono(std::move(features), K, nullptr, 1.0);
 }
 
-// Sets the Frame part of `out_event`: feature i at level levels[i], and
+// Adds Frame `frame` to `out_event`: feature i at level levels[i], and its own
 // (feature, point) observations.
-void SetFrame(TKeyFrameCreated& out_event, uint32_t map, uint32_t frame,
-              const geometry::RigidTransformation& pose, const std::vector<uint8_t>& levels,
+void AddFrame(TTransaction& out_event, uint32_t frame, const geometry::RigidTransformation& pose,
+              const std::vector<uint8_t>& levels,
               const std::vector<std::pair<uint32_t, uint32_t>>& observations) {
-    out_event.map_id = {map};
-    out_event.frame_id = {frame};
-    out_event.pose = pose;
-    out_event.measurement = MakeMeasurement(levels);
+    events::NewFrame<Extractor>& added = out_event.added_frames.emplace_back();
+    added.id = {frame};
+    added.T_cw = pose;
+    added.measurement = MakeMeasurement(levels);
     for (const auto& [feature, point] : observations) {
-        out_event.observed_features.push_back(feature);
-        out_event.observed_points.push_back({point});
+        added.observed_features.push_back(feature);
+        added.observed_points.push_back({point});
     }
 }
 
-// Applies a KeyFrameCreated of Frame `frame` that also adds `new_points` from id `start`.
+// Applies a transaction that adds Frame `frame` and `new_points` from id `start`.
 void CreateKeyFrame(TReplica& out_replica, uint32_t map, uint32_t frame,
                     const geometry::RigidTransformation& pose, const std::vector<uint8_t>& levels,
                     const std::vector<std::pair<uint32_t, uint32_t>>& observations,
                     const std::vector<Eigen::Vector3d>& new_points = {}, uint32_t start = 0) {
-    memory::ObjectPool<TKeyFrameCreated, memory::ThreadSafePolicy> pool(1);
-    TKeyFrameCreated* event = pool.Create();
-    SetFrame(*event, map, frame, pose, levels, observations);
-    SetNewPoints(*event, start, new_points);
-    out_replica.Apply(*event);
-    event->Recycle();
+    ApplyTransaction(out_replica, map, [&](TTransaction& event) {
+        AddFrame(event, frame, pose, levels, observations);
+        SetNewPoints(event, start, new_points);
+    });
 }
 
-// Adds points through a KeyFrameCreated whose Frame (`frame`, no features)
+// Adds points through a transaction whose Frame (`frame`, no features)
 // observes none of them, so they get no reference.
 void AddPoints(TReplica& out_replica, uint32_t map, uint32_t start,
                const std::vector<Eigen::Vector3d>& points, uint32_t frame = 100) {
@@ -108,32 +116,24 @@ TEST(MapReplicaTest, PointsAddedUpdatedRemoved) {
     EXPECT_EQ(replica.Descriptor({1})(5), 2);
     EXPECT_NEAR(replica.Normal({1}).z(), 2.0, 1e-6);
 
-    memory::ObjectPool<TUpdated, memory::ThreadSafePolicy> updated(1);
-    TUpdated* up = updated.Create();
-    up->map_id = {1};
-    up->Resize(2);
-    up->ids[0] = {1};
-    up->ids[1] = {7};
-    up->positions.col(0) = Eigen::Vector3d(10, 20, 30).cast<precision_t>();
-    up->positions.col(1) = Eigen::Vector3d(-1, -1, -1).cast<precision_t>();
-    up->descriptors.col(0).setConstant(77);
-    up->descriptors.col(1).setConstant(88);
-    up->normals.col(0) = Eigen::Vector3d(0, 1, 0).cast<precision_t>();
-    up->normals.col(1) = Eigen::Vector3d(0, 1, 0).cast<precision_t>();
-    replica.Apply(*up);
-    up->Recycle();
+    ApplyTransaction(replica, 1, [](TTransaction& up) {
+        up.ResizeUpdatedPoints(2);
+        up.updated_ids[0] = {1};
+        up.updated_ids[1] = {7};
+        up.updated_positions.col(0) = Eigen::Vector3d(10, 20, 30).cast<precision_t>();
+        up.updated_positions.col(1) = Eigen::Vector3d(-1, -1, -1).cast<precision_t>();
+        up.updated_descriptors.col(0).setConstant(77);
+        up.updated_descriptors.col(1).setConstant(88);
+        up.updated_normals.col(0) = Eigen::Vector3d(0, 1, 0).cast<precision_t>();
+        up.updated_normals.col(1) = Eigen::Vector3d(0, 1, 0).cast<precision_t>();
+    });
     EXPECT_TRUE(replica.Position({1}).isApprox(Eigen::Vector3d(10, 20, 30).cast<precision_t>()));
     EXPECT_EQ(replica.Descriptor({1})(0), 77);
     EXPECT_NEAR(replica.Normal({1}).y(), 1.0, 1e-6);
     EXPECT_EQ(replica.num_points(), 3u);
     EXPECT_FALSE(replica.IsAlive({7}));
 
-    memory::ObjectPool<events::MapPointsRemoved, memory::ThreadSafePolicy> removed(1);
-    events::MapPointsRemoved* rm = removed.Create();
-    rm->map_id = {1};
-    rm->ids = {{0}, {9}};
-    replica.Apply(*rm);
-    rm->Recycle();
+    ApplyTransaction(replica, 1, [](TTransaction& rm) { rm.removed_points = {{0}, {9}}; });
     EXPECT_FALSE(replica.IsAlive({0}));
     EXPECT_TRUE(replica.IsAlive({1}));
     EXPECT_FALSE(replica.IsAlive({9}));
@@ -182,20 +182,15 @@ TEST(MapReplicaTest, ReferenceIsFirstObservingKeyFrame) {
     EXPECT_EQ(replica.keyframe_ids().size(), 2u);
 }
 
-TEST(MapReplicaTest, KeyFramePoseUpdated) {
+TEST(MapReplicaTest, UpdatedPoses) {
     TReplica replica;
     AddPoints(replica, 1, 0, kThreePoints);
     CreateKeyFrame(replica, 1, 3, MakePose(0.1, 1, 2, 3), {0, 0, 0}, {{0, 0}});
     const auto updated_pose = MakePose(0.4, 5, 6, 7);
-    memory::ObjectPool<events::KeyFramePoseUpdated, memory::ThreadSafePolicy> pool(1);
-    events::KeyFramePoseUpdated* event = pool.Create();
-    event->map_id = {1};
-    event->frame_id = {3};
-    event->pose = updated_pose;
-    replica.Apply(*event);
-    event->frame_id = {99};  // unknown keyframe: ignored
-    replica.Apply(*event);
-    event->Recycle();
+    ApplyTransaction(replica, 1, [&](TTransaction& event) {
+        event.updated_poses = {{map::FrameId{3}, updated_pose},
+                               {map::FrameId{99}, updated_pose}};  // unknown keyframe: ignored
+    });
     EXPECT_TRUE(replica.keyframe({3})->T_cw.ToMatrix34().isApprox(updated_pose.ToMatrix34()));
     EXPECT_EQ(replica.keyframe({99}), nullptr);
 }
@@ -206,12 +201,10 @@ TEST(MapReplicaTest, NewerMapClears) {
     CreateKeyFrame(replica, 1, 3, MakePose(0.1, 1, 2, 3), {0, 0, 0}, {{0, 0}});
     ASSERT_EQ(replica.num_points(), 3u);
 
-    memory::ObjectPool<events::MapCreated, memory::ThreadSafePolicy> pool(1);
-    events::MapCreated* created = pool.Create();
-    created->map_id = {2};
-    created->frame_id = {10};
-    replica.Apply(*created);
-    created->Recycle();
+    ApplyTransaction(replica, 2, [](TTransaction& created) {
+        created.new_map = true;
+        created.start_frame = map::FrameId{10};
+    });
     EXPECT_EQ(replica.map_id().value, 2u);
     EXPECT_EQ(replica.num_points(), 0u);
     EXPECT_TRUE(replica.keyframe_ids().empty());
@@ -238,25 +231,24 @@ TEST(MapReplicaTest, OlderAndZeroMapIgnored) {
     EXPECT_EQ(fresh.num_points(), 0u);
 }
 
-TEST(MapReplicaTest, AppliesCombinedKeyFrameCreatedAtomically) {
+TEST(MapReplicaTest, AppliesFrameInsertionAtomically) {
     TReplica replica;
     CreateKeyFrame(replica, 1, 2, MakePose(0.0, 0, 0, 0), {0, 0, 0, 0}, {{0, 0}, {1, 1}, {2, 2}},
                    kThreePoints);
 
     // Frame 5 adds points 3-5, updates point 1, adds an observation of new
     // point 4 to existing Frame 2, and observes points 1, 3 and 5 itself.
-    memory::ObjectPool<TKeyFrameCreated, memory::ThreadSafePolicy> pool(1);
-    TKeyFrameCreated* event = pool.Create();
-    SetFrame(*event, 1, 5, MakePose(0.1, 1, 0, 0), {0, 1, 2}, {{0, 1}, {1, 3}, {2, 5}});
-    SetNewPoints(*event, 3, {{1, 0, 4}, {2, 0, 4}, {3, 0, 4}});
-    event->ResizeUpdatedPoints(1);
-    event->updated_ids[0] = {1};
-    event->updated_positions.col(0) = Eigen::Vector3d(4, 5, 7).cast<precision_t>();
-    event->updated_descriptors.col(0).setConstant(42);
-    event->updated_normals.col(0) = Eigen::Vector3d(1, 0, 0).cast<precision_t>();
-    event->added_observations.push_back({map::FrameId{2}, 3, map::MapPointId{4}});
-    replica.Apply(*event);
-    event->Recycle();
+    ApplyTransaction(replica, 1, [](TTransaction& event) {
+        AddFrame(event, 5, MakePose(0.1, 1, 0, 0), {0, 1, 2}, {{0, 1}, {1, 3}, {2, 5}});
+        SetNewPoints(event, 3, {{1, 0, 4}, {2, 0, 4}, {3, 0, 4}});
+        event.ResizeUpdatedPoints(1);
+        event.updated_ids[0] = {1};
+        event.updated_positions.col(0) = Eigen::Vector3d(4, 5, 7).cast<precision_t>();
+        event.updated_descriptors.col(0).setConstant(42);
+        event.updated_normals.col(0) = Eigen::Vector3d(1, 0, 0).cast<precision_t>();
+        event.added_observations.push_back({map::FrameId{2}, 3, map::MapPointId{4}});
+    });
+    EXPECT_TRUE(replica.CheckConsistency());
 
     ASSERT_EQ(replica.num_points(), 6u);
     EXPECT_TRUE(replica.Position({4}).isApprox(Eigen::Vector3d(2, 0, 4).cast<precision_t>()));
@@ -308,19 +300,18 @@ TEST(MapReplicaTest, UpdatedPointsChangeNormalAndDescriptor) {
     TReplica replica;
     CreateKeyFrame(replica, 1, 0, MakePose(0.0, 0, 0, 0), {0}, {{0, 0}}, kThreePoints);
 
-    memory::ObjectPool<TKeyFrameCreated, memory::ThreadSafePolicy> pool(1);
-    TKeyFrameCreated* event = pool.Create();
-    SetFrame(*event, 1, 1, MakePose(0.1, 1, 0, 0), {0}, {{0, 2}});
-    event->ResizeUpdatedPoints(2);
-    event->updated_ids[0] = {2};
-    event->updated_ids[1] = {0};
-    for (Eigen::Index i = 0; i < 2; ++i) {
-        event->updated_positions.col(i) = kThreePoints[static_cast<size_t>(2 - 2 * i)].cast<precision_t>();
-        event->updated_descriptors.col(i).setConstant(static_cast<uint8_t>(50 + i));
-        event->updated_normals.col(i) = Eigen::Vector3d(0, 1 + i, 0).cast<precision_t>();
-    }
-    replica.Apply(*event);
-    event->Recycle();
+    ApplyTransaction(replica, 1, [](TTransaction& event) {
+        AddFrame(event, 1, MakePose(0.1, 1, 0, 0), {0}, {{0, 2}});
+        event.ResizeUpdatedPoints(2);
+        event.updated_ids[0] = {2};
+        event.updated_ids[1] = {0};
+        for (Eigen::Index i = 0; i < 2; ++i) {
+            event.updated_positions.col(i) =
+                kThreePoints[static_cast<size_t>(2 - 2 * i)].cast<precision_t>();
+            event.updated_descriptors.col(i).setConstant(static_cast<uint8_t>(50 + i));
+            event.updated_normals.col(i) = Eigen::Vector3d(0, 1 + i, 0).cast<precision_t>();
+        }
+    });
 
     EXPECT_EQ(replica.Descriptor({2})(0), 50);
     EXPECT_NEAR(replica.Normal({2}).y(), 1.0, 1e-6);
@@ -328,6 +319,157 @@ TEST(MapReplicaTest, UpdatedPointsChangeNormalAndDescriptor) {
     EXPECT_NEAR(replica.Normal({0}).y(), 2.0, 1e-6);
     EXPECT_EQ(replica.Descriptor({1})(0), 2);  // untouched
     EXPECT_EQ(replica.num_points(), 3u);
+}
+
+using TObservations = std::vector<std::pair<uint32_t, map::MapPointId>>;
+
+// The reference of `point` must be (frame, feature) at that feature's level,
+// at the point's distance from the Frame's current centre.
+void ExpectReference(const TReplica& replica, uint32_t point, uint32_t frame, uint32_t feature,
+                     int level) {
+    const auto& reference = replica.Reference({point});
+    ASSERT_TRUE(reference.has_value()) << "point " << point;
+    EXPECT_EQ(reference->keyframe.value, frame) << "point " << point;
+    EXPECT_EQ(reference->feature, static_cast<Eigen::Index>(feature)) << "point " << point;
+    EXPECT_EQ(reference->level, level) << "point " << point;
+    const auto* keyframe = replica.keyframe({frame});
+    ASSERT_NE(keyframe, nullptr);
+    const geometry::TPoint3DF centre = keyframe->T_cw.Inverse().translation();
+    EXPECT_NEAR(reference->distance, (replica.Position({point}) - centre).norm(), 1e-9)
+        << "point " << point;
+}
+
+TEST(MapReplicaTest, AppliesEveryTransactionPart) {
+    TReplica replica;
+    // A new map: Frames 0-2 and points 0-4.
+    ApplyTransaction(replica, 1, [](TTransaction& event) {
+        event.new_map = true;
+        event.start_frame = map::FrameId{1};
+        AddFrame(event, 0, MakePose(0.0, 0, 0, 0), {0, 1, 2, 3}, {{0, 0}, {1, 1}, {2, 2}, {3, 3}});
+        AddFrame(event, 1, MakePose(0.1, 1, 0, 0), {0, 1, 2, 3}, {{0, 0}, {1, 1}, {2, 2}, {3, 4}});
+        AddFrame(event, 2, MakePose(0.2, 2, 0, 0), {0, 1, 2, 3}, {{0, 3}, {1, 4}});
+        SetNewPoints(event, 0, {{0, 0, 5}, {1, 0, 5}, {2, 0, 5}, {3, 0, 5}, {4, 0, 5}});
+    });
+    ASSERT_TRUE(replica.CheckConsistency());
+    ExpectReference(replica, 2, 0, 2, 2);
+
+    // Every part at once.
+    const auto pose_1 = MakePose(0.3, 1, 1, 0);
+    ApplyTransaction(replica, 1, [&](TTransaction& event) {
+        AddFrame(event, 3, MakePose(0.0, 3, 0, 0), {0, 1, 2}, {{0, 1}, {1, 5}});
+        SetNewPoints(event, 5, {{5, 0, 5}, {6, 0, 5}});
+        // Point 6 is first observed by Frame 2, which this transaction removes.
+        event.added_observations = {{map::FrameId{2}, 2, map::MapPointId{5}},
+                                    {map::FrameId{2}, 3, map::MapPointId{6}},
+                                    {map::FrameId{3}, 2, map::MapPointId{6}}};
+        event.ResizeUpdatedPoints(1);
+        event.updated_ids[0] = {0};
+        event.updated_positions.col(0) = Eigen::Vector3d(0, 1, 6).cast<precision_t>();
+        event.updated_descriptors.col(0).setConstant(99);
+        event.updated_normals.col(0) = Eigen::Vector3d(0, 1, 0).cast<precision_t>();
+        event.updated_poses = {{map::FrameId{1}, pose_1}};
+        event.removed_observations = {{map::FrameId{0}, map::MapPointId{2}}};
+        event.replaced_points = {{map::MapPointId{4}, map::MapPointId{3}}};
+        event.removed_points = {map::MapPointId{1}};
+        event.removed_frames = {map::FrameId{2}};
+    });
+
+    EXPECT_TRUE(replica.CheckConsistency());
+    EXPECT_EQ(replica.num_points(), 7u);
+    for (const uint32_t alive : {0u, 2u, 3u, 5u, 6u}) EXPECT_TRUE(replica.IsAlive({alive})) << alive;
+    EXPECT_FALSE(replica.IsAlive({1}));  // removed
+    EXPECT_FALSE(replica.IsAlive({4}));  // the loser of a replacement
+    EXPECT_EQ(replica.keyframe_ids(),
+              (std::vector<map::FrameId>{map::FrameId{0}, map::FrameId{1}, map::FrameId{3}}));
+    EXPECT_EQ(replica.keyframe({2}), nullptr);
+    EXPECT_TRUE(replica.Position({0}).isApprox(Eigen::Vector3d(0, 1, 6).cast<precision_t>()));
+    EXPECT_EQ(replica.Descriptor({0})(0), 99);
+    EXPECT_NEAR(replica.Normal({0}).y(), 1.0, 1e-9);
+    EXPECT_TRUE(replica.keyframe({1})->T_cw.ToMatrix34().isApprox(pose_1.ToMatrix34()));
+
+    EXPECT_EQ(replica.keyframe({0})->observations, (TObservations{{0, {0}}, {3, {3}}}));
+    EXPECT_EQ(replica.keyframe({1})->observations, (TObservations{{0, {0}}, {2, {2}}}));
+    EXPECT_EQ(replica.keyframe({3})->observations, (TObservations{{1, {5}}, {2, {6}}}));
+    EXPECT_EQ(replica.covisibility().Covisible({0}, 10),
+              (std::vector<std::pair<map::FrameId, uint32_t>>{{map::FrameId{1}, 1}}));
+    EXPECT_TRUE(replica.covisibility().Points({2}).empty());
+    EXPECT_TRUE(replica.covisibility().Observations({4}).empty());
+
+    // Point 2 lost its reference observation (Frame 0): Frame 1 takes over.
+    // Point 5's reference is the new Frame's own observation; point 6's
+    // (Frame 2) is gone with its Frame.
+    ExpectReference(replica, 2, 1, 2, 2);
+    ExpectReference(replica, 3, 0, 3, 3);
+    ExpectReference(replica, 5, 3, 1, 1);
+    ExpectReference(replica, 6, 3, 2, 2);
+    EXPECT_FALSE(replica.Reference({1}).has_value());
+    EXPECT_FALSE(replica.Reference({4}).has_value());
+}
+
+TEST(MapReplicaTest, ReferenceReassignedOnFrameRemoval) {
+    TReplica replica;
+    // Point 0 is referenced in Frame 3 and also observed by Frames 7 and 5
+    // (added in that order).
+    ApplyTransaction(replica, 1, [](TTransaction& event) {
+        event.new_map = true;
+        AddFrame(event, 3, MakePose(0.0, 0, 0, 0), {1}, {{0, 0}});
+        AddFrame(event, 7, MakePose(0.1, 2, 0, 0), {0, 2}, {{1, 0}});
+        AddFrame(event, 5, MakePose(0.1, 1, 0, 0), {0, 0, 4}, {{2, 0}});
+        SetNewPoints(event, 0, {{1, 2, 8}});
+    });
+    ExpectReference(replica, 0, 3, 0, 1);
+
+    // Frame 5 moves in the same transaction: the distance is from its new centre.
+    const auto moved = MakePose(0.2, -3, 1, 2);
+    ApplyTransaction(replica, 1, [&](TTransaction& event) {
+        event.updated_poses = {{map::FrameId{5}, moved}};
+        event.removed_frames = {map::FrameId{3}};
+    });
+
+    EXPECT_TRUE(replica.CheckConsistency());
+    ASSERT_TRUE(replica.IsAlive({0}));
+    ExpectReference(replica, 0, 5, 2, 4);
+    const Eigen::Vector3d centre = moved.Inverse().translation().cast<double>();
+    EXPECT_NEAR(replica.Reference({0})->distance, (Eigen::Vector3d(1, 2, 8) - centre).norm(), 1e-9);
+}
+
+TEST(MapReplicaTest, PointWithoutObservationsIsRemoved) {
+    TReplica replica;
+    ApplyTransaction(replica, 1, [](TTransaction& event) {
+        event.new_map = true;
+        AddFrame(event, 1, MakePose(0.0, 0, 0, 0), {0, 0}, {{0, 0}, {1, 1}});
+        AddFrame(event, 2, MakePose(0.1, 1, 0, 0), {0}, {{0, 0}});
+        SetNewPoints(event, 0, {{0, 0, 5}, {1, 0, 5}});
+    });
+    ASSERT_TRUE(replica.CheckConsistency());
+
+    // Point 1's only observation goes.
+    ApplyTransaction(replica, 1, [](TTransaction& event) {
+        event.removed_observations = {{map::FrameId{1}, map::MapPointId{1}}};
+    });
+    EXPECT_TRUE(replica.CheckConsistency());
+    EXPECT_FALSE(replica.IsAlive({1}));
+    EXPECT_FALSE(replica.Reference({1}).has_value());
+    EXPECT_TRUE(replica.IsAlive({0}));
+
+    // Point 0's two Frames go.
+    ApplyTransaction(replica, 1, [](TTransaction& event) {
+        event.removed_frames = {map::FrameId{2}, map::FrameId{1}};
+    });
+    EXPECT_TRUE(replica.CheckConsistency());
+    EXPECT_FALSE(replica.IsAlive({0}));
+    EXPECT_TRUE(replica.keyframe_ids().empty());
+    EXPECT_TRUE(replica.covisibility().Observations({0}).empty());
+}
+
+TEST(MapReplicaTest, CheckConsistencyDetectsAnUnobservedPoint) {
+    TReplica replica;
+    CreateKeyFrame(replica, 1, 0, MakePose(0.0, 0, 0, 0), {0}, {{0, 0}}, kThreePoints);
+    EXPECT_FALSE(replica.CheckConsistency());  // points 1 and 2 have no observation
+    ApplyTransaction(replica, 1, [](TTransaction& event) {
+        event.removed_points = {map::MapPointId{1}, map::MapPointId{2}};
+    });
+    EXPECT_TRUE(replica.CheckConsistency());
 }
 
 } // namespace

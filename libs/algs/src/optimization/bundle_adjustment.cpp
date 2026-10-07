@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <istream>
 #include <memory>
 #include <ostream>
@@ -9,6 +10,7 @@
 
 #include <g2o/core/base_binary_edge.h>
 #include <g2o/core/block_solver.h>
+#include <g2o/core/hyper_graph_action.h>
 #include <g2o/core/optimization_algorithm_levenberg.h>
 #include <g2o/core/robust_kernel_impl.h>
 #include <g2o/core/sparse_optimizer.h>
@@ -59,9 +61,6 @@ public:
         _jacobianOplusXj = pose_jacobian;
     }
 
-    /// Camera-frame depth of the point at the current estimates.
-    [[nodiscard]] double Depth() const { return Pose().Transform(Point()).z(); }
-
 private:
     [[nodiscard]] TPoint3DF Point() const { return vertexXn<0>()->estimate(); }
     [[nodiscard]] RigidTransformation Pose() const {
@@ -71,13 +70,94 @@ private:
     Camera camera_;
 };
 
+/// Stereo error of a world point (vertex 0) seen by a T_cw pose (vertex 1): the rows of
+/// EdgePixelProjection over right.Project(T_rl T_cw X).x() - right_x; measurement =
+/// (u_l, v_l, u_r), raw px.
+class EdgeStereoProjection
+    : public g2o::BaseBinaryEdge<3, Eigen::Vector3d, g2o::VertexPointXYZ, g2o::VertexSE3Expmap> {
+public:
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+
+    EdgeStereoProjection(const Camera& left, const StereoCameras& stereo)
+        : left_(left), right_(stereo.right), T_rl_(stereo.T_rl) {}
+
+    bool read(std::istream& /*is*/) override { return false; }
+    bool write(std::ostream& /*os*/) const override { return false; }
+
+    void computeError() override {
+        _error = StereoPixel(left_, right_, Pose(), T_rl_, Point()) - _measurement;
+    }
+
+    void linearizeOplus() override {
+        Eigen::Matrix<precision_t, 3, 6> pose_jacobian;
+        Eigen::Matrix<precision_t, 3, 3> point_jacobian;
+        StereoPixelJacobians(left_, right_, Pose(), T_rl_, Point(), pose_jacobian,
+                             point_jacobian);
+        _jacobianOplusXi = point_jacobian;
+        _jacobianOplusXj = pose_jacobian;
+    }
+
+private:
+    [[nodiscard]] TPoint3DF Point() const { return vertexXn<0>()->estimate(); }
+    [[nodiscard]] RigidTransformation Pose() const {
+        return FromSE3Quat(vertexXn<1>()->estimate());
+    }
+
+    Camera left_;
+    Camera right_;
+    RigidTransformation T_rl_;
+};
+
+/// Evaluates should_stop once (Check) and after every LM iteration (as a g2o post-iteration
+/// action) until it returns true; the result is the optimizer's force-stop flag.
+class StopCheck : public g2o::HyperGraphAction {
+public:
+    explicit StopCheck(const std::function<bool()>& should_stop) : should_stop_(should_stop) {}
+
+    /// Evaluates should_stop unless it already returned true; true = stop.
+    bool Check() {
+        if (!stop_) {
+            stop_ = should_stop_();
+        }
+        return stop_;
+    }
+
+    [[nodiscard]] bool Stopped() const { return stop_; }
+    bool* Flag() { return &stop_; }
+
+    // initializeOptimization also fires the post-iteration actions, with iteration -1.
+    g2o::HyperGraphAction* operator()(const g2o::HyperGraph* /*graph*/,
+                                      Parameters* parameters) override {
+        const auto* iteration = dynamic_cast<const ParametersIteration*>(parameters);
+        if (iteration != nullptr && iteration->iteration >= 0) {
+            Check();
+        }
+        return this;
+    }
+
+private:
+    const std::function<bool()>& should_stop_;
+    bool stop_ = false;
+};
+
+bool IsFinite(const RigidTransformation& pose) {
+    return pose.rotation().allFinite() && pose.translation().allFinite();
+}
+
 bool IsValid(const BaProblem& problem) {
     if (problem.keyframe_poses.empty() || problem.points.cols() == 0 ||
         problem.observations.empty() ||
         problem.keyframe_fixed.size() != problem.keyframe_poses.size() ||
         problem.keyframe_cameras.size() != problem.keyframe_poses.size() ||
+        (!problem.keyframe_stereo.empty() &&
+         problem.keyframe_stereo.size() != problem.keyframe_poses.size()) ||
         !problem.points.allFinite()) {
         return false;
+    }
+    for (const std::optional<StereoCameras>& stereo : problem.keyframe_stereo) {
+        if (stereo && (!IsFinite(stereo->T_rl) || !stereo->right.K.allFinite())) {
+            return false;
+        }
     }
     for (const Camera& camera : problem.keyframe_cameras) {
         if (!camera.K.allFinite()) {
@@ -85,7 +165,7 @@ bool IsValid(const BaProblem& problem) {
         }
     }
     for (const RigidTransformation& pose : problem.keyframe_poses) {
-        if (!pose.rotation().allFinite() || !pose.translation().allFinite()) {
+        if (!IsFinite(pose)) {
             return false;
         }
     }
@@ -94,6 +174,11 @@ bool IsValid(const BaProblem& problem) {
         if (observation.keyframe >= problem.keyframe_poses.size() ||
             observation.point >= num_points || !observation.measurement.allFinite() ||
             !std::isfinite(observation.sigma) || observation.sigma <= 0.0) {
+            return false;
+        }
+        if (observation.right_x &&
+            (!std::isfinite(*observation.right_x) || problem.keyframe_stereo.empty() ||
+             !problem.keyframe_stereo[observation.keyframe])) {
             return false;
         }
     }
@@ -110,7 +195,8 @@ const std::shared_ptr<spdlog::logger>& Log() {
 
 BaResult BundleAdjust(const BaProblem& problem, const BundleAdjustmentOptions& options) {
     BaResult result;
-    if (!IsValid(problem) || options.robust_iterations < 0 || options.iterations < 0) {
+    if (!IsValid(problem) || options.robust_iterations < 0 || options.iterations < 0 ||
+        !(options.huber_chi2 > 0.0) || !(options.stereo_chi2 > 0.0)) {
         Log()->debug("BA skipped: invalid problem or options ({} keyframes, {} cameras, {} points, "
                      "{} observations)",
                      problem.keyframe_poses.size(), problem.keyframe_cameras.size(),
@@ -124,6 +210,8 @@ BaResult BundleAdjust(const BaProblem& problem, const BundleAdjustmentOptions& o
                  problem.observations.size(), options.robust ? "robust" : "plain",
                  options.robust_iterations, options.iterations);
 
+    // Outlives the optimizer, which holds a pointer to it and to its flag.
+    StopCheck stop_check(options.should_stop);
     using BlockSolver = g2o::BlockSolver_6_3;
     auto linear_solver = std::make_unique<g2o::LinearSolverEigen<BlockSolver::PoseMatrixType>>();
     g2o::SparseOptimizer optimizer;
@@ -131,14 +219,20 @@ BaResult BundleAdjust(const BaProblem& problem, const BundleAdjustmentOptions& o
     optimizer.setAlgorithm(new g2o::OptimizationAlgorithmLevenberg(
         std::make_unique<BlockSolver>(std::move(linear_solver))));
     optimizer.setVerbose(false);
+    if (options.should_stop) {
+        optimizer.addPostIterationAction(&stop_check);
+        optimizer.setForceStopFlag(stop_check.Flag());
+    }
 
     // Only vertices that take part in an observation enter the graph.
     const size_t num_keyframes = problem.keyframe_poses.size();
     const auto num_points = static_cast<size_t>(problem.points.cols());
     std::vector<g2o::VertexSE3Expmap*> pose_vertices(num_keyframes, nullptr);
     std::vector<g2o::VertexPointXYZ*> point_vertices(num_points, nullptr);
-    std::vector<EdgePixelProjection*> edges;
+    std::vector<g2o::OptimizableGraph::Edge*> edges;
+    std::vector<double> edge_chi2_threshold;   // outlier test (and kernel delta^2) per edge
     edges.reserve(problem.observations.size());
+    edge_chi2_threshold.reserve(problem.observations.size());
     for (const BaObservation& observation : problem.observations) {
         g2o::VertexSE3Expmap*& pose_vertex = pose_vertices[observation.keyframe];
         if (pose_vertex == nullptr) {
@@ -158,25 +252,56 @@ BaResult BundleAdjust(const BaProblem& problem, const BundleAdjustmentOptions& o
             optimizer.addVertex(point_vertex);
         }
 
-        auto* edge = new EdgePixelProjection(problem.keyframe_cameras[observation.keyframe]);
-        edge->setVertex(0, point_vertex);
-        edge->setVertex(1, pose_vertex);
-        edge->setMeasurement(observation.measurement);
-        edge->setInformation(Eigen::Matrix2d::Identity() /
-                             (observation.sigma * observation.sigma));
+        const Camera& camera = problem.keyframe_cameras[observation.keyframe];
+        const double information = 1.0 / (observation.sigma * observation.sigma);
+        g2o::OptimizableGraph::Edge* edge = nullptr;
+        double chi2_threshold = options.huber_chi2;
+        if (observation.right_x) {
+            auto* stereo_edge = new EdgeStereoProjection(
+                camera, *problem.keyframe_stereo[observation.keyframe]);
+            stereo_edge->setVertex(0, point_vertex);
+            stereo_edge->setVertex(1, pose_vertex);
+            stereo_edge->setMeasurement(Eigen::Vector3d(
+                observation.measurement.x(), observation.measurement.y(), *observation.right_x));
+            stereo_edge->setInformation(Eigen::Matrix3d::Identity() * information);
+            edge = stereo_edge;
+            chi2_threshold = options.stereo_chi2;
+        } else {
+            auto* mono_edge = new EdgePixelProjection(camera);
+            mono_edge->setVertex(0, point_vertex);
+            mono_edge->setVertex(1, pose_vertex);
+            mono_edge->setMeasurement(observation.measurement);
+            mono_edge->setInformation(Eigen::Matrix2d::Identity() /
+                                      (observation.sigma * observation.sigma));
+            edge = mono_edge;
+        }
         if (options.robust) {
             auto* kernel = new g2o::RobustKernelHuber();
-            kernel->setDelta(std::sqrt(options.huber_chi2));
+            kernel->setDelta(std::sqrt(chi2_threshold));
             edge->setRobustKernel(kernel);
         }
         optimizer.addEdge(edge);
         edges.push_back(edge);
+        edge_chi2_threshold.push_back(chi2_threshold);
     }
+
+    // Positive depth of observation i at the current estimates (stereo: in both cameras).
+    const auto in_front = [&](size_t i) {
+        const BaObservation& observation = problem.observations[i];
+        const TPoint3DF xc =
+            FromSE3Quat(pose_vertices[observation.keyframe]->estimate())
+                .Transform(TPoint3DF(point_vertices[observation.point]->estimate()));
+        if (!(xc.z() > 0.0)) {
+            return false;
+        }
+        return !observation.right_x ||
+               problem.keyframe_stereo[observation.keyframe]->T_rl.Transform(xc).z() > 0.0;
+    };
 
     // Plain chi2 sum over the edges the next pass optimizes (level 0).
     const auto active_cost = [&] {
         double cost = 0.0;
-        for (EdgePixelProjection* edge : edges) {
+        for (g2o::OptimizableGraph::Edge* edge : edges) {
             if (edge->level() == 0) {
                 edge->computeError();
                 cost += edge->chi2();
@@ -206,31 +331,48 @@ BaResult BundleAdjust(const BaProblem& problem, const BundleAdjustmentOptions& o
         return true;
     };
 
-    for (EdgePixelProjection* edge : edges) {
+    for (g2o::OptimizableGraph::Edge* edge : edges) {
         edge->computeError();
         result.initial_cost += edge->chi2();
     }
 
-    if (options.robust) {
+    // The stage that runs next (0 robust, 1 plain); reported if should_stop interrupts it.
+    int stage = 0;
+    if (options.should_stop && stop_check.Check()) {
+        Log()->debug("BA interrupted before the first iteration");
+    } else if (options.robust) {
         if (!run_pass("robust", options.robust_iterations)) {
             return result;
         }
-        // Deactivate the outliers of the robust pass; the plain pass runs without a kernel.
-        size_t num_deactivated = 0;
-        for (EdgePixelProjection* edge : edges) {
-            edge->computeError();
-            if (edge->chi2() > options.huber_chi2 || !(edge->Depth() > 0.0)) {
-                edge->setLevel(1);
-                ++num_deactivated;
+        if (!stop_check.Stopped()) {
+            // Deactivate the outliers of the robust pass; the plain pass runs without a kernel.
+            size_t num_deactivated = 0;
+            for (size_t i = 0; i < edges.size(); ++i) {
+                g2o::OptimizableGraph::Edge* edge = edges[i];
+                edge->computeError();
+                if (edge->chi2() > edge_chi2_threshold[i] || !in_front(i)) {
+                    edge->setLevel(1);
+                    ++num_deactivated;
+                }
+                edge->setRobustKernel(nullptr);
             }
-            edge->setRobustKernel(nullptr);
+            Log()->debug("BA deactivated {} of {} observations as outliers", num_deactivated,
+                         edges.size());
+            stage = 1;
+            if (!run_pass("plain", options.iterations)) {
+                return result;
+            }
         }
-        Log()->debug("BA deactivated {} of {} observations as outliers", num_deactivated, edges.size());
-        if (!run_pass("plain", options.iterations)) {
+    } else {
+        stage = 1;
+        if (!run_pass("plain", options.robust_iterations + options.iterations)) {
             return result;
         }
-    } else if (!run_pass("plain", options.robust_iterations + options.iterations)) {
-        return result;
+    }
+    result.interrupted = stop_check.Stopped();
+    result.stage_reached = result.interrupted ? stage : 2;
+    if (result.interrupted) {
+        Log()->debug("BA interrupted in stage {} after {} iterations", stage, result.iterations);
     }
 
     // Fixed keyframes keep their input pose exactly; free ones are read back.
@@ -250,11 +392,12 @@ BaResult BundleAdjust(const BaProblem& problem, const BundleAdjustmentOptions& o
     // chi2 / inlier for every edge, the deactivated ones included.
     result.chi2.reserve(edges.size());
     result.inlier.reserve(edges.size());
-    for (EdgePixelProjection* edge : edges) {
+    for (size_t i = 0; i < edges.size(); ++i) {
+        g2o::OptimizableGraph::Edge* edge = edges[i];
         edge->computeError();
         const double chi2 = edge->chi2();
         result.chi2.push_back(chi2);
-        result.inlier.push_back(chi2 <= options.huber_chi2 && edge->Depth() > 0.0);
+        result.inlier.push_back(chi2 <= edge_chi2_threshold[i] && in_front(i));
         if (edge->level() == 0) {
             result.final_cost += chi2;
         }
@@ -262,8 +405,7 @@ BaResult BundleAdjust(const BaProblem& problem, const BundleAdjustmentOptions& o
 
     result.success = result.points.allFinite();
     for (const RigidTransformation& pose : result.keyframe_poses) {
-        result.success = result.success && pose.rotation().allFinite() &&
-                         pose.translation().allFinite();
+        result.success = result.success && IsFinite(pose);
     }
     if (!result.success) {
         Log()->debug("BA failed: non-finite result");

@@ -6,6 +6,7 @@ voyah_add_test_binary(voyah_algs_tests
         estimators/ransac_test.cpp
         features/feature_extractor_levels_test.cpp
         features/feature_grid_test.cpp
+        features/fuse_matcher_test.cpp
         features/initialization_matcher_test.cpp
         features/keypoint_matches_test.cpp
         features/stereo_matcher_test.cpp
@@ -18,6 +19,7 @@ voyah_add_test_binary(voyah_algs_tests
         images/resizer_tests.cpp
         map/point_statistics_test.cpp
         mapping/keyframe_decision_test.cpp
+        mapping/map_quality_test.cpp
         mapping/triangulation_test.cpp
         optimization/bundle_adjustment_test.cpp
         optimization/pose_optimization_test.cpp

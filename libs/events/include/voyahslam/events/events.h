@@ -6,12 +6,8 @@
 
 #include <voyahslam/events/frame_tracked.h>
 #include <voyahslam/events/initialization_measurement.h>
-#include <voyahslam/events/key_frame_created.h>
-#include <voyahslam/events/key_frame_pose_updated.h>
 #include <voyahslam/events/loop_detected.h>
-#include <voyahslam/events/map_created.h>
-#include <voyahslam/events/map_points_removed.h>
-#include <voyahslam/events/map_points_updated.h>
+#include <voyahslam/events/map_transaction.h>
 #include <voyahslam/events/tracking_lost.h>
 
 #endif // VOYAHSLAM_EVENTS_EVENTS_H
