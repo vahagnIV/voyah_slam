@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -41,7 +42,8 @@ TrackerOptions RelocalizingOptions() {
 // feature pair.
 class RelocalizationTest : public TrackerTest {
 protected:
-    RelocalizationTest() : TrackerTest({}, RelocalizingOptions(), MakeRootVocabulary()) {}
+    explicit RelocalizationTest(mapping::MapperOptions mapper_options = {})
+        : TrackerTest(std::move(mapper_options), RelocalizingOptions(), MakeRootVocabulary()) {}
 
     // Tracks frames 0..kMappedFrames-1 of `sequence`, then loses tracking
     // with kBlackout empty measurements at the next frames' timestamps.
@@ -113,6 +115,8 @@ TEST(RelocalizationOptionsTest, SpecDefaults) {
     EXPECT_DOUBLE_EQ(options.first_pass_max_distance, 100.0);
     EXPECT_DOUBLE_EQ(options.second_pass_window, 3.0);
     EXPECT_DOUBLE_EQ(options.second_pass_max_distance, 64.0);
+    EXPECT_DOUBLE_EQ(options.post_relocalization_seconds, 1.0);
+    EXPECT_EQ(options.post_relocalization_min_inliers, 50u);
 }
 
 TEST_F(RelocalizationTest, RelocalizesIntoSameMap) {
@@ -169,6 +173,52 @@ features::TMeasurement<Extractor> Aliased(const test::SyntheticStereoSequenceFra
         test::TestImageFeatures(std::move(points), geometry::TRowVectorF::Ones(n), std::move(angles),
                                 std::move(descriptors), std::move(levels)),
         test::SyntheticStereoIntrinsics(), nullptr, timestamp);
+}
+
+// The Mapper's post-relocalization guard on any map size, as on a real map of
+// more than 20 Frames: after a relocalization the Tracker sees the map as it
+// was, so the inlier counts below do not depend on new Frames.
+class PostRelocalizationTest : public RelocalizationTest {
+protected:
+    PostRelocalizationTest() : RelocalizationTest(GuardedMapperOptions()) {}
+
+    static mapping::MapperOptions GuardedMapperOptions() {
+        mapping::MapperOptions options;
+        options.keyframe.relocalization_guard_min_frames = 0;
+        return options;
+    }
+};
+
+TEST_F(PostRelocalizationTest, StricterGateAfterRelocalization) {
+    // A monocular view of a frame through 75 of its features: about 40
+    // local-map inliers, between min_local_map_inliers (30) and
+    // post_relocalization_min_inliers (50).
+    const auto sequence = LongStereoSequence();
+    MapThenBlackOut(sequence);
+    const auto weak = [&](size_t frame, double timestamp) {
+        return std::get<features::TMonocularMeasurement<Extractor>>(
+            Aliased(sequence.frames[frame], 75, 0, timestamp));
+    };
+    const double first = FrameTimestamp(kResumeFrame);
+    ExpectRelocalized(Feed(sequence.frames[kResumeFrame].measurement), sequence, kResumeFrame);
+
+    // Within post_relocalization_seconds: 50 inliers needed, so it is lost.
+    auto captured = Feed(weak(kResumeFrame + 1, first + 0.999));
+    ASSERT_EQ(captured.size(), 1u);
+    EXPECT_EQ(captured[0].type, events::EventType::TrackingLost);
+    EXPECT_FALSE(captured[0].final);
+    EXPECT_EQ(tracker_.state(), TrackerState::RecentlyLost);
+
+    // Relocalized again; post_relocalization_seconds later the usual gate.
+    const double second = FrameTimestamp(kResumeFrame + 2);
+    ExpectRelocalized(Feed(sequence.frames[kResumeFrame + 2].measurement), sequence,
+                      kResumeFrame + 2);
+    captured = Feed(weak(kResumeFrame + 3, second + 1.0));
+    ASSERT_EQ(captured.size(), 1u);
+    ASSERT_EQ(captured[0].type, events::EventType::FrameTracked);
+    EXPECT_GE(captured[0].num_inliers, TrackingOptions{}.min_local_map_inliers);
+    EXPECT_LT(captured[0].num_inliers, RelocalizationOptions{}.post_relocalization_min_inliers);
+    EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
 }
 
 TEST_F(RelocalizationTest, UnmappedPlaceDoesNotRelocalize) {

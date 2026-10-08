@@ -117,7 +117,9 @@ struct TrackerOptions {
 // min_map_frames_to_relocalize Frames, a failure enters RecentlyLost
 // (TrackingLost, final = false): each measurement tries relocalization
 // (relocalizer.h); a success resumes Tracking in the same map with the
-// velocity reset, and after recently_lost_seconds of measurement timestamps
+// velocity reset, and for post_relocalization_seconds from the relocalized
+// measurement on the local-map step needs post_relocalization_min_inliers;
+// after recently_lost_seconds of measurement timestamps
 // the Tracker is Lost (TrackingLost, final = true). Otherwise a failure is
 // Lost at once (final = true). Lost, like WaitingForMap, forwards
 // measurements to the Mapper for a new map.
@@ -257,6 +259,8 @@ private:
     // The last FrameTracked's reference Frame (the start Frame of a new map).
     std::optional<map::FrameId> reference_frame_id_;
     double recently_lost_since_ = 0.0;  // timestamp of the measurement that failed
+    // Timestamp of the last relocalized measurement in the current map.
+    std::optional<double> relocalized_at_;
     size_t tracked_frames_ = 0;  // in the current map
     std::chrono::steady_clock::time_point last_info_log_{};
 

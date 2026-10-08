@@ -138,6 +138,9 @@ void Mapper<TFeatureExtractor>::SkipFrameTracked(const events::Event& event) {
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::CountTrackedPoints(
     const events::FrameTracked<TFeatureExtractor>& event) {
+    if (event.stage == events::TrackingStage::Relocalization) {
+        relocalized_at_ = event.timestamp;
+    }
     // Ids of a replica that is behind may be unknown here: skipped.
     for (const map::MapPointId point : event.visible_points) {
         if (point.value < num_visible_.size()) {
@@ -209,6 +212,7 @@ void Mapper<TFeatureExtractor>::ClearMap() {
     num_found_.clear();
     recent_points_.clear();
     backlog_ = 0;
+    relocalized_at_.reset();
     num_keyframes_.store(0, std::memory_order_release);
     num_map_points_.store(0, std::memory_order_release);
 }
@@ -221,8 +225,13 @@ void Mapper<TFeatureExtractor>::OnFrameTracked(
     }
     CountTrackedPoints(event);
     const KeyFrameSignals signals = MeasureSignals(event);
-    const bool create = ShouldCreateFrame(signals, options_.keyframe);
+    const bool guarded = InRelocalizationGuard(event);
+    const bool create = !guarded && ShouldCreateFrame(signals, options_.keyframe);
     num_frame_evaluations_.fetch_add(1, std::memory_order_acq_rel);
+    if (guarded) {
+        log_->debug("FrameTracked t={:.3f}: {:.3f} s after the relocalization at t={:.3f} -> no Frame",
+                    event.timestamp, event.timestamp - *relocalized_at_, *relocalized_at_);
+    }
     log_->debug(
         "FrameTracked t={:.3f}: stereo={} frames={} ref_points={} since_last={:.3f} backlog={} "
         "inliers={} close_tracked={} close_untracked={} -> {}",
@@ -233,6 +242,15 @@ void Mapper<TFeatureExtractor>::OnFrameTracked(
     if (create) {
         CreateFrame(event);
     }
+}
+
+template <typename TFeatureExtractor>
+bool Mapper<TFeatureExtractor>::InRelocalizationGuard(
+    const events::FrameTracked<TFeatureExtractor>& event) const {
+    const KeyFrameOptions& options = options_.keyframe;
+    return relocalized_at_ &&
+           num_keyframes_.load(std::memory_order_relaxed) > options.relocalization_guard_min_frames &&
+           event.timestamp - *relocalized_at_ < options.relocalization_guard_seconds;
 }
 
 template <typename TFeatureExtractor>

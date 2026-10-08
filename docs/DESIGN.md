@@ -1555,14 +1555,15 @@ into other maps waits for multi-map (roadmap step 5).
 ```
 Tracking ─(motion model, zero motion and reference Frame fail)→ RecentlyLost
 RecentlyLost: relocalize every measurement
-   success → Tracking (same map; velocity reset; the matched Frame is the reference)
+   success → Tracking (same map; velocity reset; the matched Frame is the reference;
+             1 s of the post-relocalization guard, ruling J)
    timeout → Lost
 Lost: TrackingLost(final = true) → the Mapper clears its map → initialization (as before)
 ```
 
 - **`RecentlyLost`** needs a vocabulary and a map with more than
   `min_map_frames_to_relocalize` (10) Frames; otherwise a failure goes
-  straight to `Lost` (exactly the old behaviour without a vocabulary). The
+  straight to `Lost` (as before without a vocabulary). The
   timeout is `recently_lost_seconds` (5.0) of **measurement timestamps**, not
   wall-clock time (backwards timestamps never time out: TODO).
 - While `RecentlyLost` the Tracker publishes **no `FrameTracked` and no
@@ -1667,10 +1668,31 @@ depends on a lucky seed.
    are ORB-SLAM3's semantics; the local-map search's ×2.5–4 window and 0.8
    ratio test (an earlier draft) are not used here.
 7. The first candidate reaching **50 inliers** wins; then the local-map step
-   runs (its 30-inlier gate decides) and Tracking resumes in the same map
-   with stage `Relocalization`, the velocity reset and the matched Frame as
-   the reference. The debug log prints every attempt's candidates, candidates
-   with BoW matches, hypotheses and best verified inliers.
+   runs (its 50-inlier post-relocalization gate decides, below) and Tracking
+   resumes in the same map with stage `Relocalization`, the velocity reset
+   and the matched Frame as the reference. The debug log prints every
+   attempt's candidates, candidates with BoW matches, hypotheses and best
+   verified inliers.
+
+**Post-relocalization guard (ruling J, ORB-SLAM3's `mnLastRelocFrameId +
+mMaxFrames`; final review Important 1).** A relocalized pose is the least
+confirmed of the run, and the Mapper's Frame rule would almost always make it
+a Frame (`since_last ≥ 1 s` after any loss of 1 s or more; in stereo
+`need_close` then places about 250 close points from it). Two sides:
+- **Tracker:** for `post_relocalization_seconds` (1.0) of measurement
+  timestamps from the relocalized measurement on, that one included, the
+  local-map step needs `post_relocalization_min_inliers` (50) instead of
+  `min_local_map_inliers` (30) (`RelocalizationOptions`). A new map resets it.
+- **Mapper:** no Frame from a `FrameTracked` within
+  `relocalization_guard_seconds` (1.0) of the latest one with stage
+  `Relocalization`, that one included, superseded ones too
+  (`KeyFrameOptions`; logged at debug level). As ORB-SLAM3 (`nKFs >
+  mMaxFrames`, `mMaxFrames` = fps), it applies only while the map has more
+  than `relocalization_guard_min_frames` (20) Frames: a smaller map must keep
+  growing. Without that condition stereo corridor1 (18 Frames at the
+  recovery) lost tracking again 12 frames after recovering in 2 of 2 runs (the
+  camera left the relocalized view with no new Frame; inliers 148 → 43, below
+  the 50 gate), then a second map. A map clear resets the guard.
 
 **Motion-model gate** (spec §0, the spike's fix). `min_motion_model_inliers`
 = 30: a motion-model pose with fewer final inliers counts as failed, so zero
@@ -1686,8 +1708,9 @@ and losses), one map each; mono 400 unchanged (0.0315 m).
 
 **Deviations from ORB-SLAM3** (all in TODO): RANSAC is more permissive than
 ORB's effective settings (ORB: minimum inliers max(10, 0.5 · N), about 35
-iterations from ε 0.5; ours 10 and 300); ORB's stricter local-map gate for
-about 1 s after a relocalization (50 inliers) is not carried over;
+iterations from ε 0.5; ours 10 and 300); the post-relocalization guard
+(ruling J) counts 1 s of measurement timestamps, not `mMaxFrames` (= fps)
+frames;
 `SearchFromFrame` has no scale-distance (min / max invariance distance) gate;
 the RANSAC state is not kept between rounds (fresh calls); a near-collinear
 PnP sample can pass RANSAC (only exact collinearity is rejected; the
@@ -1703,7 +1726,9 @@ synthetic jump, RecentlyLost and `TrackingLost(final = false)` on a blackout
 with the Mapper's map kept, relocalization into the same `map_id`, the 5 s
 timeout (`final = true`, map cleared), small maps straight to Lost, no
 vocabulary unchanged, database consistency after Frame removals, aliased
-places rejected at BoW / RANSAC / the 50-inlier gate, candidate grouping.
+places rejected at BoW / RANSAC / the 50-inlier gate, candidate grouping,
+the post-relocalization guard (`RelocalizationTest.StricterGateAfterRelocalization`;
+`MapperRelocalizationGuardTest.*`, `MapperFrameCreationTest.NoRelocalizationGuardOnSmallMap`).
 Integration: `SlamTest.{Mono,Stereo}RelocalizesAfterBlackout` run the
 threaded `Slam` on the leave-the-view sequence with a 1 s blackout (frames
 31–50, right after the Mapper's latest Frame) and a one-node vocabulary
@@ -1746,6 +1771,20 @@ fails on the first empty frame of a drop, as it should). ATE by
   zero motion took over each time), never in mono; no run lost tracking without a
   drop. Stereo no-drop ATE 0.036 m (was 0.056 / 0.189 m with the vocabulary
   before the gate).
+- **With ruling J** (same setup, one run each, 2026-10-08): mono drop
+  recovers at 271 (Frame 9, 139 inliers) into map 1, 21 Frames, so the guard
+  applies and **no Frame is created within 1 s** of the recovery (21 skips
+  logged); Sim3 0.0333 m. Stereo drop recovers at 523 (Frame 0, 77 inliers)
+  into map 1 with no other loss; the map has 18 Frames, so the guard does not
+  apply at first: the recovered frame becomes a Frame (as in ORB-SLAM3, 263
+  close points), 3 more follow in 0.55 s until the map passes 20 Frames, and
+  the remaining 8 `FrameTracked` of that second are skipped;
+  SE3 0.0350 m. Stereo no drop: one map, SE3 0.0362 m. Without the 20-Frame
+  condition both stereo drop runs lost tracking again at frame 532–533 and
+  made a second map (above). Two first-try runs (one drop, one no drop, both
+  before the condition) had SE3 0.27 / 0.060 m from errors **before** frame 500,
+  where no ruling-J code runs: run-to-run variance of the stereo run, not
+  this change (their reruns: 0.0349 / 0.0362 m).
 
 ## 7. Coding Conventions
 
@@ -2015,6 +2054,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-08 | `geometry::SolvePnPRansac`: Lambda Twist P3P on unit bearings (`Camera::Unproject`), 4th point disambiguates, RANSAC 300 / 0.99 / ≥ 10, raw-pixel χ² 5.991 inliers; no OpenCV, no EPnP. MLPnP kept as an alternative (TODO). | Rays handle fisheye without undistortion; one residual space for the library. |
 | 2026-10-08 | (E, F, G) `SolvePnPRansac` is a raw hypothesis generator; relocalization refines a RANSAC pose with `OptimizePose` over **all** the candidate's BoW matches (spec §4.5 step 2 amended). PnP tests assert over seeded scene sets (200 half-outlier scenes, ≥ 95 % on mask and on refined pose; 50 fisheye seeds at 1e-5), not one lucky seed. | Raw RANSAC poses meet 1 cm / 0.5° in only 34–59 % of half-outlier scenes; refining the inliers only 93 %, all matches 97.6 %. |
 | 2026-10-08 | (I) Relocalization's projection passes use `features::SearchFromFrame`, ORB-exact `SearchByProjection(Frame, KeyFrame)`: radius `th · 1.2^level` px, no ratio test, levels [l−1, l+1], orientation check; `th` / distance 10 / 100 then 3 / 64. | The spec values are ORB-SLAM3's semantics; reusing `SearchFromLocalMap` multiplied the window by 2.5–4 and added a 0.8 ratio test. |
+| 2026-10-08 | (J) ORB-SLAM3's post-relocalization guard: for 1 s of measurement timestamps from a relocalization, that measurement included, the Tracker's local-map gate is 50 inliers (`post_relocalization_seconds`, `post_relocalization_min_inliers` in `RelocalizationOptions`) and the Mapper creates no Frame from a `FrameTracked` within `relocalization_guard_seconds` (1.0, `KeyFrameOptions`) of the latest stage-`Relocalization` one, while its map has more than `relocalization_guard_min_frames` (20) Frames; a map clear (Mapper) or new map (Tracker) resets it. | Final review Important 1: every relocalized frame became a Frame (stereo: ~250 close points from the least-confirmed pose), so a wrong relocalization would be written into the map at once. The 20-Frame condition is ORB-SLAM3's `nKFs > mMaxFrames`; without it stereo corridor1 (18 Frames at recovery) lost tracking again 12 frames after recovery in 2 of 2 runs. |
 | 2026-10-08 | Apps gain `--drop_frames a:b` (featureless measurements at the frames' own timestamps). | Reproducible blackouts for the relocalization smoke. |
 | 2026-10-08 | Relocalization smoke result (corridor1, Release, `--vocabulary`, two runs each; "Relocalization and Reference-Frame Tracking"): mono 400 with frames 250–270 dropped recovers at frame 271 into map 1 in both runs (Sim3 0.0325 / 0.0336 m); stereo 1000 with 500–520 dropped recovers at 521 / 524 into map 1, no other loss (SE3 0.0351 / 0.0349 m); no drop: one map each, mono 0.0324 / 0.0323 m, stereo 0.0365 / 0.0363 m. A relocalization attempt costs about 10 ms. All Musts met; nothing tuned. Integration bounds: blackout centre error mono 1.5 × 0.0931 m, stereo 1.5 × 0.0217 m. | A short loss now keeps the map; accuracy after recovery is unchanged. |
 

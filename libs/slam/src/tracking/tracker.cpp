@@ -188,6 +188,7 @@ void Tracker<TFeatureExtractor>::StartTracking(map::FrameId start_frame) {
     }
     velocity_.reset();
     reference_frame_id_ = start_frame;
+    relocalized_at_.reset();
     tracked_frames_ = 0;
     SetState(TrackerState::Tracking);
 }
@@ -255,6 +256,7 @@ void Tracker<TFeatureExtractor>::TrackMeasurement(TMeasurement& measurement) {
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::ProcessRecentlyLost(TMeasurement& measurement) {
     if (std::optional<PoseResult> pose = TryRelocalize(measurement)) {
+        relocalized_at_ = TimestampOf(measurement);
         velocity_.reset();
         SetState(TrackerState::Tracking);
         AcceptPose(measurement, std::move(*pose));
@@ -448,9 +450,18 @@ auto Tracker<TFeatureExtractor>::TrackLocalMap(const TMeasurement& measurement, 
         LocalPointSource<TFeatureExtractor>(replica_, local), pose.matches, tracking.local_map_th,
         options_.matcher, &visible);
     PoseResult result = OptimizeAndDropOutliers(measurement, pose.T_cw, std::move(pose.matches));
-    if (result.num_inliers < tracking.min_local_map_inliers) {
+    // Stricter right after a relocalization, the relocalized measurement
+    // included (ORB-SLAM3's 50 within mMaxFrames of mnLastRelocFrameId).
+    const RelocalizationOptions& relocalization = options_.relocalization;
+    const bool after_relocalization =
+        pose.stage == events::TrackingStage::Relocalization ||
+        (relocalized_at_ &&
+         TimestampOf(measurement) - *relocalized_at_ < relocalization.post_relocalization_seconds);
+    const size_t min_inliers = after_relocalization ? relocalization.post_relocalization_min_inliers
+                                                    : tracking.min_local_map_inliers;
+    if (result.num_inliers < min_inliers) {
         log_->debug("local map failed: {} matches ({} new), {} inliers (< {})", result.num_matches,
-                    added, result.num_inliers, tracking.min_local_map_inliers);
+                    added, result.num_inliers, min_inliers);
         return std::nullopt;
     }
     log_->debug("local map: {} matches ({} new), {} inliers", result.num_matches, added,

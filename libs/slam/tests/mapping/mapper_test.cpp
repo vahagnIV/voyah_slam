@@ -719,15 +719,18 @@ protected:
 
     // Sequence frame `index`, tracked in map `map` with `pairs` as its
     // inliers (num_inliers = pairs.size() unless given) and `visible` as its
-    // visible points, posed at Frame 1 unless `pose` is given.
+    // visible points, posed at Frame 1 unless `pose` is given, at the frame's
+    // timestamp unless `timestamp` is given.
     void PublishFrameTracked(uint32_t map, size_t index, const std::vector<Pair>& pairs,
                              std::optional<map::FrameId> reference = map::FrameId{1},
                              std::optional<size_t> num_inliers = std::nullopt,
                              std::optional<geometry::RigidTransformation> pose = std::nullopt,
-                             const std::vector<map::MapPointId>& visible = {}) {
+                             const std::vector<map::MapPointId>& visible = {},
+                             events::TrackingStage stage = events::TrackingStage::MotionModel,
+                             std::optional<double> timestamp = std::nullopt) {
         auto* event = frame_tracked_pool_.Create();
         event->map_id = map::MapId{map};
-        event->timestamp = sequence_.frames[index].measurement.timestamp();
+        event->timestamp = timestamp.value_or(sequence_.frames[index].measurement.timestamp());
         event->pose = pose.value_or(second_.pose);
         event->measurement = sequence_.frames[index].measurement;
         for (const Pair& pair : pairs) {
@@ -736,7 +739,7 @@ protected:
         }
         event->visible_points = visible;
         event->reference_frame_id = reference;
-        event->stage = events::TrackingStage::MotionModel;
+        event->stage = stage;
         event->num_matches = static_cast<uint32_t>(pairs.size());
         event->num_inliers = static_cast<uint32_t>(num_inliers.value_or(pairs.size()));
         tracker_.Notify(event);
@@ -1019,6 +1022,100 @@ TEST_F(MapperFrameCreationTest, NoFrameWhenStrong) {
     EXPECT_TRUE(TakeCaptured().empty());
     EXPECT_EQ(mapper_.num_frame_evaluations(), evaluations + 1);
     EXPECT_EQ(mapper_.num_keyframes(), 2u);
+}
+
+// The relocalization guard on any map size (the synthetic maps have 2 Frames).
+class MapperRelocalizationGuardTest : public MapperFrameCreationTest {
+protected:
+    MapperRelocalizationGuardTest() : MapperFrameCreationTest(GuardOptions()) {}
+
+    static MapperOptions GuardOptions() {
+        MapperOptions options = CreationOnlyOptions();
+        options.keyframe.relocalization_guard_min_frames = 0;
+        return options;
+    }
+
+    // Sequence frame `index` tracked weakly enough to become a Frame, with
+    // `stage`, at `timestamp`.
+    void PublishWeak(size_t index, events::TrackingStage stage, double timestamp) {
+        PublishFrameTracked(1, index, TrackedPairs(index, num_points_ / 2), map::FrameId{1},
+                            std::nullopt, std::nullopt, {}, stage, timestamp);
+    }
+};
+
+TEST_F(MapperRelocalizationGuardTest, NoFrameRightAfterRelocalization) {
+    // ORB-SLAM3's post-relocalization guard (Ruling J): no Frame from the
+    // relocalized FrameTracked, nor from any within
+    // relocalization_guard_seconds of it; weak tracking would create one.
+    EXPECT_DOUBLE_EQ(KeyFrameOptions{}.relocalization_guard_seconds, 1.0);
+    EXPECT_EQ(KeyFrameOptions{}.relocalization_guard_min_frames, 20u);
+    SetUpMonoMap();
+    // After a 2 s blackout: since_last alone would make each a candidate.
+    const double relocalized_at = sequence_.frames[next_].measurement.timestamp() + 2.0;
+
+    const size_t evaluations = mapper_.num_frame_evaluations();
+    PublishWeak(next_, events::TrackingStage::Relocalization, relocalized_at);
+    Drain();
+    PublishWeak(next_ + 1, events::TrackingStage::ZeroMotion, relocalized_at + 0.5);
+    Drain();
+    PublishWeak(next_ + 2, events::TrackingStage::MotionModel, relocalized_at + 0.999);
+    Drain();
+    EXPECT_TRUE(TakeCaptured().empty());
+    EXPECT_EQ(mapper_.num_frame_evaluations(), evaluations + 3);
+    EXPECT_EQ(mapper_.num_keyframes(), 2u);
+
+    // 1 s after: the normal decision.
+    PublishWeak(next_ + 3, events::TrackingStage::MotionModel, relocalized_at + 1.0);
+    Drain();
+    EXPECT_EQ(TakeCaptured().size(), 2u);
+    EXPECT_EQ(mapper_.num_keyframes(), 3u);
+}
+
+TEST_F(MapperRelocalizationGuardTest, SupersededRelocalizationStillGuards) {
+    // A relocalized FrameTracked drained behind a newer one is not evaluated,
+    // but it still starts the guard.
+    SetUpMonoMap();
+    const double relocalized_at = sequence_.frames[next_].measurement.timestamp() + 2.0;
+    PublishWeak(next_, events::TrackingStage::Relocalization, relocalized_at);
+    PublishWeak(next_ + 1, events::TrackingStage::ZeroMotion, relocalized_at + 0.5);
+    Drain();
+
+    EXPECT_TRUE(TakeCaptured().empty());
+    EXPECT_EQ(mapper_.num_keyframes(), 2u);
+}
+
+TEST_F(MapperRelocalizationGuardTest, MapClearResetsGuard) {
+    SetUpMonoMap();
+    const double relocalized_at = sequence_.frames[next_].measurement.timestamp() + 2.0;
+    PublishWeak(next_, events::TrackingStage::Relocalization, relocalized_at);
+    PublishTrackingLost(1, relocalized_at + 0.1);
+    Drain();
+    TakeCaptured();
+    ASSERT_EQ(mapper_.state(), MapperState::Initializing);
+
+    // Map 2 from the same sequence: frame next_'s points are map 2's too.
+    SetUpMonoMap();
+    ASSERT_EQ(mapper_.current_map_id(), map::MapId{2});
+    PublishFrameTracked(2, next_, TrackedPairs(next_, num_points_ / 2), second_.frame_id,
+                        std::nullopt, std::nullopt, {}, events::TrackingStage::MotionModel,
+                        relocalized_at + 0.5);
+    Drain();
+    EXPECT_EQ(TakeCaptured().size(), 2u);
+    EXPECT_EQ(mapper_.num_keyframes(), 3u);
+}
+
+TEST_F(MapperFrameCreationTest, NoRelocalizationGuardOnSmallMap) {
+    // ORB-SLAM3 guards only a map with more than mMaxFrames keyframes: this
+    // 2-Frame map keeps growing right after a relocalization.
+    SetUpMonoMap();
+    const double relocalized_at = sequence_.frames[next_].measurement.timestamp() + 2.0;
+    PublishFrameTracked(1, next_, TrackedPairs(next_, num_points_ / 2), map::FrameId{1},
+                        std::nullopt, std::nullopt, {}, events::TrackingStage::Relocalization,
+                        relocalized_at);
+    Drain();
+
+    EXPECT_EQ(TakeCaptured().size(), 2u);
+    EXPECT_EQ(mapper_.num_keyframes(), 3u);
 }
 
 TEST_F(MapperFrameCreationTest, SkipsInvalidAndDuplicatePoints) {

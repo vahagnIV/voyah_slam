@@ -24,6 +24,13 @@ struct RelocalizationOptions {
     double recently_lost_seconds = 5.0;
     // A map with at most this many Frames goes straight to Lost.
     size_t min_map_frames_to_relocalize = 10;
+    // For this long after a relocalization, in measurement timestamps, the
+    // relocalized measurement included, the local-map step needs
+    // post_relocalization_min_inliers instead of
+    // TrackingOptions::min_local_map_inliers (ORB-SLAM3: 50 within mMaxFrames
+    // of mnLastRelocFrameId).
+    double post_relocalization_seconds = 1.0;
+    size_t post_relocalization_min_inliers = 50;
 
     // Database query: Frames sharing at least this fraction of the best
     // Frame's common words.

@@ -1,7 +1,7 @@
 # Relocalization and Reference-Frame Tracking — Design Spec
 
 Date: 2026-10-07
-Status: approved in conversation, pending spec review (amended with the stereo-drift spike result; amended 2026-10-08 with rulings C, E–G, F and I from the implementation)
+Status: approved in conversation, pending spec review (amended with the stereo-drift spike result; amended 2026-10-08 with rulings C, E–G, F, I and J from the implementation and the final review)
 Roadmap: step 3 in `docs/ROADMAP.md`
 
 ## Context and Scope
@@ -28,7 +28,11 @@ data per Frame, but it never publishes it.
 - The Tracker never mutates map data.
 - Threads talk only through events.
 - Residuals are in raw pixels, with σ = sigma_px·1.2^level.
-- No vocabulary means behaviour exactly as today.
+- No vocabulary means no reference-Frame tracking, no RecentlyLost and no
+  relocalization: a failure is Lost at once, as before. Two changes apply
+  with or without a vocabulary: the 30-inlier motion-model gate (§0) and the
+  `FrameTracked.stage` labels (MotionModel / ZeroMotion instead of LocalMap,
+  Ruling C).
 
 **Stereo drift with `--vocabulary` (amended: spike result,
 `.superpowers/spikes/2026-10-07-stereo-drift.md`).**
@@ -191,6 +195,14 @@ matches is dropped.
    a 0.8 ratio test.
 4. Success means ≥ 50 inliers. The local-map step then runs, and Tracking
    resumes with stage `Relocalization`.
+5. *(amended: ruling J, ORB-SLAM3's post-relocalization guard)* For
+   `post_relocalization_seconds` (1.0) of measurement timestamps from the
+   relocalized measurement on, that one included, the local-map step needs
+   `post_relocalization_min_inliers` (50) instead of 30. The Mapper creates no
+   Frame from a `FrameTracked` within `relocalization_guard_seconds` (1.0) of
+   the latest one with stage `Relocalization`, that one included, while its
+   map has more than `relocalization_guard_min_frames` (20) Frames (ORB-SLAM3
+   `nKFs > mMaxFrames`); a map clear resets the guard.
 
 ## 5. Testing
 

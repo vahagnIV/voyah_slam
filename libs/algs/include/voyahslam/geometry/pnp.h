@@ -42,7 +42,7 @@ struct PnpResult {
 /// lower inlier χ² sum. Iterations adapt as log(1 - confidence) / log(1 - w³), w the best inlier
 /// ratio so far, capped at max_iterations. Deterministic for a given seed. Success means at least
 /// min_inliers inliers; fewer than 4 points or mismatched sizes fail immediately. The pose is not
-/// refined (callers run OptimizePose on the inliers).
+/// refined (relocalization runs OptimizePose on all of the candidate's matches, Ruling F).
 [[nodiscard]] PnpResult SolvePnPRansac(const Camera& camera, const std::vector<TPoint3DF>& world,
                                        const std::vector<TPoint2DF>& pixels, const std::vector<double>& sigmas,
                                        const PnpOptions& options);

@@ -231,8 +231,6 @@ Spec `docs/superpowers/specs/2026-10-06-keyframes-design.md`; DESIGN
 - [ ] ORB-SLAM3's busy-Mapper branch of the Frame rule (interruptible local BA
       is done; a Mapper pass now takes about 250 ms, so drain-to-latest skips
       about 40 % of the `FrameTracked` on corridor1).
-- [ ] The post-relocalization Frame guard: ORB-SLAM3 creates no keyframe
-      for about 1 s after a relocalization (see "Relocalization" below).
 - [ ] The 80-Frame local-map cap can drop the only K1 Frame of a matched
       point, hiding it from the local points (`visible ⊇ matched` corner
       case): always include matched points in the mask.
@@ -367,10 +365,17 @@ Spec `docs/superpowers/specs/2026-10-07-relocalization-design.md`; DESIGN
       Lambda Twist P3P + `OptimizePose`: it uses the bearing covariances and
       needs no minimal-solver disambiguation. Compare recall and time on
       blackout runs.
-- [ ] **ORB-SLAM3's post-relocalization gate:** for about 1 s after a
-      relocalization ORB-SLAM3 needs 50 local-map inliers (not 30) and
-      creates no keyframe. Not carried over; add it if a wrong
-      relocalization is ever seen.
+- [ ] **Cap the relocalization candidates:** every candidate group at
+      ≥ 0.75 · best is kept, so one measurement costs up to C × 60
+      verifications (C candidates × 60 rounds; each up to 3 `OptimizePose`
+      and 2 `SearchFromFrame`, about 1–4 ms in Release). Cap C (for example
+      the top 10 groups) or bound the time per measurement; check recall on
+      real data.
+- [ ] **`FrameDatabase` duplicates each Frame's `BowVector`**
+      (`FrameDatabase::frames_` and `ReplicaKeyFrame::bow`): about 22 KB per
+      Frame (1400 words × 16 B). Bounded by the live Frames, not a leak.
+      Store only the word ids, or let the replica own the single copy.
+      `Remove` is O(words × posting length), O(W · F) worst case.
 - [ ] **RANSAC is more permissive than ORB-SLAM3's effective settings:**
       ORB asks max(10, 0.5 · N) inliers and stops after about 35 iterations
       (ε 0.5); ours 10 inliers and up to 300. The 50-inlier verification
@@ -396,6 +401,16 @@ Spec `docs/superpowers/specs/2026-10-07-relocalization-design.md`; DESIGN
       smoke table; a candidate stuck at 10–49 inliers is re-verified every
       round until 300 iterations (ORB-like), which costs time per failed
       measurement while `RecentlyLost`.
+- [ ] **`SlamTest.StereoRelocalizesAfterBlackout` is load-sensitive:** under
+      12 parallel copies its centre error exceeds the 1.5 × 0.0217 m bound in
+      about 1 run in 20 (0.036–0.058 m), before and after ruling J alike
+      (3 / 60 and 4 / 60); it passes alone and in `check_all`. The threaded
+      Mapper's pace changes the map. Widen the bound or make the run
+      deterministic.
+- [ ] **Post-relocalization guard window** (ruling J) is 1 s of measurement
+      timestamps and the map-size condition a fixed 20 Frames; ORB-SLAM3
+      uses `mMaxFrames` = fps frames for both. Derive both from the frame
+      rate if a dataset's rate differs much from 20 Hz.
 - [ ] **Synthetic maps make few Frames** (3–5 over 60 frames): the
       integration blackout tests and the relocalization unit tests set
       `min_map_frames_to_relocalize` 0, so the default 10-Frame rule is only
@@ -415,9 +430,10 @@ Spec `docs/superpowers/specs/2026-10-07-relocalization-design.md`; DESIGN
     not check the cleared mask / identity pose; no adaptive-stop or
     determinism test (determinism is per standard library); the 4th-point
     selection lowers per-iteration success against the w³ formula; R is not
-    re-orthonormalized and the lambdas not re-checked after Gauss-Newton;
-    the fisheye margin is thin (9.78e-6 against 1e-5); `pnp.h` still says
-    callers refine on the inliers (ruling F refines on all matches).
+    re-orthonormalized and the lambdas not re-checked after Gauss-Newton; the fisheye margin is thin (9.78e-6 against 1e-5).
+  - No test for a `new_map` transaction arriving while `RecentlyLost`, nor
+    for old-map transactions arriving while `Lost` after a final loss (both
+    correct by reading and unreachable today; re-check with multi-map).
   - `RecentlyLost` is unit-tested only with threshold 0; the one-node test
     vocabulary does not exercise `levels_up` 4.
   - `LeftOf` is copied a third time (`relocalizer.cpp`); `OptimizeMatchedPose`
