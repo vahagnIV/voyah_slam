@@ -41,6 +41,8 @@ struct FrameTracked
     // Weakly tracked (few inliers): the Mapper should answer promptly. Mirrors
     // Event::priority; the Tracker sets both on every publish.
     bool urgent = false;
+    // The correction epoch of the map, as the Tracker's replica knew it.
+    uint32_t map_epoch = 0;
 
     // Called by the pool on reuse; keeps the vectors' capacity.
     void Reset() {
@@ -54,6 +56,7 @@ struct FrameTracked
         num_matches = 0;
         num_inliers = 0;
         urgent = false;
+        map_epoch = 0;
         priority = false;
     }
 

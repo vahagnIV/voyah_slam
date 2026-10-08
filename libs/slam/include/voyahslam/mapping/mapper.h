@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -62,6 +63,9 @@ struct LocalBaSummary {
     size_t num_outliers = 0;   // observations removed as outliers
 };
 
+// Test access to the Mapper's private graph edits (defined by the tests).
+struct MapperTestAccess;
+
 enum class MapperState : uint8_t {
     Initializing,  // no map: builds one from the Tracker's InitializationMeasurements
     Mapping,       // extends the current map
@@ -87,6 +91,14 @@ enum class MapperState : uint8_t {
 // one (stage Relocalization), that one included.
 // LoopDetected is not consumed yet. Runs on its own thread; each
 // ProcessPending() pass drains the inbox.
+//
+// The map graph (loop-closing spec section 1), published in the
+// transactions: each Frame but the map's first has a parent in a spanning
+// tree, the Frame sharing the most points with it once transaction 1's
+// fusion is done (ORB-SLAM3 UpdateConnections). A culled Frame's children are
+// re-parented as in ORB-SLAM3's KeyFrame::SetBadFlag. Frames with loop edges
+// are never culled. Every transaction carries the map's correction epoch,
+// 0 for a new map.
 //
 // With a vocabulary (immutable, so it may be shared read-only), every
 // Frame, the initial ones included, keeps the BowVector and FeatureVector of
@@ -157,14 +169,23 @@ public:
     // The BowVector of the current map's Frame `frame`; nullptr without a
     // vocabulary or if the Frame is not in the map. Same thread rule.
     [[nodiscard]] const bow::BowVector* BowVectorOf(map::FrameId frame) const;
+    // The current map's Frame `frame`: its parent in the spanning tree and its
+    // loop partners; none / empty if it is not in the map. Same thread rule.
+    [[nodiscard]] std::optional<map::FrameId> Parent(map::FrameId frame) const;
+    [[nodiscard]] std::set<map::FrameId> LoopEdges(map::FrameId frame) const;
 
 private:
+    friend struct MapperTestAccess;
+
     // A Frame of the current map with its bag of words (empty without a
-    // vocabulary).
+    // vocabulary) and its links in the map graph.
     struct KeyFrameRecord {
         TKeyFrame frame;
         bow::BowVector bow;
         bow::FeatureVector features;
+        std::optional<map::FrameId> parent;  // none for the map's first Frame
+        std::set<map::FrameId> children;
+        std::set<map::FrameId> loop_edges;
     };
 
     // A point created with Frame `created`, culled or graduated by
@@ -204,6 +225,7 @@ private:
     // The current map's Frame `id` with its bag of words; nullptr if it is not
     // in the map (or was culled).
     [[nodiscard]] const KeyFrameRecord* FindRecord(map::FrameId id) const;
+    [[nodiscard]] KeyFrameRecord* FindRecord(map::FrameId id);
     // The current map's Frame `id`; nullptr if it is not in the map (or was
     // culled).
     [[nodiscard]] const TKeyFrame* FindKeyFrame(map::FrameId id) const;
@@ -219,6 +241,26 @@ private:
     // stereo-matched one (right index >= 0), 1 otherwise. Unlike
     // CovisibilityIndex::NumObservations, which counts Frames.
     [[nodiscard]] size_t WeightedObservations(map::MapPointId point) const;
+    // A pooled transaction of the current map at the current epoch.
+    [[nodiscard]] events::MapTransaction<TFeatureExtractor>* CreateTransaction();
+    // Gives Frame `frame`, the newest one, its parent: the Frame sharing the
+    // most points with it, the lower id on a tie; without shared points, the
+    // previous newest Frame (ORB-SLAM3 leaves it without one). Returns it.
+    map::FrameId ConnectToParent(map::FrameId frame);
+    // Makes `parent` the parent of `frame` and lists the change in
+    // `out_event`.
+    void ChangeParent(map::FrameId frame, map::FrameId parent,
+                      events::MapTransaction<TFeatureExtractor>& out_event);
+    // Adds the loop edge between Frames `a` and `b` and lists it in
+    // `out_event`.
+    void AddLoopEdge(map::FrameId a, map::FrameId b,
+                     events::MapTransaction<TFeatureExtractor>& out_event);
+    // Before Frame `frame` is culled, its observations already gone: each
+    // child goes to the candidate sharing the most points with it, the
+    // candidates being `frame`'s parent and the children re-parented so far;
+    // a child sharing none goes to `frame`'s parent (ORB-SLAM3
+    // KeyFrame::SetBadFlag).
+    void ReparentChildren(map::FrameId frame, events::MapTransaction<TFeatureExtractor>& out_event);
     // The inputs to ShouldCreateFrame for `event` (spec section 3.2).
     [[nodiscard]] KeyFrameSignals MeasureSignals(
         const events::FrameTracked<TFeatureExtractor>& event) const;
@@ -329,12 +371,13 @@ private:
                            std::vector<map::MapPointId>& out_changed);
     // Frame culling (spec section 4.2): removes each covisible Frame of
     // `frame` that IsRedundantFrame judges redundant, never the map's first
-    // Frame. The points that lost an observation are appended to
-    // `out_changed`.
+    // Frame nor one with a loop edge. The points that lost an observation are
+    // appended to `out_changed`.
     void CullFrames(map::FrameId frame, events::MapTransaction<TFeatureExtractor>& out_event,
                     std::vector<map::MapPointId>& out_changed);
-    // Drops the Frame and its observations; a point left with fewer than 2
-    // observations is removed, the others are appended to `out_changed`.
+    // Drops the Frame and its observations, re-parenting its children; a
+    // point left with fewer than 2 observations is removed, the others are
+    // appended to `out_changed`.
     void RemoveFrame(map::FrameId frame, events::MapTransaction<TFeatureExtractor>& out_event,
                      std::vector<map::MapPointId>& out_changed);
     // After transaction 2's removals: each changed point still alive whose
@@ -387,6 +430,7 @@ private:
     std::atomic<map::MapId> current_map_id_{map::MapId{0}};
     map::MapId next_map_id_{1};
     map::FrameId next_frame_id_{0};  // never reset: frame ids are unique across maps
+    uint32_t map_epoch_ = 0;         // the current map's correction epoch
     // The current map's Frames by id from its first one; a culled Frame is
     // empty. The first and the last one are never culled.
     std::vector<std::optional<KeyFrameRecord>> keyframes_;

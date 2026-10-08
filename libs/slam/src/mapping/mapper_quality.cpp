@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -276,9 +277,7 @@ void Mapper<TFeatureExtractor>::FinishTransaction(
 template <typename TFeatureExtractor>
 auto Mapper<TFeatureExtractor>::RefineAroundFrame(map::FrameId frame) -> Refinement {
     using Clock = std::chrono::steady_clock;
-    auto* refined = transaction_pool_.Create();
-    refined->map_id = current_map_id();
-    refined->priority = false;
+    auto* refined = CreateTransaction();
     Refinement refinement;
     // Points moved by BA or that lost an observation, with repeats.
     std::vector<map::MapPointId> changed;
@@ -446,11 +445,12 @@ void Mapper<TFeatureExtractor>::CullFrames(map::FrameId frame,
                                            events::MapTransaction<TFeatureExtractor>& out_event,
                                            std::vector<map::MapPointId>& out_changed) {
     // ORB-SLAM3 LocalMapping::KeyFrameCulling, each candidate judged on the
-    // map as the earlier ones left it.
+    // map as the earlier ones left it. The first Frame (the tree's root) and
+    // Frames with loop edges stay (ORB-SLAM3 KeyFrame::SetBadFlag).
     const map::FrameId first = FirstKeyFrame().id();
     for (const auto& [candidate, shared] :
          covisibility_.Covisible(frame, std::numeric_limits<size_t>::max())) {
-        if (candidate == first) {
+        if (candidate == first || !FindRecord(candidate)->loop_edges.empty()) {
             continue;
         }
         const TKeyFrame& keyframe = *FindKeyFrame(candidate);
@@ -498,6 +498,7 @@ void Mapper<TFeatureExtractor>::RemoveFrame(map::FrameId frame,
                                             std::vector<map::MapPointId>& out_changed) {
     const std::vector<map::MapPointId> points = covisibility_.Points(frame);
     covisibility_.RemoveFrame(frame);
+    ReparentChildren(frame, out_event);
     keyframes_[frame.value - FirstKeyFrame().id().value].reset();
     out_event.removed_frames.push_back(frame);
     for (const map::MapPointId point : points) {
@@ -507,6 +508,47 @@ void Mapper<TFeatureExtractor>::RemoveFrame(map::FrameId frame,
             out_changed.push_back(point);
         }
     }
+}
+
+template <typename TFeatureExtractor>
+void Mapper<TFeatureExtractor>::ReparentChildren(
+    map::FrameId frame, events::MapTransaction<TFeatureExtractor>& out_event) {
+    KeyFrameRecord& culled = *FindRecord(frame);
+    assert(culled.parent.has_value() && culled.loop_edges.empty());
+    const map::FrameId parent = *culled.parent;
+    std::set<map::FrameId> children = std::move(culled.children);
+    culled.children.clear();
+    std::set<map::FrameId> candidates = {parent};
+    // Each round attaches the (child, candidate) pair sharing the most points,
+    // the lower child id and then the lower candidate id on a tie.
+    while (!children.empty()) {
+        std::optional<std::pair<map::FrameId, map::FrameId>> best;
+        uint32_t best_shared = 0;
+        for (const map::FrameId child : children) {
+            // By shared points descending, then by id.
+            for (const auto& [other, shared] :
+                 covisibility_.Covisible(child, std::numeric_limits<size_t>::max())) {
+                if (shared <= best_shared) {
+                    break;
+                }
+                if (candidates.contains(other)) {
+                    best = {child, other};
+                    best_shared = shared;
+                    break;
+                }
+            }
+        }
+        if (!best) {
+            break;
+        }
+        ChangeParent(best->first, best->second, out_event);
+        candidates.insert(best->first);
+        children.erase(best->first);
+    }
+    for (const map::FrameId child : children) {
+        ChangeParent(child, parent, out_event);
+    }
+    FindRecord(parent)->children.erase(frame);
 }
 
 template <typename TFeatureExtractor>
@@ -566,6 +608,7 @@ void Mapper<TFeatureExtractor>::FinishRefinement(
                                          std::vector<map::MapPointId>&);                           \
     template void Mapper<FE>::RemoveFrame(map::FrameId, events::MapTransaction<FE>&,               \
                                           std::vector<map::MapPointId>&);                          \
+    template void Mapper<FE>::ReparentChildren(map::FrameId, events::MapTransaction<FE>&);         \
     template void Mapper<FE>::FinishRefinement(std::vector<map::MapPointId>,                       \
                                                events::MapTransaction<FE>&);
 

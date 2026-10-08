@@ -525,6 +525,7 @@ void Tracker<TFeatureExtractor>::PublishFrameTracked(const PoseResult& pose) {
     event->num_inliers = static_cast<uint32_t>(pose.num_inliers);
     event->urgent = options_.tracking.IsUrgent(pose.num_inliers);
     event->priority = event->urgent;
+    event->map_epoch = replica_.map_epoch();
     observable_.Notify(event);
 }
 

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -33,6 +34,11 @@ struct ReplicaKeyFrame {
     // The Mapper's BoW data of the left descriptors; empty without a vocabulary.
     bow::BowVector bow;
     bow::FeatureVector features;
+    // The map graph: the parent in the spanning tree (none for the map's
+    // first Frame), the children, the loop partners.
+    std::optional<map::FrameId> parent;
+    std::set<map::FrameId> children;
+    std::set<map::FrameId> loop_edges;
 };
 
 // The Tracker's private copy of the map, built only from Mapper events and
@@ -41,10 +47,13 @@ struct ReplicaKeyFrame {
 // event of a newer map clears the replica and adopts the id.
 //
 // A MapTransaction is applied whole, in one Apply(), in the spec's order: new
-// map, Frames, points, observations (each new Frame's own, then the added
-// ones), updated points, poses, removed observations, removed points (the
-// losers of replaced points too), removed Frames. An observation of an unknown
-// Frame or of a point that is not alive is skipped.
+// map, Frames with their parents, loop edges, points, observations (each new
+// Frame's own, then the added ones), updated points, poses, removed
+// observations, removed points (the losers of replaced points too), parent
+// changes, removed Frames. An observation, a parent or a loop edge naming an
+// unknown Frame, and an observation of a point that is not alive, is
+// skipped. A removed Frame leaves its parent's children and its partners'
+// loop edges; a child it still has is left without a parent.
 //
 // Point references. A point's reference is its first observation in the
 // transaction that adds it. When the reference observation is removed, the
@@ -91,12 +100,29 @@ public:
     // The inverted word index of the Frames' BoW vectors (place recognition); Frames
     // without a vocabulary are not in it.
     [[nodiscard]] const bow::FrameDatabase& database() const { return database_; }
+    // Frame `id`'s parent in the spanning tree, its children and its loop
+    // partners; none / empty if the Frame is unknown.
+    [[nodiscard]] std::optional<map::FrameId> parent(map::FrameId id) const {
+        const ReplicaKeyFrame<TFeatureExtractor>* found = keyframe(id);
+        return found != nullptr ? found->parent : std::nullopt;
+    }
+    [[nodiscard]] const std::set<map::FrameId>& children(map::FrameId id) const {
+        const ReplicaKeyFrame<TFeatureExtractor>* found = keyframe(id);
+        return found != nullptr ? found->children : kNoFrames;
+    }
+    [[nodiscard]] const std::set<map::FrameId>& loop_edges(map::FrameId id) const {
+        const ReplicaKeyFrame<TFeatureExtractor>* found = keyframe(id);
+        return found != nullptr ? found->loop_edges : kNoFrames;
+    }
+    // The map's correction epoch, from the latest transaction; 0 for a new map.
+    [[nodiscard]] uint32_t map_epoch() const { return map_epoch_; }
 
     // The invariant after every transaction (spec section 2): every
     // observation refers to an existing Frame and an alive point, the
     // per-Frame observations and covisibility() agree, and every alive point
-    // has an observation, its reference among them. Linear in the number of
-    // observations; for tests.
+    // has an observation, its reference among them. In the map graph, every
+    // parent, child and loop partner is an existing Frame, and both sides of
+    // each link agree. Linear in the number of observations; for tests.
     [[nodiscard]] bool CheckConsistency() const;
 
 private:
@@ -115,15 +141,24 @@ private:
     void RemoveObservation(map::FrameId frame, map::MapPointId point);
     // Drops the point and all its observations; a no-op unless it is alive.
     void RemovePoint(map::MapPointId point);
-    // Drops the Frame and all its observations.
+    // Drops the Frame, all its observations and its graph links.
     void RemoveFrame(map::FrameId frame);
+    // Makes `parent` the parent of `frame`; a no-op unless both exist.
+    void SetParent(map::FrameId frame, map::FrameId parent);
+    // Adds the loop edge between `a` and `b`; a no-op unless both exist.
+    void AddLoopEdge(map::FrameId a, map::FrameId b);
     // After `point` lost its observation by `frame`: removes the point if it
     // has none left, else moves its reference if it was that observation.
     void OnObservationRemoved(map::FrameId frame, map::MapPointId point);
     void SetReference(map::MapPointId point, const ReplicaKeyFrame<TFeatureExtractor>& keyframe,
                       uint32_t feature);
+    // The map graph's links agree on both sides and name existing Frames.
+    [[nodiscard]] bool CheckGraph() const;
+
+    inline static const std::set<map::FrameId> kNoFrames;
 
     map::MapId map_id_{0};
+    uint32_t map_epoch_ = 0;
     std::vector<geometry::TPoint3DF> positions_;
     std::vector<TDescriptor> descriptors_;
     std::vector<geometry::TPoint3DF> normals_;
@@ -171,8 +206,10 @@ void MapReplica<TFeatureExtractor>::ApplyTransaction(
     const events::MapTransaction<TFeatureExtractor>& transaction) {
     // 1. New map: nothing of an earlier map of the same id survives.
     if (transaction.new_map) Clear();
+    map_epoch_ = transaction.map_epoch;
 
-    // 2. Frames; their observations follow the points.
+    // 2. Frames, then their parents (a parent may be added in the same
+    // transaction), then loop edges; their observations follow the points.
     for (const events::NewFrame<TFeatureExtractor>& added : transaction.added_frames) {
         if (keyframes_.contains(added.id)) RemoveFrame(added.id);
         ReplicaKeyFrame<TFeatureExtractor>& keyframe = keyframes_[added.id];
@@ -183,6 +220,12 @@ void MapReplica<TFeatureExtractor>::ApplyTransaction(
         keyframe.features = added.features;
         database_.Add(added.id, added.bow);
         keyframe.observations.reserve(added.observed_features.size());
+    }
+    for (const events::NewFrame<TFeatureExtractor>& added : transaction.added_frames) {
+        if (added.parent) SetParent(added.id, *added.parent);
+    }
+    for (const auto& [a, b] : transaction.added_loop_edges) {
+        AddLoopEdge(a, b);
     }
 
     // 3. Points.
@@ -226,7 +269,8 @@ void MapReplica<TFeatureExtractor>::ApplyTransaction(
         if (it != keyframes_.end()) it->second.T_cw = T_cw;
     }
 
-    // 7.-9. Removals.
+    // 7.-10. Removals; a culled Frame's children are re-parented before it
+    // goes.
     for (const events::RemovedObservation& removed : transaction.removed_observations) {
         RemoveObservation(removed.frame, removed.point);
     }
@@ -235,6 +279,9 @@ void MapReplica<TFeatureExtractor>::ApplyTransaction(
     }
     for (const map::MapPointId point : transaction.removed_points) {
         RemovePoint(point);
+    }
+    for (const auto& [frame, parent] : transaction.parent_changes) {
+        SetParent(frame, parent);
     }
     for (const map::FrameId frame : transaction.removed_frames) {
         RemoveFrame(frame);
@@ -296,10 +343,36 @@ void MapReplica<TFeatureExtractor>::RemoveFrame(map::FrameId frame) {
     if (it == keyframes_.end()) return;
     const std::vector<std::pair<uint32_t, map::MapPointId>> observations =
         std::move(it->second.observations);
+    const ReplicaKeyFrame<TFeatureExtractor>& removed = it->second;
+    if (removed.parent) keyframes_.at(*removed.parent).children.erase(frame);
+    for (const map::FrameId child : removed.children) keyframes_.at(child).parent.reset();
+    for (const map::FrameId partner : removed.loop_edges) {
+        keyframes_.at(partner).loop_edges.erase(frame);
+    }
     keyframes_.erase(it);
     database_.Remove(frame);
     covisibility_.RemoveFrame(frame);
     for (const auto& [feature, point] : observations) OnObservationRemoved(frame, point);
+}
+
+template <typename TFeatureExtractor>
+void MapReplica<TFeatureExtractor>::SetParent(map::FrameId frame, map::FrameId parent) {
+    const auto it = keyframes_.find(frame);
+    const auto parent_it = keyframes_.find(parent);
+    if (it == keyframes_.end() || parent_it == keyframes_.end() || frame == parent) return;
+    ReplicaKeyFrame<TFeatureExtractor>& keyframe = it->second;
+    if (keyframe.parent) keyframes_.at(*keyframe.parent).children.erase(frame);
+    keyframe.parent = parent;
+    parent_it->second.children.insert(frame);
+}
+
+template <typename TFeatureExtractor>
+void MapReplica<TFeatureExtractor>::AddLoopEdge(map::FrameId a, map::FrameId b) {
+    const auto a_it = keyframes_.find(a);
+    const auto b_it = keyframes_.find(b);
+    if (a_it == keyframes_.end() || b_it == keyframes_.end() || a == b) return;
+    a_it->second.loop_edges.insert(b);
+    b_it->second.loop_edges.insert(a);
 }
 
 template <typename TFeatureExtractor>
@@ -369,7 +442,31 @@ bool MapReplica<TFeatureExtractor>::CheckConsistency() const {
             return false;
         }
     }
-    return num_indexed == num_observations;
+    return num_indexed == num_observations && CheckGraph();
+}
+
+template <typename TFeatureExtractor>
+bool MapReplica<TFeatureExtractor>::CheckGraph() const {
+    const auto links = [&](map::FrameId other, auto&& has_link) {
+        const auto it = keyframes_.find(other);
+        return it != keyframes_.end() && has_link(it->second);
+    };
+    for (const auto& [id, keyframe] : keyframes_) {
+        if (keyframe.parent && !links(*keyframe.parent, [&](const auto& parent) {
+                return parent.children.contains(id);
+            })) {
+            return false;
+        }
+        for (const map::FrameId child : keyframe.children) {
+            if (!links(child, [&](const auto& c) { return c.parent == id; })) return false;
+        }
+        for (const map::FrameId partner : keyframe.loop_edges) {
+            if (!links(partner, [&](const auto& p) { return p.loop_edges.contains(id); })) {
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 template <typename TFeatureExtractor>
@@ -392,6 +489,7 @@ void MapReplica<TFeatureExtractor>::Clear() {
     keyframes_.clear();
     covisibility_.Clear();
     database_.Clear();
+    map_epoch_ = 0;
 }
 
 } // namespace voyahslam::tracking

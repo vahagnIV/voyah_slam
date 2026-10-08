@@ -2,6 +2,7 @@
 
 #include <Eigen/Geometry>
 #include <algorithm>
+#include <set>
 #include <utility>
 #include <vector>
 #include <voyahslam/events/events.h>
@@ -516,6 +517,76 @@ TEST(MapReplicaTest, PointWithoutObservationsIsRemoved) {
     EXPECT_FALSE(replica.IsAlive({0}));
     EXPECT_TRUE(replica.keyframe_ids().empty());
     EXPECT_TRUE(replica.covisibility().Observations({0}).empty());
+}
+
+TEST(MapReplicaTest, StoresParentsAndLoopEdges) {
+    using map::FrameId;
+    using Edges = std::set<FrameId>;
+    TReplica replica;
+    // Tree 0 <- 1 <- {2, 3}, 0 <- 4; loop edge 3 - 0. Frame 5's parent and
+    // the loop edge to Frame 9 are unknown: skipped.
+    ApplyTransaction(replica, 1, [](TTransaction& event) {
+        event.new_map = true;
+        for (uint32_t frame = 0; frame < 6; ++frame) {
+            AddFrame(event, frame, MakePose(0.0, frame, 0, 0), {0}, {});
+        }
+        event.added_frames[1].parent = FrameId{0};
+        event.added_frames[2].parent = FrameId{1};
+        event.added_frames[3].parent = FrameId{1};
+        event.added_frames[4].parent = FrameId{0};
+        event.added_frames[5].parent = FrameId{7};
+        event.added_loop_edges = {{FrameId{3}, FrameId{0}}, {FrameId{2}, FrameId{9}}};
+    });
+    EXPECT_TRUE(replica.CheckConsistency());
+    EXPECT_EQ(replica.map_epoch(), 0u);
+    EXPECT_FALSE(replica.parent(FrameId{0}).has_value());
+    EXPECT_EQ(replica.parent(FrameId{1}), FrameId{0});
+    EXPECT_EQ(replica.parent(FrameId{3}), FrameId{1});
+    EXPECT_FALSE(replica.parent(FrameId{5}).has_value());
+    EXPECT_EQ(replica.children(FrameId{0}), (Edges{FrameId{1}, FrameId{4}}));
+    EXPECT_EQ(replica.children(FrameId{1}), (Edges{FrameId{2}, FrameId{3}}));
+    EXPECT_EQ(replica.loop_edges(FrameId{0}), Edges{FrameId{3}});
+    EXPECT_EQ(replica.loop_edges(FrameId{3}), Edges{FrameId{0}});
+    EXPECT_TRUE(replica.loop_edges(FrameId{2}).empty());
+
+    // Frame 1 culled: its children re-parented, 3 to 0 and then 2 to 3,
+    // before it is removed; a loop edge 2 - 4 and a new epoch.
+    ApplyTransaction(replica, 1, [](TTransaction& event) {
+        event.map_epoch = 2;
+        event.parent_changes = {{FrameId{3}, FrameId{0}}, {FrameId{2}, FrameId{3}}};
+        event.added_loop_edges = {{FrameId{2}, FrameId{4}}};
+        event.removed_frames = {FrameId{1}};
+    });
+    EXPECT_TRUE(replica.CheckConsistency());
+    EXPECT_EQ(replica.map_epoch(), 2u);
+    EXPECT_EQ(replica.parent(FrameId{3}), FrameId{0});
+    EXPECT_EQ(replica.parent(FrameId{2}), FrameId{3});
+    EXPECT_EQ(replica.children(FrameId{0}), (Edges{FrameId{3}, FrameId{4}}));
+    EXPECT_EQ(replica.children(FrameId{3}), Edges{FrameId{2}});
+    EXPECT_FALSE(replica.parent(FrameId{1}).has_value());
+    EXPECT_TRUE(replica.children(FrameId{1}).empty());
+    EXPECT_EQ(replica.loop_edges(FrameId{2}), Edges{FrameId{4}});
+    EXPECT_EQ(replica.loop_edges(FrameId{4}), Edges{FrameId{2}});
+
+    // Frame 3 removed with no parent change: its loop edge goes from Frame 0,
+    // it leaves its parent's children, and its child is left without a parent.
+    ApplyTransaction(replica, 1, [](TTransaction& event) { event.removed_frames = {FrameId{3}}; });
+    EXPECT_TRUE(replica.CheckConsistency());
+    EXPECT_TRUE(replica.loop_edges(FrameId{0}).empty());
+    EXPECT_EQ(replica.children(FrameId{0}), Edges{FrameId{4}});
+    EXPECT_FALSE(replica.parent(FrameId{2}).has_value());
+
+    // A newer map clears the graph and the epoch.
+    ApplyTransaction(replica, 1, [](TTransaction& event) { event.map_epoch = 3; });
+    EXPECT_EQ(replica.map_epoch(), 3u);
+    ApplyTransaction(replica, 2, [](TTransaction& event) {
+        AddFrame(event, 10, MakePose(0.0, 0, 0, 0), {0}, {});
+    });
+    EXPECT_TRUE(replica.CheckConsistency());
+    EXPECT_EQ(replica.map_epoch(), 0u);
+    EXPECT_TRUE(replica.children(FrameId{0}).empty());
+    EXPECT_TRUE(replica.loop_edges(FrameId{2}).empty());
+    EXPECT_FALSE(replica.parent(FrameId{10}).has_value());
 }
 
 TEST(MapReplicaTest, CheckConsistencyDetectsAnUnobservedPoint) {

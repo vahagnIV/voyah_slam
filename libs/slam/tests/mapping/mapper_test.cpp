@@ -13,16 +13,32 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <numeric>
 #include <optional>
 #include <random>
+#include <set>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <variant>
 #include <vector>
 
 namespace voyahslam::mapping {
+
+// The Mapper's private graph edit for tests: publishes a transaction that
+// adds a loop edge between Frames `a` and `b` of the current map.
+struct MapperTestAccess {
+    template <typename TFeatureExtractor>
+    static void PublishLoopEdge(Mapper<TFeatureExtractor>& out_mapper, map::FrameId a,
+                                map::FrameId b) {
+        auto* event = out_mapper.CreateTransaction();
+        out_mapper.AddLoopEdge(a, b, *event);
+        out_mapper.observable_.Notify(event);
+    }
+};
+
 namespace {
 
 using Extractor = test::TestExtractor;
@@ -48,6 +64,7 @@ struct PublishedFrame {
     geometry::TRowVectorF depths;
     bow::BowVector bow;  // the transaction's BoW data of the Frame
     bow::FeatureVector features;
+    std::optional<map::FrameId> parent;
 };
 
 // One published MapTransaction.
@@ -79,6 +96,10 @@ struct Published {
     std::vector<map::MapPointId> removed_points;
     std::vector<std::pair<map::FrameId, geometry::RigidTransformation>> updated_poses;
     std::vector<map::FrameId> removed_frames;
+    // The map graph and the correction epoch.
+    std::vector<std::pair<map::FrameId, map::FrameId>> parent_changes;
+    std::vector<std::pair<map::FrameId, map::FrameId>> added_loop_edges;
+    uint32_t map_epoch = 0;
 
     // The `k`th added Frame.
     [[nodiscard]] const PublishedFrame& frame(size_t k = 0) const { return frames.at(k); }
@@ -144,6 +165,7 @@ protected:
                     frame.observed_points = added.observed_points;
                     frame.bow = added.bow;
                     frame.features = added.features;
+                    frame.parent = added.parent;
                     if (const auto* mono = std::get_if<TMonocularMeasurement>(&added.measurement)) {
                         frame.descriptors = mono->descriptors();
                     } else if (const auto* binocular =
@@ -174,6 +196,9 @@ protected:
                 p.removed_points = transaction->removed_points;
                 p.updated_poses = transaction->updated_poses;
                 p.removed_frames = transaction->removed_frames;
+                p.parent_changes = transaction->parent_changes;
+                p.added_loop_edges = transaction->added_loop_edges;
+                p.map_epoch = transaction->map_epoch;
             }
             ExpectApplied(p);
             if (after_each) {
@@ -830,6 +855,9 @@ protected:
             const size_t max_count = frames.size();
             EXPECT_EQ(replica.Covisible(frame, max_count), mapper.Covisible(frame, max_count))
                 << "Frame " << frame.value;
+            // Same map graph.
+            EXPECT_EQ(replica_.parent(frame), mapper_.Parent(frame)) << "Frame " << frame.value;
+            EXPECT_EQ(replica_.loop_edges(frame), mapper_.LoopEdges(frame)) << "Frame " << frame.value;
         }
         // Same alive points, same references.
         for (uint32_t p = 0; p < replica_.num_points(); ++p) {
@@ -2326,6 +2354,256 @@ TEST_F(MapperQualityTest, SkipsBaWithoutFreeFrames) {
     EXPECT_EQ(refined.num_updated, 0u);
     EXPECT_EQ(mapper_.num_keyframes(), 3u);
     ExpectReplicaConsistent();
+}
+
+// The map graph (loop-closing spec section 1): each Frame's parent in the
+// spanning tree and its loop edges, published to the replica. Without fusion
+// by default: fusion makes Frames 0 and 1 observe nearly every point, so
+// every parent would be Frame 0.
+class MapperGraphTest : public MapperQualityTest {
+protected:
+    explicit MapperGraphTest(MapperOptions options = WithoutFusion())
+        : MapperQualityTest(options) {}
+
+    static MapperOptions WithoutFusion() {
+        MapperOptions options;
+        options.map_quality.fuse_neighbours_mono = 0;
+        options.map_quality.fuse_neighbours_stereo = 0;
+        return options;
+    }
+
+    // The replica's spanning tree: the map's first Frame is its root, every
+    // other Frame has an alive parent that lists it as a child, and every
+    // Frame reaches the root.
+    void ExpectSpanningTree() const {
+        const std::vector<map::FrameId> frames = replica_.keyframe_ids();
+        for (const map::FrameId frame : frames) {
+            const std::optional<map::FrameId> parent = replica_.parent(frame);
+            if (frame == first_.frame_id) {
+                EXPECT_FALSE(parent.has_value());
+                continue;
+            }
+            ASSERT_TRUE(parent.has_value()) << "orphan Frame " << frame.value;
+            EXPECT_NE(replica_.keyframe(*parent), nullptr) << "Frame " << frame.value;
+            EXPECT_TRUE(replica_.children(*parent).contains(frame)) << "Frame " << frame.value;
+            map::FrameId ancestor = frame;
+            for (size_t step = 0; step < frames.size() && ancestor != first_.frame_id; ++step) {
+                ancestor = replica_.parent(ancestor).value_or(ancestor);
+            }
+            EXPECT_EQ(ancestor, first_.frame_id) << "Frame " << frame.value;
+        }
+    }
+
+    // Initializes a stereo map from StereoMeasurement(0.0); its Frame is first_.
+    void SetUpStereoMap() { first_ = InitializeStereoMap().frame(); }
+
+    // A Frame of StereoMeasurement(timestamp) at first_'s pose (the same
+    // view), tracking `pairs` against `reference`, weak at 20 inliers; its own
+    // features without a point give it close points no other Frame has.
+    // Returns its two transactions.
+    std::vector<Published> CreateStereoFrame(
+        double timestamp, const std::vector<Pair>& pairs, map::FrameId reference,
+        const std::function<void(const Published&)>& after_each = {}) {
+        PublishStereoFrameTracked(timestamp, first_.pose, pairs, reference, 20);
+        Drain();
+        std::vector<Published> published = TakeCaptured(after_each);
+        EXPECT_EQ(published.size(), 2u) << "t=" << timestamp;
+        return published.size() == 2 ? published : std::vector<Published>(2);
+    }
+
+    // After a transaction that adds a Frame: its parent is the Frame sharing
+    // the most points with it (the lower id on a tie), in the transaction and
+    // in the replica. Returns that parent.
+    map::FrameId ExpectMostCovisibleParent(const Published& created) const {
+        const map::FrameId frame = created.frame().frame_id;
+        const auto covisible = replica_.covisibility().Covisible(frame, 1);
+        EXPECT_EQ(covisible.size(), 1u) << "Frame " << frame.value;
+        if (covisible.empty()) return frame;
+        const map::FrameId expected = covisible[0].first;
+        EXPECT_EQ(created.frame().parent, expected) << "Frame " << frame.value;
+        EXPECT_EQ(replica_.parent(frame), expected) << "Frame " << frame.value;
+        EXPECT_TRUE(replica_.children(expected).contains(frame)) << "Frame " << frame.value;
+        return expected;
+    }
+};
+
+// With fusion: the parent counts the points fused into the new Frame.
+class MapperGraphFusionTest : public MapperGraphTest {
+protected:
+    MapperGraphFusionTest()
+        : MapperGraphTest(MapperOptions{}) {}
+};
+
+TEST_F(MapperGraphFusionTest, ParentIsMostCovisibleAfterFusion) {
+    SetUpMonoMap();
+    const size_t index = next_ + 5;
+    size_t num_checked = 0;
+    const auto check = [&](const Published& published) {
+        if (published.frames.empty()) return;
+        ExpectMostCovisibleParent(published);
+        ++num_checked;
+    };
+    const std::vector<Published> created =
+        CreateMonoFrame(index, AllTrackedPairs(index), std::nullopt, map::FrameId{1}, check);
+    CreateMonoFrame(index, PairsOf(created[0].frame()), std::nullopt,
+                    created[0].frame().frame_id, check);
+    EXPECT_EQ(num_checked, 2u);
+    ExpectReplicaConsistent();
+    ExpectSpanningTree();
+}
+
+TEST_F(MapperGraphTest, NewMapFramesAreConnected) {
+    // Mono: the second Frame's parent is the first, the root.
+    SetUpMonoMap();
+    EXPECT_FALSE(first_.parent.has_value());
+    EXPECT_EQ(second_.parent, first_.frame_id);
+    EXPECT_EQ(initial_.map_epoch, 0u);
+    ExpectSpanningTree();
+}
+
+TEST_F(MapperGraphTest, ParentIsMostCovisibleAtCreation) {
+    // Frame A tracks half of Frame 0's points and adds its close points;
+    // Frames B and C track all of A's points: A shares the most with both
+    // (B also adds close points of its own, which C does not track).
+    SetUpStereoMap();
+    EXPECT_FALSE(first_.parent.has_value());
+    std::vector<map::FrameId> parents;
+    const auto check = [&](const Published& published) {
+        EXPECT_EQ(published.map_epoch, 0u);
+        if (!published.frames.empty()) parents.push_back(ExpectMostCovisibleParent(published));
+    };
+    std::vector<Pair> pairs = PairsOf(first_);
+    pairs.resize(pairs.size() / 2);
+    const PublishedFrame a_part = CreateStereoFrame(1.0, pairs, first_.frame_id, check)[0].frame();
+    const map::FrameId a = a_part.frame_id;
+    const std::vector<Pair> pairs_a = PairsOf(a_part);
+    CreateStereoFrame(2.0, pairs_a, a, check);
+    CreateStereoFrame(3.0, pairs_a, a, check);
+    EXPECT_EQ(parents, (std::vector<map::FrameId>{first_.frame_id, a, a}));
+    ExpectReplicaConsistent();
+    ExpectSpanningTree();
+}
+
+TEST_F(MapperGraphTest, ParentWithoutSharedPointsIsNewestFrame) {
+    // ORB-SLAM3 leaves such a Frame without a parent; ours takes the newest
+    // Frame, so the tree stays connected.
+    SetUpMonoMap();
+    const std::vector<Published> published = CreateMonoFrame(next_ + 2, {});
+    ASSERT_TRUE(published[0].frame().observed_points.empty());
+    EXPECT_EQ(published[0].frame().parent, second_.frame_id);
+    ExpectReplicaConsistent();
+    ExpectSpanningTree();
+}
+
+TEST_F(MapperGraphTest, CulledFrameChildrenAreReparented) {
+    // Frame A tracks half of Frame 0's points and adds its close points;
+    // Frames B, C, D track all of A's points, so they are A's children, until
+    // A is redundant. Its children are re-parented to A's parent or to an
+    // already re-parented sibling, the pair sharing the most points first
+    // (ORB-SLAM3 KeyFrame::SetBadFlag).
+    SetUpStereoMap();
+    std::vector<Pair> pairs = PairsOf(first_);
+    pairs.resize(pairs.size() / 2);
+    const PublishedFrame a_part = CreateStereoFrame(1.0, pairs, first_.frame_id)[0].frame();
+    const map::FrameId a = a_part.frame_id;
+    const std::vector<Pair> pairs_a = PairsOf(a_part);
+
+    // The replica's parent and children per Frame before each transaction.
+    std::map<map::FrameId, std::optional<map::FrameId>> parent_before;
+    std::map<map::FrameId, std::set<map::FrameId>> children_before;
+    const auto snapshot = [&] {
+        parent_before.clear();
+        children_before.clear();
+        for (const map::FrameId frame : replica_.keyframe_ids()) {
+            parent_before[frame] = replica_.parent(frame);
+            children_before[frame] = replica_.children(frame);
+        }
+    };
+    snapshot();
+    size_t num_reparented = 0;
+    std::vector<std::pair<map::FrameId, map::FrameId>> changes;
+    const auto check = [&](const Published& published) {
+        ExpectSpanningTree();
+        for (const map::FrameId culled : published.removed_frames) {
+            for (const map::FrameId child : children_before[culled]) {
+                if (replica_.keyframe(child) == nullptr) continue;  // culled too
+                EXPECT_TRUE(std::any_of(published.parent_changes.begin(),
+                                        published.parent_changes.end(),
+                                        [&](const auto& change) { return change.first == child; }))
+                    << "child " << child.value << " of culled Frame " << culled.value;
+                ++num_reparented;
+            }
+        }
+        // One culled Frame: each new parent is its parent or a sibling
+        // re-parented before.
+        if (published.removed_frames.size() == 1) {
+            const map::FrameId culled = published.removed_frames[0];
+            std::set<map::FrameId> candidates = {*parent_before[culled]};
+            for (const auto& [child, parent] : published.parent_changes) {
+                EXPECT_TRUE(children_before[culled].contains(child)) << "Frame " << child.value;
+                EXPECT_TRUE(candidates.contains(parent)) << "Frame " << child.value;
+                candidates.insert(child);
+            }
+        }
+        changes.insert(changes.end(), published.parent_changes.begin(),
+                       published.parent_changes.end());
+        snapshot();
+    };
+    std::vector<map::FrameId> children;
+    bool culled = false;
+    for (size_t k = 0; k < 6 && !culled; ++k) {
+        const std::vector<Published> published =
+            CreateStereoFrame(2.0 + static_cast<double>(k), pairs_a, a, check);
+        children.push_back(published[0].frame().frame_id);
+        EXPECT_EQ(published[0].frame().parent, a);
+        const auto& frames = published[1].removed_frames;
+        culled = std::find(frames.begin(), frames.end(), a) != frames.end();
+        ExpectReplicaConsistent();
+    }
+    ASSERT_TRUE(culled);
+    EXPECT_EQ(num_reparented, children.size());
+    // All children share as much with Frame 0, so the lowest id goes there
+    // first; each later one shares more with that sibling than with Frame 0,
+    // the lowest sibling id on a tie.
+    ASSERT_EQ(children.size(), 3u);
+    EXPECT_EQ(changes, (std::vector<std::pair<map::FrameId, map::FrameId>>{
+                           {children[0], first_.frame_id},
+                           {children[1], children[0]},
+                           {children[2], children[0]}}));
+}
+
+TEST_F(MapperGraphTest, LoopEdgeFramesAreNotCulled) {
+    // As CullsRedundantFrame, with a loop edge between Frame 1 and the first
+    // repeating Frame: neither is ever culled, while other Frames are.
+    SetUpMonoMap();
+    const size_t second_index = next_ - 1;
+    const map::FrameId looped =
+        CreateMonoFrame(second_index, AllTrackedPairs(second_index))[0].frame().frame_id;
+    MapperTestAccess::PublishLoopEdge(mapper_, second_.frame_id, looped);
+    const std::vector<Published> edge = TakeCaptured();
+    ASSERT_EQ(edge.size(), 1u);
+    EXPECT_EQ(edge[0].added_loop_edges,
+              (std::vector<std::pair<map::FrameId, map::FrameId>>{{second_.frame_id, looped}}));
+    EXPECT_EQ(edge[0].map_epoch, 0u);
+    EXPECT_EQ(replica_.loop_edges(second_.frame_id), std::set<map::FrameId>{looped});
+    EXPECT_EQ(replica_.loop_edges(looped), std::set<map::FrameId>{second_.frame_id});
+    ExpectReplicaConsistent();
+
+    std::vector<map::FrameId> removed;
+    for (size_t k = 0; k < 6; ++k) {
+        const std::vector<Published> published =
+            CreateMonoFrame(second_index, AllTrackedPairs(second_index));
+        for (const map::FrameId culled : published[1].removed_frames) {
+            EXPECT_NE(culled, second_.frame_id);
+            EXPECT_NE(culled, looped);
+            removed.push_back(culled);
+        }
+        ExpectReplicaConsistent();
+    }
+    EXPECT_FALSE(removed.empty());
+    EXPECT_NE(replica_.keyframe(second_.frame_id), nullptr);
+    EXPECT_NE(replica_.keyframe(looped), nullptr);
+    EXPECT_EQ(replica_.loop_edges(looped), std::set<map::FrameId>{second_.frame_id});
 }
 
 // Bag of words. The Mapper's Frames get their BowVector and FeatureVector
