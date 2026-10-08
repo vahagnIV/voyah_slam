@@ -1,11 +1,11 @@
 #include <algorithm>
-#include <cmath>
 #include <cstdint>
 #include <unordered_map>
 #include <utility>
 #include <variant>
 #include <voyahslam/features/bow_matcher.h>
 #include <voyahslam/features/instantiation.h>
+#include <voyahslam/mapping/mapper.h>
 #include <voyahslam/tracking/tracker.h>
 
 namespace voyahslam::tracking {
@@ -54,10 +54,6 @@ size_t CountMatches(const std::vector<int64_t>& matches) {
         count += id >= 0 ? 1 : 0;
     }
     return count;
-}
-
-bool IsFinite(const geometry::RigidTransformation& T) {
-    return T.rotation().allFinite() && T.translation().allFinite();
 }
 
 } // namespace
@@ -369,7 +365,10 @@ auto Tracker<TFeatureExtractor>::TrackReferenceFrame(const TMeasurement& measure
     const auto& frame = LeftOf<TFeatureExtractor>(reference->measurement);
     bow::BowVector current_bow;
     bow::FeatureVector current_features;
-    vocabulary_->Transform(current.descriptors(), kBowLevelsUp, current_bow, current_features);
+    // The Mapper's levels: the Frames' and the current frame's FeatureVectors
+    // must be comparable.
+    vocabulary_->Transform(current.descriptors(), mapping::Mapper<TFeatureExtractor>::kBowLevelsUp,
+                           current_bow, current_features);
 
     // The Frame's live points, per (left) feature.
     std::vector<std::optional<map::MapPointId>> frame_points(
@@ -410,9 +409,29 @@ auto Tracker<TFeatureExtractor>::TrackReferenceFrame(const TMeasurement& measure
 }
 
 template <typename TFeatureExtractor>
-auto Tracker<TFeatureExtractor>::TryRelocalize(const TMeasurement& /*measurement*/)
+auto Tracker<TFeatureExtractor>::TryRelocalize(const TMeasurement& measurement)
     -> std::optional<PoseResult> {
-    return std::nullopt;
+    if (!vocabulary_) {
+        return std::nullopt;
+    }
+    RelocalizationResult relocalized = Relocalize(replica_, measurement, *vocabulary_,
+                                                  options_.relocalization, Refinement(), options_.matcher);
+    if (!relocalized.success) {
+        log_->debug("relocalization failed");
+        return std::nullopt;
+    }
+    log_->debug("relocalization: Frame {}, {} inliers", relocalized.frame.value, relocalized.inliers);
+    PoseResult pose;
+    pose.T_cw = relocalized.T_cw;
+    pose.matches = std::move(relocalized.matches);
+    pose.num_matches = relocalized.inliers;
+    pose.num_inliers = relocalized.inliers;
+    pose.stage = events::TrackingStage::Relocalization;
+    std::optional<PoseResult> tracked = TrackLocalMap(measurement, std::move(pose));
+    if (tracked) {
+        tracked->reference_frame_id = relocalized.frame;
+    }
+    return tracked;
 }
 
 template <typename TFeatureExtractor>
@@ -445,55 +464,13 @@ template <typename TFeatureExtractor>
 auto Tracker<TFeatureExtractor>::OptimizeAndDropOutliers(
     const TMeasurement& measurement, const geometry::RigidTransformation& initial_T_cw,
     std::vector<int64_t> matches) const -> PoseResult {
-    const auto& left = LeftOf<TFeatureExtractor>(measurement);
-    const auto* binocular = std::get_if<TBinocularMeasurement>(&measurement);
-
-    std::vector<optimization::PoseObservation> observations;
-    std::vector<size_t> feature_of;  // per observation
-    for (size_t i = 0; i < matches.size(); ++i) {
-        if (matches[i] < 0) {
-            continue;
-        }
-        const map::MapPointId id{static_cast<uint32_t>(matches[i])};
-        if (!replica_.IsAlive(id)) {
-            matches[i] = -1;
-            continue;
-        }
-        const auto feature = static_cast<Eigen::Index>(i);
-        optimization::PoseObservation observation{
-            replica_.Position(id), left.distorted_points().col(feature), std::nullopt,
-            options_.sigma_px * std::pow(options_.level_scale, left.levels()(feature))};
-        if (binocular) {
-            const int right = binocular->right_indices()(feature);
-            if (right >= 0) {
-                observation.right = binocular->right().distorted_points().col(right);
-            }
-        }
-        observations.push_back(observation);
-        feature_of.push_back(i);
-    }
-
+    MatchedPose optimized =
+        OptimizeMatchedPose(replica_, measurement, initial_T_cw, std::move(matches), Refinement());
     PoseResult pose;
-    pose.num_matches = observations.size();
-    std::optional<optimization::StereoCameras> stereo;
-    if (binocular) {
-        stereo = optimization::StereoCameras{binocular->right().camera(), binocular->rig().T_rl};
-    }
-    const optimization::PoseOptimizationResult result = optimization::OptimizePose(
-        initial_T_cw, left.camera(), stereo, observations, options_.pose_optimization);
-    if (!result.success || !IsFinite(result.T_cw)) {
-        pose.T_cw = initial_T_cw;
-        pose.matches.assign(matches.size(), -1);
-        return pose;
-    }
-    for (size_t k = 0; k < observations.size(); ++k) {
-        if (!result.inlier[k]) {
-            matches[feature_of[k]] = -1;
-        }
-    }
-    pose.T_cw = result.T_cw;
-    pose.matches = std::move(matches);
-    pose.num_inliers = result.num_inliers;
+    pose.T_cw = optimized.T_cw;
+    pose.matches = std::move(optimized.matches);
+    pose.num_matches = optimized.num_matches;
+    pose.num_inliers = optimized.num_inliers;
     return pose;
 }
 

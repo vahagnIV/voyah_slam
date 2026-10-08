@@ -80,6 +80,17 @@ inline test::SyntheticStereoSequence StereoSequence(double step = 0.05, double y
     return test::MakeSyntheticStereoSequence(options);
 }
 
+// k = 2, L = 1: two words of weight 1 under the root. With levels_up = 4
+// every FeatureVector files all features under the root, so SearchByBoW
+// compares every pair of features (the ratio test decides).
+inline std::shared_ptr<const TVocabulary> MakeRootVocabulary() {
+    using TDescriptors = typename Extractor::TDescriptors;
+    TDescriptors descriptors = TDescriptors::Zero(Extractor::DescriptorSize, 3);
+    descriptors(0, 2) = 0xFF;
+    return std::make_shared<const TVocabulary>(
+        TVocabulary::FromTree(2, 1, {0, 0, 0}, std::move(descriptors), {0.0, 1.0, 1.0}));
+}
+
 // A real Mapper and a real Tracker driven synchronously, without threads: the
 // Mapper's events go to the Tracker's inbox, the Tracker's to the Mapper's.
 // `injector_` publishes hand-built events into the Tracker's inbox; `capture_`

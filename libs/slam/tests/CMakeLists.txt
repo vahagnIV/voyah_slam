@@ -10,6 +10,7 @@ voyah_add_test_binary(voyah_slam_tests
         mapping/paired_inliers_test.cpp
         tracking/local_map_test.cpp
         tracking/map_replica_test.cpp
+        tracking/relocalization_test.cpp
         tracking/tracker_test.cpp
     LIBS
         voyah_slam

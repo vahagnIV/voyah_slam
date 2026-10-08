@@ -31,6 +31,7 @@
 #include <voyahslam/optimization/pose_optimization.h>
 #include <voyahslam/tracking/local_map.h>
 #include <voyahslam/tracking/map_replica.h>
+#include <voyahslam/tracking/relocalizer.h>
 
 namespace voyahslam::tracking {
 
@@ -75,14 +76,6 @@ struct TrackingOptions {
     }
 };
 
-// The loss protocol (ORB-SLAM3 RECENTLY_LOST), with a vocabulary only.
-struct RelocalizationOptions {
-    // RecentlyLost for this long, in measurement timestamps, then Lost.
-    double recently_lost_seconds = 5.0;
-    // A map with at most this many Frames goes straight to Lost.
-    size_t min_map_frames_to_relocalize = 10;
-};
-
 struct TrackerOptions {
     features::StereoMatcherOptions stereo_matcher;
     TrackingOptions tracking;
@@ -112,7 +105,8 @@ struct TrackerOptions {
 // (projection search from the last frame at velocity * T_last, pose
 // optimization), else a wide-window search at zero motion, else, with a
 // vocabulary, the reference Frame (bag-of-words matches against the last
-// FrameTracked's reference Frame, pose optimization from the last pose); then
+// FrameTracked's reference Frame, pose optimization from the last pose; the
+// FeatureVectors at the Mapper's levels_up); then
 // the local map and a final pose optimization. The local map (local_map.h) is
 // built from the covisibility of the Frames observing the initial step's
 // matches; FrameTracked carries its Frames, the local points passing the
@@ -121,11 +115,12 @@ struct TrackerOptions {
 //
 // Loss (spec section 2). With a vocabulary and a map of more than
 // min_map_frames_to_relocalize Frames, a failure enters RecentlyLost
-// (TrackingLost, final = false): each measurement tries relocalization, and
-// after recently_lost_seconds of measurement timestamps the Tracker is Lost
-// (TrackingLost, final = true). Otherwise a failure is Lost at once
-// (final = true). Lost, like WaitingForMap, forwards measurements to the
-// Mapper for a new map.
+// (TrackingLost, final = false): each measurement tries relocalization
+// (relocalizer.h); a success resumes Tracking in the same map with the
+// velocity reset, and after recently_lost_seconds of measurement timestamps
+// the Tracker is Lost (TrackingLost, final = true). Otherwise a failure is
+// Lost at once (final = true). Lost, like WaitingForMap, forwards
+// measurements to the Mapper for a new map.
 //
 // MapTransactions. A new map starts tracking from its start Frame. An added
 // Frame whose measurement is the last tracked one (same timestamp) merges its
@@ -139,10 +134,6 @@ public:
     using TMonocularMeasurement = features::TMonocularMeasurement<TFeatureExtractor>;
     using TBinocularMeasurement = features::TBinocularMeasurement<TFeatureExtractor>;
     using TMeasurement = features::TMeasurement<TFeatureExtractor>;
-
-    // FeatureVector nodes are this many levels above the words, as the
-    // Mapper's (the Frames' and the current frame's must be comparable).
-    static constexpr int kBowLevelsUp = 4;
 
     // `vocabulary` (may be null) is immutable and shared read-only with the
     // Mapper.
@@ -231,8 +222,9 @@ private:
     // Bag-of-words matches against the reference Frame, then pose optimization
     // from the last frame's pose (spec section 3, steps 1-3).
     std::optional<PoseResult> TrackReferenceFrame(const TMeasurement& measurement);
-    // Relocalization in the current map (spec section 4). Not implemented
-    // yet: always fails.
+    // Relocalization in the current map (spec section 4, Relocalize), then the
+    // local-map step; the reference is the matched Frame, the stage
+    // Relocalization.
     std::optional<PoseResult> TryRelocalize(const TMeasurement& measurement);
     std::optional<PoseResult> TrackLocalMap(const TMeasurement& measurement, PoseResult pose);
     // Optimizes `initial_T_cw` against the matches and drops the outliers from
@@ -240,6 +232,9 @@ private:
     PoseResult OptimizeAndDropOutliers(const TMeasurement& measurement,
                                        const geometry::RigidTransformation& initial_T_cw,
                                        std::vector<int64_t> matches) const;
+    [[nodiscard]] PoseRefinement Refinement() const {
+        return {options_.pose_optimization, options_.sigma_px, options_.level_scale};
+    }
     void SetState(TrackerState state);
 
     void PublishInitializationMeasurement(TMeasurement& measurement);

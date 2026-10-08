@@ -3,6 +3,7 @@
 add_library(voyah_slam STATIC
     src/voyahslam.cpp
     src/tracking/tracker.cpp
+    src/tracking/relocalizer.cpp
     src/mapping/mapper.cpp
     src/mapping/mapper_quality.cpp
     src/mapping/map_initializer.cpp

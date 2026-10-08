@@ -539,17 +539,6 @@ TEST_F(TrackerTest, ThreadProcessesTrackedMeasurements) {
 
 // Reference-Frame tracking and the loss protocol (spec sections 2, 3).
 
-// k = 2, L = 1: two words of weight 1 under the root. With levels_up = 4
-// every FeatureVector files all features under the root, so SearchByBoW
-// compares every pair of features (the ratio test decides).
-std::shared_ptr<const TVocabulary> MakeRootVocabulary() {
-    using TDescriptors = typename Extractor::TDescriptors;
-    TDescriptors descriptors = TDescriptors::Zero(Extractor::DescriptorSize, 3);
-    descriptors(0, 2) = 0xFF;
-    return std::make_shared<const TVocabulary>(
-        TVocabulary::FromTree(2, 1, {0, 0, 0}, std::move(descriptors), {0.0, 1.0, 1.0}));
-}
-
 // `min_map_frames` is RelocalizationOptions::min_map_frames_to_relocalize; a
 // fresh stereo map has one Frame.
 TrackerOptions LossOptions(size_t min_map_frames) {
@@ -663,10 +652,13 @@ TEST_F(TrackerBowTest, FailureEntersRecentlyLostWithVocabulary) {
     EXPECT_EQ(mapper_.num_keyframes(), num_frames);
 
     // While RecentlyLost nothing is published (no FrameTracked, no
-    // InitializationMeasurement), not even for a trackable frame: only
-    // relocalization (not implemented yet) leaves RecentlyLost.
+    // InitializationMeasurement), not even for a frame that could start a new
+    // map (another scene): only relocalization leaves RecentlyLost.
     EXPECT_TRUE(LoseAt(2.0).empty());
-    EXPECT_TRUE(Feed(sequence.frames[1].measurement).empty());
+    test::SyntheticStereoSequenceOptions elsewhere;
+    elsewhere.trajectory.num_points = 600;
+    elsewhere.trajectory.seed = 2;
+    EXPECT_TRUE(Feed(test::MakeSyntheticStereoSequence(elsewhere).frames[1].measurement).empty());
     EXPECT_EQ(tracker_.state(), TrackerState::RecentlyLost);
     EXPECT_EQ(mapper_.state(), mapping::MapperState::Mapping);
     EXPECT_EQ(mapper_.num_keyframes(), num_frames);
