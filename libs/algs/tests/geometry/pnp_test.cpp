@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 #include <limits>
 #include <random>
 #include <vector>
@@ -139,16 +140,22 @@ TEST(PnpTest, P3PAllSolutionsReproject) {
     }
 }
 
+// The bound is set by Camera::Unproject (KB undistortion tolerance 1e-8 on the radius) and by
+// the adaptive stop at the first all-inlier hypothesis, whatever its sample's conditioning.
 TEST(PnpTest, RansacFisheyeNoiseFree) {
     const auto model = TumViModel();
     const Camera camera = TumViCamera(&model);
-    std::mt19937 rng(3);
-    const PnpScene scene = RandomPnpScene(rng, camera, 100, 80.0 * kDeg, 0.0);
-    const PnpResult result = SolvePnPRansac(camera, scene.world, scene.pixels, scene.sigmas, PnpOptions{});
-    ASSERT_TRUE(result.success);
-    EXPECT_EQ(result.num_inliers, 100u);
-    ASSERT_EQ(result.inlier.size(), 100u);
-    EXPECT_LT(PoseError(result.T_cw, scene.T_cw), 1e-6);
+    for (uint64_t seed = 0; seed < 50; ++seed) {
+        std::mt19937 rng(static_cast<std::mt19937::result_type>(seed));
+        const PnpScene scene = RandomPnpScene(rng, camera, 100, 80.0 * kDeg, 0.0);
+        PnpOptions options;
+        options.seed = seed;
+        const PnpResult result = SolvePnPRansac(camera, scene.world, scene.pixels, scene.sigmas, options);
+        ASSERT_TRUE(result.success) << "seed " << seed;
+        EXPECT_EQ(result.num_inliers, 100u) << "seed " << seed;
+        ASSERT_EQ(result.inlier.size(), 100u);
+        EXPECT_LT(PoseError(result.T_cw, scene.T_cw), 1e-5) << "seed " << seed;
+    }
 }
 
 // The pose is the unrefined best P3P hypothesis. Over 1000 random scenes like this one it meets
@@ -185,6 +192,10 @@ TEST(PnpTest, DegenerateInputFailsCleanly) {
     const Camera camera = TumViCamera(&model);
     std::mt19937 rng(5);
 
+    // Seed 5 is representative: the size checks do not depend on the data, and in a 300-seed
+    // sweep of the scenes below the collinear and all-outlier cases never succeeded and the
+    // behind-camera case succeeded once (10 of its 50 points nearly coplanar with the camera
+    // centre, which a 180°-rotated pose genuinely sees in front).
     {  // Fewer than 4 points.
         const PnpScene scene = RandomPnpScene(rng, camera, 3, 60.0 * kDeg, 0.0);
         ExpectCleanFailure(SolvePnPRansac(camera, scene.world, scene.pixels, scene.sigmas, PnpOptions{}));
@@ -195,6 +206,7 @@ TEST(PnpTest, DegenerateInputFailsCleanly) {
         ExpectCleanFailure(SolvePnPRansac(camera, scene.world, scene.pixels, scene.sigmas, PnpOptions{}));
     }
     {  // 20 world points on one 3-D line (rotation about the line is unobservable), 1 px noise.
+       // SolveP3P rejects every collinear triple, so no hypothesis exists for any seed.
         PnpScene scene;
         scene.T_cw = RigidTransformation(Eigen::AngleAxisd(0.3, RandomUnit(rng)).toRotationMatrix(),
                                          TVector3DF(0.1, -0.2, 0.3));
