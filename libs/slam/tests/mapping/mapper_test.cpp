@@ -113,10 +113,11 @@ protected:
         tracker_.Notify(event);
     }
 
-    void PublishTrackingLost(uint32_t map, double timestamp) {
+    void PublishTrackingLost(uint32_t map, double timestamp, bool final = true) {
         auto* event = tracking_lost_pool_.Create();
         event->map_id = map::MapId{map};
         event->timestamp = timestamp;
+        event->final = final;
         tracker_.Notify(event);
     }
 
@@ -566,6 +567,38 @@ TEST_F(MapperTest, IgnoresStaleTrackingLost) {
     EXPECT_EQ(mapper_.num_keyframes(), 1u);
 }
 
+TEST_F(MapperTest, IgnoresNonFinalTrackingLost) {
+    // Initializing: nothing to discard; initialization goes on.
+    PublishTrackingLost(0, 0.0, /*final=*/false);
+    Drain();
+    EXPECT_EQ(mapper_.state(), MapperState::Initializing);
+    EXPECT_TRUE(TakeCaptured().empty());
+    InitializeStereo(0.5);
+    ASSERT_EQ(mapper_.current_map_id(), map::MapId{1});
+    const size_t num_points = mapper_.num_map_points();
+
+    // Mapping: the Tracker is only recently lost; the map stays.
+    PublishTrackingLost(1, 1.0, /*final=*/false);
+    Drain();
+    EXPECT_TRUE(TakeCaptured().empty());
+    EXPECT_EQ(mapper_.state(), MapperState::Mapping);
+    EXPECT_EQ(mapper_.current_map_id(), map::MapId{1});
+    EXPECT_EQ(mapper_.num_keyframes(), 1u);
+    EXPECT_EQ(mapper_.num_map_points(), num_points);
+
+    // Stale: a non-final loss of map 1 does not touch map 2.
+    PublishTrackingLost(1, 2.0);
+    Drain();
+    ASSERT_EQ(mapper_.state(), MapperState::Initializing);
+    InitializeStereo(3.0);
+    ASSERT_EQ(mapper_.current_map_id(), map::MapId{2});
+    PublishTrackingLost(1, 4.0, /*final=*/false);
+    Drain();
+    EXPECT_EQ(mapper_.state(), MapperState::Mapping);
+    EXPECT_EQ(mapper_.current_map_id(), map::MapId{2});
+    EXPECT_EQ(mapper_.num_keyframes(), 1u);
+}
+
 TEST_F(MapperTest, StateIsMappingWhenNewMapIsPublished) {
     // A synchronous observer runs on the publishing thread, inside Notify, so
     // it sees the state at the exact moment the new map is published.
@@ -703,7 +736,7 @@ protected:
         }
         event->visible_points = visible;
         event->reference_frame_id = reference;
-        event->stage = events::TrackingStage::LocalMap;
+        event->stage = events::TrackingStage::MotionModel;
         event->num_matches = static_cast<uint32_t>(pairs.size());
         event->num_inliers = static_cast<uint32_t>(num_inliers.value_or(pairs.size()));
         tracker_.Notify(event);
@@ -876,6 +909,21 @@ TEST_F(MapperInboxTest, TrackingLostAfterFrameTrackedCreatesNoFrame) {
     EXPECT_EQ(mapper_.num_frame_evaluations(), evaluations);
     EXPECT_EQ(mapper_.state(), MapperState::Initializing);
     EXPECT_EQ(mapper_.num_keyframes(), 0u);
+}
+
+TEST_F(MapperInboxTest, NonFinalTrackingLostDoesNotSupersedeFrameTracked) {
+    // The map survives a non-final loss, so the last FrameTracked before it
+    // is still evaluated.
+    SetUpMonoMap();
+    const size_t evaluations = mapper_.num_frame_evaluations();
+
+    PublishFrameTracked(1, next_, TrackedPairs(next_, num_points_ / 2));
+    PublishTrackingLost(1, sequence_.frames[next_].measurement.timestamp(), /*final=*/false);
+    Drain();
+
+    EXPECT_EQ(mapper_.num_frame_evaluations(), evaluations + 1);
+    EXPECT_EQ(mapper_.state(), MapperState::Mapping);
+    EXPECT_GE(mapper_.num_keyframes(), 2u);
 }
 
 TEST_F(MapperInboxTest, IgnoresFrameTrackedOfOldMap) {

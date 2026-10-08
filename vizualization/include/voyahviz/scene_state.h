@@ -18,7 +18,9 @@
 
 namespace voyahviz {
 
-enum class TrackingStatus : uint8_t { None, Tracking, Lost };
+// RecentlyLost: a non-final TrackingLost (the Tracker tries to relocalize in
+// the map, which the scene keeps); Lost: a final one.
+enum class TrackingStatus : uint8_t { None, Tracking, RecentlyLost, Lost };
 
 // What the map viewer knows, built only from SLAM events (never from Slam or
 // its components), so the same code can later be fed by a deserializer on a

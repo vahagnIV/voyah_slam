@@ -8,6 +8,7 @@
 #include <support/synthetic_sequence.h>
 #include <support/test_measurements.h>
 #include <support/trajectory_error.h>
+#include <voyahslam/bow/vocabulary.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
 #include <voyahslam/events/observable.h>
@@ -21,6 +22,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -37,6 +39,7 @@ using TTracker = Tracker<Extractor>;
 using TMapper = mapping::Mapper<Extractor>;
 using TInitializationMeasurement = events::InitializationMeasurement<Extractor>;
 using TFrameTracked = events::FrameTracked<Extractor>;
+using TVocabulary = bow::Vocabulary<Extractor>;
 using Clock = std::chrono::steady_clock;
 
 inline constexpr double kFrameInterval = 0.05;  // SyntheticSequenceOptions::frame_interval
@@ -48,6 +51,7 @@ struct Captured {
     map::FrameId frame_id;       // FrameTracked: the reference frame
     geometry::RigidTransformation pose;  // FrameTracked
     double timestamp = 0.0;      // FrameTracked, TrackingLost
+    bool final = false;          // TrackingLost
     // FrameTracked.
     double measurement_timestamp = 0.0;
     size_t num_observed_features = 0;
@@ -82,9 +86,12 @@ inline test::SyntheticStereoSequence StereoSequence(double step = 0.05, double y
 // records what the Tracker publishes.
 class TrackerTest : public ::testing::Test {
 protected:
+    // `vocabulary` (may be null) is shared by the Mapper and the Tracker.
     explicit TrackerTest(mapping::MapperOptions mapper_options = {},
-                         TrackerOptions tracker_options = {})
-        : mapper_(std::move(mapper_options)), tracker_(std::move(tracker_options)) {
+                         TrackerOptions tracker_options = {},
+                         const std::shared_ptr<const TVocabulary>& vocabulary = nullptr)
+        : mapper_(std::move(mapper_options), vocabulary),
+          tracker_(std::move(tracker_options), vocabulary) {
         mapper_.AddObserver(tracker_.inbox());
         tracker_.AddObserver(mapper_.inbox());
         injector_.ConnectAsync(tracker_.inbox());
@@ -140,7 +147,9 @@ protected:
                 c.visible_points = tracked.visible_points;
                 c.local_frames = tracked.local_frames;
             } else if (event->type == events::EventType::TrackingLost) {
-                c.timestamp = static_cast<events::TrackingLost*>(event)->timestamp;
+                const auto& lost = *static_cast<events::TrackingLost*>(event);
+                c.timestamp = lost.timestamp;
+                c.final = lost.final;
             }
             captured.push_back(c);
         }
@@ -194,22 +203,31 @@ protected:
     }
 
     // Expects exactly one FrameTracked within the bounds of a metric map,
-    // with its inliers.
+    // with its inliers (and its stage, if given).
     void ExpectTrackedMetric(const std::vector<Captured>& captured,
                              const geometry::RigidTransformation& truth,
-                             const test::MapAlignment& alignment, size_t frame) {
+                             const test::MapAlignment& alignment, size_t frame,
+                             std::optional<events::TrackingStage> stage = std::nullopt) {
         ASSERT_EQ(captured.size(), 1u) << "frame " << frame;
         ASSERT_EQ(captured[0].type, events::EventType::FrameTracked) << "frame " << frame;
-        ExpectTrackedThroughLocalMap(captured[0], frame);
+        ExpectTrackedThroughLocalMap(captured[0], frame, stage);
         EXPECT_TRUE(captured[0].pose.ToMatrix34().allFinite());
         EXPECT_LT(alignment.RotationErrorDeg(captured[0].pose, truth), 0.5) << "frame " << frame;
         EXPECT_LT(alignment.CentreError(captured[0].pose, truth), 0.02) << "frame " << frame;
     }
 
-    // A successful frame's final step is the local map; its observations are
-    // exactly its inliers.
-    static void ExpectTrackedThroughLocalMap(const Captured& tracked, size_t frame) {
-        EXPECT_EQ(tracked.stage, events::TrackingStage::LocalMap) << "frame " << frame;
+    // A successful frame's final step is the local map, refining the initial
+    // pose of `stage` (by default a last-frame pose: motion model or zero
+    // motion); its observations are exactly its inliers.
+    static void ExpectTrackedThroughLocalMap(const Captured& tracked, size_t frame,
+                                             std::optional<events::TrackingStage> stage = std::nullopt) {
+        if (stage) {
+            EXPECT_EQ(tracked.stage, *stage) << "frame " << frame;
+        } else {
+            EXPECT_TRUE(tracked.stage == events::TrackingStage::MotionModel ||
+                        tracked.stage == events::TrackingStage::ZeroMotion)
+                << "frame " << frame;
+        }
         EXPECT_EQ(tracked.num_observed_points, tracked.num_inliers) << "frame " << frame;
         EXPECT_EQ(tracked.num_observed_features, tracked.num_observed_points) << "frame " << frame;
         EXPECT_GE(tracked.num_matches, tracked.num_inliers) << "frame " << frame;

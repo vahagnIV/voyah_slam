@@ -1,6 +1,4 @@
 #include <gtest/gtest.h>
-#include <spdlog/sinks/ostream_sink.h>
-#include <spdlog/spdlog.h>
 #include "tracking/tracker_test_fixture.h"
 #include <support/synthetic_sequence.h>
 #include <support/test_measurements.h>
@@ -20,7 +18,6 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -121,9 +118,7 @@ TEST_F(TrackerTest, TracksAndPublishesFrameTracked) {
     EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
 }
 
-// Tracker with a configurable motion-model gate. The tracking stage is not
-// part of FrameTracked (it always reports the local-map stage), so the tests
-// read the Tracker's debug log for the step that produced the pose.
+// Tracker with a configurable motion-model gate.
 class TrackerGateTest : public TrackerTest {
 protected:
     explicit TrackerGateTest(size_t min_motion_model_inliers = 30)
@@ -136,25 +131,21 @@ protected:
     }
 
     // Tracks frames 1 and 2 (frame 2 is the first with a velocity) and returns
-    // the Tracker's debug log.
-    std::string TrackTwoFramesLog() {
+    // the stages of their initial poses.
+    std::vector<events::TrackingStage> TrackTwoFramesStages() {
         const auto sequence = StereoSequence();
         EXPECT_EQ(InitializeStereo(sequence, 0), 0u);
-        const auto logger = spdlog::get("Tracker");
-        EXPECT_NE(logger, nullptr);
-        std::ostringstream out;
-        const auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(out);
-        const auto previous_level = logger->level();
-        logger->sinks().push_back(sink);
-        logger->set_level(spdlog::level::debug);
+        std::vector<events::TrackingStage> stages;
         for (size_t k = 1; k <= 2; ++k) {
             const auto captured = Feed(sequence.frames[k].measurement);
             EXPECT_EQ(captured.size(), 1u);
-            if (!captured.empty()) EXPECT_EQ(captured[0].type, events::EventType::FrameTracked);
+            if (captured.size() == 1 && captured[0].type == events::EventType::FrameTracked) {
+                stages.push_back(captured[0].stage);
+            } else {
+                ADD_FAILURE() << "frame " << k << " not tracked";
+            }
         }
-        logger->sinks().pop_back();
-        logger->set_level(previous_level);
-        return out.str();
+        return stages;
     }
 };
 
@@ -167,18 +158,19 @@ protected:
 TEST_F(TrackerGateTest, MotionModelAcceptedAboveGate) {
     EXPECT_EQ(TrackingOptions{}.min_motion_model_inliers, 30u);
     EXPECT_EQ(TrackingOptions{}.min_motion_inliers, 10u);
-    const std::string log = TrackTwoFramesLog();
-    EXPECT_NE(log.find("motion model:"), std::string::npos) << log;
-    EXPECT_EQ(log.find("motion model failed"), std::string::npos) << log;
+    // Frame 1 has no velocity yet: zero motion.
+    const std::vector<events::TrackingStage> expected{events::TrackingStage::ZeroMotion,
+                                                      events::TrackingStage::MotionModel};
+    EXPECT_EQ(TrackTwoFramesStages(), expected);
 }
 
 TEST_F(TrackerStrictGateTest, WeakMotionModelFallsBackToZeroMotion) {
     // Frame 2 is tracked with a velocity; its motion-model pose has fewer
     // inliers than the gate, so zero motion (gated at min_motion_inliers only)
     // produces the pose.
-    const std::string log = TrackTwoFramesLog();
-    EXPECT_NE(log.find("motion model failed"), std::string::npos) << log;
-    EXPECT_NE(log.find("zero motion:"), std::string::npos) << log;
+    const std::vector<events::TrackingStage> expected{events::TrackingStage::ZeroMotion,
+                                                      events::TrackingStage::ZeroMotion};
+    EXPECT_EQ(TrackTwoFramesStages(), expected);
 }
 
 TEST_F(TrackerTest, UrgentWhenInliersNearGate) {
@@ -346,6 +338,7 @@ TEST_F(TrackerTest, EmptyFrameIsLost) {
     ASSERT_EQ(captured.size(), 1u);
     EXPECT_EQ(captured[0].type, events::EventType::TrackingLost);
     EXPECT_EQ(captured[0].map_id, map::MapId{1});
+    EXPECT_TRUE(captured[0].final);
     EXPECT_EQ(tracker_.state(), TrackerState::Lost);
 }
 
@@ -542,6 +535,226 @@ TEST_F(TrackerTest, ThreadProcessesTrackedMeasurements) {
 
     ASSERT_EQ(captured.size(), 3u);
     for (const Captured& c : captured) EXPECT_EQ(c.type, events::EventType::FrameTracked);
+}
+
+// Reference-Frame tracking and the loss protocol (spec sections 2, 3).
+
+// k = 2, L = 1: two words of weight 1 under the root. With levels_up = 4
+// every FeatureVector files all features under the root, so SearchByBoW
+// compares every pair of features (the ratio test decides).
+std::shared_ptr<const TVocabulary> MakeRootVocabulary() {
+    using TDescriptors = typename Extractor::TDescriptors;
+    TDescriptors descriptors = TDescriptors::Zero(Extractor::DescriptorSize, 3);
+    descriptors(0, 2) = 0xFF;
+    return std::make_shared<const TVocabulary>(
+        TVocabulary::FromTree(2, 1, {0, 0, 0}, std::move(descriptors), {0.0, 1.0, 1.0}));
+}
+
+// `min_map_frames` is RelocalizationOptions::min_map_frames_to_relocalize; a
+// fresh stereo map has one Frame.
+TrackerOptions LossOptions(size_t min_map_frames) {
+    TrackerOptions options;
+    options.relocalization.min_map_frames_to_relocalize = min_map_frames;
+    return options;
+}
+
+class TrackerBowTest : public TrackerTest {
+protected:
+    explicit TrackerBowTest(size_t min_map_frames = 0,
+                            std::shared_ptr<const TVocabulary> vocabulary = MakeRootVocabulary())
+        : TrackerTest({}, LossOptions(min_map_frames), vocabulary) {}
+
+    // Tracks frames 1..3 of `sequence` (a velocity, a reference Frame), then
+    // the frame `jumped`: frame 4's timestamp, yawed 15 degrees from where the
+    // motion model puts it. Returns what the jumped frame published.
+    std::vector<Captured> TrackThenJump(const test::SyntheticStereoSequence& sequence,
+                                        const test::SyntheticStereoSequence& jumped) {
+        EXPECT_EQ(InitializeStereo(sequence, 0), 0u);
+        for (size_t k = 1; k <= 3; ++k) {
+            const auto captured = Feed(sequence.frames[k].measurement);
+            EXPECT_EQ(captured.size(), 1u);
+            if (!captured.empty()) EXPECT_EQ(captured[0].type, events::EventType::FrameTracked);
+        }
+        return Feed(jumped.frames[4].measurement);
+    }
+
+    // Loses tracking with an empty frame at `timestamp`.
+    std::vector<Captured> LoseAt(double timestamp) { return Feed(test::MakeBinocular(0, timestamp)); }
+};
+
+// Same scene (same seed), 4 degrees of yaw per frame instead of 0.2: frame 4
+// is ~15 degrees (~100 px) from the motion model's prediction, beyond the
+// zero-motion window (4 x 7 px, retried at x2).
+test::SyntheticStereoSequence JumpedSequence() { return StereoSequence(0.05, 4.0); }
+
+class TrackerNoVocabularyTest : public TrackerBowTest {
+protected:
+    TrackerNoVocabularyTest() : TrackerBowTest(0, nullptr) {}
+};
+
+class TrackerSmallMapTest : public TrackerBowTest {
+protected:
+    // A map with exactly min_map_frames_to_relocalize Frames is too small.
+    TrackerSmallMapTest() : TrackerBowTest(1) {}
+};
+
+TEST(TrackerOptionsTest, RelocalizationDefaults) {
+    const RelocalizationOptions options;
+    EXPECT_DOUBLE_EQ(options.recently_lost_seconds, 5.0);
+    EXPECT_EQ(options.min_map_frames_to_relocalize, 10u);
+    EXPECT_DOUBLE_EQ(TrackingOptions{}.reference_frame_nn_ratio, 0.7);
+    EXPECT_EQ(TrackingOptions{}.min_reference_frame_matches, 15u);
+    EXPECT_EQ(TrackingOptions{}.min_reference_frame_inliers, 10u);
+}
+
+TEST_F(TrackerBowTest, ReferenceFrameRecoversJump) {
+    const auto sequence = StereoSequence();
+    const auto jumped = JumpedSequence();
+    const auto captured = TrackThenJump(sequence, jumped);
+
+    ASSERT_EQ(captured.size(), 1u);
+    ASSERT_EQ(captured[0].type, events::EventType::FrameTracked);
+    EXPECT_EQ(captured[0].stage, events::TrackingStage::ReferenceFrame);
+    EXPECT_EQ(captured[0].map_id, map::MapId{1});
+    EXPECT_GE(captured[0].num_inliers, TrackingOptions{}.min_local_map_inliers);
+    EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
+    ExpectTrackedMetric(captured, jumped.frames[4].T_cw, test::MapAlignment(sequence.frames[0].T_cw), 4,
+                        events::TrackingStage::ReferenceFrame);
+
+    // Tracking goes on from the recovered pose.
+    const auto next = Feed(jumped.frames[5].measurement);
+    ASSERT_EQ(next.size(), 1u);
+    EXPECT_EQ(next[0].type, events::EventType::FrameTracked);
+}
+
+TEST_F(TrackerNoVocabularyTest, NoVocabularyBehavesAsBefore) {
+    // The same jump, no vocabulary: no reference-Frame tracking, no
+    // RecentlyLost (although the map is large enough), straight to Lost.
+    const auto captured = TrackThenJump(StereoSequence(), JumpedSequence());
+
+    ASSERT_EQ(captured.size(), 1u);
+    EXPECT_EQ(captured[0].type, events::EventType::TrackingLost);
+    EXPECT_TRUE(captured[0].final);
+    EXPECT_EQ(tracker_.state(), TrackerState::Lost);
+    EXPECT_EQ(mapper_.state(), mapping::MapperState::Initializing);
+
+    // Lost: measurements go to the Mapper for initialization again.
+    const auto next = Feed(test::MakeBinocular(200, 1.0));
+    ASSERT_EQ(next.size(), 1u);
+    EXPECT_EQ(next[0].type, events::EventType::InitializationMeasurement);
+}
+
+TEST_F(TrackerBowTest, FailureEntersRecentlyLostWithVocabulary) {
+    const auto sequence = StereoSequence();
+    ASSERT_EQ(InitializeStereo(sequence, 0), 0u);
+    const size_t num_frames = mapper_.num_keyframes();
+
+    auto captured = LoseAt(1.0);
+
+    ASSERT_EQ(captured.size(), 1u);
+    EXPECT_EQ(captured[0].type, events::EventType::TrackingLost);
+    EXPECT_FALSE(captured[0].final);
+    EXPECT_EQ(captured[0].map_id, map::MapId{1});
+    EXPECT_DOUBLE_EQ(captured[0].timestamp, 1.0);
+    EXPECT_EQ(tracker_.state(), TrackerState::RecentlyLost);
+    // The Mapper keeps its map.
+    EXPECT_EQ(mapper_.state(), mapping::MapperState::Mapping);
+    EXPECT_EQ(mapper_.current_map_id(), map::MapId{1});
+    EXPECT_EQ(mapper_.num_keyframes(), num_frames);
+
+    // While RecentlyLost nothing is published (no FrameTracked, no
+    // InitializationMeasurement), not even for a trackable frame: only
+    // relocalization (not implemented yet) leaves RecentlyLost.
+    EXPECT_TRUE(LoseAt(2.0).empty());
+    EXPECT_TRUE(Feed(sequence.frames[1].measurement).empty());
+    EXPECT_EQ(tracker_.state(), TrackerState::RecentlyLost);
+    EXPECT_EQ(mapper_.state(), mapping::MapperState::Mapping);
+    EXPECT_EQ(mapper_.num_keyframes(), num_frames);
+}
+
+TEST_F(TrackerBowTest, StateIsRecentlyLostWhenTrackingLostIsPublished) {
+    const auto sequence = StereoSequence();
+    ASSERT_EQ(InitializeStereo(sequence, 0), 0u);
+    struct Probe {
+        TTracker* tracker;
+        bool seen = false;
+        TrackerState state = TrackerState::WaitingForMap;
+    } probe{&tracker_};
+    tracker_.AddSyncObserver(
+        [](void* ctx, events::Event* event) {
+            auto* p = static_cast<Probe*>(ctx);
+            if (event->type == events::EventType::TrackingLost) {
+                p->seen = true;
+                p->state = p->tracker->state();
+            }
+        },
+        &probe);
+
+    LoseAt(1.0);
+
+    ASSERT_TRUE(probe.seen);
+    EXPECT_EQ(probe.state, TrackerState::RecentlyLost);
+}
+
+TEST_F(TrackerBowTest, RecentlyLostTimesOutToLost) {
+    const auto sequence = StereoSequence();
+    ASSERT_EQ(InitializeStereo(sequence, 0), 0u);
+    constexpr double kLostAt = 1.0;
+    ASSERT_EQ(LoseAt(kLostAt).size(), 1u);
+    ASSERT_EQ(tracker_.state(), TrackerState::RecentlyLost);
+
+    // Measurement timestamps, not wall time: just under 5 s, nothing.
+    for (const double dt : {1.0, 2.5, 4.99}) {
+        EXPECT_TRUE(LoseAt(kLostAt + dt).empty()) << dt;
+        EXPECT_EQ(tracker_.state(), TrackerState::RecentlyLost) << dt;
+    }
+
+    auto captured = LoseAt(kLostAt + 5.0);
+    ASSERT_EQ(captured.size(), 1u);
+    EXPECT_EQ(captured[0].type, events::EventType::TrackingLost);
+    EXPECT_TRUE(captured[0].final);
+    EXPECT_EQ(captured[0].map_id, map::MapId{1});
+    EXPECT_DOUBLE_EQ(captured[0].timestamp, kLostAt + 5.0);
+    EXPECT_EQ(tracker_.state(), TrackerState::Lost);
+    // The final loss clears the Mapper's map.
+    EXPECT_EQ(mapper_.state(), mapping::MapperState::Initializing);
+    EXPECT_EQ(mapper_.num_keyframes(), 0u);
+
+    // Lost: re-initialization as before, into map 2.
+    captured = Feed(test::MakeBinocular(200, kLostAt + 6.0));
+    ASSERT_EQ(captured.size(), 1u);
+    EXPECT_EQ(captured[0].type, events::EventType::InitializationMeasurement);
+    ASSERT_EQ(InitializeStereo(sequence, 5), 5u);
+    EXPECT_EQ(tracker_.current_map_id(), map::MapId{2});
+}
+
+TEST_F(TrackerSmallMapTest, SmallMapGoesStraightToLost) {
+    const auto sequence = StereoSequence();
+    ASSERT_EQ(InitializeStereo(sequence, 0), 0u);
+    ASSERT_EQ(tracker_.replica().keyframe_ids().size(), 1u);
+
+    const auto captured = LoseAt(1.0);
+
+    ASSERT_EQ(captured.size(), 1u);
+    EXPECT_EQ(captured[0].type, events::EventType::TrackingLost);
+    EXPECT_TRUE(captured[0].final);
+    EXPECT_EQ(tracker_.state(), TrackerState::Lost);
+    EXPECT_EQ(mapper_.state(), mapping::MapperState::Initializing);
+}
+
+class TrackerDefaultBowTest : public TrackerBowTest {
+protected:
+    TrackerDefaultBowTest() : TrackerBowTest(RelocalizationOptions{}.min_map_frames_to_relocalize) {}
+};
+
+TEST_F(TrackerDefaultBowTest, SmallMapGoesStraightToLostByDefault) {
+    // Default options: a fresh stereo map (1 Frame) is far below 10 Frames.
+    const auto sequence = StereoSequence();
+    ASSERT_EQ(InitializeStereo(sequence, 0), 0u);
+    const auto captured = LoseAt(1.0);
+    ASSERT_EQ(captured.size(), 1u);
+    EXPECT_TRUE(captured[0].final);
+    EXPECT_EQ(tracker_.state(), TrackerState::Lost);
 }
 
 } // namespace

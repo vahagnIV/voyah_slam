@@ -79,6 +79,7 @@ public:
         const auto it = keyframes_.find(id);
         return it == keyframes_.end() ? nullptr : &it->second;
     }
+    [[nodiscard]] size_t num_keyframes() const { return keyframes_.size(); }
     [[nodiscard]] std::vector<map::FrameId> keyframe_ids() const {
         std::vector<map::FrameId> ids;
         ids.reserve(keyframes_.size());

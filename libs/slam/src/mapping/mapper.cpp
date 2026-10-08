@@ -86,13 +86,15 @@ bool Mapper<TFeatureExtractor>::ProcessPending() {
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::MarkSupersededFrameTracked() {
     superseded_.assign(batch_.size(), false);
-    // Maps with a FrameTracked or TrackingLost later in the batch; a batch
-    // rarely spans more than one or two maps.
+    // Maps with a FrameTracked or final TrackingLost later in the batch; a
+    // batch rarely spans more than one or two maps. A non-final TrackingLost
+    // keeps the map, so it supersedes nothing.
     std::vector<map::MapId> later;
     for (size_t i = batch_.size(); i-- > 0;) {
         const events::Event& event = *batch_[i];
-        if (event.type != events::EventType::FrameTracked &&
-            event.type != events::EventType::TrackingLost) {
+        const bool final_lost = event.type == events::EventType::TrackingLost &&
+                                static_cast<const events::TrackingLost&>(event).final;
+        if (event.type != events::EventType::FrameTracked && !final_lost) {
             continue;
         }
         const bool seen = std::find(later.begin(), later.end(), event.map_id) != later.end();
@@ -186,6 +188,9 @@ void Mapper<TFeatureExtractor>::OnInitializationMeasurement(
 
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::OnTrackingLost(const events::TrackingLost& event) {
+    if (!event.final) {
+        return;  // recently lost: the Tracker relocalizes in this map
+    }
     if (event.map_id != current_map_id() || state() != MapperState::Mapping) {
         return;  // stale: an older map
     }

@@ -108,6 +108,7 @@ inline const char* StateName(tracking::TrackerState state) {
     switch (state) {
         case tracking::TrackerState::WaitingForMap: return "WaitingForMap";
         case tracking::TrackerState::Tracking: return "Tracking";
+        case tracking::TrackerState::RecentlyLost: return "RecentlyLost";
         case tracking::TrackerState::Lost: return "Lost";
     }
     return "?";

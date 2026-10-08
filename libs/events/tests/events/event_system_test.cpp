@@ -336,7 +336,7 @@ TEST(EventSystemTest, RecycledFrameTrackedIsReset) {
     event->visible_points = {map::MapPointId{5}};
     event->reference_frame_id = map::FrameId{42};
     event->local_frames = {map::FrameId{42}};
-    event->stage = TrackingStage::LocalMap;
+    event->stage = TrackingStage::ReferenceFrame;
     event->num_matches = 7;
     event->num_inliers = 2;
     event->Recycle();
@@ -352,6 +352,21 @@ TEST(EventSystemTest, RecycledFrameTrackedIsReset) {
     EXPECT_EQ(reused->stage, TrackingStage::MotionModel);
     EXPECT_EQ(reused->num_matches, 0u);
     EXPECT_EQ(reused->num_inliers, 0u);
+    reused->Recycle();
+}
+
+TEST(EventSystemTest, RecycledTrackingLostIsReset) {
+    memory::ObjectPool<TrackingLost, memory::ThreadSafePolicy> pool(1);
+    auto* event = pool.Create();
+    EXPECT_TRUE(event->final);  // a TrackingLost ends the map unless it says otherwise
+    event->timestamp = 1.5;
+    event->final = false;
+    event->Recycle();
+
+    auto* reused = pool.Create();
+    ASSERT_EQ(reused, event);
+    EXPECT_EQ(reused->timestamp, 0.0);
+    EXPECT_TRUE(reused->final);
     reused->Recycle();
 }
 

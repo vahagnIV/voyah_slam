@@ -37,7 +37,10 @@ namespace voyahslam::tracking {
 enum class TrackerState : uint8_t {
     WaitingForMap,  // no map yet: measurements go to the Mapper for initialization
     Tracking,       // tracking against the current map
-    Lost,           // tracking failed: behaves like WaitingForMap (relocalization later)
+    // Tracking failed; relocalization in the current map is tried on every
+    // measurement, nothing is published, and the Mapper keeps the map.
+    RecentlyLost,
+    Lost,           // tracking failed for good: behaves like WaitingForMap
 };
 
 // Frame-to-map tracking thresholds (ORB-SLAM3 TrackWithMotionModel /
@@ -52,6 +55,12 @@ struct TrackingOptions {
     // 10-29 inlier poses that drift).
     size_t min_motion_model_inliers = 30;
     double fallback_window_scale = 4.0; // zero-motion fallback window factor
+    // Reference-Frame tracking (ORB-SLAM3 TrackReferenceKeyFrame), with a
+    // vocabulary only: SearchByBoW ratio, minimum matches, and minimum inliers
+    // after pose optimization.
+    double reference_frame_nn_ratio = 0.7;
+    size_t min_reference_frame_matches = 15;
+    size_t min_reference_frame_inliers = 10;
     double local_map_th = 1.0;          // local-map search window factor
     size_t min_local_map_inliers = 30;
     // A frame with fewer than urgent_inlier_factor * min_local_map_inliers
@@ -66,9 +75,18 @@ struct TrackingOptions {
     }
 };
 
+// The loss protocol (ORB-SLAM3 RECENTLY_LOST), with a vocabulary only.
+struct RelocalizationOptions {
+    // RecentlyLost for this long, in measurement timestamps, then Lost.
+    double recently_lost_seconds = 5.0;
+    // A map with at most this many Frames goes straight to Lost.
+    size_t min_map_frames_to_relocalize = 10;
+};
+
 struct TrackerOptions {
     features::StereoMatcherOptions stereo_matcher;
     TrackingOptions tracking;
+    RelocalizationOptions relocalization;
     features::ProjectionMatcherOptions matcher;
     optimization::PoseOptimizationOptions pose_optimization;
     double sigma_px = 1.0;     // keypoint noise std-dev at level 0, px
@@ -90,13 +108,24 @@ struct TrackerOptions {
 // InitializationMeasurement, FrameTracked and TrackingLost; never modifies
 // map objects.
 //
-// Tracking (ORB-SLAM3 Track without BoW): the motion model (projection search
-// from the last frame at velocity * T_last, pose optimization), else a
-// wide-window search at zero motion, then the local map and a final pose
-// optimization. The local map (local_map.h) is built from the covisibility of
-// the Frames observing that step's matches; FrameTracked carries its Frames,
-// the local points passing the projection gate, and the reference Frame (the
-// local Frame observing the most final inliers).
+// Tracking (ORB-SLAM3 Track): an initial pose from the motion model
+// (projection search from the last frame at velocity * T_last, pose
+// optimization), else a wide-window search at zero motion, else, with a
+// vocabulary, the reference Frame (bag-of-words matches against the last
+// FrameTracked's reference Frame, pose optimization from the last pose); then
+// the local map and a final pose optimization. The local map (local_map.h) is
+// built from the covisibility of the Frames observing the initial step's
+// matches; FrameTracked carries its Frames, the local points passing the
+// projection gate, the reference Frame (the local Frame observing the most
+// final inliers) and, as its stage, the initial pose's source.
+//
+// Loss (spec section 2). With a vocabulary and a map of more than
+// min_map_frames_to_relocalize Frames, a failure enters RecentlyLost
+// (TrackingLost, final = false): each measurement tries relocalization, and
+// after recently_lost_seconds of measurement timestamps the Tracker is Lost
+// (TrackingLost, final = true). Otherwise a failure is Lost at once
+// (final = true). Lost, like WaitingForMap, forwards measurements to the
+// Mapper for a new map.
 //
 // MapTransactions. A new map starts tracking from its start Frame. An added
 // Frame whose measurement is the last tracked one (same timestamp) merges its
@@ -110,6 +139,10 @@ public:
     using TMonocularMeasurement = features::TMonocularMeasurement<TFeatureExtractor>;
     using TBinocularMeasurement = features::TBinocularMeasurement<TFeatureExtractor>;
     using TMeasurement = features::TMeasurement<TFeatureExtractor>;
+
+    // FeatureVector nodes are this many levels above the words, as the
+    // Mapper's (the Frames' and the current frame's must be comparable).
+    static constexpr int kBowLevelsUp = 4;
 
     // `vocabulary` (may be null) is immutable and shared read-only with the
     // Mapper.
@@ -181,6 +214,13 @@ private:
     // last_frame_'s measurement.
     void MergeOwnFrame(const events::NewFrame<TFeatureExtractor>& frame);
     void ProcessMeasurement(TMeasurement& measurement);
+    // Tracks `measurement` while Tracking: publishes FrameTracked, or enters
+    // RecentlyLost or Lost.
+    void TrackMeasurement(TMeasurement& measurement);
+    // While RecentlyLost: relocalizes `measurement`, or times out to Lost.
+    void ProcessRecentlyLost(TMeasurement& measurement);
+    // Makes `measurement`, tracked as `pose`, the last frame and publishes it.
+    void AcceptPose(TMeasurement& measurement, PoseResult pose);
     // Steps 1-3 of the tracking flow; on success T_cw and the inlier matches.
     std::optional<PoseResult> TrackFrame(const TMeasurement& measurement);
     // Projection search from the last frame at `predicted` (retried with the
@@ -188,6 +228,12 @@ private:
     std::optional<PoseResult> TrackFromLastFrame(const TMeasurement& measurement,
                                                  const geometry::RigidTransformation& predicted,
                                                  double window_px, events::TrackingStage stage);
+    // Bag-of-words matches against the reference Frame, then pose optimization
+    // from the last frame's pose (spec section 3, steps 1-3).
+    std::optional<PoseResult> TrackReferenceFrame(const TMeasurement& measurement);
+    // Relocalization in the current map (spec section 4). Not implemented
+    // yet: always fails.
+    std::optional<PoseResult> TryRelocalize(const TMeasurement& measurement);
     std::optional<PoseResult> TrackLocalMap(const TMeasurement& measurement, PoseResult pose);
     // Optimizes `initial_T_cw` against the matches and drops the outliers from
     // them; on an optimization failure every match is dropped.
@@ -199,7 +245,7 @@ private:
     void PublishInitializationMeasurement(TMeasurement& measurement);
     // Publishes last_frame_, just tracked as `pose`.
     void PublishFrameTracked(const PoseResult& pose);
-    void PublishTrackingLost(double timestamp);
+    void PublishTrackingLost(double timestamp, bool final);
 
     const TrackerOptions options_;
     const std::shared_ptr<const bow::Vocabulary<TFeatureExtractor>> vocabulary_;
@@ -213,6 +259,9 @@ private:
     MapReplica<TFeatureExtractor> replica_;
     LastFrame last_frame_;
     std::optional<geometry::RigidTransformation> velocity_;  // T_cur_last
+    // The last FrameTracked's reference Frame (the start Frame of a new map).
+    std::optional<map::FrameId> reference_frame_id_;
+    double recently_lost_since_ = 0.0;  // timestamp of the measurement that failed
     size_t tracked_frames_ = 0;  // in the current map
     std::chrono::steady_clock::time_point last_info_log_{};
 

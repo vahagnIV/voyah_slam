@@ -80,7 +80,8 @@ enum class MapperState : uint8_t {
 // covisible Frames (spec sections 5, 4.2). Every change is published as one
 // MapTransaction: a new map with all its Frames and points, or, per created
 // Frame, transaction 1 (creation, culling, fusion) and transaction 2 (local
-// BA, Frame culling). A TrackingLost of the current map discards it.
+// BA, Frame culling). A final TrackingLost of the current map discards it; a
+// non-final one (the Tracker is recently lost) is ignored.
 // LoopDetected is not consumed yet. Runs on its own thread; each
 // ProcessPending() pass drains the inbox.
 //
@@ -131,7 +132,7 @@ public:
         return num_frame_evaluations_.load(std::memory_order_acquire);
     }
     // FrameTracked events of the current map skipped, in total, because a
-    // newer FrameTracked (or a TrackingLost) of the same map was in the same
+    // newer FrameTracked (or a final TrackingLost) of the same map was in the same
     // drained batch.
     [[nodiscard]] size_t backlog_skipped() const {
         return backlog_skipped_.load(std::memory_order_acquire);
@@ -171,7 +172,7 @@ private:
     };
 
     // Marks in superseded_ each FrameTracked of batch_ that is followed in the
-    // batch by a FrameTracked or a TrackingLost of the same map.
+    // batch by a FrameTracked or a final TrackingLost of the same map.
     void MarkSupersededFrameTracked();
     void ApplyEvent(const events::Event& event);
     // A superseded FrameTracked: counted in the backlog, and its visible and

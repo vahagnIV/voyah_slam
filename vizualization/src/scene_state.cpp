@@ -28,7 +28,9 @@ void SceneState<TFeatureExtractor>::Apply(const voyahslam::events::Event& event)
             break;
         }
         case EventType::TrackingLost:
-            status_ = TrackingStatus::Lost;
+            status_ = static_cast<const events::TrackingLost&>(event).final
+                          ? TrackingStatus::Lost
+                          : TrackingStatus::RecentlyLost;
             tracked_points_.clear();
             visible_points_.clear();
             local_frames_.clear();
