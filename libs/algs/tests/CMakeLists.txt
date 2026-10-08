@@ -1,6 +1,7 @@
 voyah_add_test_binary(voyah_algs_tests
     LABEL unit
     SOURCES
+        bow/frame_database_test.cpp
         bow/vocabulary_io_test.cpp
         bow/vocabulary_test.cpp
         estimators/essential_estimator_test.cpp

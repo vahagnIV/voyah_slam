@@ -10,6 +10,7 @@
 #include <variant>
 #include <vector>
 #include <voyahslam/bow/bow_vector.h>
+#include <voyahslam/bow/frame_database.h>
 #include <voyahslam/defs.h>
 #include <voyahslam/events/event_types.h>
 #include <voyahslam/events/map_transaction.h>
@@ -86,6 +87,9 @@ public:
     }
     // The observations indexed per point and per Frame.
     [[nodiscard]] const map::CovisibilityIndex& covisibility() const { return covisibility_; }
+    // The inverted word index of the Frames' BoW vectors (place recognition); Frames
+    // without a vocabulary are not in it.
+    [[nodiscard]] const bow::FrameDatabase& database() const { return database_; }
 
     // The invariant after every transaction (spec section 2): every
     // observation refers to an existing Frame and an alive point, the
@@ -126,6 +130,7 @@ private:
     std::vector<std::optional<map::PointReference>> references_;
     std::map<map::FrameId, ReplicaKeyFrame<TFeatureExtractor>> keyframes_;
     map::CovisibilityIndex covisibility_;
+    bow::FrameDatabase database_;
 };
 
 namespace detail {
@@ -175,6 +180,7 @@ void MapReplica<TFeatureExtractor>::ApplyTransaction(
         keyframe.measurement = added.measurement;
         keyframe.bow = added.bow;
         keyframe.features = added.features;
+        database_.Add(added.id, added.bow);
         keyframe.observations.reserve(added.observed_features.size());
     }
 
@@ -290,6 +296,7 @@ void MapReplica<TFeatureExtractor>::RemoveFrame(map::FrameId frame) {
     const std::vector<std::pair<uint32_t, map::MapPointId>> observations =
         std::move(it->second.observations);
     keyframes_.erase(it);
+    database_.Remove(frame);
     covisibility_.RemoveFrame(frame);
     for (const auto& [feature, point] : observations) OnObservationRemoved(frame, point);
 }
@@ -383,6 +390,7 @@ void MapReplica<TFeatureExtractor>::Clear() {
     references_.clear();
     keyframes_.clear();
     covisibility_.Clear();
+    database_.Clear();
 }
 
 } // namespace voyahslam::tracking

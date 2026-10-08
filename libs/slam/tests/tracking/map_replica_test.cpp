@@ -192,6 +192,39 @@ TEST(MapReplicaTest, StoresFrameBow) {
     EXPECT_TRUE(without->features.nodes.empty());
 }
 
+TEST(MapReplicaTest, DatabaseFollowsTransactions) {
+    TReplica replica;
+    ApplyTransaction(replica, 1, [&](TTransaction& event) {
+        AddFrame(event, 4, MakePose(0.1, 0, 0, 0), {0}, {});
+        AddFrame(event, 5, MakePose(0.2, 0, 0, 0), {0}, {});
+        AddFrame(event, 6, MakePose(0.3, 0, 0, 0), {0}, {});  // no vocabulary
+        event.added_frames[0].bow.entries = {{3, 0.5}, {7, 0.5}};
+        event.added_frames[1].bow.entries = {{3, 0.5}, {8, 0.5}};
+    });
+    EXPECT_EQ(replica.database().size(), 2u);
+    EXPECT_FALSE(replica.database().Contains({6}));
+    bow::BowVector query;
+    query.entries = {{3, 1.0}};
+    EXPECT_EQ(replica.database().Query(query).size(), 2u);
+
+    ApplyTransaction(replica, 1, [&](TTransaction& event) { event.removed_frames.push_back({4}); });
+    const std::vector<bow::DatabaseHit> hits = replica.database().Query(query);
+    ASSERT_EQ(hits.size(), 1u);
+    EXPECT_EQ(hits[0].frame, map::FrameId{5});
+
+    ApplyTransaction(replica, 1, [&](TTransaction& event) {
+        event.new_map = true;
+        AddFrame(event, 9, MakePose(0.0, 0, 0, 0), {0}, {});
+        event.added_frames[0].bow.entries = {{3, 1.0}};
+    });
+    EXPECT_EQ(replica.database().size(), 1u);
+    EXPECT_TRUE(replica.database().Contains({9}));
+    EXPECT_FALSE(replica.database().Contains({5}));
+
+    ApplyTransaction(replica, 2, [&](TTransaction&) {});  // a newer map clears
+    EXPECT_EQ(replica.database().size(), 0u);
+}
+
 TEST(MapReplicaTest, ReferenceIsFirstObservingKeyFrame) {
     TReplica replica;
     CreateKeyFrame(replica, 1, 4, MakePose(0.0, 0, 0, 0), {2, 5, 3}, {{0, 0}}, kThreePoints);
