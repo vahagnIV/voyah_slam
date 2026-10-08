@@ -12,6 +12,7 @@ voyah_add_test_binary(voyah_common_tests
         geometry/distortion_models/distortion_model_test.cpp
         geometry/distortion_models/kannala_brandt_distortion_model_test.cpp
         geometry/rigid_transformation_test.cpp
+        geometry/sim3_test.cpp
         map/covisibility_index_test.cpp
         map/frame_test.cpp
         map/id_types_test.cpp
