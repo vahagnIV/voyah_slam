@@ -162,13 +162,13 @@ TEST(PnpTest, RansacFisheyeNoiseFree) {
 
 // Contract: SolvePnPRansac is a raw hypothesis generator; accuracy and the final inlier set are
 // owned by the refinement (spec 4.5). Relocalization runs OptimizePose over all candidate matches
-// from the RANSAC pose. Over 50 random scenes (seeds 0..49, not hand-picked), in at least 95 %:
+// from the RANSAC pose. Over 200 random scenes (seeds 0..199, not hand-picked), in at least 95 %:
 // (a) RANSAC succeeds and OptimizePose's inlier mask is >= 90 % correct; (b) the refined pose is
 // within 1 cm / 0.5°.
 TEST(PnpTest, RansacHalfOutliers) {
     const auto model = TumViModel();
     const Camera camera = TumViCamera(&model);
-    constexpr uint64_t kScenes = 50;
+    constexpr uint64_t kScenes = 200;
     size_t mask_ok = 0;
     size_t refined_ok = 0;
     for (uint64_t seed = 0; seed < kScenes; ++seed) {
@@ -199,8 +199,8 @@ TEST(PnpTest, RansacHalfOutliers) {
                           ? 1
                           : 0;
     }
-    EXPECT_GE(mask_ok, 48u) << "RANSAC success and refined mask >= 90 % correct in " << mask_ok << "/" << kScenes;
-    EXPECT_GE(refined_ok, 48u) << "refined pose within 1 cm / 0.5° in " << refined_ok << "/" << kScenes;
+    EXPECT_GE(mask_ok, 190u) << "RANSAC success and refined mask >= 90 % correct in " << mask_ok << "/" << kScenes;
+    EXPECT_GE(refined_ok, 190u) << "refined pose within 1 cm / 0.5° in " << refined_ok << "/" << kScenes;
 }
 
 void ExpectCleanFailure(const PnpResult& result) {
