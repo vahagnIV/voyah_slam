@@ -22,7 +22,7 @@ public:
     using TMapper = mapping::Mapper<TFeatureExtractor>;
     using TLoopCloser = loop_closing::LoopCloser<TFeatureExtractor>;
 
-    // `vocabulary` (may be null) goes to the Mapper; it is immutable, so the
+    // `vocabulary` (may be null) goes to the Mapper and the Tracker; it is immutable, so the
     // threads share it without locks.
     explicit Slam(mapping::MapperOptions mapper_options = {},
                   tracking::TrackerOptions tracker_options = {},

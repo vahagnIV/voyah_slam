@@ -14,6 +14,7 @@ add_library(voyah_algs STATIC
     src/features/orb_feature_extractor.cpp
     src/features/sift_feature_extractor.cpp
     src/geometry/geometry.cpp
+    src/geometry/pnp.cpp
     src/geometry/two_view_decomposition.cpp
     src/geometry/two_view_reconstruction.cpp
     src/io/read_image.cpp

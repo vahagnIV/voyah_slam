@@ -14,8 +14,10 @@
 
 namespace voyahslam::events {
 
-// The tracking step that produced a FrameTracked's final pose.
-enum class TrackingStage : uint8_t { MotionModel, ZeroMotion, LocalMap };
+// The source of the initial pose that the local-map step refined into a
+// FrameTracked's final pose: the last frame at the motion model's prediction
+// or at zero motion, the reference Frame by bag of words, or relocalization.
+enum class TrackingStage : uint8_t { MotionModel, ZeroMotion, ReferenceFrame, Relocalization };
 
 // Published by the Tracker for every successfully tracked measurement.
 template <typename TFeatureExtractor>

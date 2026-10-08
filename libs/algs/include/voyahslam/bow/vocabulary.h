@@ -209,22 +209,7 @@ void Vocabulary<TFeatureExtractor>::Transform(const TDescriptors& descriptors, i
 
 template <typename TFeatureExtractor>
 double Vocabulary<TFeatureExtractor>::Score(const BowVector& a, const BowVector& b) {
-    // DBoW2 L1Scoring: over shared words, accumulate |x - y| - |x| - |y|, then negate and halve.
-    double score = 0.0;
-    auto ia = a.entries.begin();
-    auto ib = b.entries.begin();
-    while (ia != a.entries.end() && ib != b.entries.end()) {
-        if (ia->first == ib->first) {
-            score += std::abs(ia->second - ib->second) - std::abs(ia->second) - std::abs(ib->second);
-            ++ia;
-            ++ib;
-        } else if (ia->first < ib->first) {
-            ++ia;
-        } else {
-            ++ib;
-        }
-    }
-    return -score / 2.0;
+    return bow::Score(a, b);
 }
 
 }  // namespace voyahslam::bow

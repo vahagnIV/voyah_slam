@@ -39,6 +39,8 @@ const char* StatusName(TrackingStatus status) {
     switch (status) {
         case TrackingStatus::Tracking:
             return "tracking";
+        case TrackingStatus::RecentlyLost:
+            return "recently lost";
         case TrackingStatus::Lost:
             return "lost";
         case TrackingStatus::None:
@@ -159,6 +161,8 @@ bool PangolinRenderer<TFeatureExtractor>::Draw(const SceneState<TFeatureExtracto
     if (scene.current_pose()) {
         if (scene.status() == TrackingStatus::Lost) {
             glColor3f(1.0f, 0.0f, 0.0f);
+        } else if (scene.status() == TrackingStatus::RecentlyLost) {
+            glColor3f(1.0f, 0.6f, 0.0f);
         } else {
             glColor3f(0.0f, 0.8f, 0.0f);
         }

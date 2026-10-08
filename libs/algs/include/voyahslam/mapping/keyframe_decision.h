@@ -16,6 +16,14 @@ struct KeyFrameOptions {
     size_t close_tracked_max = 100;       ///< need_close: fewer close points tracked than this ...
     size_t close_untracked_min = 70;      ///< ... and more close points available untracked than this.
     size_t min_inliers = 15;              ///< Floor: never create from this few inliers.
+    /// Applied by the Mapper, not ShouldCreateFrame: in a map with more than
+    /// relocalization_guard_min_frames Frames, no Frame from a tracked
+    /// measurement less than relocalization_guard_seconds after the latest
+    /// relocalized one, that one included (ORB-SLAM3 NeedNewKeyFrame:
+    /// mnLastRelocFrameId + mMaxFrames, only while nKFs > mMaxFrames, mMaxFrames
+    /// = fps). A smaller map must keep growing to keep tracking.
+    double relocalization_guard_seconds = 1.0;
+    size_t relocalization_guard_min_frames = 20;
 };
 
 /// Inputs to ShouldCreateFrame, measured by the Mapper for one tracked measurement.

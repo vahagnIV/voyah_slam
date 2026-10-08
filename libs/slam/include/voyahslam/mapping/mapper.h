@@ -80,13 +80,18 @@ enum class MapperState : uint8_t {
 // covisible Frames (spec sections 5, 4.2). Every change is published as one
 // MapTransaction: a new map with all its Frames and points, or, per created
 // Frame, transaction 1 (creation, culling, fusion) and transaction 2 (local
-// BA, Frame culling). A TrackingLost of the current map discards it.
+// BA, Frame culling). A final TrackingLost of the current map discards it; a
+// non-final one (the Tracker is recently lost) is ignored. In a map with more
+// than relocalization_guard_min_frames Frames, no Frame is created from a
+// FrameTracked within relocalization_guard_seconds of the latest relocalized
+// one (stage Relocalization), that one included.
 // LoopDetected is not consumed yet. Runs on its own thread; each
 // ProcessPending() pass drains the inbox.
 //
 // With a vocabulary (immutable, so it may be shared read-only), every
 // Frame, the initial ones included, keeps the BowVector and FeatureVector of
-// its (left) descriptors, which are not published, and triangulation takes
+// its (left) descriptors, published with the Frame in its NewFrame (the
+// Tracker's relocalization database), and triangulation takes
 // its candidate pairs from the FeatureVector nodes two Frames share (spec
 // section 3). Without one, Frames have no bag of words and triangulation
 // stays brute force.
@@ -131,7 +136,7 @@ public:
         return num_frame_evaluations_.load(std::memory_order_acquire);
     }
     // FrameTracked events of the current map skipped, in total, because a
-    // newer FrameTracked (or a TrackingLost) of the same map was in the same
+    // newer FrameTracked (or a final TrackingLost) of the same map was in the same
     // drained batch.
     [[nodiscard]] size_t backlog_skipped() const {
         return backlog_skipped_.load(std::memory_order_acquire);
@@ -171,14 +176,20 @@ private:
     };
 
     // Marks in superseded_ each FrameTracked of batch_ that is followed in the
-    // batch by a FrameTracked or a TrackingLost of the same map.
+    // batch by a FrameTracked or a final TrackingLost of the same map.
     void MarkSupersededFrameTracked();
     void ApplyEvent(const events::Event& event);
     // A superseded FrameTracked: counted in the backlog, and its visible and
     // found points counted, if it is of the map being extended.
     void SkipFrameTracked(const events::Event& event);
-    // Increments the visible and found counters of `event`'s points.
+    // Increments the visible and found counters of `event`'s points, and
+    // notes a relocalized one for the relocalization guard.
     void CountTrackedPoints(const events::FrameTracked<TFeatureExtractor>& event);
+    // True when the map has more than relocalization_guard_min_frames Frames
+    // and `event` is within relocalization_guard_seconds of the latest
+    // relocalized FrameTracked, that one included: it becomes no Frame
+    // (ORB-SLAM3's guard after a relocalization, Ruling J).
+    [[nodiscard]] bool InRelocalizationGuard(const events::FrameTracked<TFeatureExtractor>& event) const;
     void OnInitializationMeasurement(const events::InitializationMeasurement<TFeatureExtractor>& event);
     void OnFrameTracked(const events::FrameTracked<TFeatureExtractor>& event);
     void OnTrackingLost(const events::TrackingLost& event);
@@ -355,7 +366,7 @@ private:
     // observations, every point; tracking starts from the last Frame.
     void PublishNewMap();
     // Appends `keyframe`, with its pose and measurement, to `out_event`'s
-    // added Frames; returns that part.
+    // added Frames, with its BoW data if there is a vocabulary; returns that part.
     events::NewFrame<TFeatureExtractor>& AddFramePart(
         const TKeyFrame& keyframe, events::MapTransaction<TFeatureExtractor>& out_event) const;
 
@@ -366,6 +377,9 @@ private:
     std::vector<events::Event*> batch_;
     std::vector<bool> superseded_;
     size_t backlog_ = 0;  // FrameTracked skipped since the last evaluated one
+    // Timestamp of the current map's latest FrameTracked with stage
+    // Relocalization, evaluated or skipped; none since the map was cleared.
+    std::optional<double> relocalized_at_;
     std::atomic<size_t> num_frame_evaluations_{0};
     std::atomic<size_t> backlog_skipped_{0};
 

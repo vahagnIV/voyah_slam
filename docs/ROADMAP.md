@@ -6,7 +6,8 @@ execution; nothing is merged without an explicit "merge and push".
 Done: tracking (sub-project 1), camera model (raw-pixel residuals),
 keyframes and map growth (sub-project 2, merged b93fcf4), restructure
 (step 0, merged 7426697), map quality (step 1, merged 9da7081), own DBoW2
-(step 2, merged 6fb863a).
+(step 2, merged 6fb863a), relocalization (step 3, branch
+`feat/relocalization`, merge pending).
 
 ## 0. Restructure (done 2026-10-07)
 
@@ -100,7 +101,35 @@ Apache-2.0). `FeatureVector` also enables `SearchByBoW`, replacing the
 brute-force triangulation matching (~25 ms per mono neighbour, ~0.75 s per
 Frame at 30 neighbours).
 
-## 3. Relocalization (sub-project 4)
+## 3. Relocalization (sub-project 4) (done 2026-10-08)
+
+**Result:** a short tracking loss is recovered into the **same map**. With a
+vocabulary the Tracker falls back to reference-Frame tracking
+(`SearchByBoW`), then enters `RecentlyLost` (`TrackingLost(final = false)`,
+the Mapper keeps its map) and relocalizes every measurement for up to 5 s:
+`bow::FrameDatabase` query, covisibility-grouped candidates, `SearchByBoW`,
+Lambda Twist P3P RANSAC on rays, `OptimizePose` over all matches, ORB-exact
+projection passes, 50 inliers. Only the timeout (`final = true`) clears the
+map. A motion-model inlier gate (30) fixed the stereo-with-vocabulary
+regression of step 2 (0.056 / 0.189 m → 0.036 m). The apps take
+`--drop_frames a:b`. Smoke on corridor1 (Release, `--vocabulary`, two runs
+each):
+
+| Run | Result |
+|---|---|
+| Mono 400, drop 250–270 | relocalized into map 1 at frame 271 in both runs (the first frame after the drop); 1 map; ATE Sim3 0.0325 / 0.0336 m |
+| Stereo 1000, drop 500–520 | relocalized into map 1 at frames 521 / 524; no other loss; ATE SE3 0.0351 / 0.0349 m |
+| Mono 400, no drop | 1 map, 277–278 tracked, ATE Sim3 0.0324 / 0.0323 m, no relocalization |
+| Stereo 1000, no drop | 1 map, 999 tracked, no loss, ATE SE3 0.0365 / 0.0363 m (step 2: 0.056 / 0.189 m) |
+
+A relocalization attempt costs about 10 ms.
+
+Spec: `docs/superpowers/specs/2026-10-07-relocalization-design.md`; see
+DESIGN "Relocalization and Reference-Frame Tracking" and the 2026-10-08
+decisions-log entries. Out of scope and in TODO: relocalization into other
+maps (step 5), MLPnP, ORB-SLAM3's post-relocalization gate.
+
+The step as agreed:
 
 Plus reference-Frame tracking. Fixes the stereo loss in fast rotation
 (120–170°/s; the zero-motion window cannot cover 6–8° per frame).

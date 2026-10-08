@@ -437,6 +437,81 @@ TEST(ProjectionMatcherTest, LocalMapPredictedLevelAndRatio) {
     EXPECT_EQ(matches[5], -1);
 }
 
+// SearchFromFrame (relocalization's passes): one Frame observing the point at
+// (0, 0, 5) with its feature 0, at level 0 from the origin, so the predicted
+// level is 0 and the radius th pixels.
+class SearchFromFrameTest : public ::testing::Test {
+protected:
+    SearchFromFrameTest() {
+        AddPoints(replica_, {{{0.0, 0.0, 5.0}, MakeDescriptor(1)}});
+        CreateKeyFrame(replica_, 0, Eigen::Vector3d::Zero(), {0}, {0});
+    }
+
+    // Matches `current` with th = 10 and max_distance = 100 (or the given).
+    std::vector<int64_t> Search(const Measurement& current, double max_distance = 100.0) const {
+        std::vector<int64_t> matches(static_cast<size_t>(current.points().cols()), -1);
+        const std::vector<std::pair<uint32_t, map::MapPointId>> observations = {{0, {0}}};
+        SearchFromFrame<TestExtractor>(current, kIdentity, frame_, observations, replica_, matches, 10.0,
+                                       max_distance, ProjectionMatcherOptions{});
+        return matches;
+    }
+
+    TReplica replica_;
+    const Measurement frame_ = MakeLastFrame({0});
+    const geometry::TPoint2DF projection_ = Project({0.0, 0.0, 5.0});
+};
+
+TEST_F(SearchFromFrameTest, RadiusIsThPixelsAtLevelZero) {
+    // 9 px away: inside th = 10 (SearchFromLocalMap's window would be 25 px).
+    std::vector<int64_t> matches =
+        Search(MakeMeasurement({{projection_ + geometry::TPoint2DF(9.0, 0.0), MakeDescriptor(1), 0}}));
+    EXPECT_EQ(matches[0], 0);
+    EXPECT_EQ(CountMatches(matches), 1u);
+
+    matches = Search(MakeMeasurement({{projection_ + geometry::TPoint2DF(11.0, 0.0), MakeDescriptor(1), 0}}));
+    EXPECT_EQ(CountMatches(matches), 0u);
+}
+
+TEST_F(SearchFromFrameTest, NoRatioTest) {
+    // Best 10, second 11 on the same level: SearchFromLocalMap's ratio test
+    // (10 < 0.8 x 11 fails) would reject it; SearchFromFrame takes the best.
+    const Measurement current = MakeMeasurement({
+        {projection_ + geometry::TPoint2DF(1.0, 0.0), MakeDescriptor(1, 11), 0},
+        {projection_ + geometry::TPoint2DF(-1.0, 0.0), MakeDescriptor(1, 10), 0},
+    });
+    std::vector<int64_t> matches = Search(current);
+    EXPECT_EQ(matches[0], -1);
+    EXPECT_EQ(matches[1], 0);
+
+    std::vector<int64_t> local(static_cast<size_t>(current.points().cols()), -1);
+    EXPECT_EQ(SearchFromLocalMap<TestExtractor>(current, kIdentity, replica_, local, 4.0,
+                                                ProjectionMatcherOptions{}),
+              0u);
+
+    // The best must be within max_distance.
+    EXPECT_EQ(CountMatches(Search(current, 10.0)), 1u);
+    EXPECT_EQ(CountMatches(Search(current, 9.0)), 0u);
+}
+
+TEST_F(SearchFromFrameTest, SkipsAlreadyMatchedPointsAndFeatures) {
+    const Measurement current = MakeMeasurement({
+        {projection_, MakeDescriptor(1), 0},
+        {projection_ + geometry::TPoint2DF(1.0, 0.0), MakeDescriptor(1, 1), 0},
+    });
+    std::vector<int64_t> matches(static_cast<size_t>(current.points().cols()), -1);
+    const std::vector<std::pair<uint32_t, map::MapPointId>> observations = {{0, {0}}};
+    // The exact feature is taken by another point: the point goes to the next.
+    matches[0] = 7;
+    EXPECT_EQ(SearchFromFrame<TestExtractor>(current, kIdentity, frame_, observations, replica_, matches, 10.0,
+                                             100.0, ProjectionMatcherOptions{}),
+              1u);
+    EXPECT_EQ(matches[1], 0);
+    // Point 0 already matched: nothing added.
+    EXPECT_EQ(SearchFromFrame<TestExtractor>(current, kIdentity, frame_, observations, replica_, matches, 10.0,
+                                             100.0, ProjectionMatcherOptions{}),
+              0u);
+}
+
 TEST(ProjectionMatcherTest, FisheyePeripheralPointsMatch) {
     // TUM-VI KB camera, points 60-80 degrees off axis, keypoints 1.8 raw px
     // from the true projection: inside the 2.5 px window in raw pixels, but

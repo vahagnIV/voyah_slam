@@ -121,10 +121,11 @@ void TrackFrame(TOrbScene& out_scene, uint32_t map, const geometry::RigidTransfo
     event->Recycle();
 }
 
-void LoseTracking(TOrbScene& out_scene, uint32_t map) {
+void LoseTracking(TOrbScene& out_scene, uint32_t map, bool final = true) {
     memory::ObjectPool<events::TrackingLost, memory::ThreadSafePolicy> pool(1);
     events::TrackingLost* event = pool.Create();
     event->map_id = {map};
+    event->final = final;
     out_scene.Apply(*event);
     event->Recycle();
 }
@@ -314,6 +315,32 @@ TEST(SceneStateTest, TrackingLostKeepsScene) {
     EXPECT_EQ(scene.num_alive_points(), 3u);
     EXPECT_EQ(scene.keyframes().size(), 1u);
     EXPECT_TRUE(scene.current_pose().has_value());
+}
+
+TEST(SceneStateTest, NonFinalLostKeepsScene) {
+    TOrbScene scene;
+    CreateKeyFrame(scene, 1, 0, MakePose(0, 0, 0, 0), kThreePoints);
+    TrackFrame(scene, 1, MakePose(0.1, 1, 1, 1));
+    LoseTracking(scene, 1, /*final=*/false);
+    EXPECT_EQ(scene.status(), TrackingStatus::RecentlyLost);
+    EXPECT_EQ(scene.current_map_id().value, 1u);
+    EXPECT_EQ(scene.num_alive_points(), 3u);
+    EXPECT_EQ(scene.keyframes().size(), 1u);
+    EXPECT_TRUE(scene.current_pose().has_value());
+    EXPECT_EQ(scene.trajectory().size(), 1u);
+    EXPECT_TRUE(scene.tracked_points().empty());
+
+    // Relocalized: tracking again in the same scene.
+    TrackFrame(scene, 1, MakePose(0.2, 1, 1, 1));
+    EXPECT_EQ(scene.status(), TrackingStatus::Tracking);
+    EXPECT_EQ(scene.num_alive_points(), 3u);
+    EXPECT_EQ(scene.trajectory().size(), 2u);
+
+    // A final loss after a non-final one: Lost, scene still kept.
+    LoseTracking(scene, 1, /*final=*/false);
+    LoseTracking(scene, 1);
+    EXPECT_EQ(scene.status(), TrackingStatus::Lost);
+    EXPECT_EQ(scene.num_alive_points(), 3u);
 }
 
 TEST(SceneStateTest, OlderMapIgnored) {

@@ -193,17 +193,13 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
       depends on the sequence (mono then mono: today's two-view init; mono
       then stereo, stereo then mono, …: to be designed). Keep both
       observation storages and per-keyframe measurement types to allow it.
-- [ ] **Tracking sub-project 4 (deferred; the user has their own design, ask
-      before designing; sub-projects 2 and 3 are done, see DESIGN "Keyframes
-      and Map Growth" and "Map Quality"):** relocalization /
-      reference-keyframe tracking via place recognition (BoW, roadmap step 3).
-      Includes relocalization in `TrackerState::Lost` (now it behaves like
-      `WaitingForMap`; the Mapper starts a new map on `TrackingLost`).
 - [ ] Derive `TrackerOptions::level_scale` and `ProjectionMatcherOptions`
       `level_scale`/`max_level` from the feature extractor instead of keeping
       them in sync by hand.
-- [ ] BoW-less fallback limitation: a wide-window (x4) zero-motion projection
-      search replaces `TrackReferenceKeyFrame`; it recovers only small motion.
+- [ ] BoW-less fallback limitation: without a vocabulary a wide-window (x4)
+      zero-motion projection search is the only fallback (no
+      `TrackReferenceKeyFrame`, no relocalization); it recovers only small
+      motion.
 - [ ] Local-map search: add ORB-SLAM3's scale-invariance distance check (now
       only the predicted level is clamped).
 - [ ] Debug `OptimizePose` costs about 0.5 s per call with about 500 stereo
@@ -226,17 +222,15 @@ Spec `docs/superpowers/specs/2026-10-06-keyframes-design.md`; DESIGN
 
 - [ ] **Stereo loss at fast rotation (smoke 2026-10-07):** frame ~360 of
       corridor1 (mocap 120-170 deg/s): motion model 17 matches (< 20), zero
-      motion 6 inliers. Needs reference-Frame tracking / relocalization
-      (sub-project 4). Not seen since the restructure re-run: the two
-      map-quality stereo runs (2026-10-07) tracked all 999 frames; the
-      rotation is still uncovered by the zero-motion fallback.
+      motion 6 inliers. Since 2026-10-08, with a vocabulary, reference-Frame
+      tracking runs next and a loss relocalizes into the same map; without a
+      vocabulary the rotation is still uncovered by the zero-motion fallback.
 - [ ] Faiss vs DBoW2/FBoW spike for place recognition (sub-project 4).
       Roadmap step 2 ported DBoW2 (see "Bag of words" below); revisit only
       if its recall or speed falls short in relocalization / loop detection.
 - [ ] ORB-SLAM3's busy-Mapper branch of the Frame rule (interruptible local BA
       is done; a Mapper pass now takes about 250 ms, so drain-to-latest skips
       about 40 % of the `FrameTracked` on corridor1).
-- [ ] The post-relocalization Frame guard (sub-project 4).
 - [ ] The 80-Frame local-map cap can drop the only K1 Frame of a matched
       point, hiding it from the local points (`visible ⊇ matched` corner
       case): always include matched points in the mask.
@@ -296,8 +290,8 @@ Spec `docs/superpowers/specs/2026-10-06-keyframes-design.md`; DESIGN
     (removing either `covisibility_.Clear()` fails nothing).
   - The zero-motion fallback re-centres on the last pose with a 28 px window,
     which cannot cover 6–8° per frame; the stereo loss in fast rotation
-    (corridor1 ~frame 360) needs a rotation-aware fallback or reference-Frame
-    tracking (sub-project 4).
+    (corridor1 ~frame 360) needs a rotation-aware fallback. Reference-Frame
+    tracking exists since 2026-10-08 but only with a vocabulary.
 
 ## Bag of words (roadmap step 2, 2026-10-07)
 
@@ -305,25 +299,17 @@ Spec `docs/superpowers/specs/2026-10-07-bow-design.md`; DESIGN "Bag of Words"
 (smoke table there). Triangulation matching cost is solved there
 (`SearchByBoW`: 26–28× faster per Frame mono, 39× stereo).
 
-- [ ] **Stereo drift when the Mapper is fast (with `--vocabulary`):**
-      timing-dependent (smoke 2026-10-07: SE3 ATE 0.056 / 0.189 m vs
-      0.037–0.038 m without; mono unaffected). Not a BoW matching defect:
-      a 150 ms sleep after triangulation gives 0.037 / 0.037 m at 157–161
-      points per Frame; BoW restricted to brute-force-accepted matches gives
-      0.036 / 0.037 m at 116 points; ratio test off gives 170 points but
-      0.050 / 0.235 m. Candidates: Frame-creation rate (idle Mapper -> `c1b`
-      creates more Frames with less parallax), BA interruption frequency,
-      fusion/culling cadence. Reproduce with/without a sleep after
-      triangulation.
 - [ ] **`SearchForTriangulation` ratio test:** it applies a 0.6
       best/second-best ratio test that ORB-SLAM3's `SearchForTriangulation`
       does not. Predates the BoW branch; with BoW it often passes trivially
-      because only one candidate is left. Evaluate it when diagnosing the
-      item above.
+      because only one candidate is left. (The stereo drift it was to be
+      evaluated with is fixed: the motion-model gate, 2026-10-08.)
 - [ ] **Extra stereo BoW run lost tracking at frame 325** (fast rotation, the
       known weakness below; runs without the vocabulary dip to 38 / 52 inliers
-      at frames 325 / 355). Count losses over more runs with and without the
-      vocabulary before blaming either.
+      at frames 325 / 355). The 2026-10-07 spike traced it to 10–29-inlier
+      motion-model poses; the motion-model gate (2026-10-08) removed it in
+      every run since, and a loss there would now relocalize. Close after a
+      few more stereo runs without a loss.
 
 - [ ] **Vocabulary training** (out of scope of step 2): our own k-majority
       tree builder, so we do not depend on ORB-SLAM3's `ORBvoc.txt`, and a
@@ -331,12 +317,6 @@ Spec `docs/superpowers/specs/2026-10-07-bow-design.md`; DESIGN "Bag of Words"
 - [ ] **`ORBvoc.txt` licence** (deferred, user decision): the file is used
       as is on the user's PC and never committed. Settle its terms before any
       distribution; DBoW2's own code is BSD (keep its notice with the port).
-- [ ] **Frame database and relocalization** (roadmap step 3, sub-project 4;
-      ask the user first): an inverted index over the Frames' BowVectors,
-      candidate search by `Score`, BoW in the Tracker (`TrackReferenceKeyFrame`
-      / relocalization via `SearchByBoW`). The Mapper's bags of words are
-      private (`KeyFrameRecord`); the database's thread and ownership are
-      still to be designed.
 - [ ] **Phantom node vs ORB-SLAM3** (ruling D): DBoW2 turns the empty read
       after `ORBvoc.txt`'s trailing newline into a phantom leaf (971 815 words
       vs our 971 814; uninitialised values, UB). A feature DBoW2 drops at that
@@ -372,6 +352,93 @@ Spec `docs/superpowers/specs/2026-10-07-bow-design.md`; DESIGN "Bag of Words"
   - Mapper BoW tests: no stereo BoW test; the FeatureVector and `levels_up`
     are asserted only indirectly; `MapperBowRun` is a hand-driven gtest
     fixture subclass.
+
+## Relocalization (roadmap step 3, 2026-10-08)
+
+Spec `docs/superpowers/specs/2026-10-07-relocalization-design.md`; DESIGN
+"Relocalization and Reference-Frame Tracking" (smoke table there).
+
+- [ ] **Relocalization into other maps** (roadmap step 5, multi-map Atlas):
+      today `RecentlyLost` searches only the current map, and `Lost` still
+      clears it.
+- [ ] **MLPnP** (Urban et al. 2016, ORB-SLAM3's PnP) as an alternative to
+      Lambda Twist P3P + `OptimizePose`: it uses the bearing covariances and
+      needs no minimal-solver disambiguation. Compare recall and time on
+      blackout runs.
+- [ ] **Cap the relocalization candidates:** every candidate group at
+      ≥ 0.75 · best is kept, so one measurement costs up to C × 60
+      verifications (C candidates × 60 rounds; each up to 3 `OptimizePose`
+      and 2 `SearchFromFrame`, about 1–4 ms in Release). Cap C (for example
+      the top 10 groups) or bound the time per measurement; check recall on
+      real data.
+- [ ] **`FrameDatabase` duplicates each Frame's `BowVector`**
+      (`FrameDatabase::frames_` and `ReplicaKeyFrame::bow`): about 22 KB per
+      Frame (1400 words × 16 B). Bounded by the live Frames, not a leak.
+      Store only the word ids, or let the replica own the single copy.
+      `Remove` is O(words × posting length), O(W · F) worst case.
+- [ ] **RANSAC is more permissive than ORB-SLAM3's effective settings:**
+      ORB asks max(10, 0.5 · N) inliers and stops after about 35 iterations
+      (ε 0.5); ours 10 inliers and up to 300. The 50-inlier verification
+      guards it; measure false hypotheses and time on harder data.
+- [ ] **Near-collinear PnP samples:** only exactly collinear points are
+      rejected; with 1 mm–1 cm of collinearity and 1 px noise RANSAC can
+      report success with a wrong pose (mitigated by the 50-inlier
+      verification). Add a conditioning test on the sample.
+- [ ] **Culled reference Frame:** reference-Frame tracking just fails when
+      the Mapper culled the reference Frame; ORB-SLAM3 follows the parent.
+      Pick the culled Frame's best covisible survivor.
+- [ ] **Backwards timestamps** never time out `RecentlyLost` (the elapsed
+      time is negative). Treat a backwards jump as a timeout or a reset.
+- [ ] **`SearchFromFrame` has no scale-distance gate** (ORB-SLAM3's min /
+      max invariance distance check in `SearchByProjection(Frame, KeyFrame)`);
+      it relies on the level window only. Same gap as the local-map search
+      item under "Threads".
+- [ ] **`Slam` member order:** the Tracker copies the vocabulary pointer
+      before the Mapper's constructor moves it, so correctness depends on
+      `tracker_` being declared before `mapper_`. Pass by copy to both or add
+      a comment / static check.
+- [ ] **Time per relocalization attempt** on corridor1 is in the DESIGN
+      smoke table; a candidate stuck at 10–49 inliers is re-verified every
+      round until 300 iterations (ORB-like), which costs time per failed
+      measurement while `RecentlyLost`.
+- [ ] **`SlamTest.StereoRelocalizesAfterBlackout` is load-sensitive:** under
+      12 parallel copies its centre error exceeds the 1.5 × 0.0217 m bound in
+      about 1 run in 20 (0.036–0.058 m), before and after ruling J alike
+      (3 / 60 and 4 / 60); it passes alone and in `check_all`. The threaded
+      Mapper's pace changes the map. Widen the bound or make the run
+      deterministic.
+- [ ] **Post-relocalization guard window** (ruling J) is 1 s of measurement
+      timestamps and the map-size condition a fixed 20 Frames; ORB-SLAM3
+      uses `mMaxFrames` = fps frames for both. Derive both from the frame
+      rate if a dataset's rate differs much from 20 Hz.
+- [ ] **Synthetic maps make few Frames** (3–5 over 60 frames): the
+      integration blackout tests and the relocalization unit tests set
+      `min_map_frames_to_relocalize` 0, so the default 10-Frame rule is only
+      unit-tested (`SmallMapGoesStraightToLostByDefault`).
+- [ ] Deferred review minors:
+  - Motion-model gate test forces 100000 (no 10–29 band / exactly-30 case);
+    the "zero motion:" assertion is not discriminating; the gate test reads
+    debug-log text through a spdlog sink (the `stage` field can replace it).
+  - No stereo-transaction BoW test; no test that the Tracker stores the
+    vocabulary; no test that a removed Frame drops its BoW.
+  - `FrameDatabase::Query` compares a float threshold (exact for 0.8 with
+    integer counts).
+  - The sorted-node merge loop of `SearchByBoW` duplicates
+    `triangulation.h` (extract a shared walker); no test for the `nn_ratio`
+    boundary or `histogram_bins`; a stale test comment ("1 vs 2").
+  - PnP: no test catches a broken depth ≤ 0 rule; `ExpectCleanFailure` does
+    not check the cleared mask / identity pose; no adaptive-stop or
+    determinism test (determinism is per standard library); the 4th-point
+    selection lowers per-iteration success against the w³ formula; R is not
+    re-orthonormalized and the lambdas not re-checked after Gauss-Newton; the fisheye margin is thin (9.78e-6 against 1e-5).
+  - No test for a `new_map` transaction arriving while `RecentlyLost`, nor
+    for old-map transactions arriving while `Lost` after a final loss (both
+    correct by reading and unreachable today; re-check with multi-map).
+  - `RecentlyLost` is unit-tested only with threshold 0; the one-node test
+    vocabulary does not exercise `levels_up` 4.
+  - `LeftOf` is copied a third time (`relocalizer.cpp`); `OptimizeMatchedPose`
+    / `PoseRefinement` live in `relocalizer.h`; `Relocalize` is about 135
+    lines.
 
 ## Map quality (sub-project 3, 2026-10-07)
 

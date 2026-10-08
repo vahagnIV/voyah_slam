@@ -86,13 +86,15 @@ bool Mapper<TFeatureExtractor>::ProcessPending() {
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::MarkSupersededFrameTracked() {
     superseded_.assign(batch_.size(), false);
-    // Maps with a FrameTracked or TrackingLost later in the batch; a batch
-    // rarely spans more than one or two maps.
+    // Maps with a FrameTracked or final TrackingLost later in the batch; a
+    // batch rarely spans more than one or two maps. A non-final TrackingLost
+    // keeps the map, so it supersedes nothing.
     std::vector<map::MapId> later;
     for (size_t i = batch_.size(); i-- > 0;) {
         const events::Event& event = *batch_[i];
-        if (event.type != events::EventType::FrameTracked &&
-            event.type != events::EventType::TrackingLost) {
+        const bool final_lost = event.type == events::EventType::TrackingLost &&
+                                static_cast<const events::TrackingLost&>(event).final;
+        if (event.type != events::EventType::FrameTracked && !final_lost) {
             continue;
         }
         const bool seen = std::find(later.begin(), later.end(), event.map_id) != later.end();
@@ -136,6 +138,9 @@ void Mapper<TFeatureExtractor>::SkipFrameTracked(const events::Event& event) {
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::CountTrackedPoints(
     const events::FrameTracked<TFeatureExtractor>& event) {
+    if (event.stage == events::TrackingStage::Relocalization) {
+        relocalized_at_ = event.timestamp;
+    }
     // Ids of a replica that is behind may be unknown here: skipped.
     for (const map::MapPointId point : event.visible_points) {
         if (point.value < num_visible_.size()) {
@@ -186,6 +191,9 @@ void Mapper<TFeatureExtractor>::OnInitializationMeasurement(
 
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::OnTrackingLost(const events::TrackingLost& event) {
+    if (!event.final) {
+        return;  // recently lost: the Tracker relocalizes in this map
+    }
     if (event.map_id != current_map_id() || state() != MapperState::Mapping) {
         return;  // stale: an older map
     }
@@ -204,6 +212,7 @@ void Mapper<TFeatureExtractor>::ClearMap() {
     num_found_.clear();
     recent_points_.clear();
     backlog_ = 0;
+    relocalized_at_.reset();
     num_keyframes_.store(0, std::memory_order_release);
     num_map_points_.store(0, std::memory_order_release);
 }
@@ -216,8 +225,13 @@ void Mapper<TFeatureExtractor>::OnFrameTracked(
     }
     CountTrackedPoints(event);
     const KeyFrameSignals signals = MeasureSignals(event);
-    const bool create = ShouldCreateFrame(signals, options_.keyframe);
+    const bool guarded = InRelocalizationGuard(event);
+    const bool create = !guarded && ShouldCreateFrame(signals, options_.keyframe);
     num_frame_evaluations_.fetch_add(1, std::memory_order_acq_rel);
+    if (guarded) {
+        log_->debug("FrameTracked t={:.3f}: {:.3f} s after the relocalization at t={:.3f} -> no Frame",
+                    event.timestamp, event.timestamp - *relocalized_at_, *relocalized_at_);
+    }
     log_->debug(
         "FrameTracked t={:.3f}: stereo={} frames={} ref_points={} since_last={:.3f} backlog={} "
         "inliers={} close_tracked={} close_untracked={} -> {}",
@@ -228,6 +242,15 @@ void Mapper<TFeatureExtractor>::OnFrameTracked(
     if (create) {
         CreateFrame(event);
     }
+}
+
+template <typename TFeatureExtractor>
+bool Mapper<TFeatureExtractor>::InRelocalizationGuard(
+    const events::FrameTracked<TFeatureExtractor>& event) const {
+    const KeyFrameOptions& options = options_.keyframe;
+    return relocalized_at_ &&
+           num_keyframes_.load(std::memory_order_relaxed) > options.relocalization_guard_min_frames &&
+           event.timestamp - *relocalized_at_ < options.relocalization_guard_seconds;
 }
 
 template <typename TFeatureExtractor>
@@ -735,6 +758,12 @@ events::NewFrame<TFeatureExtractor>& Mapper<TFeatureExtractor>::AddFramePart(
     part.id = keyframe.id();
     part.T_cw = keyframe.pose();
     part.measurement = keyframe.measurement();
+    if (vocabulary_) {
+        const KeyFrameRecord* record = FindRecord(keyframe.id());
+        assert(record != nullptr);
+        part.bow = record->bow;
+        part.features = record->features;
+    }
     return part;
 }
 

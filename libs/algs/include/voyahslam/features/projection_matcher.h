@@ -9,6 +9,8 @@
 #include <limits>
 #include <numbers>
 #include <optional>
+#include <span>
+#include <utility>
 #include <vector>
 #include <voyahslam/defs.h>
 #include <voyahslam/features/feature_grid.h>
@@ -269,6 +271,97 @@ size_t SearchFromLocalMap(const TMonocularMeasurement<TFeatureExtractor>& curren
         }
         out_matches[static_cast<size_t>(best_index)] = static_cast<int64_t>(p);
         ++added;
+    }
+    return added;
+}
+
+// ORB-SLAM3 ORBmatcher::SearchByProjection(Frame&, KeyFrame*, const
+// set<MapPoint*>&, th, ORBdist), relocalization's projection passes: projects
+// the alive points of one map Frame (frame_observations: (feature of
+// `frame`, point)) that are not yet in out_matches (per current feature,
+// MapPointId value or -1) and matches each to an unmatched current feature
+// within radius th * level_scale^l over levels [l - 1, l + 1], l the level
+// predicted from the point's reference. The best match is accepted at
+// <= max_distance, with no ratio test; a current feature goes to the first
+// point claiming it. Points behind the camera, beyond the ray-angle limit or
+// outside the bounding box are skipped; there is no viewing-angle or
+// scale-distance gate. Then, with check_orientation, the rotation histogram
+// (the Frame feature's angle - the current one) drops inconsistent new
+// matches. Returns the number added.
+template <typename TFeatureExtractor, typename TPointSource>
+size_t SearchFromFrame(const TMonocularMeasurement<TFeatureExtractor>& current,
+                       const geometry::RigidTransformation& T_cw,
+                       const TMonocularMeasurement<TFeatureExtractor>& frame,
+                       std::span<const std::pair<uint32_t, map::MapPointId>> frame_observations,
+                       const TPointSource& points, std::vector<int64_t>& out_matches, double th,
+                       double max_distance, const ProjectionMatcherOptions& options) {
+    const Eigen::Index num_current = current.points().cols();
+    assert(static_cast<Eigen::Index>(out_matches.size()) == num_current);
+    assert(options.histogram_bins > 0 || !options.check_orientation);
+    const size_t num_points = points.num_points();
+    std::vector<bool> already_matched(num_points, false);
+    for (const int64_t id : out_matches) {
+        if (id >= 0 && static_cast<uint64_t>(id) < num_points) {
+            already_matched[static_cast<size_t>(id)] = true;
+        }
+    }
+
+    const FeatureGrid grid(current.distorted_points(), current.levels());
+    const detail::ProjectionGate gate(current.camera(), current.distorted_points(), options.max_ray_angle_deg);
+    const geometry::TPoint3DF centre = T_cw.Inverse().translation();
+    std::vector<Eigen::Index> frame_feature_of(static_cast<size_t>(num_current), -1);  // new matches only
+    size_t added = 0;
+    for (const auto& [frame_feature, id] : frame_observations) {
+        if (id.value >= num_points || already_matched[id.value] || !points.IsAlive(id)) {
+            continue;
+        }
+        const auto& reference = points.Reference(id);
+        if (!reference) {
+            continue;
+        }
+        const geometry::TPoint3DF X = points.Position(id);
+        const std::optional<geometry::TPoint2DF> uv = gate.Project(T_cw.Transform(X));
+        if (!uv) {
+            continue;
+        }
+        const int level =
+            detail::PredictLevel(*reference, (X - centre).norm(), options.level_scale, options.max_level);
+        const double radius = th * std::pow(options.level_scale, level);
+        const typename TFeatureExtractor::TDescriptor descriptor = points.Descriptor(id);
+        double best = std::numeric_limits<double>::infinity();
+        Eigen::Index best_index = -1;
+        for (const Eigen::Index j : grid.FeaturesInArea(*uv, radius, level - 1, level + 1)) {
+            if (out_matches[static_cast<size_t>(j)] >= 0) {
+                continue;
+            }
+            const typename TFeatureExtractor::TDescriptor candidate = current.descriptors().col(j);
+            const double d = static_cast<double>(TFeatureExtractor::Distance(descriptor, candidate));
+            if (d < best) {
+                best = d;
+                best_index = j;
+            }
+        }
+        if (best_index < 0 || best > max_distance) {
+            continue;
+        }
+        out_matches[static_cast<size_t>(best_index)] = static_cast<int64_t>(id.value);
+        already_matched[id.value] = true;
+        frame_feature_of[static_cast<size_t>(best_index)] = static_cast<Eigen::Index>(frame_feature);
+        ++added;
+    }
+
+    if (options.check_orientation) {
+        RotationHistogram histogram(options.histogram_bins);
+        for (Eigen::Index j = 0; j < num_current; ++j) {
+            const Eigen::Index i = frame_feature_of[static_cast<size_t>(j)];
+            if (i >= 0) {
+                histogram.Add(static_cast<double>(frame.angles()(i)) - static_cast<double>(current.angles()(j)), j);
+            }
+        }
+        for (const Eigen::Index j : histogram.Inconsistent()) {
+            out_matches[static_cast<size_t>(j)] = -1;
+            --added;
+        }
     }
     return added;
 }

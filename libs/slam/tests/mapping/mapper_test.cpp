@@ -46,6 +46,8 @@ struct PublishedFrame {
     std::vector<map::MapPointId> observed_points;
     TDescriptors descriptors;
     geometry::TRowVectorF depths;
+    bow::BowVector bow;  // the transaction's BoW data of the Frame
+    bow::FeatureVector features;
 };
 
 // One published MapTransaction.
@@ -111,10 +113,11 @@ protected:
         tracker_.Notify(event);
     }
 
-    void PublishTrackingLost(uint32_t map, double timestamp) {
+    void PublishTrackingLost(uint32_t map, double timestamp, bool final = true) {
         auto* event = tracking_lost_pool_.Create();
         event->map_id = map::MapId{map};
         event->timestamp = timestamp;
+        event->final = final;
         tracker_.Notify(event);
     }
 
@@ -139,6 +142,8 @@ protected:
                         std::visit([](const auto& m) { return m.timestamp(); }, added.measurement);
                     frame.observed_features = added.observed_features;
                     frame.observed_points = added.observed_points;
+                    frame.bow = added.bow;
+                    frame.features = added.features;
                     if (const auto* mono = std::get_if<TMonocularMeasurement>(&added.measurement)) {
                         frame.descriptors = mono->descriptors();
                     } else if (const auto* binocular =
@@ -562,6 +567,38 @@ TEST_F(MapperTest, IgnoresStaleTrackingLost) {
     EXPECT_EQ(mapper_.num_keyframes(), 1u);
 }
 
+TEST_F(MapperTest, IgnoresNonFinalTrackingLost) {
+    // Initializing: nothing to discard; initialization goes on.
+    PublishTrackingLost(0, 0.0, /*final=*/false);
+    Drain();
+    EXPECT_EQ(mapper_.state(), MapperState::Initializing);
+    EXPECT_TRUE(TakeCaptured().empty());
+    InitializeStereo(0.5);
+    ASSERT_EQ(mapper_.current_map_id(), map::MapId{1});
+    const size_t num_points = mapper_.num_map_points();
+
+    // Mapping: the Tracker is only recently lost; the map stays.
+    PublishTrackingLost(1, 1.0, /*final=*/false);
+    Drain();
+    EXPECT_TRUE(TakeCaptured().empty());
+    EXPECT_EQ(mapper_.state(), MapperState::Mapping);
+    EXPECT_EQ(mapper_.current_map_id(), map::MapId{1});
+    EXPECT_EQ(mapper_.num_keyframes(), 1u);
+    EXPECT_EQ(mapper_.num_map_points(), num_points);
+
+    // Stale: a non-final loss of map 1 does not touch map 2.
+    PublishTrackingLost(1, 2.0);
+    Drain();
+    ASSERT_EQ(mapper_.state(), MapperState::Initializing);
+    InitializeStereo(3.0);
+    ASSERT_EQ(mapper_.current_map_id(), map::MapId{2});
+    PublishTrackingLost(1, 4.0, /*final=*/false);
+    Drain();
+    EXPECT_EQ(mapper_.state(), MapperState::Mapping);
+    EXPECT_EQ(mapper_.current_map_id(), map::MapId{2});
+    EXPECT_EQ(mapper_.num_keyframes(), 1u);
+}
+
 TEST_F(MapperTest, StateIsMappingWhenNewMapIsPublished) {
     // A synchronous observer runs on the publishing thread, inside Notify, so
     // it sees the state at the exact moment the new map is published.
@@ -682,15 +719,18 @@ protected:
 
     // Sequence frame `index`, tracked in map `map` with `pairs` as its
     // inliers (num_inliers = pairs.size() unless given) and `visible` as its
-    // visible points, posed at Frame 1 unless `pose` is given.
+    // visible points, posed at Frame 1 unless `pose` is given, at the frame's
+    // timestamp unless `timestamp` is given.
     void PublishFrameTracked(uint32_t map, size_t index, const std::vector<Pair>& pairs,
                              std::optional<map::FrameId> reference = map::FrameId{1},
                              std::optional<size_t> num_inliers = std::nullopt,
                              std::optional<geometry::RigidTransformation> pose = std::nullopt,
-                             const std::vector<map::MapPointId>& visible = {}) {
+                             const std::vector<map::MapPointId>& visible = {},
+                             events::TrackingStage stage = events::TrackingStage::MotionModel,
+                             std::optional<double> timestamp = std::nullopt) {
         auto* event = frame_tracked_pool_.Create();
         event->map_id = map::MapId{map};
-        event->timestamp = sequence_.frames[index].measurement.timestamp();
+        event->timestamp = timestamp.value_or(sequence_.frames[index].measurement.timestamp());
         event->pose = pose.value_or(second_.pose);
         event->measurement = sequence_.frames[index].measurement;
         for (const Pair& pair : pairs) {
@@ -699,7 +739,7 @@ protected:
         }
         event->visible_points = visible;
         event->reference_frame_id = reference;
-        event->stage = events::TrackingStage::LocalMap;
+        event->stage = stage;
         event->num_matches = static_cast<uint32_t>(pairs.size());
         event->num_inliers = static_cast<uint32_t>(num_inliers.value_or(pairs.size()));
         tracker_.Notify(event);
@@ -874,6 +914,21 @@ TEST_F(MapperInboxTest, TrackingLostAfterFrameTrackedCreatesNoFrame) {
     EXPECT_EQ(mapper_.num_keyframes(), 0u);
 }
 
+TEST_F(MapperInboxTest, NonFinalTrackingLostDoesNotSupersedeFrameTracked) {
+    // The map survives a non-final loss, so the last FrameTracked before it
+    // is still evaluated.
+    SetUpMonoMap();
+    const size_t evaluations = mapper_.num_frame_evaluations();
+
+    PublishFrameTracked(1, next_, TrackedPairs(next_, num_points_ / 2));
+    PublishTrackingLost(1, sequence_.frames[next_].measurement.timestamp(), /*final=*/false);
+    Drain();
+
+    EXPECT_EQ(mapper_.num_frame_evaluations(), evaluations + 1);
+    EXPECT_EQ(mapper_.state(), MapperState::Mapping);
+    EXPECT_GE(mapper_.num_keyframes(), 2u);
+}
+
 TEST_F(MapperInboxTest, IgnoresFrameTrackedOfOldMap) {
     SetUpMonoMap();
     const std::vector<Pair> pairs = TrackedPairs(next_, num_points_ / 2);
@@ -967,6 +1022,100 @@ TEST_F(MapperFrameCreationTest, NoFrameWhenStrong) {
     EXPECT_TRUE(TakeCaptured().empty());
     EXPECT_EQ(mapper_.num_frame_evaluations(), evaluations + 1);
     EXPECT_EQ(mapper_.num_keyframes(), 2u);
+}
+
+// The relocalization guard on any map size (the synthetic maps have 2 Frames).
+class MapperRelocalizationGuardTest : public MapperFrameCreationTest {
+protected:
+    MapperRelocalizationGuardTest() : MapperFrameCreationTest(GuardOptions()) {}
+
+    static MapperOptions GuardOptions() {
+        MapperOptions options = CreationOnlyOptions();
+        options.keyframe.relocalization_guard_min_frames = 0;
+        return options;
+    }
+
+    // Sequence frame `index` tracked weakly enough to become a Frame, with
+    // `stage`, at `timestamp`.
+    void PublishWeak(size_t index, events::TrackingStage stage, double timestamp) {
+        PublishFrameTracked(1, index, TrackedPairs(index, num_points_ / 2), map::FrameId{1},
+                            std::nullopt, std::nullopt, {}, stage, timestamp);
+    }
+};
+
+TEST_F(MapperRelocalizationGuardTest, NoFrameRightAfterRelocalization) {
+    // ORB-SLAM3's post-relocalization guard (Ruling J): no Frame from the
+    // relocalized FrameTracked, nor from any within
+    // relocalization_guard_seconds of it; weak tracking would create one.
+    EXPECT_DOUBLE_EQ(KeyFrameOptions{}.relocalization_guard_seconds, 1.0);
+    EXPECT_EQ(KeyFrameOptions{}.relocalization_guard_min_frames, 20u);
+    SetUpMonoMap();
+    // After a 2 s blackout: since_last alone would make each a candidate.
+    const double relocalized_at = sequence_.frames[next_].measurement.timestamp() + 2.0;
+
+    const size_t evaluations = mapper_.num_frame_evaluations();
+    PublishWeak(next_, events::TrackingStage::Relocalization, relocalized_at);
+    Drain();
+    PublishWeak(next_ + 1, events::TrackingStage::ZeroMotion, relocalized_at + 0.5);
+    Drain();
+    PublishWeak(next_ + 2, events::TrackingStage::MotionModel, relocalized_at + 0.999);
+    Drain();
+    EXPECT_TRUE(TakeCaptured().empty());
+    EXPECT_EQ(mapper_.num_frame_evaluations(), evaluations + 3);
+    EXPECT_EQ(mapper_.num_keyframes(), 2u);
+
+    // 1 s after: the normal decision.
+    PublishWeak(next_ + 3, events::TrackingStage::MotionModel, relocalized_at + 1.0);
+    Drain();
+    EXPECT_EQ(TakeCaptured().size(), 2u);
+    EXPECT_EQ(mapper_.num_keyframes(), 3u);
+}
+
+TEST_F(MapperRelocalizationGuardTest, SupersededRelocalizationStillGuards) {
+    // A relocalized FrameTracked drained behind a newer one is not evaluated,
+    // but it still starts the guard.
+    SetUpMonoMap();
+    const double relocalized_at = sequence_.frames[next_].measurement.timestamp() + 2.0;
+    PublishWeak(next_, events::TrackingStage::Relocalization, relocalized_at);
+    PublishWeak(next_ + 1, events::TrackingStage::ZeroMotion, relocalized_at + 0.5);
+    Drain();
+
+    EXPECT_TRUE(TakeCaptured().empty());
+    EXPECT_EQ(mapper_.num_keyframes(), 2u);
+}
+
+TEST_F(MapperRelocalizationGuardTest, MapClearResetsGuard) {
+    SetUpMonoMap();
+    const double relocalized_at = sequence_.frames[next_].measurement.timestamp() + 2.0;
+    PublishWeak(next_, events::TrackingStage::Relocalization, relocalized_at);
+    PublishTrackingLost(1, relocalized_at + 0.1);
+    Drain();
+    TakeCaptured();
+    ASSERT_EQ(mapper_.state(), MapperState::Initializing);
+
+    // Map 2 from the same sequence: frame next_'s points are map 2's too.
+    SetUpMonoMap();
+    ASSERT_EQ(mapper_.current_map_id(), map::MapId{2});
+    PublishFrameTracked(2, next_, TrackedPairs(next_, num_points_ / 2), second_.frame_id,
+                        std::nullopt, std::nullopt, {}, events::TrackingStage::MotionModel,
+                        relocalized_at + 0.5);
+    Drain();
+    EXPECT_EQ(TakeCaptured().size(), 2u);
+    EXPECT_EQ(mapper_.num_keyframes(), 3u);
+}
+
+TEST_F(MapperFrameCreationTest, NoRelocalizationGuardOnSmallMap) {
+    // ORB-SLAM3 guards only a map with more than mMaxFrames keyframes: this
+    // 2-Frame map keeps growing right after a relocalization.
+    SetUpMonoMap();
+    const double relocalized_at = sequence_.frames[next_].measurement.timestamp() + 2.0;
+    PublishFrameTracked(1, next_, TrackedPairs(next_, num_points_ / 2), map::FrameId{1},
+                        std::nullopt, std::nullopt, {}, events::TrackingStage::Relocalization,
+                        relocalized_at);
+    Drain();
+
+    EXPECT_EQ(TakeCaptured().size(), 2u);
+    EXPECT_EQ(mapper_.num_keyframes(), 3u);
 }
 
 TEST_F(MapperFrameCreationTest, SkipsInvalidAndDuplicatePoints) {
@@ -2395,6 +2544,43 @@ TEST(MapperBowTest, FramesGetBowWithVocabulary) {
     EXPECT_EQ(num_checked, run.mapper().num_keyframes());
     // The initial Frames included (Frame 0 is never culled).
     EXPECT_NE(run.mapper().BowVectorOf(map::FrameId{0}), nullptr);
+}
+
+TEST(MapperBowTest, TransactionsCarryBow) {
+    const auto vocabulary = MakeSplitVocabulary();
+    MapperBowRun run(MapperOptions{}, vocabulary);
+    const std::vector<Published> published = run.RunMono();
+    size_t num_frames = 0;
+    for (const Published& p : published) {
+        for (const PublishedFrame& frame : p.frames) {
+            ++num_frames;
+            SCOPED_TRACE("Frame " + std::to_string(frame.frame_id.value));
+            EXPECT_FALSE(frame.bow.entries.empty());
+            EXPECT_FALSE(frame.features.nodes.empty());
+            bow::BowVector expected;
+            bow::FeatureVector features;
+            vocabulary->Transform(frame.descriptors, TMapper::kBowLevelsUp, expected, features);
+            EXPECT_EQ(frame.bow.entries, expected.entries);
+            EXPECT_EQ(frame.features.nodes, features.nodes);
+            EXPECT_EQ(frame.features.offsets, features.offsets);
+            EXPECT_EQ(frame.features.features, features.features);
+            // Equal to the Mapper's own, where the Frame is still in the map.
+            if (const bow::BowVector* own = run.mapper().BowVectorOf(frame.frame_id)) {
+                EXPECT_EQ(frame.bow.entries, own->entries);
+            }
+        }
+    }
+    EXPECT_GT(num_frames, 0u);
+}
+
+TEST(MapperBowTest, TransactionsHaveNoBowWithoutVocabulary) {
+    MapperBowRun run;
+    for (const Published& p : run.RunMono()) {
+        for (const PublishedFrame& frame : p.frames) {
+            EXPECT_TRUE(frame.bow.entries.empty());
+            EXPECT_TRUE(frame.features.nodes.empty());
+        }
+    }
 }
 
 TEST(MapperBowTest, NoBowWithoutVocabulary) {
