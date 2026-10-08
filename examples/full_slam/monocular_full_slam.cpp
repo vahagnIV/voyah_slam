@@ -33,6 +33,11 @@ int main(int argc, char** argv) {
         std::cout << "Dataset: " << options.dataset << ", " << reader.size() << " frames, "
                   << camera.width << "x" << camera.height << "\n";
 
+        if (options.drop_frames) {
+            std::cout << "Dropping frames " << options.drop_frames->first << ".."
+                      << options.drop_frames->last << " (no features)\n";
+        }
+
         TFeatureExtractor extractor(full_slam::kScaleFactor, full_slam::kNumLevels,
                                     full_slam::kInitThresholdFast, full_slam::kMinThresholdFast);
         // 3D viewer: consumes Tracker and Mapper events on its own thread (later
@@ -81,7 +86,10 @@ int main(int argc, char** argv) {
 
             dataset_reader::MonocularFrame frame = reader.LoadMonocular(i);
             auto loaded = std::chrono::steady_clock::now();
-            auto features = extractor.DetectAndExtract(frame.image, full_slam::kNumFeatures);
+            // A dropped frame keeps its timestamp but has no features.
+            const bool dropped = options.drop_frames && options.drop_frames->Contains(i);
+            auto features = dropped ? TFeatureExtractor::TFeatures{}
+                                    : extractor.DetectAndExtract(frame.image, full_slam::kNumFeatures);
             TMonocularMeasurement measurement(std::move(features), camera.K, camera.distortion,
                                               frame.timestamp);
             auto extracted = std::chrono::steady_clock::now();

@@ -1,6 +1,7 @@
 #include <support/synthetic_sequence.h>
 #include <support/test_measurements.h>
 #include <support/trajectory_error.h>
+#include <voyahslam/bow/vocabulary.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
 #include <voyahslam/features/orb_feature_extractor.h>
@@ -15,7 +16,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <optional>
+#include <string>
 #include <thread>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -35,6 +40,7 @@ struct StampedPose {
     uint32_t map;
     geometry::RigidTransformation pose;
     double timestamp;
+    events::TrackingStage stage = events::TrackingStage::MotionModel;  // FrameTracked
 };
 
 TEST(SlamTest, WiresComponentsAsynchronously) {
@@ -117,9 +123,11 @@ public:
                 const auto& tracked =
                     *static_cast<events::FrameTracked<features::OrbFeatureExtractor>*>(event);
                 frame_tracked.push_back(event->map_id.value);
-                positions.push_back({event->map_id.value, tracked.pose, tracked.timestamp});
+                positions.push_back(
+                    {event->map_id.value, tracked.pose, tracked.timestamp, tracked.stage});
             } else if (event->type == events::EventType::TrackingLost) {
                 tracking_lost.push_back(event->map_id.value);
+                tracking_lost_final.push_back(static_cast<const events::TrackingLost*>(event)->final);
             }
         }
     }
@@ -148,6 +156,7 @@ public:
     std::vector<bool> new_points_not_after_new_map;
     std::vector<uint32_t> frame_tracked;
     std::vector<uint32_t> tracking_lost;
+    std::vector<bool> tracking_lost_final;  // per TrackingLost
     std::vector<StampedPose> keyframes;  // added Frames, in publication order
     std::vector<size_t> transaction_new_points;  // per transaction, in publication order
     std::vector<StampedPose> positions;
@@ -420,11 +429,13 @@ test::SyntheticSequenceOptions LeavingInitialViewOptions() {
     return options;
 }
 
-// Largest camera-centre error, in true units, of `map`'s FrameTracked poses,
-// aligned through the map's first keyframe (stereo) or first two keyframes
-// (mono: scale from the second keyframe's baseline).
+// Largest camera-centre error, in true units, of `map`'s FrameTracked poses
+// from frame `first_frame` on, aligned through the map's first keyframe
+// (stereo) or first two keyframes (mono: scale from the second keyframe's
+// baseline).
 double MaxCentreError(const ProtocolRecorder& recorder, uint32_t map,
-                      const std::vector<geometry::RigidTransformation>& truth, bool monocular) {
+                      const std::vector<geometry::RigidTransformation>& truth, bool monocular,
+                      size_t first_frame = 0) {
     std::vector<StampedPose> keyframes;
     for (const StampedPose& keyframe : recorder.keyframes) {
         if (keyframe.map == map) keyframes.push_back(keyframe);
@@ -439,6 +450,7 @@ double MaxCentreError(const ProtocolRecorder& recorder, uint32_t map,
     for (const StampedPose& position : recorder.positions) {
         if (position.map != map) continue;
         const size_t k = FrameIndexOf(position.timestamp);
+        if (k < first_frame) continue;
         max_error = std::max(max_error, alignment.CentreError(position.pose, truth[k]));
     }
     return max_error;
@@ -451,16 +463,36 @@ struct RunCounts {
     size_t num_map_points = 0;  // the Mapper's
 };
 
+// Frames [begin, end] of a run arrive as measurements without features (a
+// camera blackout), at their own timestamps.
+struct Blackout {
+    size_t begin = 0;
+    size_t end = 0;
+};
+
+// A measurement without features at `timestamp`, of `sequence`'s kind.
+features::TMonocularMeasurement<features::OrbFeatureExtractor> EmptyMeasurement(
+    const test::SyntheticSequence& /*sequence*/, double timestamp) {
+    return test::MakeMonocular(0, timestamp);
+}
+features::TBinocularMeasurement<features::OrbFeatureExtractor> EmptyMeasurement(
+    const test::SyntheticStereoSequence& /*sequence*/, double timestamp) {
+    return test::MakeBinocular(0, timestamp);
+}
+
 // Feeds a sequence to a new Slam: the first `init_frames` frames build the
-// map, then every later frame is fed once it tracks. Returns when every frame
-// is tracked or tracking is lost, with the Slam stopped and `out_recorder`
-// drained.
+// map, then every later frame is fed once it tracks (the frames of
+// `blackout`, if any, without features). Returns when the last frame is
+// tracked or tracking is lost for good (TrackingLost with `final`), with the
+// Slam stopped and `out_recorder` drained.
 template <typename TSequence>
 void RunSequence(const TSequence& sequence, size_t init_frames,
                  const mapping::MapperOptions& mapper_options, ProtocolRecorder& out_recorder,
-                 RunCounts& out_counts) {
+                 RunCounts& out_counts, const tracking::TrackerOptions& tracker_options = {},
+                 std::shared_ptr<const OrbSlam::TMapper::TVocabulary> vocabulary = nullptr,
+                 std::optional<Blackout> blackout = std::nullopt) {
     // Lifetimes as in EndToEndInitializeTrackLoseReinitialize.
-    OrbSlam slam(mapper_options);
+    OrbSlam slam(mapper_options, tracker_options, std::move(vocabulary));
     out_recorder.Attach(slam);
     struct StopAndDrain {
         OrbSlam& slam;
@@ -482,13 +514,19 @@ void RunSequence(const TSequence& sequence, size_t init_frames,
         std::chrono::seconds(120)));
     out_counts.tracked_before = out_recorder.positions.size();
     for (size_t i = init_frames; i < sequence.frames.size(); ++i) {
-        slam.tracker().Track(sequence.frames[i].measurement);
+        if (blackout && i >= blackout->begin && i <= blackout->end) {
+            slam.tracker().Track(EmptyMeasurement(sequence, sequence.frames[i].measurement.timestamp()));
+        } else {
+            slam.tracker().Track(sequence.frames[i].measurement);
+        }
     }
-    const size_t to_track = sequence.frames.size() - init_frames;
+    const size_t last = sequence.frames.size() - 1;
     ASSERT_TRUE(out_recorder.WaitFor(
         [&] {
-            return !out_recorder.tracking_lost.empty() ||
-                   out_recorder.positions.size() >= out_counts.tracked_before + to_track;
+            const auto& finals = out_recorder.tracking_lost_final;
+            return std::find(finals.begin(), finals.end(), true) != finals.end() ||
+                   (!out_recorder.positions.empty() &&
+                    FrameIndexOf(out_recorder.positions.back().timestamp) == last);
         },
         std::chrono::seconds(120)));
     slam.Stop();
@@ -550,6 +588,93 @@ TEST(SlamTest, StereoMapGrowsWhileLeavingInitialView) {
     // Error bound: see LeavingInitialViewOptions.
     ExpectMapGrowsWhileLeavingInitialView(sequence, /*init_frames=*/1, /*monocular=*/false,
                                           mapper_options, 1.5 * 0.0248);
+}
+
+// k = 2, L = 1: two words of weight 1 under the root (as the Tracker tests'
+// MakeRootVocabulary). The Tracker looks features up 4 levels up, so every
+// FeatureVector files all features under the root and SearchByBoW compares
+// every pair (the ratio test decides); the Frame database returns every Frame.
+std::shared_ptr<const OrbSlam::TMapper::TVocabulary> RootVocabulary() {
+    using TVocabulary = OrbSlam::TMapper::TVocabulary;
+    using TDescriptors = features::OrbFeatureExtractor::TDescriptors;
+    TDescriptors descriptors =
+        TDescriptors::Zero(features::OrbFeatureExtractor::DescriptorSize, 3);
+    descriptors(0, 2) = 0xFF;
+    return std::make_shared<const TVocabulary>(
+        TVocabulary::FromTree(2, 1, {0, 0, 0}, std::move(descriptors), {0.0, 1.0, 1.0}));
+}
+
+// The leave-the-view run with a vocabulary and a 1 s blackout (frames
+// 31-50) soon after the Mapper's latest Frame (mono: frame 30, stereo:
+// frame 26), so the camera reappears in the mapped area: the Tracker becomes
+// RecentlyLost (one non-final TrackingLost), relocalizes into map 1 and
+// tracks to the end. Expects no other map, the first frame tracked after the
+// blackout with stage Relocalization, and a centre error from the recovery on
+// within `max_error`.
+//
+// Error bounds: 1.5x the largest of three measured runs (2026-10-08): mono
+// 0.0931 / 0.0931 / 0.0931 m (recovery at frame 52: frame 51 reaches only 41
+// of the 50 inliers), stereo 0.0137 / 0.0217 / 0.0217 m (recovery at frame 51).
+template <typename TSequence>
+void ExpectRelocalizesAfterBlackout(const TSequence& sequence, size_t init_frames,
+                                    bool monocular, const mapping::MapperOptions& mapper_options,
+                                    double max_error) {
+    std::vector<geometry::RigidTransformation> truth;
+    for (const auto& frame : sequence.frames) truth.push_back(frame.T_cw);
+    const Blackout blackout{.begin = 31, .end = 50};
+
+    // The synthetic run makes few Frames (3-4 at the blackout), so any map may
+    // relocalize.
+    tracking::TrackerOptions tracker_options;
+    tracker_options.relocalization.min_map_frames_to_relocalize = 0;
+
+    ProtocolRecorder recorder;
+    RunCounts counts;
+    RunSequence(sequence, init_frames, mapper_options, recorder, counts, tracker_options,
+                RootVocabulary(), blackout);
+    if (::testing::Test::HasFatalFailure()) return;
+
+    EXPECT_EQ(recorder.map_created, std::vector<uint32_t>{1});
+    EXPECT_EQ(recorder.tracking_lost, std::vector<uint32_t>{1});
+    EXPECT_EQ(recorder.tracking_lost_final, std::vector<bool>{false});
+    for (uint32_t map : recorder.frame_tracked) EXPECT_EQ(map, 1u);
+    const auto recovered = std::find_if(
+        recorder.positions.begin(), recorder.positions.end(),
+        [&](const StampedPose& position) { return FrameIndexOf(position.timestamp) > blackout.end; });
+    if (recovered == recorder.positions.end()) {
+        ADD_FAILURE() << "no frame tracked after the blackout";
+        return;
+    }
+    EXPECT_EQ(recovered->stage, events::TrackingStage::Relocalization);
+    const size_t recovery_frame = FrameIndexOf(recovered->timestamp);
+    EXPECT_EQ(FrameIndexOf(recorder.positions.back().timestamp), sequence.frames.size() - 1);
+    const double error = MaxCentreError(recorder, 1, truth, monocular, recovery_frame);
+    EXPECT_LE(error, max_error);
+    ::testing::Test::RecordProperty("recovery_frame", static_cast<int>(recovery_frame));
+    ::testing::Test::RecordProperty("max_centre_error_m", std::to_string(error));
+}
+
+TEST(SlamTest, MonoRelocalizesAfterBlackout) {
+    const test::SyntheticSequence sequence = test::MakeSyntheticSequence(LeavingInitialViewOptions());
+    // As in MonoMapGrowsWhileLeavingInitialView.
+    mapping::MapperOptions mapper_options;
+    mapper_options.initializer.reconstruction.min_parallax_deg = 4.0;
+    // Error bound: see ExpectRelocalizesAfterBlackout.
+    ExpectRelocalizesAfterBlackout(sequence, /*init_frames=*/30, /*monocular=*/true,
+                                   mapper_options, 1.5 * 0.0931);
+}
+
+TEST(SlamTest, StereoRelocalizesAfterBlackout) {
+    // As StereoMapGrowsWhileLeavingInitialView.
+    test::SyntheticStereoSequenceOptions options;
+    options.trajectory = LeavingInitialViewOptions();
+    options.trajectory.num_points = 700;
+    const test::SyntheticStereoSequence sequence = test::MakeSyntheticStereoSequence(options);
+    mapping::MapperOptions mapper_options;
+    mapper_options.initializer.stereo_min_features = 150;
+    // Error bound: see ExpectRelocalizesAfterBlackout.
+    ExpectRelocalizesAfterBlackout(sequence, /*init_frames=*/1, /*monocular=*/false,
+                                   mapper_options, 1.5 * 0.0217);
 }
 
 // The stereo leave-the-view run: every Frame adds close points for the

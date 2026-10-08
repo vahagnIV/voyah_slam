@@ -1,7 +1,7 @@
 # Relocalization and Reference-Frame Tracking — Design Spec
 
 Date: 2026-10-07
-Status: approved in conversation, pending spec review (amended with the stereo-drift spike result)
+Status: approved in conversation, pending spec review (amended with the stereo-drift spike result; amended 2026-10-08 with rulings C, E–G, F and I from the implementation)
 Roadmap: step 3 in `docs/ROADMAP.md`
 
 ## Context and Scope
@@ -102,6 +102,11 @@ Lost: TrackingLost(final = true) → Mapper clears map → initialization (as to
   - `true` is published on entering Lost. Only this one clears the Mapper's
     map.
 - **`TrackingStage` gains `ReferenceFrame` and `Relocalization`.**
+  *(amended: ruling C)* The stage reports the **source of the initial pose**
+  that the local-map step refined: `MotionModel`, `ZeroMotion`,
+  `ReferenceFrame` or `Relocalization`. `LocalMap` is removed: the local-map
+  step always runs last, so the old stage was always `LocalMap` and could not
+  show these paths.
 - **Without a vocabulary,** RecentlyLost is skipped (direct to Lost, as
   today).
 - **Options:** `TrackerOptions::relocalization` holds
@@ -164,11 +169,26 @@ matches is dropped.
    round, until one yields a pose with ≥ 10 inliers.
 2. `OptimizePose` runs on the inliers. Fewer than 10 survivors drops the
    candidate.
+   *(amended: ruling F)* `OptimizePose` runs over **all** the candidate's
+   `SearchByBoW` matches, starting from the RANSAC pose; its robust rounds
+   reject the outliers. `SolvePnPRansac` stays a raw hypothesis generator
+   (§4.4 unchanged). Measured on half-outlier scenes: 97.6 % within
+   1 cm / 0.5° this way, 93 % refining only the RANSAC inliers, 34–59 % for
+   the raw RANSAC pose.
 3. If fewer than 50 survive:
    - project the candidate's other points (a point source restricted to them,
      window factor 10, descriptor distance ≤ 100), then optimize again;
    - if the count is between 30 and 50, project once more with window factor
      3 and distance ≤ 64, then optimize.
+
+   *(amended: ruling I)* The values are ORB-SLAM3's `th` and `ORBdist` of
+   `SearchByProjection(Frame&, KeyFrame*, set, th, ORBdist)`, with its
+   semantics: `features::SearchFromFrame` uses a fixed radius
+   `th · scale^level` pixels over levels [l−1, l+1], accepts the best
+   descriptor at ≤ `ORBdist` with **no ratio test** (the first claim on a
+   current feature wins), and applies the rotation histogram. It does not
+   reuse the local-map search, whose window is ×2.5–4 larger and which applies
+   a 0.8 ratio test.
 4. Success means ≥ 50 inliers. The local-map step then runs, and Tracking
    resumes with stage `Relocalization`.
 
@@ -184,6 +204,15 @@ matches is dropped.
   - noise-free fisheye rays up to 80° recover the pose;
   - 50 % outliers with 1 px noise recover it within 1 cm / 0.5°;
   - degenerate input fails cleanly.
+
+  *(amended: rulings E–G)* No test depends on one lucky seed, and RANSAC
+  alone does not promise 1 cm / 0.5°:
+  - fisheye: 50 seeded scenes, all within 1e-5 (the `Unproject` tolerance);
+  - half outliers: 200 seeded scenes (seeds 0–199); in ≥ 95 % of them
+    (a) RANSAC succeeds and `OptimizePose`'s inlier mask is ≥ 90 % correct,
+    and (b) the pose after `OptimizePose` over **all** matches from the
+    RANSAC pose (the pipeline contract, §4.5 step 2) is within
+    1 cm / 0.5°. Measured: 199/200 and 198/200.
 
 **`voyah_slam`:**
 - reference-Frame tracking recovers a synthetic jump that defeats the

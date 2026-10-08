@@ -8,7 +8,7 @@
 > `docs/superpowers/specs/` and `docs/superpowers/plans/`. When they disagree
 > with this document, **this document wins** — fix the spec or note the change here.
 
-Last updated: 2026-10-07
+Last updated: 2026-10-08
 
 ---
 
@@ -141,7 +141,11 @@ stub was deleted on 2026-10-05.
 
 ### Tracker
 - **State machine** (`TrackerState`, readable from any thread via `state()`):
-  `WaitingForMap` -> `Tracking` -> `Lost` -> `Tracking`...
+  `WaitingForMap` -> `Tracking` -> (`RecentlyLost` ->) `Lost` -> `Tracking`...
+  (`RecentlyLost` since 2026-10-08, with a vocabulary: see "Relocalization and
+  Reference-Frame Tracking"; it returns to `Tracking` in the same map on a
+  relocalization, and the rest of this bullet describes a failure without
+  it.)
   One `ProcessPending()` pass: (1) drain the whole inbox applying the `map_id`
   consumer rule (§6) — every Mapper diff of the current map is applied to the
   Tracker's `tracking::MapReplica`; a `MapTransaction` with `new_map` sets
@@ -152,8 +156,8 @@ stub was deleted on 2026-10-05.
   `InitializationMeasurement` (`map_id` 0); in `Tracking` run the frame-to-map
   tracking described in "Tracking Against the Map" — success publishes
   `FrameTracked`, failure moves to `Lost` and then publishes
-  `TrackingLost(current map)`. `Lost` currently behaves like `WaitingForMap`
-  (relocalization will live there; deferred, TODO).
+  `TrackingLost(current map, final = true)`. `Lost` behaves like
+  `WaitingForMap`; relocalization lives in `RecentlyLost` (2026-10-08).
 - Runs its **own thread with two input queues**:
   - `inbox()` — map diffs from the Mapper (events),
   - `measurements_` — `std::variant<TMonocularMeasurement, TBinocularMeasurement>`
@@ -282,11 +286,11 @@ The distortion models now live in `geometry/distortion_models/` (moved from
 
 | Event | Producer → Consumer | Payload |
 |---|---|---|
-| `FrameTracked<FE>` | Tracker → Mapper, viewer | every tracked measurement: timestamp, pose (`T_cw` after `OptimizePose`), measurement copy (binocular: stereo-matched), inlier pairs `observed_features[i]` -> `observed_points[i]`, `visible_points` (local points passing the projection gate, matched ones included), `reference_frame_id` (optional), `local_frames`, `stage` (`MotionModel` / `ZeroMotion` / `LocalMap`), `num_matches`, `num_inliers`, `urgent` (mirrored in `Event::priority`) |
-| `MapTransaction<FE>` | Mapper → all | **every Mapper change, as one atomic transaction** (since 2026-10-07; replaces `KeyFrameCreated`, `MapCreated`, `MapPointsUpdated`, `MapPointsRemoved`, `KeyFramePoseUpdated`). Parts, each possibly empty: `new_map` + `start_frame`; added Frames (id, `T_cw`, measurement, own observations); new points (`new_points_start_id`, contiguous ids, positions / normals / descriptors); `added_observations` (frame, feature, point, depth and right index, -1 when absent); updated points (ids, positions, normals, descriptors); `replaced_points` (loser, winner); `removed_points`; `updated_poses`; `removed_observations`; `removed_frames`. Apply order and contract: see "Map Quality" |
+| `FrameTracked<FE>` | Tracker → Mapper, viewer | every tracked measurement: timestamp, pose (`T_cw` after `OptimizePose`), measurement copy (binocular: stereo-matched), inlier pairs `observed_features[i]` -> `observed_points[i]`, `visible_points` (local points passing the projection gate, matched ones included), `reference_frame_id` (optional), `local_frames`, `stage` (the source of the initial pose the local-map step refined: `MotionModel` / `ZeroMotion` / `ReferenceFrame` / `Relocalization`; 2026-10-08, ruling C), `num_matches`, `num_inliers`, `urgent` (mirrored in `Event::priority`) |
+| `MapTransaction<FE>` | Mapper → all | **every Mapper change, as one atomic transaction** (since 2026-10-07; replaces `KeyFrameCreated`, `MapCreated`, `MapPointsUpdated`, `MapPointsRemoved`, `KeyFramePoseUpdated`). Parts, each possibly empty: `new_map` + `start_frame`; added Frames (id, `T_cw`, measurement, own observations, and since 2026-10-08 the Frame's `bow::BowVector bow` and `bow::FeatureVector features`, empty without a vocabulary); new points (`new_points_start_id`, contiguous ids, positions / normals / descriptors); `added_observations` (frame, feature, point, depth and right index, -1 when absent); updated points (ids, positions, normals, descriptors); `replaced_points` (loser, winner); `removed_points`; `updated_poses`; `removed_observations`; `removed_frames`. Apply order and contract: see "Map Quality" |
 | `LoopDetected` | LoopCloser → Mapper | query/match frames + verification data (TBD) |
 | `InitializationMeasurement<FE>` | Tracker → Mapper (+ other Tracker observers) | `features::TMeasurement<FE>` (`map_id` 0) |
-| `TrackingLost` | Tracker → all | timestamp (`map_id` = the lost map) |
+| `TrackingLost` | Tracker → all | timestamp, `final` (`map_id` = the lost map). Since 2026-10-08: `final = false` on entering `RecentlyLost` (the Mapper ignores it and keeps the map), `final = true` on entering `Lost` (only this one clears the Mapper's map) |
 
 Rules:
 - Events are coarse-grained (one event per batch, Eigen matrices inside).
@@ -337,7 +341,7 @@ Rules:
   and ignore; `> current` -> first event of a newer map: reset the replica,
   adopt `current = map_id`, apply (a new map arrives as one `new_map`
   transaction since 2026-10-07); `== current`
-  -> apply. The Mapper builds map n+1 only after `TrackingLost(n)`, so a newer
+  -> apply. The Mapper builds map n+1 only after a final `TrackingLost(n)`, so a newer
   map never appears while the Tracker tracks an older one.
 - **No subscription filtering:** an `Observable` delivers every event to every
   connected observer (the viewer also receives `InitializationMeasurement` and
@@ -958,7 +962,10 @@ level, distance to the camera centre). It does not count events (decision R).
 1. **Motion model** (when a velocity exists): predict `T_cw = velocity * T_last`,
    `SearchFromLastFrame` with a 15 px (mono) / 7 px (binocular) window scaled
    by `level_scale^level` of the last-frame feature; fewer than 20 matches
-   retries with the window x2; `OptimizePose`; the step needs >= 10 inliers.
+   retries with the window x2; `OptimizePose`; the step needs >= 10 inliers,
+   and since 2026-10-08 >= `min_motion_model_inliers` (30) final inliers, else
+   it counts as failed and zero motion runs (see "Relocalization and
+   Reference-Frame Tracking", motion-model gate).
 2. **Zero-motion fallback** when step 1 failed or there is no velocity: same
    with the predicted pose = `T_last` and the window x4 (the BoW-less stand-in
    for ORB-SLAM3's `TrackReferenceKeyFrame`; see limitation below).
@@ -973,8 +980,9 @@ level, distance to the camera centre). It does not count events (decision R).
    `TrackingLost`; the debug log names the step and counts.
 
 **Thresholds** (`TrackingOptions`): window 15 px mono / 7 px stereo; motion
-model needs 20 matches (else x2 retry) and 10 inliers; zero-motion window x4;
-local-map `th` 1.0; 30 local-map inliers.
+model needs 20 matches (else x2 retry) and 10 inliers (30 since 2026-10-08);
+zero-motion window x4 and 10 inliers; reference Frame ratio 0.7, 15 matches,
+10 inliers; local-map `th` 1.0; 30 local-map inliers.
 
 **Projection matching** (`features/projection_matcher.h`, header-only
 template on the extractor; raw (distorted) pixel space: projection through
@@ -1005,6 +1013,9 @@ zero-motion projection search replaces it. It recovers only small
 frame-to-frame motion; real recovery is relocalization (sub-project 4).
 *(2026-10-07: a vocabulary exists now, see "Bag of Words", but only the
 Mapper uses it; the Tracker gets BoW with relocalization, roadmap step 3.)*
+*(2026-10-08: with a vocabulary, reference-Frame tracking runs after
+zero motion, and a failure relocalizes; see "Relocalization and
+Reference-Frame Tracking". Without one, this fallback is still all there is.)*
 
 **Measured behaviour** (TUM-VI `dataset-corridor1_1024_16`, Release, ORB,
 2026-10-05; details in `docs/TODO.md` smoke note): binocular tracks all 200
@@ -1375,7 +1386,7 @@ OpenCV-free port of DBoW2's `TemplatedVocabulary` (ORB-SLAM3
 
 | Type | Header | Role |
 |---|---|---|
-| `WordId`, `NodeId`, `BowVector`, `FeatureVector` | `bow/bow_vector.h` | `BowVector`: (word, weight) sorted by word, L1-normalised. `FeatureVector`: feature indices grouped by node in CSR form (`nodes` sorted, `offsets`, `features`). |
+| `WordId`, `NodeId`, `BowVector`, `FeatureVector`, free `Score` | `bow/bow_vector.h` (in `voyah_common` since 2026-10-08, ruling D: plain data the events carry; same include path) | `BowVector`: (word, weight) sorted by word, L1-normalised. `FeatureVector`: feature indices grouped by node in CSR form (`nodes` sorted, `offsets`, `features`). |
 | `Vocabulary<FE>` | `bow/vocabulary.h` (I/O in `src/bow/vocabulary_io.cpp`) | `LoadText`, `LoadBinary`, `SaveBinary`, `FromTree`, `Transform(descriptors, levels_up, out_bow, out_features)`, `Score`, `num_words()`, `k()`, `L()` |
 
 - **Generic over the extractor:** descriptors are `FE::TDescriptors` (one
@@ -1438,8 +1449,9 @@ The pointer may be null: then nothing computes a bag of words and the Mapper
 behaves exactly as before.
 
 **Mapper.** Frames are kept in a private `KeyFrameRecord { frame; bow;
-features; }` (ruling G): `map::Frame` is unchanged and the bags of words are
-never published. With a vocabulary, `AddKeyFrame` (initial Frames included)
+features; }` (ruling G): `map::Frame` is unchanged. The bags of words were
+never published until 2026-10-08; since then every added Frame carries them in
+its `MapTransaction` (see "Relocalization and Reference-Frame Tracking"). With a vocabulary, `AddKeyFrame` (initial Frames included)
 runs `Transform` on the left descriptors with `kBowLevelsUp` = 4 (ORB-SLAM3);
 about 5–8 ms per Frame. `BowVectorOf(frame)` exposes it to tests.
 
@@ -1455,7 +1467,8 @@ feature under one node the result equals brute force exactly (tested, and the
 Mapper's one-node-vocabulary test gives transactions identical to the
 null-vocabulary run, ruling H). Without FeatureVectors brute force runs as
 before. Fusion and the Tracker's projection matching are unchanged; the
-Tracker does not use BoW yet.
+Tracker uses BoW since 2026-10-08 (reference-Frame tracking and
+relocalization).
 
 **ORB rounding.** The rotated BRIEF offsets use `std::lround` (ORB-SLAM3's
 `cvRound`) instead of truncation, so our descriptors are bit-compatible with
@@ -1527,6 +1540,212 @@ mono), so compare against the "without" rows.
   then 41 matches, local map 23 inliers (< 30). The runs without the
   vocabulary dip to 38 and 52 inliers at frames 325 / 355, so the margin was
   already thin; the Tracker does not use BoW.
+
+## Relocalization and Reference-Frame Tracking (roadmap step 3, sub-project 4)
+
+Spec: `docs/superpowers/specs/2026-10-07-relocalization-design.md` (amended
+in place for rulings C, E–G, F and I); plan
+`docs/superpowers/plans/2026-10-08-relocalization.md`; the stereo-drift spike
+`.superpowers/spikes/2026-10-07-stereo-drift.md`. Goal: a short tracking
+loss is recovered **into the same map** instead of clearing it. Relocalization
+into other maps waits for multi-map (roadmap step 5).
+
+**State machine** (`TrackerState`, ORB-SLAM3 visual-only):
+
+```
+Tracking ─(motion model, zero motion and reference Frame fail)→ RecentlyLost
+RecentlyLost: relocalize every measurement
+   success → Tracking (same map; velocity reset; the matched Frame is the reference)
+   timeout → Lost
+Lost: TrackingLost(final = true) → the Mapper clears its map → initialization (as before)
+```
+
+- **`RecentlyLost`** needs a vocabulary and a map with more than
+  `min_map_frames_to_relocalize` (10) Frames; otherwise a failure goes
+  straight to `Lost` (exactly the old behaviour without a vocabulary). The
+  timeout is `recently_lost_seconds` (5.0) of **measurement timestamps**, not
+  wall-clock time (backwards timestamps never time out: TODO).
+- While `RecentlyLost` the Tracker publishes **no `FrameTracked` and no
+  `InitializationMeasurement`**; empty measurements still advance the timeout.
+- **`TrackingLost::final`.** `false` is published on entering
+  `RecentlyLost`: the Mapper ignores it, keeps its map, and the viewer shows
+  "recently lost". `true` is published on entering `Lost`; only this one
+  clears the Mapper's map. A non-final `TrackingLost` does not supersede an
+  earlier `FrameTracked` of the same map in the Mapper's drained batch (ruling
+  H: the map survives, so the last tracked frame is still evaluated); a final
+  one does (decision I of 2026-10-06).
+- Options: `TrackerOptions::relocalization` (`RelocalizationOptions`,
+  `tracking/relocalizer.h`) holds the loss protocol and every §4 value below;
+  the §3 reference-Frame values live in `TrackingOptions` (ruling B, amended).
+
+**`TrackingStage`** (ruling C). `FrameTracked::stage` reports the **source of
+the initial pose** that the local-map step refined: `MotionModel`,
+`ZeroMotion`, `ReferenceFrame` or `Relocalization`. The old `LocalMap` value
+is gone: the local-map step always runs last, so it said nothing.
+
+**BoW in `MapTransaction`.** Each added Frame (`events::NewFrame`) carries
+`bow::BowVector bow` and `bow::FeatureVector features`, filled by the Mapper
+from its per-Frame computation (`levels_up` 4) and empty without a
+vocabulary. The Tracker's `MapReplica` stores them per Frame. The Tracker gets
+the same immutable `std::shared_ptr<const bow::Vocabulary<FE>>` as the Mapper
+through `Slam`, and uses it only for the current frame at loss time
+(reference Frame, relocalization). `bow_vector.h` (plain data and the free
+`bow::Score`) moved down to `voyah_common` at the same include path so the
+events can carry it (ruling D; ruling A for the free `Score`). `Slam` copies
+the vocabulary pointer into the Tracker before the Mapper takes it, which
+relies on `tracker_` being declared before `mapper_` (fragile: TODO).
+
+**`bow::FrameDatabase`** (`voyah_algs`, `bow/frame_database.h`,
+non-templated): an inverted index word → Frames that keeps each Frame's
+`BowVector`, so a removal edits exactly its word lists. The replica owns one
+and keeps it in sync with its transactions (`Add` on an added Frame with a
+non-empty BoW, `Remove` on a removed Frame, `Clear` on a map switch).
+`Query(bow, min_common_ratio)` returns the Frames sharing at least one word
+and at least 0.8 × the best Frame's common words, with their L1 score
+(`bow::Score`), by score descending, ties by ascending `FrameId`. A removed
+Frame is never returned. Single-threaded: each owner has its own copy, as
+every other replica structure.
+
+**Reference-Frame tracking** (ORB-SLAM3 `TrackReferenceKeyFrame`; vocabulary
+only). After zero motion fails: the current frame's BoW (`levels_up` 4),
+`features::SearchByBoW` against the last `FrameTracked`'s reference Frame
+(ratio 0.7, fewer than 15 matches fail), `OptimizePose` from the last pose
+(≥ 10 inliers after dropping outliers), then the usual local-map step and its
+30-inlier gate; stage `ReferenceFrame`. A reference Frame the Mapper has
+culled makes it fail (ORB-SLAM3 follows the parent: TODO).
+
+**`features::SearchByBoW`** (`voyah_algs`, `features/bow_matcher.h`;
+ORB-SLAM3 `SearchByBoW(KeyFrame*, Frame&)`): current features against one
+Frame's features that observe a live point, only under shared
+`FeatureVector` nodes; best distance ≤ 50, best < ratio × second best,
+rotation histogram (12 bins, top 3), one-to-one (an already matched current
+feature is skipped, as ORB-SLAM3). Returns current feature → `MapPointId`.
+
+**`geometry::SolvePnPRansac`** (`voyah_algs`, `geometry/pnp.h`). Minimal
+solver: Lambda Twist P3P (Persson & Nordberg 2018) on unit bearing rays from
+`Camera::Unproject`, so fisheye works without undistortion; a 4th point picks
+among the up-to-4 solutions. RANSAC: up to 300 iterations, confidence 0.99
+(adaptive stop), ≥ 10 inliers; inliers by raw-pixel χ² < 5.991 through
+`Camera::Project` with σ = `sigma_px · 1.2^level`, depth ≤ 0 is an outlier.
+Output: `T_cw`, inlier mask, success; degenerate input (fewer than 4 points,
+exactly collinear points, no valid solution) fails cleanly, never NaN. It is a
+**raw hypothesis generator**: accuracy comes from the refinement (ruling F).
+Test contracts (rulings E–G, spec §5 amended): Lambda Twist recovers 3
+noise-free rays to 1e-9; noise-free fisheye up to 80° to 1e-5 in all 50
+seeded scenes (the `Unproject` tolerance bounds it); with 50 % outliers and
+1 px noise, over 200 seeded scenes, ≥ 95 % succeed with an inlier mask ≥ 90 %
+correct and ≥ 95 % are within 1 cm / 0.5° **after `OptimizePose` over all
+matches** from the RANSAC pose (measured 199/200 and 198/200). Raw RANSAC
+poses meet 1 cm / 0.5° in only about 34–59 % of such scenes, so no test
+depends on a lucky seed.
+
+**Relocalization** (`tracking/relocalizer.h`, `Relocalize`; ORB-SLAM3
+`Relocalization`), on every measurement while `RecentlyLost`:
+1. The current frame's BoW, queried in the replica's database (common ≥
+   0.8 × max); hits whose Frame is gone are skipped.
+2. Candidates grouped by covisibility: a hit's group score is its own plus
+   those of its top 10 covisible Frames that are hits too; groups ≥ 0.75 ×
+   the best keep their best-scoring Frame.
+3. `SearchByBoW` against each candidate (ratio 0.75); fewer than 15 matches
+   drop it.
+4. Rounds of P3P RANSAC: each round gives every live candidate up to 5 more
+   iterations, as a fresh `SolvePnPRansac` call with its own seed (from the
+   measurement timestamp, the Frame and the round; deterministic), until 300.
+5. **Refinement (ruling F, spec §4.5 step 2 amended):** a RANSAC pose with
+   ≥ 10 inliers is refined by `OptimizePose` over **all** the candidate's
+   SearchByBoW matches, starting from the RANSAC pose (its robust rounds
+   reject the outliers), not only over the RANSAC inliers; fewer than 10
+   survivors drop the candidate. Measured on half-outlier scenes: 97.6 %
+   within 1 cm / 0.5° this way, 93 % refining the inliers only.
+6. **Projection passes (ruling I, spec §4.5 amended):** below 50 inliers the
+   candidate Frame's other points are projected with
+   `features::SearchFromFrame`, **ORB-exact** (`SearchByProjection(Frame&,
+   KeyFrame*, set, th, ORBdist)`): fixed radius `th · 1.2^level` px over levels
+   [l−1, l+1], best distance ≤ `ORBdist`, **no ratio test**, first claim wins,
+   rotation histogram; `th` 10 / distance 100, optimize; then, when 30 < n <
+   50, `th` 3 / distance 64, optimize again. The spec's 10 / 100 and 3 / 64
+   are ORB-SLAM3's semantics; the local-map search's ×2.5–4 window and 0.8
+   ratio test (an earlier draft) are not used here.
+7. The first candidate reaching **50 inliers** wins; then the local-map step
+   runs (its 30-inlier gate decides) and Tracking resumes in the same map
+   with stage `Relocalization`, the velocity reset and the matched Frame as
+   the reference. The debug log prints every attempt's candidates, candidates
+   with BoW matches, hypotheses and best verified inliers.
+
+**Motion-model gate** (spec §0, the spike's fix). `min_motion_model_inliers`
+= 30: a motion-model pose with fewer final inliers counts as failed, so zero
+motion (whose minimum stays 10) and then the reference Frame run. The spike
+found the stereo "drift" with `--vocabulary` was not drift: in the fast
+rotations (corridor1 frames 324–378) the motion model was accepted with
+10–29 inliers, `need_close` made the wrong pose a Frame with ~320 close
+points, and with BoW the Mapper published it before the next frame was
+tracked, so the Tracker locked onto the misplaced points (a jump or a loss).
+With the gate, stereo 1000 with the vocabulary measured 0.0361 / 0.0363 /
+0.0369 m in the spike and 0.0361 / 0.0358 m at Task 1 (was 0.056 / 0.189 m
+and losses), one map each; mono 400 unchanged (0.0315 m).
+
+**Deviations from ORB-SLAM3** (all in TODO): RANSAC is more permissive than
+ORB's effective settings (ORB: minimum inliers max(10, 0.5 · N), about 35
+iterations from ε 0.5; ours 10 and 300); ORB's stricter local-map gate for
+about 1 s after a relocalization (50 inliers) is not carried over;
+`SearchFromFrame` has no scale-distance (min / max invariance distance) gate;
+the RANSAC state is not kept between rounds (fresh calls); a near-collinear
+PnP sample can pass RANSAC (only exact collinearity is rejected; the
+50-inlier verification is the guard).
+
+**Apps.** `--drop_frames a:b` feeds frames a..b (inclusive, 0-based) as
+measurements without features at their own timestamps, to simulate a
+blackout.
+
+**Tests.** `voyah_algs`: `FrameDatabase`, `SearchByBoW`, `SolvePnPRansac`
+(above). `voyah_slam`: the motion-model gate, reference-Frame tracking of a
+synthetic jump, RecentlyLost and `TrackingLost(final = false)` on a blackout
+with the Mapper's map kept, relocalization into the same `map_id`, the 5 s
+timeout (`final = true`, map cleared), small maps straight to Lost, no
+vocabulary unchanged, database consistency after Frame removals, aliased
+places rejected at BoW / RANSAC / the 50-inlier gate, candidate grouping.
+Integration: `SlamTest.{Mono,Stereo}RelocalizesAfterBlackout` run the
+threaded `Slam` on the leave-the-view sequence with a 1 s blackout (frames
+31–50, right after the Mapper's latest Frame) and a one-node vocabulary
+(`min_map_frames_to_relocalize` 0: the synthetic map has 3–5 Frames): one
+non-final `TrackingLost`, map 1 only, the first frame tracked after the
+blackout has stage `Relocalization`, and the centre error from the recovery
+on stays within 1.5 × the largest of three runs (mono 0.0931 m, recovery at
+frame 52; stereo 0.0217 m, recovery at frame 51).
+
+**Smoke (corridor1 1024, Release, ORB 1500, `--vocabulary ORBvoc.bin`,
+`--rate=0`, debug logs, headless, sequential, 2026-10-08; two runs each).**
+Recovery = the first frame tracked after the drop (stage `Relocalization`:
+the only way out of `RecentlyLost`). "Reloc" = successful relocalizations
+(Frame id, inliers); no run used reference-Frame tracking successfully (it
+fails on the first empty frame of a drop, as it should). ATE by
+`tools/ate.py` (mono Sim3, stereo SE3; matched poses / tracked).
+
+| Run | Maps | Tracked | RecentlyLost / Lost | Recovery frame | Reloc | Reference-Frame successes | ATE | Must |
+|---|---|---|---|---|---|---|---|---|
+| Mono 400, drop 250–270, run 1 | 1 | 256 (122–398) | 1 / 0 | **271** | Frame 9, 136 | 0 | Sim3 0.0325 m (256 / 256) | **met** |
+| Mono 400, drop 250–270, run 2 | 1 | 256 (122–398) | 1 / 0 | **271** | Frame 9, 139 | 0 | Sim3 0.0336 m (256 / 256) | **met** |
+| Stereo 1000, drop 500–520, run 1 | 1 | 978 (1–999) | 1 / 0 | **521** | Frame 0, 81 | 0 | SE3 0.0351 m (515 / 978) | **met**, no other loss |
+| Stereo 1000, drop 500–520, run 2 | 1 | 975 (1–999) | 1 / 0 | **524** (521–523: 1 candidate, best 3 / 9 / 0 inliers) | Frame 13, 99 | 0 | SE3 0.0349 m (512 / 975) | **met**, no other loss |
+| Mono 400, no drop, run 1 | 1 | 278 (122–399) | 0 / 0 | – | – | 0 | Sim3 0.0324 m (278 / 278) | **met** (≈ 0.032) |
+| Mono 400, no drop, run 2 | 1 | 277 (122–398) | 0 / 0 | – | – | 0 | Sim3 0.0323 m (277 / 277) | **met** |
+| Stereo 1000, no drop, run 1 | 1 | 999 | 0 / 0 | – | – | 0 | SE3 0.0365 m (536 / 999) | **met** (≤ 0.04) |
+| Stereo 1000, no drop, run 2 | 1 | 999 | 0 / 0 | – | – | 0 | SE3 0.0363 m (536 / 999) | **met** |
+
+- **Recovery is immediate** in 3 of 4 drop runs (the first frame after the
+  drop) and 3 frames later in the fourth; both drop ranges are in mapped
+  parts of the run (mono: the map had Frames there; stereo run 1 matched the
+  map's first Frame, Frame 0), so nothing recovered in unseen corridor. The
+  ATE with a drop equals the no-drop ATE within 0.001–0.002 m (fewer poses).
+- **Time per relocalization attempt** (a separate timed run each, with a
+  temporary timer that was not committed): an attempt that succeeded took
+  10.3 ms (mono, 82 inliers) and 9.3 ms (stereo, 86 inliers), BoW transform
+  included; an empty measurement 0.000 ms. The failed real attempts (stereo
+  run 2, frames 521–523) were not timed.
+- The motion-model gate fired 2–3 times per stereo run (15–23 inliers;
+  zero motion took over each time), never in mono; no run lost tracking without a
+  drop. Stereo no-drop ATE 0.036 m (was 0.056 / 0.189 m with the vocabulary
+  before the gate).
 
 ## 7. Coding Conventions
 
@@ -1785,6 +2004,19 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-07 | `SearchForTriangulation` takes two optional FeatureVectors (`SearchByBoW`): candidates only from shared-node pairs, all other checks unchanged; its matches are drawn only from shared-node pairs and are not in general a subset of brute force (ruling F, spec §6 amended). A one-node vocabulary reproduces brute force exactly (ruling H, Mapper test). | ORB-SLAM3 `SearchForTriangulation`; fewer candidates can let the ratio test pass where brute force failed. |
 | 2026-10-07 | ORB rotated BRIEF offsets are rounded with `std::lround` (ORB-SLAM3 `cvRound`) instead of truncated. | Bit-compatibility with ORB-SLAM3's vocabulary. |
 | 2026-10-07 | BoW smoke result (corridor1, Release, two runs each with and without the vocabulary, plus one extra stereo run; "Bag of Words"): triangulation per Frame 26–28× faster mono (about 180 → 7 ms) and 39× stereo (about 148 → 4 ms), a Mapper pass about 290 → 140 ms. Mono: one map, 278 tracked, ATE Sim3 0.031–0.033 m (0.034 without). Stereo: one map and no loss in both planned runs, but ATE SE3 0.056 / 0.189 m (0.037–0.038 without); the extra run lost tracking at frame 325 (2 maps). The 3× Must is met; stereo accuracy regressed and nothing was tuned. | Cause is not fewer triangulated points (final review: a 150 ms sleep after triangulation restores ATE 0.037 m at the same point count); the regression follows Mapper speed, i.e. timing-dependent behaviour elsewhere (TODO). The frame-325 loss is the known fast-rotation weakness (runs without the vocabulary dip to 38 inliers there). |
+| 2026-10-08 | Motion-model inlier gate: `min_motion_model_inliers` = 30; a motion-model pose with fewer final inliers counts as failed and zero motion (minimum 10) runs next. | Spike 2026-10-07: the stereo-with-vocabulary "drift" was 10–29-inlier motion-model poses in fast rotations becoming `need_close` Frames that the Tracker then locked onto. With the gate stereo 1000 + vocabulary 0.036–0.037 m, one map (was 0.056 / 0.189 m and losses); mono unchanged. |
+| 2026-10-08 | Loss protocol (ORB-SLAM3 RECENTLY_LOST): with a vocabulary and a map of more than 10 Frames a failure enters `RecentlyLost` (`TrackingLost(final = false)`, nothing published, the Mapper keeps its map) and relocalizes every measurement for 5 s of measurement timestamps, then `Lost` (`final = true`, the only one that clears the map). Without a vocabulary, or on a small map, straight to `Lost` as before. | A short loss must not cost the map. Measurement time keeps the protocol deterministic and replayable. |
+| 2026-10-08 | (H) A non-final `TrackingLost` does not supersede an earlier `FrameTracked` in the Mapper's drained batch; a final one does. | The map survives a non-final loss, so the last tracked frame is still worth evaluating. |
+| 2026-10-08 | (C) `TrackingStage` = the source of the initial pose the local-map step refined (`MotionModel` / `ZeroMotion` / `ReferenceFrame` / `Relocalization`); `LocalMap` removed. | The local-map step always runs last, so `stage` was always `LocalMap` and could not show the recovery paths. |
+| 2026-10-08 | Every added Frame carries its `BowVector` / `FeatureVector` in its `MapTransaction`; the Tracker's replica stores them and keeps its own `bow::FrameDatabase`; the Tracker gets the shared vocabulary through `Slam`. Reverses the 2026-10-07 "bags of words are Mapper-only" entry. | Relocalization runs on the Tracker thread against its replica; recomputing BoW there would duplicate the Mapper's work and the vocabulary is immutable. |
+| 2026-10-08 | (D, A) `bow_vector.h` (plain data) moved from `voyah_algs` to `voyah_common` at the same include path, with a free `bow::Score`; `Vocabulary<FE>::Score` forwards to it and `FrameDatabase` is not templated. | Events (`voyah_events`) must not include algs; the database needs scoring without an extractor type. |
+| 2026-10-08 | `bow::FrameDatabase`: inverted index owned by each replica, synced by transactions; `Query` keeps common ≥ 0.8 × max and returns L1 scores. Candidates grouped by the top 10 covisible Frames, kept at ≥ 0.75 × the best group (ORB-SLAM3 `DetectRelocalizationCandidates`). | Single-threaded per owner like every replica structure; no shared database, no lock. |
+| 2026-10-08 | Reference-Frame tracking (ORB-SLAM3 `TrackReferenceKeyFrame`) after zero motion: `SearchByBoW` ratio 0.7, ≥ 15 matches, ≥ 10 inliers, then the local map; its values in `TrackingOptions` (ruling B amended). | The BoW fallback ORB-SLAM3 uses before declaring loss; tracking values belong with tracking. |
+| 2026-10-08 | `geometry::SolvePnPRansac`: Lambda Twist P3P on unit bearings (`Camera::Unproject`), 4th point disambiguates, RANSAC 300 / 0.99 / ≥ 10, raw-pixel χ² 5.991 inliers; no OpenCV, no EPnP. MLPnP kept as an alternative (TODO). | Rays handle fisheye without undistortion; one residual space for the library. |
+| 2026-10-08 | (E, F, G) `SolvePnPRansac` is a raw hypothesis generator; relocalization refines a RANSAC pose with `OptimizePose` over **all** the candidate's BoW matches (spec §4.5 step 2 amended). PnP tests assert over seeded scene sets (200 half-outlier scenes, ≥ 95 % on mask and on refined pose; 50 fisheye seeds at 1e-5), not one lucky seed. | Raw RANSAC poses meet 1 cm / 0.5° in only 34–59 % of half-outlier scenes; refining the inliers only 93 %, all matches 97.6 %. |
+| 2026-10-08 | (I) Relocalization's projection passes use `features::SearchFromFrame`, ORB-exact `SearchByProjection(Frame, KeyFrame)`: radius `th · 1.2^level` px, no ratio test, levels [l−1, l+1], orientation check; `th` / distance 10 / 100 then 3 / 64. | The spec values are ORB-SLAM3's semantics; reusing `SearchFromLocalMap` multiplied the window by 2.5–4 and added a 0.8 ratio test. |
+| 2026-10-08 | Apps gain `--drop_frames a:b` (featureless measurements at the frames' own timestamps). | Reproducible blackouts for the relocalization smoke. |
+| 2026-10-08 | Relocalization smoke result (corridor1, Release, `--vocabulary`, two runs each; "Relocalization and Reference-Frame Tracking"): mono 400 with frames 250–270 dropped recovers at frame 271 into map 1 in both runs (Sim3 0.0325 / 0.0336 m); stereo 1000 with 500–520 dropped recovers at 521 / 524 into map 1, no other loss (SE3 0.0351 / 0.0349 m); no drop: one map each, mono 0.0324 / 0.0323 m, stereo 0.0365 / 0.0363 m. A relocalization attempt costs about 10 ms. All Musts met; nothing tuned. Integration bounds: blackout centre error mono 1.5 × 0.0931 m, stereo 1.5 × 0.0217 m. | A short loss now keeps the map; accuracy after recovery is unchanged. |
 
 ## 9. Open Questions
 
@@ -1980,6 +2212,15 @@ branch → review → merge to `master`. Update this document at the end.
   `--vocabulary` in the apps (see "Bag of Words"; triangulation 26–39× faster per
   Frame, stereo ATE regressed: TODO).
 
+- Relocalization and reference-Frame tracking, roadmap step 3 / tracking
+  sub-project 4 (branch `feat/relocalization`, merge pending): motion-model
+  inlier gate (fixes the stereo-with-vocabulary regression), BoW in
+  `MapTransaction`, `bow::FrameDatabase`, `features::SearchByBoW`,
+  `geometry::SolvePnPRansac` (Lambda Twist P3P), `RecentlyLost` with
+  `TrackingLost::final`, reference-Frame tracking, relocalization into the
+  same map, `--drop_frames` (see "Relocalization and Reference-Frame
+  Tracking").
+
 **Required follow-up:**
 - Decide `MapPointStorage` growth / compaction (Open Question 2); ids are
   append-only since 2026-10-05.
@@ -1990,9 +2231,8 @@ branch → review → merge to `master`. Update this document at the end.
   rounding). Building OpenCV from source to link against
   (in progress, user).
 - Tracker measurement policy (19).
-- Roadmap (`docs/ROADMAP.md`): relocalization /
-  reference-keyframe tracking via place recognition (step 3, tracking
-  sub-project 4; the user has their own design, ask first), loop closing with
-  global BA in its own thread (step 4).
+- Roadmap (`docs/ROADMAP.md`): loop closing with global BA in its own
+  thread (step 4); relocalization into other maps comes with map merging
+  (step 5).
 - Event pool lifetime (Open Question 25).
 - Then the Mapper, then the LoopCloser.
