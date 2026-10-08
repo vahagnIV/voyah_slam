@@ -6,8 +6,11 @@
 #include <concurrentqueue.h>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
+#include <voyahslam/bow/vocabulary.h>
 #include <voyahslam/defs.h>
 #include <voyahslam/events/event_node.h>
 #include <voyahslam/events/frame_tracked.h>
@@ -108,7 +111,11 @@ public:
     using TBinocularMeasurement = features::TBinocularMeasurement<TFeatureExtractor>;
     using TMeasurement = features::TMeasurement<TFeatureExtractor>;
 
-    explicit Tracker(TrackerOptions options = {}) : options_(options) {}
+    // `vocabulary` (may be null) is immutable and shared read-only with the
+    // Mapper.
+    explicit Tracker(TrackerOptions options = {},
+                     std::shared_ptr<const bow::Vocabulary<TFeatureExtractor>> vocabulary = nullptr)
+        : options_(options), vocabulary_(std::move(vocabulary)) {}
     // Stops the worker before any member it uses is destroyed.
     ~Tracker();
 
@@ -195,6 +202,7 @@ private:
     void PublishTrackingLost(double timestamp);
 
     const TrackerOptions options_;
+    const std::shared_ptr<const bow::Vocabulary<TFeatureExtractor>> vocabulary_;
     moodycamel::ConcurrentQueue<TMeasurement> measurements_;
     events::Listener inbox_listener_ = inbox_.GetListener();
 

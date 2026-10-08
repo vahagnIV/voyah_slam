@@ -46,6 +46,8 @@ struct PublishedFrame {
     std::vector<map::MapPointId> observed_points;
     TDescriptors descriptors;
     geometry::TRowVectorF depths;
+    bow::BowVector bow;  // the transaction's BoW data of the Frame
+    bow::FeatureVector features;
 };
 
 // One published MapTransaction.
@@ -139,6 +141,8 @@ protected:
                         std::visit([](const auto& m) { return m.timestamp(); }, added.measurement);
                     frame.observed_features = added.observed_features;
                     frame.observed_points = added.observed_points;
+                    frame.bow = added.bow;
+                    frame.features = added.features;
                     if (const auto* mono = std::get_if<TMonocularMeasurement>(&added.measurement)) {
                         frame.descriptors = mono->descriptors();
                     } else if (const auto* binocular =
@@ -2395,6 +2399,43 @@ TEST(MapperBowTest, FramesGetBowWithVocabulary) {
     EXPECT_EQ(num_checked, run.mapper().num_keyframes());
     // The initial Frames included (Frame 0 is never culled).
     EXPECT_NE(run.mapper().BowVectorOf(map::FrameId{0}), nullptr);
+}
+
+TEST(MapperBowTest, TransactionsCarryBow) {
+    const auto vocabulary = MakeSplitVocabulary();
+    MapperBowRun run(MapperOptions{}, vocabulary);
+    const std::vector<Published> published = run.RunMono();
+    size_t num_frames = 0;
+    for (const Published& p : published) {
+        for (const PublishedFrame& frame : p.frames) {
+            ++num_frames;
+            SCOPED_TRACE("Frame " + std::to_string(frame.frame_id.value));
+            EXPECT_FALSE(frame.bow.entries.empty());
+            EXPECT_FALSE(frame.features.nodes.empty());
+            bow::BowVector expected;
+            bow::FeatureVector features;
+            vocabulary->Transform(frame.descriptors, TMapper::kBowLevelsUp, expected, features);
+            EXPECT_EQ(frame.bow.entries, expected.entries);
+            EXPECT_EQ(frame.features.nodes, features.nodes);
+            EXPECT_EQ(frame.features.offsets, features.offsets);
+            EXPECT_EQ(frame.features.features, features.features);
+            // Equal to the Mapper's own, where the Frame is still in the map.
+            if (const bow::BowVector* own = run.mapper().BowVectorOf(frame.frame_id)) {
+                EXPECT_EQ(frame.bow.entries, own->entries);
+            }
+        }
+    }
+    EXPECT_GT(num_frames, 0u);
+}
+
+TEST(MapperBowTest, TransactionsHaveNoBowWithoutVocabulary) {
+    MapperBowRun run;
+    for (const Published& p : run.RunMono()) {
+        for (const PublishedFrame& frame : p.frames) {
+            EXPECT_TRUE(frame.bow.entries.empty());
+            EXPECT_TRUE(frame.features.nodes.empty());
+        }
+    }
 }
 
 TEST(MapperBowTest, NoBowWithoutVocabulary) {

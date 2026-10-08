@@ -355,7 +355,7 @@ private:
     // observations, every point; tracking starts from the last Frame.
     void PublishNewMap();
     // Appends `keyframe`, with its pose and measurement, to `out_event`'s
-    // added Frames; returns that part.
+    // added Frames, with its BoW data if there is a vocabulary; returns that part.
     events::NewFrame<TFeatureExtractor>& AddFramePart(
         const TKeyFrame& keyframe, events::MapTransaction<TFeatureExtractor>& out_event) const;
 

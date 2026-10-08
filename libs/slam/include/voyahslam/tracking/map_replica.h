@@ -9,6 +9,7 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include <voyahslam/bow/bow_vector.h>
 #include <voyahslam/defs.h>
 #include <voyahslam/events/event_types.h>
 #include <voyahslam/events/map_transaction.h>
@@ -28,6 +29,9 @@ struct ReplicaKeyFrame {
     geometry::RigidTransformation T_cw;  // world -> camera
     features::TMeasurement<TFeatureExtractor> measurement;
     std::vector<std::pair<uint32_t, map::MapPointId>> observations;  // (feature, point)
+    // The Mapper's BoW data of the left descriptors; empty without a vocabulary.
+    bow::BowVector bow;
+    bow::FeatureVector features;
 };
 
 // The Tracker's private copy of the map, built only from Mapper events and
@@ -169,6 +173,8 @@ void MapReplica<TFeatureExtractor>::ApplyTransaction(
         keyframe.id = added.id;
         keyframe.T_cw = added.T_cw;
         keyframe.measurement = added.measurement;
+        keyframe.bow = added.bow;
+        keyframe.features = added.features;
         keyframe.observations.reserve(added.observed_features.size());
     }
 

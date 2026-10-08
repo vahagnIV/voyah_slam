@@ -5,6 +5,7 @@
 #include <optional>
 #include <utility>
 #include <vector>
+#include <voyahslam/bow/bow_vector.h>
 #include <voyahslam/defs.h>
 #include <voyahslam/events/event_types.h>
 #include <voyahslam/features/measurement.h>
@@ -47,6 +48,10 @@ struct NewFrame {
     features::TMeasurement<TFeatureExtractor> measurement;  // carries the timestamp
     std::vector<uint32_t> observed_features;
     std::vector<map::MapPointId> observed_points;
+    // The BoW data of the measurement's (left) descriptors: filled by a Mapper
+    // that has a vocabulary, empty otherwise.
+    bow::BowVector bow;
+    bow::FeatureVector features;
 };
 
 // Everything one Mapper step changes in map `map_id`: the only event the

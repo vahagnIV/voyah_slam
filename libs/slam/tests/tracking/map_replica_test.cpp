@@ -169,6 +169,29 @@ TEST(MapReplicaTest, KeyFrameStoresObservationsAndReference) {
     EXPECT_FALSE(replica.Reference({1}).has_value());
 }
 
+TEST(MapReplicaTest, StoresFrameBow) {
+    TReplica replica;
+    ApplyTransaction(replica, 1, [&](TTransaction& event) {
+        AddFrame(event, 4, MakePose(0.1, 0, 0, 0), {0, 1}, {});
+        AddFrame(event, 5, MakePose(0.2, 0, 0, 0), {0}, {});
+        events::NewFrame<Extractor>& first = event.added_frames[0];
+        first.bow.entries = {{3, 0.25}, {7, 0.75}};
+        first.features.nodes = {2, 9};
+        first.features.offsets = {0, 1, 2};
+        first.features.features = {0, 1};
+    });
+    const auto* with = replica.keyframe({4});
+    ASSERT_NE(with, nullptr);
+    EXPECT_EQ(with->bow.entries, (std::vector<std::pair<bow::WordId, double>>{{3, 0.25}, {7, 0.75}}));
+    EXPECT_EQ(with->features.nodes, (std::vector<bow::NodeId>{2, 9}));
+    EXPECT_EQ(with->features.offsets, (std::vector<uint32_t>{0, 1, 2}));
+    EXPECT_EQ(with->features.features, (std::vector<uint32_t>{0, 1}));
+    const auto* without = replica.keyframe({5});
+    ASSERT_NE(without, nullptr);
+    EXPECT_TRUE(without->bow.entries.empty());
+    EXPECT_TRUE(without->features.nodes.empty());
+}
+
 TEST(MapReplicaTest, ReferenceIsFirstObservingKeyFrame) {
     TReplica replica;
     CreateKeyFrame(replica, 1, 4, MakePose(0.0, 0, 0, 0), {2, 5, 3}, {{0, 0}}, kThreePoints);

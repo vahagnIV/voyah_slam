@@ -735,6 +735,12 @@ events::NewFrame<TFeatureExtractor>& Mapper<TFeatureExtractor>::AddFramePart(
     part.id = keyframe.id();
     part.T_cw = keyframe.pose();
     part.measurement = keyframe.measurement();
+    if (vocabulary_) {
+        const KeyFrameRecord* record = FindRecord(keyframe.id());
+        assert(record != nullptr);
+        part.bow = record->bow;
+        part.features = record->features;
+    }
     return part;
 }
 
