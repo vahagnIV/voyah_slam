@@ -22,11 +22,12 @@ public:
     using TMapper = mapping::Mapper<TFeatureExtractor>;
     using TLoopCloser = loop_closing::LoopCloser<TFeatureExtractor>;
 
-    // `vocabulary` (may be null) goes to the Mapper and the Tracker; it is immutable, so the
-    // threads share it without locks.
+    // `vocabulary` (may be null) goes to the Mapper, the Tracker and the LoopCloser; it is
+    // immutable, so the threads share it without locks. Without it there is no loop closing.
     explicit Slam(mapping::MapperOptions mapper_options = {},
                   tracking::TrackerOptions tracker_options = {},
-                  std::shared_ptr<const typename TMapper::TVocabulary> vocabulary = nullptr);
+                  std::shared_ptr<const typename TMapper::TVocabulary> vocabulary = nullptr,
+                  loop_closing::LoopCloserOptions loop_closer_options = {});
     // Stops every component thread before any component is destroyed.
     ~Slam();
     Slam(const Slam&) = delete;
