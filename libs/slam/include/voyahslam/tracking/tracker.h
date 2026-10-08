@@ -43,7 +43,11 @@ struct TrackingOptions {
     double window_mono_px = 15.0;       // last-frame search window, monocular
     double window_stereo_px = 7.0;      // last-frame search window, binocular
     size_t min_motion_matches = 20;     // below: retry with the window x2; still below: fail
-    size_t min_motion_inliers = 10;     // after pose optimization
+    size_t min_motion_inliers = 10;     // after pose optimization (motion model and zero motion)
+    // Motion-model step only: a pose with fewer final inliers counts as failed
+    // and the zero-motion fallback runs (fast rotations otherwise yield
+    // 10-29 inlier poses that drift).
+    size_t min_motion_model_inliers = 30;
     double fallback_window_scale = 4.0; // zero-motion fallback window factor
     double local_map_th = 1.0;          // local-map search window factor
     size_t min_local_map_inliers = 30;

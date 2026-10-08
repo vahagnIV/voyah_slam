@@ -292,9 +292,12 @@ auto Tracker<TFeatureExtractor>::TrackFromLastFrame(const TMeasurement& measurem
     }
 
     PoseResult pose = OptimizeAndDropOutliers(measurement, predicted, std::move(matches));
-    if (pose.num_inliers < tracking.min_motion_inliers) {
+    const size_t min_inliers = stage == events::TrackingStage::MotionModel
+                                   ? tracking.min_motion_model_inliers
+                                   : tracking.min_motion_inliers;
+    if (pose.num_inliers < min_inliers) {
         log_->debug("{} failed: {} matches, {} inliers (< {})", step, pose.num_matches,
-                    pose.num_inliers, tracking.min_motion_inliers);
+                    pose.num_inliers, min_inliers);
         return std::nullopt;
     }
     log_->debug("{}: {} matches, {} inliers", step, pose.num_matches, pose.num_inliers);

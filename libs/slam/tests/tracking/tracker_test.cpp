@@ -1,4 +1,6 @@
 #include <gtest/gtest.h>
+#include <spdlog/sinks/ostream_sink.h>
+#include <spdlog/spdlog.h>
 #include "tracking/tracker_test_fixture.h"
 #include <support/synthetic_sequence.h>
 #include <support/test_measurements.h>
@@ -16,7 +18,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -115,6 +119,66 @@ TEST_F(TrackerTest, TracksAndPublishesFrameTracked) {
     ExpectTrackedMetric(captured, sequence.frames[1].T_cw,
                         test::MapAlignment(sequence.frames[0].T_cw), 1);
     EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
+}
+
+// Tracker with a configurable motion-model gate. The tracking stage is not
+// part of FrameTracked (it always reports the local-map stage), so the tests
+// read the Tracker's debug log for the step that produced the pose.
+class TrackerGateTest : public TrackerTest {
+protected:
+    explicit TrackerGateTest(size_t min_motion_model_inliers = 30)
+        : TrackerTest({}, GateOptions(min_motion_model_inliers)) {}
+
+    static TrackerOptions GateOptions(size_t min_motion_model_inliers) {
+        TrackerOptions options;
+        options.tracking.min_motion_model_inliers = min_motion_model_inliers;
+        return options;
+    }
+
+    // Tracks frames 1 and 2 (frame 2 is the first with a velocity) and returns
+    // the Tracker's debug log.
+    std::string TrackTwoFramesLog() {
+        const auto sequence = StereoSequence();
+        EXPECT_EQ(InitializeStereo(sequence, 0), 0u);
+        const auto logger = spdlog::get("Tracker");
+        EXPECT_NE(logger, nullptr);
+        std::ostringstream out;
+        const auto sink = std::make_shared<spdlog::sinks::ostream_sink_mt>(out);
+        const auto previous_level = logger->level();
+        logger->sinks().push_back(sink);
+        logger->set_level(spdlog::level::debug);
+        for (size_t k = 1; k <= 2; ++k) {
+            const auto captured = Feed(sequence.frames[k].measurement);
+            EXPECT_EQ(captured.size(), 1u);
+            if (!captured.empty()) EXPECT_EQ(captured[0].type, events::EventType::FrameTracked);
+        }
+        logger->sinks().pop_back();
+        logger->set_level(previous_level);
+        return out.str();
+    }
+};
+
+class TrackerStrictGateTest : public TrackerGateTest {
+protected:
+    // No frame of the synthetic sequence reaches this many motion-model inliers.
+    TrackerStrictGateTest() : TrackerGateTest(100000) {}
+};
+
+TEST_F(TrackerGateTest, MotionModelAcceptedAboveGate) {
+    EXPECT_EQ(TrackingOptions{}.min_motion_model_inliers, 30u);
+    EXPECT_EQ(TrackingOptions{}.min_motion_inliers, 10u);
+    const std::string log = TrackTwoFramesLog();
+    EXPECT_NE(log.find("motion model:"), std::string::npos) << log;
+    EXPECT_EQ(log.find("motion model failed"), std::string::npos) << log;
+}
+
+TEST_F(TrackerStrictGateTest, WeakMotionModelFallsBackToZeroMotion) {
+    // Frame 2 is tracked with a velocity; its motion-model pose has fewer
+    // inliers than the gate, so zero motion (gated at min_motion_inliers only)
+    // produces the pose.
+    const std::string log = TrackTwoFramesLog();
+    EXPECT_NE(log.find("motion model failed"), std::string::npos) << log;
+    EXPECT_NE(log.find("zero motion:"), std::string::npos) << log;
 }
 
 TEST_F(TrackerTest, UrgentWhenInliersNearGate) {

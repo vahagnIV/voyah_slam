@@ -82,8 +82,9 @@ inline test::SyntheticStereoSequence StereoSequence(double step = 0.05, double y
 // records what the Tracker publishes.
 class TrackerTest : public ::testing::Test {
 protected:
-    explicit TrackerTest(mapping::MapperOptions mapper_options = {})
-        : mapper_(std::move(mapper_options)) {
+    explicit TrackerTest(mapping::MapperOptions mapper_options = {},
+                         TrackerOptions tracker_options = {})
+        : mapper_(std::move(mapper_options)), tracker_(std::move(tracker_options)) {
         mapper_.AddObserver(tracker_.inbox());
         tracker_.AddObserver(mapper_.inbox());
         injector_.ConnectAsync(tracker_.inbox());
