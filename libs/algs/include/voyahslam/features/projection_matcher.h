@@ -18,6 +18,7 @@
 #include <voyahslam/features/rotation_histogram.h>
 #include <voyahslam/geometry/camera.h>
 #include <voyahslam/geometry/rigid_transformation.h>
+#include <voyahslam/geometry/sim3.h>
 #include <voyahslam/map/map_point_id.h>
 #include <voyahslam/map/point_reference.h>
 
@@ -32,6 +33,7 @@ struct ProjectionMatcherOptions {
     double level_scale = 1.2;
     int max_level = 7;                 // ORB 8 levels
     double max_ray_angle_deg = 85.0;   // reject projections beyond the measurement's 85° limit
+    double scale_slack = 0.2;          // SearchBySim3Projection: distance in [(1 - slack) min, (1 + slack) max]
 };
 
 // The point source of both searches (TPointSource) is duck-typed on
@@ -86,6 +88,62 @@ private:
                                       int max_level) {
     const double shift = std::log(reference.distance / distance) / std::log(level_scale);
     return std::clamp(reference.level + static_cast<int>(std::lround(shift)), 0, max_level);
+}
+
+// One direction of SearchBySim3Projection: per `from` feature, the `to` feature its point
+// matches through S_to_from (from-camera to to-camera coordinates), or -1.
+template <typename TFeatureExtractor>
+[[nodiscard]] std::vector<Eigen::Index> SearchSim3Direction(
+    const TMonocularMeasurement<TFeatureExtractor>& from, const geometry::RigidTransformation& T_from_w,
+    const std::vector<std::optional<map::MapPointId>>& points_from,
+    const std::vector<geometry::TPoint3DF>& positions_from, const TMonocularMeasurement<TFeatureExtractor>& to,
+    const geometry::Sim3& S_to_from, double th, int max_distance, const ProjectionMatcherOptions& options) {
+    const Eigen::Index num_from = from.points().cols();
+    assert(static_cast<Eigen::Index>(points_from.size()) == num_from);
+    assert(positions_from.size() == points_from.size());
+    std::vector<Eigen::Index> matches(static_cast<size_t>(num_from), -1);
+
+    const FeatureGrid grid(to.distorted_points(), to.levels());
+    const ProjectionGate gate(to.camera(), to.distorted_points(), options.max_ray_angle_deg);
+    const double max_level_scale = std::pow(options.level_scale, options.max_level);
+    for (Eigen::Index i = 0; i < num_from; ++i) {
+        const auto index = static_cast<size_t>(i);
+        if (!points_from[index]) {
+            continue;
+        }
+        const geometry::TPoint3DF X_from = T_from_w.Transform(positions_from[index]);
+        const geometry::TPoint3DF X_to = geometry::Apply(S_to_from, X_from);
+        const std::optional<geometry::TPoint2DF> uv = gate.Project(X_to);
+        if (!uv) {
+            continue;
+        }
+        // The `from` observation is the scale reference (ORB-SLAM3 uses the point's).
+        const map::PointReference reference{{}, i, from.levels()(i), X_from.norm()};
+        const double distance = X_to.norm();
+        const double max_scale_distance = reference.distance * std::pow(options.level_scale, reference.level);
+        const double min_scale_distance = max_scale_distance / max_level_scale;
+        if (distance < (1.0 - options.scale_slack) * min_scale_distance ||
+            distance > (1.0 + options.scale_slack) * max_scale_distance) {
+            continue;
+        }
+        const int level = PredictLevel(reference, distance, options.level_scale, options.max_level);
+        const double radius = th * std::pow(options.level_scale, level);
+        const typename TFeatureExtractor::TDescriptor descriptor = from.descriptors().col(i);
+        double best = std::numeric_limits<double>::infinity();
+        Eigen::Index best_index = -1;
+        for (const Eigen::Index j : grid.FeaturesInArea(*uv, radius, level - 1, level)) {
+            const typename TFeatureExtractor::TDescriptor candidate = to.descriptors().col(j);
+            const double d = static_cast<double>(TFeatureExtractor::Distance(descriptor, candidate));
+            if (d < best) {
+                best = d;
+                best_index = j;
+            }
+        }
+        if (best_index >= 0 && best <= max_distance) {
+            matches[index] = best_index;
+        }
+    }
+    return matches;
 }
 
 }  // namespace detail
@@ -364,6 +422,40 @@ size_t SearchFromFrame(const TMonocularMeasurement<TFeatureExtractor>& current,
         }
     }
     return added;
+}
+
+// ORB-SLAM3 ORBmatcher::SearchBySim3 between two map Frames whose camera coordinates S_12 maps
+// 2 -> 1 (x1 = S_12 x2; geometry::SolveSim3Ransac's convention). points_k / positions_k give,
+// per feature of frame_k, the point it observes (nullopt: none) and its world position; T_kw
+// maps world to camera k. Each point of Frame 1 is projected into Frame 2 through
+// S_12⁻¹ T1w and each point of Frame 2 into Frame 1 through S_12 T2w (raw pixels: behind the
+// camera, beyond the ray-angle limit or outside the raw-point bounding box is skipped). The
+// observing feature is the scale reference (level l_ref at distance d_ref = its camera
+// distance): the projected distance d must lie within [(1 - scale_slack) d_min,
+// (1 + scale_slack) d_max], d_max = d_ref * level_scale^l_ref, d_min = d_max /
+// level_scale^max_level, and predicts the level l. The point's feature descriptor is matched to
+// the closest feature, observing a point or not, at levels [l - 1, l] within radius *
+// level_scale^l px, accepted at <= max_distance. Returns the mutual matches (feature 1,
+// feature 2), Frame 1's feature order: 1's point picks 2's feature and 2's point picks it back.
+template <typename TFeatureExtractor>
+[[nodiscard]] std::vector<std::pair<uint32_t, uint32_t>> SearchBySim3Projection(
+    const TMonocularMeasurement<TFeatureExtractor>& frame1, const geometry::RigidTransformation& T1w,
+    const std::vector<std::optional<map::MapPointId>>& points1, const std::vector<geometry::TPoint3DF>& positions1,
+    const TMonocularMeasurement<TFeatureExtractor>& frame2, const geometry::RigidTransformation& T2w,
+    const std::vector<std::optional<map::MapPointId>>& points2, const std::vector<geometry::TPoint3DF>& positions2,
+    const geometry::Sim3& S_12, double radius, int max_distance, const ProjectionMatcherOptions& options = {}) {
+    const std::vector<Eigen::Index> match12 = detail::SearchSim3Direction<TFeatureExtractor>(
+        frame1, T1w, points1, positions1, frame2, geometry::Inverse(S_12), radius, max_distance, options);
+    const std::vector<Eigen::Index> match21 = detail::SearchSim3Direction<TFeatureExtractor>(
+        frame2, T2w, points2, positions2, frame1, S_12, radius, max_distance, options);
+    std::vector<std::pair<uint32_t, uint32_t>> matches;
+    for (size_t i1 = 0; i1 < match12.size(); ++i1) {
+        const Eigen::Index i2 = match12[i1];
+        if (i2 >= 0 && match21[static_cast<size_t>(i2)] == static_cast<Eigen::Index>(i1)) {
+            matches.emplace_back(static_cast<uint32_t>(i1), static_cast<uint32_t>(i2));
+        }
+    }
+    return matches;
 }
 
 }  // namespace voyahslam::features

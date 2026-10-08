@@ -6,6 +6,7 @@
 #include "voyahslam/defs.h"
 #include "voyahslam/geometry/camera.h"
 #include "voyahslam/geometry/rigid_transformation.h"
+#include "voyahslam/geometry/sim3.h"
 
 namespace voyahslam::optimization {
 
@@ -19,6 +20,15 @@ namespace internal {
     jacobian << 0.0, xc.z(), -xc.y(), 1.0, 0.0, 0.0,
                 -xc.z(), 0.0, xc.x(), 0.0, 1.0, 0.0,
                 xc.y(), -xc.x(), 0.0, 0.0, 0.0, 1.0;
+    return jacobian;
+}
+
+/// d(y)/d(delta) = [-[y]x | I | y] for the left perturbation S <- exp(delta) * S applied to a
+/// point y = S X, delta = (omega, upsilon, sigma) (the g2o VertexSim3Expmap update convention).
+[[nodiscard]] inline Eigen::Matrix<precision_t, 3, 7> PointSim3Jacobian(const geometry::TPoint3DF& y) {
+    Eigen::Matrix<precision_t, 3, 7> jacobian;
+    jacobian.leftCols<6>() = PointPoseJacobian(y);
+    jacobian.col(6) = y;
     return jacobian;
 }
 
@@ -102,6 +112,41 @@ inline void StereoPixelJacobians(const geometry::Camera& left_camera,
     out_pose.row(2) = right_u * point_pose;
     out_point.topRows<2>() = left_jacobian * T_cw.rotation();
     out_point.row(2) = right_u * T_cw.rotation();
+}
+
+/// Raw pixel in camera 1 of the camera-2 point X2: camera1.Project(S_12 X2). The depth of
+/// S_12 X2 must be positive.
+[[nodiscard]] inline geometry::TPoint2DF Sim3Pixel(const geometry::Camera& camera1, const geometry::Sim3& S_12,
+                                                   const geometry::TPoint3DF& X2) {
+    return camera1.Project(geometry::Apply(S_12, X2));
+}
+
+/// Jacobian of Sim3Pixel w.r.t. the left perturbation S_12 <- exp(delta) * S_12,
+/// delta = (omega, upsilon, sigma): ProjectJacobian(y) * [-[y]x | I | y], y = S_12 X2.
+[[nodiscard]] inline Eigen::Matrix<precision_t, 2, 7> Sim3PixelJacobian(const geometry::Camera& camera1,
+                                                                         const geometry::Sim3& S_12,
+                                                                         const geometry::TPoint3DF& X2) {
+    const geometry::TPoint3DF y = geometry::Apply(S_12, X2);
+    return camera1.ProjectJacobian(y) * internal::PointSim3Jacobian(y);
+}
+
+/// Raw pixel in camera 2 of the camera-1 point X1: camera2.Project(S_12⁻¹ X1). The depth of
+/// S_12⁻¹ X1 must be positive.
+[[nodiscard]] inline geometry::TPoint2DF InverseSim3Pixel(const geometry::Camera& camera2,
+                                                          const geometry::Sim3& S_12,
+                                                          const geometry::TPoint3DF& X1) {
+    return camera2.Project(geometry::Apply(geometry::Inverse(S_12), X1));
+}
+
+/// Jacobian of InverseSim3Pixel w.r.t. the same left perturbation of S_12: S_12⁻¹ becomes
+/// S_12⁻¹ exp(-delta), so with z = S_12⁻¹ X1 it is
+/// ProjectJacobian(z) * (1/s) Rᵀ * [[X1]x | -I | -X1].
+[[nodiscard]] inline Eigen::Matrix<precision_t, 2, 7> InverseSim3PixelJacobian(const geometry::Camera& camera2,
+                                                                                const geometry::Sim3& S_12,
+                                                                                const geometry::TPoint3DF& X1) {
+    const geometry::Sim3 S_21 = geometry::Inverse(S_12);
+    const geometry::TPoint3DF z = geometry::Apply(S_21, X1);
+    return camera2.ProjectJacobian(z) * (S_21.scale * S_21.R) * -internal::PointSim3Jacobian(X1);
 }
 
 }  // namespace voyahslam::optimization

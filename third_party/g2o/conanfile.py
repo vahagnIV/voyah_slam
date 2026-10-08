@@ -63,7 +63,7 @@ class G2oConan(ConanFile):
         self.cpp_info.set_property("cmake_file_name", "g2o")
 
         # Components mirror upstream's target link order:
-        #   stuff <- core <- types_slam3d <- types_sba ; core <- solver_eigen
+        #   stuff <- core <- types_slam3d <- types_sba <- types_sim3 ; core <- solver_eigen
         def comp(name, lib, requires):
             c = self.cpp_info.components[name]
             c.set_property("cmake_target_name", f"g2o::{name}")
@@ -76,6 +76,7 @@ class G2oConan(ConanFile):
         comp("core", "g2o_core", ["stuff", "eigen::eigen"])
         comp("types_slam3d", "g2o_types_slam3d", ["core"])
         comp("types_sba", "g2o_types_sba", ["core", "types_slam3d"])
+        comp("types_sim3", "g2o_types_sim3", ["core", "types_sba"])
         comp("solver_eigen", "g2o_solver_eigen", ["core"])
         if self.settings.os in ("Linux", "FreeBSD"):
             self.cpp_info.components["stuff"].system_libs.append("rt")
