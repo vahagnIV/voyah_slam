@@ -28,6 +28,7 @@ voyah_add_test_binary(voyah_algs_tests
         mapping/map_quality_test.cpp
         mapping/triangulation_test.cpp
         optimization/bundle_adjustment_test.cpp
+        optimization/essential_graph_test.cpp
         optimization/pose_optimization_test.cpp
         optimization/sim3_optimization_test.cpp
         optimization/projection_test.cpp

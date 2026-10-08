@@ -23,6 +23,7 @@ add_library(voyah_algs STATIC
     src/mapping/keyframe_decision.cpp
     src/mapping/map_quality.cpp
     src/optimization/bundle_adjustment.cpp
+    src/optimization/essential_graph.cpp
     src/optimization/pose_optimization.cpp
     src/optimization/sim3_optimization.cpp
 )
