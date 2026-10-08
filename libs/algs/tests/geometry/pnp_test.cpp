@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <random>
 #include <vector>
 
@@ -15,6 +16,7 @@
 #include "voyahslam/geometry/distortion_models/kannala_brandt_distortion_model.h"
 #include "voyahslam/geometry/pnp.h"
 #include "voyahslam/geometry/rigid_transformation.h"
+#include "voyahslam/optimization/pose_optimization.h"
 
 namespace voyahslam::geometry {
 namespace {
@@ -158,27 +160,47 @@ TEST(PnpTest, RansacFisheyeNoiseFree) {
     }
 }
 
-// The pose is the unrefined best P3P hypothesis. Over 1000 random scenes like this one it meets
-// all three bounds only about a third of the time (after OptimizePose on it: 97 %); this seed is
-// one that does, so the test pins the implementation rather than a statistical guarantee.
+// Contract: SolvePnPRansac is a raw hypothesis generator; accuracy and the final inlier set are
+// owned by the refinement (spec 4.5). Relocalization runs OptimizePose over all candidate matches
+// from the RANSAC pose. Over 50 random scenes (seeds 0..49, not hand-picked), in at least 95 %:
+// (a) RANSAC succeeds and OptimizePose's inlier mask is >= 90 % correct; (b) the refined pose is
+// within 1 cm / 0.5°.
 TEST(PnpTest, RansacHalfOutliers) {
     const auto model = TumViModel();
     const Camera camera = TumViCamera(&model);
-    std::mt19937 rng(4);
-    PnpScene scene = RandomPnpScene(rng, camera, 100, 80.0 * kDeg, 1.0);
-    // Points 50..99 are outliers: their pixels are replaced by the projection of a random ray.
-    for (size_t i = 50; i < 100; ++i) scene.pixels[i] = camera.Project(RandomRay(rng, 80.0 * kDeg));
+    constexpr uint64_t kScenes = 50;
+    size_t mask_ok = 0;
+    size_t refined_ok = 0;
+    for (uint64_t seed = 0; seed < kScenes; ++seed) {
+        std::mt19937 rng(static_cast<std::mt19937::result_type>(seed));
+        PnpScene scene = RandomPnpScene(rng, camera, 100, 80.0 * kDeg, 1.0);
+        // Points 50..99 are outliers: their pixels are replaced by the projection of a random ray.
+        for (size_t i = 50; i < 100; ++i) scene.pixels[i] = camera.Project(RandomRay(rng, 80.0 * kDeg));
 
-    const PnpResult result = SolvePnPRansac(camera, scene.world, scene.pixels, scene.sigmas, PnpOptions{});
-    ASSERT_TRUE(result.success);
-    EXPECT_LT((result.T_cw.translation() - scene.T_cw.translation()).norm(), 0.01);
-    EXPECT_LT(RotationErrorDeg(result.T_cw, scene.T_cw), 0.5);
-    ASSERT_EQ(result.inlier.size(), 100u);
-    size_t correct = 0;
-    for (size_t i = 0; i < 100; ++i) correct += result.inlier[i] == (i < 50) ? 1 : 0;
-    EXPECT_GE(correct, 90u);
-    EXPECT_GE(result.iterations, 1);
-    EXPECT_LE(result.iterations, PnpOptions{}.max_iterations);
+        PnpOptions options;
+        options.seed = seed;
+        const PnpResult result = SolvePnPRansac(camera, scene.world, scene.pixels, scene.sigmas, options);
+        EXPECT_GE(result.iterations, 1);
+        EXPECT_LE(result.iterations, options.max_iterations);
+        if (!result.success) continue;
+
+        std::vector<optimization::PoseObservation> observations;
+        for (size_t i = 0; i < 100; ++i) {
+            observations.push_back({scene.world[i], scene.pixels[i], std::nullopt, scene.sigmas[i]});
+        }
+        const optimization::PoseOptimizationResult refined =
+            optimization::OptimizePose(result.T_cw, camera, std::nullopt, observations, {});
+        size_t correct = 0;
+        for (size_t i = 0; i < 100; ++i) correct += refined.inlier[i] == (i < 50) ? 1 : 0;
+        mask_ok += correct >= 90 ? 1 : 0;
+        refined_ok += refined.success &&
+                              (refined.T_cw.translation() - scene.T_cw.translation()).norm() < 0.01 &&
+                              RotationErrorDeg(refined.T_cw, scene.T_cw) < 0.5
+                          ? 1
+                          : 0;
+    }
+    EXPECT_GE(mask_ok, 48u) << "RANSAC success and refined mask >= 90 % correct in " << mask_ok << "/" << kScenes;
+    EXPECT_GE(refined_ok, 48u) << "refined pose within 1 cm / 0.5° in " << refined_ok << "/" << kScenes;
 }
 
 void ExpectCleanFailure(const PnpResult& result) {
