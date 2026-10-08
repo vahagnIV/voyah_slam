@@ -15,6 +15,7 @@ voyah_add_test_binary(voyah_algs_tests
         features/keypoint_matches_test.cpp
         features/stereo_matcher_test.cpp
         geometry/geometry_test.cpp
+        geometry/pnp_test.cpp
         geometry/two_view_decomposition_test.cpp
         geometry/two_view_reconstruction_test.cpp
         images/bilinear_interpolation_tests.cpp
