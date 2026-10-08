@@ -9,7 +9,7 @@
 #include <voyahslam/features/instantiation.h>
 #include <voyahslam/geometry/pnp.h>
 #include <voyahslam/mapping/mapper.h>
-#include <voyahslam/tracking/local_map.h>
+#include <voyahslam/features/projection_matcher.h>
 #include <voyahslam/tracking/relocalizer.h>
 
 namespace voyahslam::tracking {
@@ -192,9 +192,10 @@ RelocalizationResult Relocalize(const MapReplica<TFeatureExtractor>& replica,
     features::BowMatchOptions bow_options;
     bow_options.nn_ratio = options.nn_ratio;
     std::vector<Candidate> candidates;
-    for (const map::FrameId frame :
-         RelocalizationCandidates(hits, replica.covisibility(), options.group_neighbours,
-                                  options.min_group_score_ratio)) {
+    const std::vector<map::FrameId> grouped = RelocalizationCandidates(
+        hits, replica.covisibility(), options.group_neighbours, options.min_group_score_ratio);
+    result.num_candidates = grouped.size();
+    for (const map::FrameId frame : grouped) {
         const ReplicaKeyFrame<TFeatureExtractor>* keyframe = replica.keyframe(frame);
         if (keyframe == nullptr) {
             continue;
@@ -229,10 +230,7 @@ RelocalizationResult Relocalize(const MapReplica<TFeatureExtractor>& replica,
 
     // 4.-6. Rounds of RANSAC, each verified at once.
     const double timestamp = std::visit([](const auto& m) { return m.timestamp(); }, measurement);
-    features::ProjectionMatcherOptions first_pass = matcher;
-    first_pass.max_distance_map = options.first_pass_max_distance;
-    features::ProjectionMatcherOptions second_pass = matcher;
-    second_pass.max_distance_map = options.second_pass_max_distance;
+    result.num_matched_candidates = candidates.size();
     size_t num_alive = candidates.size();
     for (int round = 0; num_alive > 0; ++round) {
         for (Candidate& candidate : candidates) {
@@ -261,33 +259,33 @@ RelocalizationResult Relocalize(const MapReplica<TFeatureExtractor>& replica,
 
             // Refined over all of the candidate's matches (Ruling F): the
             // robust rounds drop the outliers.
+            ++result.num_hypotheses;
             MatchedPose pose =
                 OptimizeMatchedPose(replica, measurement, ransac.T_cw, candidate.matches, refinement);
+            result.best_verified_inliers = std::max(result.best_verified_inliers, pose.num_inliers);
             if (pose.num_inliers < options.min_refined_inliers) {
                 drop();
                 continue;
             }
             if (pose.num_inliers < options.min_inliers) {
-                // The candidate Frame's other points.
-                LocalMap frame_points;
-                frame_points.frames = {candidate.frame};
-                frame_points.point_mask.assign(replica.num_points(), false);
-                for (const map::MapPointId point : replica.covisibility().Points(candidate.frame)) {
-                    frame_points.point_mask[point.value] = replica.IsAlive(point);
-                }
-                const LocalPointSource<TFeatureExtractor> source(replica, frame_points);
-                const auto project = [&](double window, const features::ProjectionMatcherOptions& pass) {
-                    features::SearchFromLocalMap<TFeatureExtractor>(current, pose.T_cw, source, pose.matches,
-                                                                    window, pass);
+                // The candidate Frame's other points (ORB-SLAM3 SearchByProjection
+                // with a KeyFrame: fixed radius, no ratio test).
+                const ReplicaKeyFrame<TFeatureExtractor>& keyframe = *replica.keyframe(candidate.frame);
+                const auto& frame_measurement = LeftOf<TFeatureExtractor>(keyframe.measurement);
+                const auto project = [&](double window, double max_distance) {
+                    features::SearchFromFrame<TFeatureExtractor>(current, pose.T_cw, frame_measurement,
+                                                                 keyframe.observations, replica, pose.matches,
+                                                                 window, max_distance, matcher);
                     pose = OptimizeMatchedPose(replica, measurement, pose.T_cw, std::move(pose.matches),
                                                refinement);
                 };
-                project(options.first_pass_window, first_pass);
+                project(options.first_pass_window, options.first_pass_max_distance);
                 if (pose.num_inliers > options.min_second_pass_inliers &&
                     pose.num_inliers < options.min_inliers) {
-                    project(options.second_pass_window, second_pass);
+                    project(options.second_pass_window, options.second_pass_max_distance);
                 }
             }
+            result.best_verified_inliers = std::max(result.best_verified_inliers, pose.num_inliers);
             if (pose.num_inliers >= options.min_inliers) {
                 result.success = true;
                 result.T_cw = pose.T_cw;

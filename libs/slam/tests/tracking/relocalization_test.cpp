@@ -11,6 +11,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <variant>
 #include <vector>
 
 namespace voyahslam::tracking {
@@ -67,18 +68,16 @@ protected:
 
     static double FrameTimestamp(size_t k) { return static_cast<double>(k) * kFrameInterval; }
 
-    // `frame`'s measurement, stereo-matched as the Tracker does on dequeue.
-    static features::TMeasurement<Extractor> Matched(const test::SyntheticStereoSequenceFrame& frame) {
-        auto measurement = frame.measurement;
-        measurement.SetStereoMatches(features::MatchStereo<Extractor>(measurement, TrackerOptions{}.stereo_matcher));
-        return measurement;
-    }
-
-    // Relocalize() on the Tracker's replica with the Tracker's defaults.
-    RelocalizationResult RelocalizeDirectly(const test::SyntheticStereoSequenceFrame& frame) const {
+    // Relocalize() on the Tracker's replica with the Tracker's options; a
+    // binocular measurement is stereo-matched first, as the Tracker does on
+    // dequeue.
+    RelocalizationResult RelocalizeDirectly(features::TMeasurement<Extractor> measurement) const {
         const TrackerOptions options = RelocalizingOptions();
+        if (auto* binocular = std::get_if<features::TBinocularMeasurement<Extractor>>(&measurement)) {
+            binocular->SetStereoMatches(features::MatchStereo<Extractor>(*binocular, options.stereo_matcher));
+        }
         const PoseRefinement refinement{options.pose_optimization, options.sigma_px, options.level_scale};
-        return Relocalize(tracker_.replica(), Matched(frame), *MakeRootVocabulary(), options.relocalization,
+        return Relocalize(tracker_.replica(), measurement, *MakeRootVocabulary(), options.relocalization,
                           refinement, options.matcher);
     }
 
@@ -135,24 +134,93 @@ TEST_F(RelocalizationTest, RelocalizesIntoSameMap) {
     EXPECT_EQ(next[0].map_id, map::MapId{1});
 }
 
+// The left features of `frame` (the mapped appearance) as a monocular
+// measurement at `timestamp`: the first `num_consistent` features of scene
+// points keep their keypoints, the next `num_moved` take each other's
+// keypoints (a cyclic shift: every one lands at another point's projection),
+// and the rest are left out.
+features::TMeasurement<Extractor> Aliased(const test::SyntheticStereoSequenceFrame& frame, size_t num_consistent,
+                                          size_t num_moved, double timestamp) {
+    const auto& left = frame.measurement.left();
+    std::vector<Eigen::Index> scene;  // features of scene points
+    for (size_t i = 0; i < frame.point_of_feature.size(); ++i) {
+        if (frame.point_of_feature[i] >= 0) scene.push_back(static_cast<Eigen::Index>(i));
+    }
+    EXPECT_GE(scene.size(), num_consistent + num_moved);
+    const auto n = static_cast<Eigen::Index>(num_consistent + num_moved);
+    geometry::TPoints2DF points(2, n);
+    geometry::TRowVectorF angles(n);
+    test::TestImageFeatures::TDescriptors descriptors(Extractor::DescriptorSize, n);
+    features::TLevels levels(n);
+    for (Eigen::Index k = 0; k < n; ++k) {
+        const Eigen::Index feature = scene[static_cast<size_t>(k)];
+        Eigen::Index keypoint = feature;
+        if (k >= static_cast<Eigen::Index>(num_consistent)) {
+            const auto moved = static_cast<Eigen::Index>(num_moved);
+            const Eigen::Index shifted = (k - static_cast<Eigen::Index>(num_consistent) + moved / 2) % moved;
+            keypoint = scene[static_cast<size_t>(static_cast<Eigen::Index>(num_consistent) + shifted)];
+        }
+        points.col(k) = left.distorted_points().col(keypoint);
+        angles[k] = left.angles()[feature];
+        descriptors.col(k) = left.descriptors().col(feature);
+        levels[k] = left.levels()[feature];
+    }
+    return features::TMonocularMeasurement<Extractor>(
+        test::TestImageFeatures(std::move(points), geometry::TRowVectorF::Ones(n), std::move(angles),
+                                std::move(descriptors), std::move(levels)),
+        test::SyntheticStereoIntrinsics(), nullptr, timestamp);
+}
+
 TEST_F(RelocalizationTest, UnmappedPlaceDoesNotRelocalize) {
     const auto sequence = LongStereoSequence();
     MapThenBlackOut(sequence);
-    // Another scene: other points, other descriptors.
-    const auto elsewhere = LongStereoSequence(/*seed=*/2);
+    const auto& resume = sequence.frames[kResumeFrame];
+    const double timestamp = FrameTimestamp(kResumeFrame);
+    const size_t min_inliers = RelocalizationOptions{}.min_inliers;
 
-    for (size_t k = kResumeFrame; k < kResumeFrame + 5; ++k) {
-        EXPECT_FALSE(RelocalizeDirectly(elsewhere.frames[k]).success) << "frame " << k;
-        EXPECT_TRUE(Feed(elsewhere.frames[k].measurement).empty()) << "frame " << k;
-        EXPECT_EQ(tracker_.state(), TrackerState::RecentlyLost) << "frame " << k;
-    }
+    // Another scene (other points, other descriptors): no candidate has
+    // enough SearchByBoW matches.
+    const auto elsewhere = LongStereoSequence(/*seed=*/2);
+    RelocalizationResult result = RelocalizeDirectly(elsewhere.frames[kResumeFrame].measurement);
+    EXPECT_FALSE(result.success);
+    EXPECT_GT(result.num_candidates, 0u);
+    EXPECT_EQ(result.num_matched_candidates, 0u);
+
+    // The mapped appearance at the wrong place: 200 features, all moved.
+    // SearchByBoW matches them; no RANSAC pose explains 10 of them.
+    const auto all_moved = Aliased(resume, 0, 200, timestamp);
+    result = RelocalizeDirectly(all_moved);
+    EXPECT_FALSE(result.success);
+    EXPECT_GT(result.num_matched_candidates, 0u);
+    EXPECT_EQ(result.num_hypotheses, 0u);
+
+    // 40 features consistent with the mapped place (about half of them
+    // matched to the candidate Frame), 40 moved: RANSAC and the refinement
+    // find the consistent ones, the projection passes find nothing more (the
+    // Frame's other points land on features of other descriptors), and the
+    // 50-inlier verification rejects them.
+    const auto partly_moved = Aliased(resume, 40, 40, timestamp);
+    result = RelocalizeDirectly(partly_moved);
+    EXPECT_FALSE(result.success);
+    EXPECT_GT(result.num_hypotheses, 0u);
+    EXPECT_GE(result.best_verified_inliers, RelocalizationOptions{}.min_refined_inliers);
+    EXPECT_LT(result.best_verified_inliers, min_inliers);
+    // Control: 200 consistent features (more of them observed by the
+    // candidate Frame) pass the same verification.
+    EXPECT_TRUE(RelocalizeDirectly(Aliased(resume, 200, 40, timestamp)).success);
+
+    // The Tracker stays RecentlyLost and publishes nothing.
+    EXPECT_TRUE(Feed(elsewhere.frames[kResumeFrame].measurement).empty());
+    EXPECT_TRUE(Feed(std::get<features::TMonocularMeasurement<Extractor>>(all_moved)).empty());
+    EXPECT_TRUE(Feed(std::get<features::TMonocularMeasurement<Extractor>>(partly_moved)).empty());
+    EXPECT_EQ(tracker_.state(), TrackerState::RecentlyLost);
     EXPECT_EQ(mapper_.current_map_id(), map::MapId{1});
 }
 
 TEST_F(RelocalizationTest, SkipsFrameRemovedMidRecovery) {
     const auto sequence = LongStereoSequence();
     MapThenBlackOut(sequence);
-    const RelocalizationResult first = RelocalizeDirectly(sequence.frames[kResumeFrame]);
+    const RelocalizationResult first = RelocalizeDirectly(sequence.frames[kResumeFrame].measurement);
     ASSERT_TRUE(first.success);
     ASSERT_NE(tracker_.replica().keyframe(first.frame), nullptr);
 
@@ -166,7 +234,7 @@ TEST_F(RelocalizationTest, SkipsFrameRemovedMidRecovery) {
     ASSERT_EQ(tracker_.replica().keyframe(first.frame), nullptr);
     ASSERT_FALSE(tracker_.replica().database().Contains(first.frame));
 
-    const RelocalizationResult second = RelocalizeDirectly(sequence.frames[kResumeFrame]);
+    const RelocalizationResult second = RelocalizeDirectly(sequence.frames[kResumeFrame].measurement);
     ASSERT_TRUE(second.success);
     EXPECT_NE(second.frame, first.frame);
     EXPECT_NE(tracker_.replica().keyframe(second.frame), nullptr);
@@ -183,7 +251,7 @@ TEST_F(RelocalizationTest, EmptyMeasurementsAdvanceTimeout) {
     const double lost_at = FrameTimestamp(kMappedFrames);
 
     // Empty measurements are relocalized (and fail) without stopping the clock.
-    EXPECT_FALSE(RelocalizeDirectly({test::MakeBinocular(0, lost_at + 1.0)}).success);
+    EXPECT_FALSE(RelocalizeDirectly(test::MakeBinocular(0, lost_at + 1.0)).success);
     for (const double dt : {1.0, 4.99}) {
         EXPECT_TRUE(Feed(test::MakeBinocular(0, lost_at + dt)).empty()) << dt;
         EXPECT_EQ(tracker_.state(), TrackerState::RecentlyLost) << dt;

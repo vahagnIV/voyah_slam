@@ -48,8 +48,10 @@ struct RelocalizationOptions {
     size_t min_inliers = 50;
     // Below min_inliers, the candidate's other points are projected
     // (first_pass_*), and again (second_pass_*) when the count is strictly
-    // between min_second_pass_inliers and min_inliers.
-    double first_pass_window = 10.0;        // SearchFromLocalMap window factor
+    // between min_second_pass_inliers and min_inliers: features::
+    // SearchFromFrame with radius window * level_scale^level pixels and
+    // descriptor distance <= max_distance (ORB-SLAM3's th and ORBdist).
+    double first_pass_window = 10.0;
     double first_pass_max_distance = 100.0;
     size_t min_second_pass_inliers = 30;
     double second_pass_window = 3.0;
@@ -100,6 +102,11 @@ struct RelocalizationResult {
     map::FrameId frame{};          // the candidate Frame relocalized against
     std::vector<int64_t> matches;  // per (left) feature: inlier MapPointId value or -1
     size_t inliers = 0;
+    // How far the attempt got (also on failure).
+    size_t num_candidates = 0;          // after grouping
+    size_t num_matched_candidates = 0;  // with >= min_bow_matches SearchByBoW matches
+    size_t num_hypotheses = 0;          // RANSAC poses that went to verification
+    size_t best_verified_inliers = 0;   // most inliers a verification reached
 };
 
 // Relocalizes `measurement` in `replica` (spec sections 4.2-4.5):
@@ -115,9 +122,10 @@ struct RelocalizationResult {
 //   5. a RANSAC pose is refined by OptimizePose over all of the candidate's
 //      SearchByBoW matches; fewer than min_refined_inliers drop the candidate;
 //   6. below min_inliers, the candidate Frame's other points are projected
-//      (SearchFromLocalMap restricted to them) and the pose optimized again,
-//      a second time with the narrower window when the count is strictly
-//      between min_second_pass_inliers and min_inliers.
+//      (features::SearchFromFrame; `matcher` gives its level scale, ray-angle
+//      limit and orientation check) and the pose optimized again, a second
+//      time with the narrower window when the count is strictly between
+//      min_second_pass_inliers and min_inliers.
 // The first candidate reaching min_inliers wins. Deterministic. The
 // measurement must be stereo-matched if binocular.
 template <typename TFeatureExtractor>

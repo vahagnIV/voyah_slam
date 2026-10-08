@@ -417,7 +417,9 @@ auto Tracker<TFeatureExtractor>::TryRelocalize(const TMeasurement& measurement)
     RelocalizationResult relocalized = Relocalize(replica_, measurement, *vocabulary_,
                                                   options_.relocalization, Refinement(), options_.matcher);
     if (!relocalized.success) {
-        log_->debug("relocalization failed");
+        log_->debug("relocalization failed: {} candidates, {} with BoW matches, {} hypotheses, best {} inliers",
+                    relocalized.num_candidates, relocalized.num_matched_candidates,
+                    relocalized.num_hypotheses, relocalized.best_verified_inliers);
         return std::nullopt;
     }
     log_->debug("relocalization: Frame {}, {} inliers", relocalized.frame.value, relocalized.inliers);
