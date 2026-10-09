@@ -37,6 +37,7 @@ int main(int argc, char** argv) {
         std::cout << "Dataset: " << options.dataset << ", " << reader.size()
                   << " stereo frames, baseline " << rig.baseline << " m\n";
 
+        if (options.vocabulary.empty() || !options.loop_closing) std::cout << "Loop closing: off\n";
         if (options.drop_frames) {
             std::cout << "Dropping frames " << options.drop_frames->first << ".."
                       << options.drop_frames->last << " (no features)\n";
@@ -57,7 +58,7 @@ int main(int argc, char** argv) {
         // Declared before slam for the same reason as the viewer.
         std::optional<full_slam::TrajectoryWriter<TFeatureExtractor>> trajectory;
         if (!options.trajectory_out.empty()) trajectory.emplace(options.trajectory_out);
-        TSlam slam({}, {}, vocabulary);
+        TSlam slam({}, {}, vocabulary, loop_closing::LoopCloserOptions{.enabled = options.loop_closing});
         // Also when an exception unwinds: stop the producers, then the viewer
         // and the trajectory (their final drains recycle events into slam's
         // pools), all before ~Slam destroys those pools. Stop() and Poll()
@@ -135,7 +136,9 @@ int main(int argc, char** argv) {
                       << options.trajectory_out << "\n";
         }
         std::cout << "tracker state: " << full_slam::StateName(slam.tracker().state()) << "\n"
-                  << "mapper state: " << full_slam::StateName(slam.mapper().state()) << "\n";
+                  << "mapper state: " << full_slam::StateName(slam.mapper().state()) << "\n"
+                  << "map: " << slam.mapper().num_keyframes() << " Frames, " << slam.mapper().num_map_points()
+                  << " points\n";
         std::cout << "viewer: " << viewer.events_processed() << " events processed\n";
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";

@@ -353,6 +353,100 @@ Spec `docs/superpowers/specs/2026-10-07-bow-design.md`; DESIGN "Bag of Words"
     are asserted only indirectly; `MapperBowRun` is a hand-driven gtest
     fixture subclass.
 
+## Loop closing (roadmap step 4a+4b, 2026-10-09)
+
+Spec `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; DESIGN
+"Loop Closing" (smoke table there).
+
+- [ ] **Wrong loops in corridors break the map (smoke, 2026-10-09; DESIGN
+      "Loop Closing").** On corridor1 every loop-closing run had at least
+      one loop between views 4–22 m apart or facing the opposite way
+      (169–178°, by the no-loop stereo trajectory), e.g. frames 2262–2266 with
+      1587–1590 in all four runs. Each passed every ORB gate with 80–85
+      projection matches (gate 80) and three covisible confirmations. Its
+      correction left the map inconsistent: the next local BA started at a
+      cost of 3–5·10⁸ (median 1.5–1.8·10⁴), 50–67 % of its observations
+      became outliers, and the Tracker lost the map 3–20 frames later (a new
+      map in 3 of 4 runs). Loops whose ends lie 0.2–0.9 m apart corrected
+      cleanly (next BA ≤ 10⁵, ≤ 2 % outliers, no loss). Nothing was tuned.
+      Options: verify a correction before publishing it (reprojection error
+      of the fused points after the essential graph; ORB-SLAM3 relies on
+      global BA instead), a viewpoint-change or minimum-parallax check on
+      the matched pairs, stricter gates near the threshold. Decide with the
+      user.
+- [ ] **Mono scale after corrections:** on corridor1 mono, loops after the
+      wrong ones carried scale 0.547 and 0.261, and the ATE with loop
+      closing was 0.652 m against 0.316 m without (run 1). Revisit once
+      wrong loops are rejected.
+- [ ] **Single loop connection:** in corridor maps most corrections had only
+      the query–match loop connection (other new links share < 100 points,
+      ORB's `minFeat`), so the essential graph pulls the loop through one
+      edge. ORB-SLAM3 behaves the same; global BA (4c) is what it relies on.
+- [ ] **Global BA** (roadmap step 4c): ORB-SLAM3 runs a full BA in its own
+      thread after every loop correction; we stop at the essential graph, so
+      points keep the essential graph's (pose-only) correction and the loop's
+      residual stays until local BA reaches it.
+- [ ] **Map merging** (roadmap step 5): `LoopDetected` carries both map ids
+      and the correction steps take a window and a Sim3, but detection
+      searches only the current map and the Mapper rejects a loop across
+      maps.
+- [ ] **Scale without IMU:** mono scale is corrected only at a loop (the
+      essential graph spreads the loop's Sim3 scale over the graph, start
+      included); between loops it drifts freely, and nothing makes the map
+      metric. Visual-inertial (ORB-SLAM3's IMU initialization) is out of
+      scope so far.
+- [ ] **Point reference distances after a mono scale correction:** points
+      moved by the correction keep their old min / max invariance distances
+      (ORB-SLAM3 `UpdateNormalAndDepth` recomputes them), so scale-gated
+      projections reject them until they are re-observed (Task 6 ruling).
+- [ ] **The LoopCloser is not wired to `TrackingLost`** in `Slam` (it handles
+      a final one if wired); a lost map's late loops are rejected by the
+      Mapper's map-id check instead, after wasted detection work (Task 5
+      ruling). Duplicate loops are not suppressed in the LoopCloser either;
+      the Mapper ignores them.
+- [ ] **ORB's match-window widening for sparse maps** (fewer than 10
+      covisible Frames, `DetectAndReffineSim3FromLastKF`) is skipped: slightly
+      fewer confirmations on sparse maps (Task 5 ruling).
+- [ ] **Essential-graph weighting:** edges are identity-weighted Sim3s; in the
+      Task 6 ring test the middle Frames' rotation error grew from 2.0° to
+      3.2° under the correction. Revisit (weights by shared points, or
+      ORB-SLAM3's information) if corridor or other loops show it.
+- [ ] **Spanning-tree deviations from ORB-SLAM3** (Task 1 ruling B): a new
+      Frame sharing no points takes the previous newest Frame as parent (ORB
+      leaves none); re-parenting on a cull uses live shared-point counts with
+      lower-id ties (ORB: cached weights >= 15).
+- [ ] **Graph checks:** `CheckGraph` checks no acyclicity or single root; the
+      replica's `SetParent` has no cycle guard; the initial-map
+      `ConnectToParent` asserts the Frame is `keyframes_.back()` (true for at
+      most two initial Frames).
+- [ ] **`SearchBySim3Projection` / `SearchPointsBySim3` descriptors:** they use
+      the observing feature's descriptor and level, not the map point's
+      distinctive descriptor (the interface has none); lower projection
+      counts than ORB-SLAM3 are possible (Task 3 ruling).
+- [ ] **Matched pairs drop features without points** (`LoopDetected`
+      `matched_points`): fewer pairs to fuse than ORB-SLAM3 (Task 5 M6).
+- [ ] **Mono Tracker after a scale correction:** `last_frame_` follows its
+      reference Frame, but its relative translation and the velocity stay in
+      the old scale for one frame (Task 7 ruling).
+- [ ] **The replica applies `map_epoch` unconditionally:** a stale epoch-0
+      transaction after a correction would regress it; guard with max.
+- [ ] **Deferred test gaps:** `LoopDetected` interrupting a running local BA
+      (and a same-batch drain not stopping an earlier BA); the essential-graph
+      failure path (publishes the rigid correction and the epoch);
+      `IsValid` rejections and a newer map id without `new_map` in the
+      LoopCloser; `CorrectionWhileRecentlyLost` passes without the Task 7
+      code (pins behaviour only); `AnchorsBeforeCorrection` has no null
+      check; `SolveSim3Ransac` does not guard a non-positive or infinite
+      sigma; the `OptimizeSim3` finite-difference test uses a hand-written
+      `exp(δ)∘S`, its FixScale test starts only at scale 1;
+      `SearchBySim3Projection`'s depth-range and behind-camera gates are
+      untested; `OptimizeEssentialGraph` has no fix-scale-off test with a
+      non-unit corrected loop connection.
+- [ ] **`SlamTest.MonoClosesLoop` costs 13.7 s** (three seeds, each with and
+      without loop closing, lock-step): the longest test in `check_all`.
+      Natural mono drift is a random walk, so the scale part needs a seed
+      range; a scene with a systematic mono scale drift would allow one seed.
+
 ## Relocalization (roadmap step 3, 2026-10-08)
 
 Spec `docs/superpowers/specs/2026-10-07-relocalization-design.md`; DESIGN
@@ -406,7 +500,8 @@ Spec `docs/superpowers/specs/2026-10-07-relocalization-design.md`; DESIGN
       about 1 run in 20 (0.036–0.058 m), before and after ruling J alike
       (3 / 60 and 4 / 60); it passes alone and in `check_all`. The threaded
       Mapper's pace changes the map. Widen the bound or make the run
-      deterministic.
+      deterministic (`RunSetup::lock_step`, used by the loop tests, makes a
+      run independent of thread timing).
 - [ ] **Post-relocalization guard window** (ruling J) is 1 s of measurement
       timestamps and the map-size condition a fixed 20 Frames; ORB-SLAM3
       uses `mMaxFrames` = fps frames for both. Derive both from the frame

@@ -61,6 +61,10 @@ conan create third_party/g2o --build=missing -s build_type=Release
 
 See `third_party/README.md` for details (license, options, updating).
 
+**Loop closing (2026-10-09) added the `types_sim3` component** to the recipe.
+A machine that created the package before must re-run both `conan create`
+commands above, then the project's `conan install` for each build type.
+
 ## Build and test
 
 Debug (tree `cmake-build-debug/build/Debug`):

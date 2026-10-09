@@ -6,7 +6,9 @@ execution; nothing is merged without an explicit "merge and push".
 Done: tracking (sub-project 1), camera model (raw-pixel residuals),
 keyframes and map growth (sub-project 2, merged b93fcf4), restructure
 (step 0, merged 7426697), map quality (step 1, merged 9da7081), own DBoW2
-(step 2, merged 6fb863a), relocalization (step 3, merged 6afacc7).
+(step 2, merged 6fb863a), relocalization (step 3, merged 6afacc7), loop
+detection and correction (step 4a+4b, branch `feat/loop-closing`; its
+corridor1 smoke Musts are missed, see below).
 
 ## 0. Restructure (done 2026-10-07)
 
@@ -135,9 +137,37 @@ Plus reference-Frame tracking. Fixes the stereo loss in fast rotation
 
 ## 4. Loop closing
 
-Detection in the LoopCloser thread (BoW + Sim3/SE3 verification); correction
-in the Mapper (fusion, essential graph, global BA).
-Global BA runs in its own thread (local BA stays in the Mapper; TODO).
+### 4a+4b. Detection and correction (implemented 2026-10-09; smoke Musts missed)
+
+**Result:** the LoopCloser detects on its own replica, ORB-SLAM3
+`NewDetectCommonRegions` with its source thresholds (BoW candidates, Sim3
+RANSAC, `OptimizeSim3`, projections, three confirmations) and publishes
+`LoopDetected` with the Sim3 and the matched points; the Mapper corrects
+(`CorrectLoop`: window, points, `SearchAndFuse`, essential graph, loop edge)
+as one `MapTransaction` at a new map epoch; the Tracker's last frame follows
+its reference Frame. The map has a spanning tree and loop edges. The apps
+take `--no_loop_closing`. Synthetic loops (integration): the end error with
+loop closing is 0.04–0.15 of the error without (mono over three seeds,
+stereo), with no tracking loss across the correction. Smoke on corridor1
+(Release, `--vocabulary`, full sequence, two runs each):
+
+| Run | Result |
+|---|---|
+| Mono, loop closing | 4–6 loops corrected per run; nearby-view loops clean, but wrong ones (run 1: 2773→2662, 3207→791; run 2: 2266→1590, 3747→3506; views far apart or facing the other way) break the map: run 1 one map, ATE Sim3 0.652 m; run 2 two maps |
+| Mono, no loop closing | one map, ATE Sim3 0.316 / 0.422 m |
+| Stereo, loop closing | 4 loops corrected per run (208–814 ms); the wrong loop 2262–2265→1587 loses map 1 about 20 frames later, then 3 more maps |
+| Stereo, no loop closing | one map, ATE SE3 0.077 / 0.077 m |
+
+The smoke Musts are **missed**. Nothing was tuned. Rejecting wrong loops is
+in TODO, to decide with the user.
+
+Spec: `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; see
+DESIGN "Loop Closing" and the 2026-10-09 decisions-log entries. Out of scope
+and in TODO: global BA (4c), map merging (step 5), scale without IMU.
+
+### 4c. Global BA
+
+In its own thread after a correction (local BA stays in the Mapper; TODO).
 
 ## 5. Map merging (multi-map Atlas)
 

@@ -175,7 +175,8 @@ public:
     [[nodiscard]] size_t num_map_points() const {
         return num_map_points_.load(std::memory_order_acquire);
     }
-    // FrameTracked events evaluated by the Frame creation rule (not skipped).
+    // FrameTracked events evaluated by the Frame creation rule (not skipped),
+    // each counted once the Frame it created, if any, is published and refined.
     [[nodiscard]] size_t num_frame_evaluations() const {
         return num_frame_evaluations_.load(std::memory_order_acquire);
     }
@@ -184,6 +185,11 @@ public:
     // drained batch.
     [[nodiscard]] size_t backlog_skipped() const {
         return backlog_skipped_.load(std::memory_order_acquire);
+    }
+    // FrameTracked events of the current map skipped, in total, because they
+    // were tracked before a loop correction (an older map epoch).
+    [[nodiscard]] size_t stale_epoch_skipped() const {
+        return stale_epoch_skipped_.load(std::memory_order_acquire);
     }
 
     // The current map's observations. Mapper thread (or a test driving
@@ -542,6 +548,7 @@ private:
     std::optional<double> relocalized_at_;
     std::atomic<size_t> num_frame_evaluations_{0};
     std::atomic<size_t> backlog_skipped_{0};
+    std::atomic<size_t> stale_epoch_skipped_{0};
 
     std::atomic<MapperState> state_{MapperState::Initializing};
     std::atomic<map::MapId> current_map_id_{map::MapId{0}};

@@ -3455,6 +3455,7 @@ TEST_F(MapperLoopTest, StaleEpochCreatesNoFrame) {
             EXPECT_EQ(created.size(), 2u);  // the current epoch creates it
             EXPECT_EQ(mapper_.num_keyframes(), num_keyframes + 1);
         }
+        EXPECT_EQ(mapper_.stale_epoch_skipped(), 1u);  // the epoch-0 one
     }
 }
 

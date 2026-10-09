@@ -33,7 +33,7 @@ bool LoopCloser<TFeatureExtractor>::ProcessPending() {
     bool processed = false;
     while (const events::Event* event = inbox_listener_.GetNextEvent()) {
         processed = true;  // acknowledged by the next GetNextEvent()
-        if (vocabulary_) {
+        if (vocabulary_ && options_.enabled) {
             ApplyEvent(*event);
         }
     }

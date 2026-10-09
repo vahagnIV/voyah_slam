@@ -719,9 +719,25 @@ TEST(LoopCloserTest, NoVocabularyDoesNothing) {
     EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
 }
 
+// Disabled (the apps' --no_loop_closing), the LoopCloser does what it does
+// without a vocabulary, which the Mapper and the Tracker keep.
+TEST(LoopCloserTest, DisabledDoesNothing) {
+    LoopCloserOptions options;
+    options.enabled = false;
+    Harness harness(MakeRegionVocabulary(), options);
+    LoopScene scene(1, Revisit::Drifted, MonoDrift(), false);
+    EXPECT_TRUE(scene.PublishStartAndMiddle(harness).empty());
+    for (size_t k = 0; k < kReturnFrames; ++k) {
+        EXPECT_TRUE(scene.PublishReturn(harness, k).empty()) << "L" << k;
+    }
+    EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), 0u);
+    EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
+}
+
 // The ORB-SLAM3 source values (LoopClosing.cc, KeyFrameDatabase.cc).
 TEST(LoopCloserOptionsTest, OrbSlam3Defaults) {
     const LoopCloserOptions options;
+    EXPECT_TRUE(options.enabled);
     EXPECT_EQ(options.min_map_frames, 12u);
     EXPECT_EQ(options.num_candidates, 3u);
     EXPECT_EQ(options.num_covisibles, 10u);

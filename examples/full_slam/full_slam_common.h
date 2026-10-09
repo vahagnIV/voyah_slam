@@ -47,6 +47,8 @@ struct Options {
     bool viewer = false;  // open the 3D map viewer (Pangolin)
     std::filesystem::path trajectory_out;  // empty: no trajectory file
     std::filesystem::path vocabulary;  // binary bag-of-words vocabulary; empty: none
+    // False: no loop closing; the vocabulary still serves relocalization.
+    bool loop_closing = true;
     // Frames fed as measurements without features, at their own timestamps
     // (a simulated camera blackout); empty: none.
     std::optional<FrameRange> drop_frames;
@@ -71,17 +73,20 @@ inline std::optional<FrameRange> ParseFrameRange(const std::string& text) {
 }
 
 // Usage: <program> <dataset_root> [--rate=R] [--max-frames=N] [--show] [--viewer]
-//                  [--trajectory_out <file>] [--vocabulary <file.bin>] [--drop_frames a:b]
+//                  [--trajectory_out <file>] [--vocabulary <file.bin>] [--no_loop_closing]
+//                  [--drop_frames a:b]
 inline Options ParseOptions(int argc, char** argv) {
     auto usage = [argv]() {
         std::cerr << "Usage: " << argv[0] << " <dataset_root> [--rate=R] [--max-frames=N] [--show] [--viewer]"
-                  << " [--trajectory_out <file>] [--vocabulary <file.bin>] [--drop_frames a:b]\n"
+                  << " [--trajectory_out <file>] [--vocabulary <file.bin>] [--no_loop_closing]"
+                  << " [--drop_frames a:b]\n"
                   << "  --rate=R                  playback speed (1 = real time, 0 = as fast as possible)\n"
                   << "  --max-frames=N            stop after N frames\n"
                   << "  --show                    show frames with keypoints (q / Esc to quit)\n"
                   << "  --viewer                  open the 3D map viewer (Pangolin)\n"
                   << "  --trajectory_out <file>   write tracked poses (TUM format, camera-to-world)\n"
                   << "  --vocabulary <file.bin>   bag-of-words vocabulary (binary, see convert_vocabulary)\n"
+                  << "  --no_loop_closing         no loop closing (the vocabulary still serves relocalization)\n"
                   << "  --drop_frames a:b         feed frames a..b (inclusive, 0-based) without features\n";
         std::exit(EXIT_FAILURE);
     };
@@ -104,6 +109,8 @@ inline Options ParseOptions(int argc, char** argv) {
             options.vocabulary = argv[++i];
         } else if (arg.rfind("--vocabulary=", 0) == 0) {
             options.vocabulary = arg.substr(13);
+        } else if (arg == "--no_loop_closing") {
+            options.loop_closing = false;
         } else if (arg == "--drop_frames" || arg.rfind("--drop_frames=", 0) == 0) {
             if (arg == "--drop_frames" && i + 1 >= argc) usage();
             options.drop_frames = ParseFrameRange(arg == "--drop_frames" ? argv[++i] : arg.substr(14));

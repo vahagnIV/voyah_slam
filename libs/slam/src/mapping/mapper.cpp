@@ -239,12 +239,12 @@ void Mapper<TFeatureExtractor>::OnFrameTracked(
         // observations are of the uncorrected map (loop-closing spec section 3).
         log_->debug("FrameTracked t={:.3f}: epoch {} before the map's {} -> no Frame", event.timestamp,
                     event.map_epoch, map_epoch_);
+        stale_epoch_skipped_.fetch_add(1, std::memory_order_acq_rel);
         return;
     }
     const KeyFrameSignals signals = MeasureSignals(event);
     const bool guarded = InRelocalizationGuard(event);
     const bool create = !guarded && ShouldCreateFrame(signals, options_.keyframe);
-    num_frame_evaluations_.fetch_add(1, std::memory_order_acq_rel);
     if (guarded) {
         log_->debug("FrameTracked t={:.3f}: {:.3f} s after the relocalization at t={:.3f} -> no Frame",
                     event.timestamp, event.timestamp - *relocalized_at_, *relocalized_at_);
@@ -259,6 +259,8 @@ void Mapper<TFeatureExtractor>::OnFrameTracked(
     if (create) {
         CreateFrame(event);
     }
+    // Counted once the Frame it created, if any, is published and refined.
+    num_frame_evaluations_.fetch_add(1, std::memory_order_acq_rel);
 }
 
 template <typename TFeatureExtractor>

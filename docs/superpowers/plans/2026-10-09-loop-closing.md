@@ -206,7 +206,7 @@
 **Interfaces:**
 - **Consumes:** Task 1 replica graph; Task 2 `SolveSim3Ransac`; Task 3 `OptimizeSim3` and `SearchBySim3Projection`; `SearchByBoW`; `FrameDatabase`.
 - **Produces:**
-  - `LoopDetected { map::MapId query_map_id, match_map_id; FrameId query_frame, match_frame; Sim3 S_query_to_match; std::vector<std::pair<MapPointId,MapPointId>> matched_points; }`. The LoopCloser sets the Event base `map_id` = `query_map_id`.
+  - `LoopDetected { map::MapId query_map_id, match_map_id; FrameId query_frame, match_frame; Sim3 S_query_match; std::vector<std::pair<MapPointId,MapPointId>> matched_points; }` (ORB-SLAM3 Scm: x_query = S_query_match · x_match in camera coordinates). The LoopCloser sets the Event base `map_id` = `query_map_id`.
   - `LoopCloser(LoopCloserOptions, std::shared_ptr<const bow::Vocabulary<FE>>)` subscribes to the Mapper. It becomes a template on FE like the Tracker.
   - `LoopCloserOptions` holds the spec §4 values.
   - The detection logic is a reusable function, `DetectCommonRegion(replica, query_frame, options)`, so step 5 can reuse it.
