@@ -48,6 +48,24 @@ struct MapperTestAccess {
                               const geometry::Sim3& S_query_world) {
         out_mapper.CorrectWindow(window, S_query_world);
     }
+    // Steps 1-5 of a correction of `query` with `match` that fuses only
+    // `matched_points` (no loop points): the loop connections. Nothing is
+    // published.
+    template <typename TFeatureExtractor>
+    static std::vector<std::pair<map::FrameId, map::FrameId>> LoopConnections(
+        Mapper<TFeatureExtractor>& out_mapper, map::FrameId query, map::FrameId match,
+        const geometry::Sim3& S_query_match,
+        const std::vector<std::pair<map::MapPointId, map::MapPointId>>& matched_points) {
+        std::vector<map::FrameId> window = {query};
+        for (const map::FrameId frame : out_mapper.Connected(query)) window.push_back(frame);
+        const geometry::RigidTransformation& T_match = out_mapper.FindKeyFrame(match)->pose();
+        const auto correction = out_mapper.CorrectWindow(
+            window, geometry::Compose(S_query_match, geometry::Sim3{1.0, T_match.rotation(), T_match.translation()}));
+        auto* scratch = out_mapper.CreateTransaction();
+        out_mapper.FuseLoopPoints(correction, matched_points, {}, *scratch);
+        scratch->Recycle();
+        return out_mapper.LoopConnections(correction, match);
+    }
     template <typename TFeatureExtractor>
     static geometry::RigidTransformation Pose(const Mapper<TFeatureExtractor>& mapper, map::FrameId frame) {
         return mapper.FindKeyFrame(frame)->pose();
@@ -3142,7 +3160,7 @@ protected:
             }
             const std::vector<std::optional<map::MapPointId>> mapped = SidePoints(side);
             auto* event = frame_tracked_pool_.Create();
-            event->map_id = map::MapId{1};
+            event->map_id = scene_map_;
             event->timestamp = timestamp;
             event->pose = T_map;
             for (size_t f = 0; f < frame.scene_of_feature.size(); ++f) {
@@ -3247,6 +3265,7 @@ protected:
     }
 
     std::mt19937 rng_{11};
+    map::MapId scene_map_{1};  // the map BuildScene's FrameTracked name
     geometry::TPoints3DF points_w_;
     std::vector<test::detail::SyntheticDescriptor> descriptors_;
     std::vector<double> angles_;
@@ -3554,20 +3573,90 @@ TEST_F(MapperLoopTest, MonoWindowFoldsScale) {
     RecordProperty("moved_still", std::to_string(moved.size()) + " / " + std::to_string(num_still));
 }
 
-TEST_F(MapperLoopTest, IgnoresLoopOfOldMap) {
-    // Review Focus 3: a loop of map 1 arrives once map 1 is gone.
+TEST_F(MapperLoopTest, IgnoresLoopClosedByLoopEdgeOnly) {
+    // Review Focus 2, the loop edge alone: a similarity 20 m off fuses
+    // nothing, so after its correction the two sides share no point, yet
+    // the query and the match have a loop edge. The same loop again, and the
+    // query's neighbour with the match's neighbour, are ignored.
     BuildScene();
-    const auto pairs = MatchedPoints();
-    PublishTrackingLost(1, 5.0);
+    geometry::Sim3 far = TrueS();
+    far.t += geometry::TVector3DF(20.0, 0.0, 0.0);
+    PublishLoop(Query().id, Match().id, far, {});
     Drain();
-    InitializeStereo(6.0);
+    ASSERT_EQ(TakeCaptured().size(), 1u);
+    ASSERT_EQ(replica_.loop_edges(Query().id), std::set<map::FrameId>{Match().id});
+    for (const SceneFrame& frame : frames_) {
+        if (frame.side != LoopSide::Return) continue;
+        for (const auto& [other, shared] : replica_.covisibility().Covisible(frame.id, frames_.size())) {
+            EXPECT_EQ(std::find_if(frames_.begin(), frames_.end(),
+                                   [&](const SceneFrame& f) { return f.id == other && f.side == LoopSide::Start; }),
+                      frames_.end())
+                << "Frame " << frame.id.value << " covisible with start Frame " << other.value;
+        }
+    }
+
+    PublishLoop(Query().id, Match().id, TrueS(), MatchedPoints());
+    const SceneFrame& neighbour = frames_[frames_.size() - 2];
+    const SceneFrame& match_neighbour = frames_[kLoopMatch + 1];
+    PublishLoop(neighbour.id, match_neighbour.id, ToSim3(neighbour.T_true * match_neighbour.T_true.Inverse()), {});
+    Drain();
+    EXPECT_TRUE(TakeCaptured().empty());
+    EXPECT_EQ(replica_.map_epoch(), 1u);
+}
+
+TEST_F(MapperLoopTest, WeakQueryMatchLinkIsALoopConnection) {
+    // ORB-SLAM3 takes the loop connections among GetConnectedKeyFrames, at any
+    // weight: fused through only 10 pairs, the query and the match share 10
+    // points, fewer than a connection's 15, and are still a loop connection;
+    // every other loop connection is strong.
+    BuildScene();
+    std::vector<std::pair<map::MapPointId, map::MapPointId>> pairs;
+    for (const auto& pair : MatchedPoints()) {
+        if (pairs.size() < 10 && mapper_.covisibility().Contains(Match().id, pair.second)) pairs.push_back(pair);
+    }
+    ASSERT_EQ(pairs.size(), 10u);
+    const auto connections = MapperTestAccess::LoopConnections(mapper_, Query().id, Match().id, TrueS(), pairs);
+    const auto shared = [&](map::FrameId a, map::FrameId b) {
+        for (const auto& [other, count] : mapper_.covisibility().Covisible(a, frames_.size())) {
+            if (other == b) return count;
+        }
+        return 0u;
+    };
+    const uint32_t query_match = shared(Query().id, Match().id);
+    EXPECT_GT(query_match, 0u);
+    EXPECT_LT(query_match, 15u);
+    const auto query_match_pair = std::make_pair(Query().id, Match().id);
+    EXPECT_NE(std::find(connections.begin(), connections.end(), query_match_pair), connections.end());
+    for (const auto& [frame, other] : connections) {
+        if (std::make_pair(frame, other) != query_match_pair) EXPECT_GE(shared(frame, other), 100u);
+    }
+}
+
+TEST_F(MapperLoopTest, IgnoresLoopOfOldMap) {
+    // Review Focus 3: map 1 is gone and the scene is map 2. Loops naming its
+    // live Frames but map 1 as the query's or the match's map (or both) are
+    // ignored; the same loop of map 2 is corrected.
+    InitializeStereo(0.0);
+    PublishTrackingLost(1, 0.5);
+    Drain();
+    scene_map_ = map::MapId{2};
+    BuildScene();
     ASSERT_EQ(mapper_.current_map_id(), map::MapId{2});
-    PublishLoop(Query().id, Match().id, TrueS(), pairs);  // map 1
+    ASSERT_EQ(replica_.num_keyframes(), 3 * kLoopSideFrames);
+    const auto pairs = MatchedPoints();
+    PublishLoop(Query().id, Match().id, TrueS(), pairs, 1, 1);
     PublishLoop(Query().id, Match().id, TrueS(), pairs, 2, 1);
     PublishLoop(Query().id, Match().id, TrueS(), pairs, 1, 2);
     Drain();
     EXPECT_TRUE(TakeCaptured().empty());
     EXPECT_EQ(replica_.map_epoch(), 0u);
+
+    PublishLoop(Query().id, Match().id, TrueS(), pairs, 2, 2);
+    Drain();
+    const std::vector<Published> corrected = TakeCaptured();
+    ASSERT_EQ(corrected.size(), 1u);
+    EXPECT_EQ(corrected[0].map_id, map::MapId{2});
+    EXPECT_EQ(corrected[0].map_epoch, 1u);
 }
 
 } // namespace

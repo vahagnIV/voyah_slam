@@ -469,10 +469,7 @@ template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureExtractor>& event) {
     auto start = Clock::now();
     auto* created = CreateTransaction();
-    added_keys_.clear();
-    replaced_.clear();
-    losers_.clear();
-    touched_.clear();
+    ResetTransactionScratch();
 
     // The Frame and its tracked observations (ORB-SLAM3 ProcessNewKeyFrame).
     // The Tracker's replica may be behind or the pairs malformed: a point
@@ -557,6 +554,14 @@ void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureE
         ba.num_points, ba.iterations, ba.interrupted ? "yes" : "no", ba.stage_reached,
         ba.num_outliers, refinement.cull_ms, refinement.num_culled_frames,
         refinement.num_removed_points);
+}
+
+template <typename TFeatureExtractor>
+void Mapper<TFeatureExtractor>::ResetTransactionScratch() {
+    added_keys_.clear();
+    replaced_.clear();
+    losers_.clear();
+    touched_.clear();
 }
 
 template <typename TFeatureExtractor>

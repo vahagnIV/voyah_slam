@@ -75,10 +75,6 @@ void Mapper<TFeatureExtractor>::OnLoopDetected(const events::LoopDetected& event
 
     auto* corrected = CreateTransaction();
     corrected->map_epoch = ++map_epoch_;
-    added_keys_.clear();
-    replaced_.clear();
-    losers_.clear();
-    touched_.clear();
     const size_t num_points_before = map_points_.size();
 
     // 1. The window: the query and its connected Frames (CorrectLoop calls
@@ -177,6 +173,9 @@ template <typename TFeatureExtractor>
 auto Mapper<TFeatureExtractor>::CorrectWindow(const std::vector<map::FrameId>& window,
                                               const geometry::Sim3& S_query_world) -> WindowCorrection {
     assert(!window.empty());
+    // A correction is one transaction: FuseLoopPoints and FinishCorrection
+    // build on this scratch state.
+    ResetTransactionScratch();
     WindowCorrection correction;
     correction.frames = window;
     const geometry::RigidTransformation T_world_query = FindKeyFrame(window.front())->pose().Inverse();
@@ -235,6 +234,34 @@ void Mapper<TFeatureExtractor>::FuseLoopPoints(
 }
 
 template <typename TFeatureExtractor>
+std::vector<std::pair<map::FrameId, map::FrameId>> Mapper<TFeatureExtractor>::LoopConnections(
+    const WindowCorrection& correction, map::FrameId match) const {
+    const LoopCorrectionOptions& options = options_.loop;
+    const map::FrameId query = correction.frames.front();
+    const std::set<map::FrameId> window(correction.frames.begin(), correction.frames.end());
+    // Each window Frame's covisible Frames after the fusion, at any weight
+    // (GetConnectedKeyFrames), minus its connected Frames before it
+    // (GetVectorCovisibleKeyFrames) and the window; strong ones only, but the
+    // query's with the match.
+    std::vector<std::pair<map::FrameId, map::FrameId>> connections;
+    for (size_t i = 0; i < correction.frames.size(); ++i) {
+        const map::FrameId frame = correction.frames[i];
+        const std::vector<map::FrameId>& previous = correction.previous_connected[i];
+        for (const auto& [other, shared] : covisibility_.Covisible(frame, std::numeric_limits<size_t>::max())) {
+            if (window.contains(other) ||
+                std::find(previous.begin(), previous.end(), other) != previous.end()) {
+                continue;
+            }
+            if (shared < options.min_essential_weight && !(frame == query && other == match)) {
+                continue;
+            }
+            connections.emplace_back(frame, other);
+        }
+    }
+    return connections;
+}
+
+template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::OptimizeGraph(const WindowCorrection& correction, map::FrameId match,
                                               bool fix_scale,
                                               events::MapTransaction<TFeatureExtractor>& out_event) {
@@ -253,33 +280,16 @@ void Mapper<TFeatureExtractor>::OptimizeGraph(const WindowCorrection& correction
         problem.T_cw.push_back(record->frame.pose());
         problem.corrected_S_cw.emplace_back();
     }
-    std::unordered_set<uint32_t> in_window;
     for (size_t i = 0; i < correction.frames.size(); ++i) {
         const size_t v = index.at(correction.frames[i].value);
         problem.T_cw[v] = correction.non_corrected[i];
         problem.corrected_S_cw[v] = correction.corrected[i];
-        in_window.insert(correction.frames[i].value);
     }
-
-    // 5. The loop connections: each window Frame's connections after the
-    // fusion, minus those before it and the window; strong ones only, but
-    // the query's with the match.
-    size_t num_loop_connections = 0;
-    for (size_t i = 0; i < correction.frames.size(); ++i) {
-        const map::FrameId frame = correction.frames[i];
-        const std::vector<map::FrameId>& previous = correction.previous_connected[i];
-        for (const auto& [other, shared] : covisibility_.Covisible(frame, std::numeric_limits<size_t>::max())) {
-            const bool connected = shared >= options.min_connection_weight;
-            if (!connected || in_window.contains(other.value) ||
-                std::find(previous.begin(), previous.end(), other) != previous.end()) {
-                continue;
-            }
-            if (shared < options.min_essential_weight && !(frame == query && other == match)) {
-                continue;
-            }
-            problem.loop_connections.emplace_back(index.at(frame.value), index.at(other.value));
-            ++num_loop_connections;
-        }
+    // 5. The loop connections.
+    const auto loop_connections = LoopConnections(correction, match);
+    const size_t num_loop_connections = loop_connections.size();
+    for (const auto& [frame, other] : loop_connections) {
+        problem.loop_connections.emplace_back(index.at(frame.value), index.at(other.value));
     }
 
     // 6. The spanning tree, the loop edges and the strong covisibility edges
@@ -389,6 +399,8 @@ void Mapper<TFeatureExtractor>::FinishCorrection(events::MapTransaction<TFeature
     template void Mapper<FE>::FuseLoopPoints(                                                             \
         const WindowCorrection&, const std::vector<std::pair<map::MapPointId, map::MapPointId>>&,         \
         const std::vector<map::MapPointId>&, events::MapTransaction<FE>&);                                \
+    template std::vector<std::pair<map::FrameId, map::FrameId>> Mapper<FE>::LoopConnections(              \
+        const WindowCorrection&, map::FrameId) const;                                                     \
     template void Mapper<FE>::OptimizeGraph(const WindowCorrection&, map::FrameId, bool,                  \
                                             events::MapTransaction<FE>&);                                 \
     template void Mapper<FE>::FinishCorrection(events::MapTransaction<FE>&);

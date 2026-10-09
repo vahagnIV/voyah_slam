@@ -43,8 +43,9 @@ namespace voyahslam::mapping {
 struct LoopCorrectionOptions {
     // KeyFrame::UpdateConnections (th 15): a Frame is connected to the Frames
     // sharing at least this many points with it, or else to its most
-    // covisible one. The window is the query and its connected Frames; the
-    // loop connections are taken among connected Frames.
+    // covisible one. The window is the query and its connected Frames; a
+    // window Frame's connected Frames before the fusion are not loop
+    // connections.
     size_t min_connection_weight = 15;
     // nNumCovisibles: the loop points are those of the match Frame and of its
     // top `num_covisibles` covisible Frames (the LoopCloser's window).
@@ -273,6 +274,10 @@ private:
     // stereo-matched one (right index >= 0), 1 otherwise. Unlike
     // CovisibilityIndex::NumObservations, which counts Frames.
     [[nodiscard]] size_t WeightedObservations(map::MapPointId point) const;
+    // Clears the scratch state of the transaction being built (added
+    // observation keys, merges, touched points): the start of transaction 1
+    // and of a loop correction.
+    void ResetTransactionScratch();
     // A pooled transaction of the current map at the current epoch.
     [[nodiscard]] events::MapTransaction<TFeatureExtractor>* CreateTransaction();
     // Gives Frame `frame`, the newest one, its parent: the Frame sharing the
@@ -460,7 +465,10 @@ private:
     // never detects such a candidate), or a loop edge links the query's window
     // to the match's.
     [[nodiscard]] bool IsClosedLoop(map::FrameId query, map::FrameId match) const;
-    // Steps 2-3 (CorrectLoop): `window`'s first Frame takes S_query_world,
+    // Steps 2-3 (CorrectLoop), the start of every correction: resets the
+    // transaction scratch state (ResetTransactionScratch) that FuseLoopPoints
+    // and FinishCorrection build on, so the steps must run in order on one
+    // transaction. `window`'s first Frame takes S_query_world,
     // every other one keeps its pose relative to it; the poses take the
     // corrected similarities with the scale folded into the translation, and
     // each point the window observes moves with its first observing window
@@ -477,6 +485,13 @@ private:
                         const std::vector<std::pair<map::MapPointId, map::MapPointId>>& matched_points,
                         const std::vector<map::MapPointId>& loop_points,
                         events::MapTransaction<TFeatureExtractor>& out_event);
+    // Step 5 (CorrectLoop LoopConnections): per window Frame, its covisible
+    // Frames now, at any weight (ORB-SLAM3 GetConnectedKeyFrames), minus its
+    // connected Frames before the fusion and the window; a pair with fewer than
+    // min_essential_weight shared points is dropped, but the query's with
+    // `match`. As (window Frame, other Frame) pairs.
+    [[nodiscard]] std::vector<std::pair<map::FrameId, map::FrameId>> LoopConnections(
+        const WindowCorrection& correction, map::FrameId match) const;
     // Steps 5-6: each window Frame's new connections beyond the window are the
     // loop connections; the essential graph (OptimizeEssentialGraph) of every
     // Frame, `match` fixed and every scale fixed if `fix_scale`, gives every
