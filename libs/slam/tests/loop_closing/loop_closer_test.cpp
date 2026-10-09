@@ -337,7 +337,21 @@ enum class Revisit {
     Drifted,    // through new points, drifted by `drift`: a loop
     Tracked,    // through region A's own points: covisible, not a loop
     LookAlike,  // through new points of a place that only looks like A
+    // Through new points of region A turned 180 deg about a vertical axis
+    // beyond it (Opposite()), seen from return poses turned alike: every image
+    // is that of a true revisit, so every ORB-SLAM3 gate passes, but the place
+    // faces the other way (the corridor seen from its other end).
+    Opposite,
 };
+
+// The rigid turn of a Revisit::Opposite scene: 180 deg about the vertical
+// axis through (0, 0, 12), beyond region A (4..8 m in front of the start).
+RigidTransformation Opposite() {
+    const geometry::TMatrix33F R =
+        Eigen::AngleAxis<double>(std::numbers::pi, geometry::TVector3DF::UnitY()).toRotationMatrix();
+    const geometry::TVector3DF pivot(0.0, 0.0, 12.0);
+    return {R, pivot - R * pivot};
+}
 
 constexpr size_t kStartFrames = 5;   // E0..E4 map region A
 constexpr size_t kMiddleFrames = 7;  // B0..B6 map region B
@@ -356,6 +370,9 @@ public:
         region_a_ = MakeRegion(kRegionPoints, StartPose(0), 0x00, rng_);
         region_b_ = MakeRegion(kRegionPoints, MiddlePose(0), 0xFF, rng_);
         revisited_ = revisit == Revisit::LookAlike ? LookAlike(region_a_, rng_) : region_a_;
+        if (revisit == Revisit::Opposite) {
+            for (ScenePoint& point : revisited_) point.X = Opposite().Transform(point.X);
+        }
     }
 
     static RigidTransformation StartPose(size_t k) {
@@ -398,7 +415,8 @@ public:
 
     // Publishes return frame L_k; returns what the LoopCloser published.
     std::vector<Loop> PublishReturn(Harness& harness, size_t k) {
-        const RigidTransformation T_true = ReturnPose(k);
+        const RigidTransformation T_true =
+            revisit_ == Revisit::Opposite ? ReturnPose(k) * Opposite().Inverse() : ReturnPose(k);
         if (revisit_ == Revisit::Tracked) {
             return harness.Publish(Observe(ReturnId(k), T_true, T_true, region_a_, 0, binocular_, rng_));
         }
@@ -519,6 +537,11 @@ void ExpectLoopAtThirdConfirmation(uint32_t seed, const Sim3& drift, bool binocu
             EXPECT_GE(stats.coarse_projection_matches, 2 * options.min_coarse_projection);
             EXPECT_GE(stats.optimized_inliers, 2 * options.min_optimized);
             EXPECT_GE(stats.projection_matches, 2 * options.min_projection);
+            // The normal gate measured the final pairs of the true loop and
+            // found them consistent.
+            EXPECT_GE(result.region->normals.pairs, options.min_projection);
+            EXPECT_LE(result.region->normals.disagreement, 0.05);
+            EXPECT_TRUE(stats.normal_rejections.empty());
         }
     }
 
@@ -719,6 +742,84 @@ TEST(LoopCloserTest, NoVocabularyDoesNothing) {
     EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
 }
 
+LoopCloserOptions WithoutNormalGate() {
+    LoopCloserOptions options;
+    options.max_normal_disagreement = 1.0;
+    return options;
+}
+
+// The normal gate (an addition to ORB-SLAM3): region A seen again from the
+// opposite side through new points passes every ORB-SLAM3 gate (without the
+// normal gate it is a loop at L3), but nearly all its pairs' normals are
+// opposed, so with the gate no loop is published and each detection's
+// candidate is rejected by it.
+void ExpectOppositeRegionRejected(uint32_t seed, bool binocular) {
+    SCOPED_TRACE("seed " + std::to_string(seed) + (binocular ? " stereo" : " mono"));
+    {
+        Harness harness(MakeRegionVocabulary(), WithoutNormalGate());
+        LoopScene scene(seed, Revisit::Opposite, Sim3{}, binocular);
+        ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
+        std::vector<Loop> loops;
+        for (size_t k = 0; k <= 3; ++k) {
+            for (Loop& loop : scene.PublishReturn(harness, k)) loops.push_back(std::move(loop));
+        }
+        ASSERT_EQ(loops.size(), 1u) << "without the normal gate";
+        EXPECT_LT(loops[0].match_frame.value, kStartFrames);
+    }
+    Harness harness(MakeRegionVocabulary());
+    LoopScene scene(seed, Revisit::Opposite, Sim3{}, binocular);
+    ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
+    for (size_t k = 0; k < kReturnFrames; ++k) {
+        EXPECT_TRUE(scene.PublishReturn(harness, k).empty()) << "L" << k;
+        EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u) << "L" << k;
+        const CommonRegionStats& stats = harness.loop_closer().last_stats();
+        EXPECT_GE(stats.projection_matches, LoopCloserOptions{}.min_projection) << "L" << k;
+        ASSERT_FALSE(stats.normal_rejections.empty()) << "L" << k;
+        for (const NormalRejection& rejection : stats.normal_rejections) {
+            EXPECT_EQ(rejection.frame, LoopScene::ReturnId(k));
+            EXPECT_LT(rejection.match_frame.value, kStartFrames);
+            EXPECT_GE(rejection.agreement.pairs, LoopCloserOptions{}.min_projection);
+            EXPECT_GE(rejection.agreement.disagreement, 0.9);
+        }
+    }
+}
+
+TEST(LoopCloserTest, OppositeFacingRegionRejectedByNormals) {
+    for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+        ExpectOppositeRegionRejected(seed, /*binocular=*/false);
+        ExpectOppositeRegionRejected(seed, /*binocular=*/true);
+    }
+}
+
+// A later query's confirmation (RefineCommonRegion) passes the normal gate
+// too: the opposite region found at L0 without the gate is not confirmed by
+// L1 with it, but is without it.
+TEST(LoopCloserTest, RefinementRejectedByNormals) {
+    Harness harness(MakeRegionVocabulary(), WithoutNormalGate());
+    LoopScene scene(1, Revisit::Opposite, Sim3{}, /*binocular=*/false);
+    ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
+    ASSERT_TRUE(scene.PublishReturn(harness, 0).empty());
+    ASSERT_TRUE(scene.PublishReturn(harness, 1).empty());
+    const auto& replica = harness.loop_closer().replica();
+    const CommonRegionResult found = DetectCommonRegion(replica, LoopScene::ReturnId(0), WithoutNormalGate());
+    ASSERT_TRUE(found.region.has_value());
+    // L1's guess: L0's similarity moved by their relative pose.
+    const RigidTransformation T_10 =
+        replica.keyframe(LoopScene::ReturnId(1))->T_cw * replica.keyframe(LoopScene::ReturnId(0))->T_cw.Inverse();
+    const Sim3 S_1w = geometry::Compose(Sim3{1.0, T_10.rotation(), T_10.translation()}, found.region->S_query_world);
+
+    EXPECT_TRUE(RefineCommonRegion(replica, LoopScene::ReturnId(1), found.region->match_frame, S_1w,
+                                   WithoutNormalGate())
+                    .has_value());
+    CommonRegionStats stats;
+    EXPECT_FALSE(RefineCommonRegion(replica, LoopScene::ReturnId(1), found.region->match_frame, S_1w,
+                                    LoopCloserOptions{}, &stats)
+                     .has_value());
+    ASSERT_EQ(stats.normal_rejections.size(), 1u);
+    EXPECT_EQ(stats.normal_rejections[0].frame, LoopScene::ReturnId(1));
+    EXPECT_GE(stats.normal_rejections[0].agreement.disagreement, 0.9);
+}
+
 // Disabled (the apps' --no_loop_closing), the LoopCloser does what it does
 // without a vocabulary, which the Mapper and the Tracker keep.
 TEST(LoopCloserTest, DisabledDoesNothing) {
@@ -738,6 +839,7 @@ TEST(LoopCloserTest, DisabledDoesNothing) {
 TEST(LoopCloserOptionsTest, OrbSlam3Defaults) {
     const LoopCloserOptions options;
     EXPECT_TRUE(options.enabled);
+    EXPECT_DOUBLE_EQ(options.max_normal_disagreement, 0.5);  // user decision, not ORB-SLAM3
     EXPECT_EQ(options.min_map_frames, 12u);
     EXPECT_EQ(options.num_candidates, 3u);
     EXPECT_EQ(options.num_covisibles, 10u);

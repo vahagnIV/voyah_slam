@@ -358,30 +358,41 @@ Spec `docs/superpowers/specs/2026-10-07-bow-design.md`; DESIGN "Bag of Words"
 Spec `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; DESIGN
 "Loop Closing" (smoke table there).
 
-- [ ] **Wrong loops in corridors break the map (smoke, 2026-10-09; DESIGN
-      "Loop Closing").** On corridor1 every loop-closing run had at least
-      one loop between views 4–22 m apart or facing the opposite way
-      (169–178°, by the no-loop stereo trajectory), e.g. frames 2262–2266 with
-      1587–1590 in all four runs. Each passed every ORB gate with 80–85
-      projection matches (gate 80) and three covisible confirmations. Its
-      correction left the map inconsistent: the next local BA started at a
-      cost of 3–5·10⁸ (median 1.5–1.8·10⁴), 50–67 % of its observations
-      became outliers, and the Tracker lost the map 3–20 frames later (a new
-      map in 3 of 4 runs). Loops whose ends lie 0.2–0.9 m apart corrected
-      cleanly (next BA ≤ 10⁵, ≤ 2 % outliers, no loss). Nothing was tuned.
-      Options: verify a correction before publishing it (reprojection error
-      of the fused points after the essential graph; ORB-SLAM3 relies on
-      global BA instead), a viewpoint-change or minimum-parallax check on
-      the matched pairs, stricter gates near the threshold. Decide with the
-      user.
-- [ ] **Mono scale after corrections:** on corridor1 mono, loops after the
-      wrong ones carried scale 0.547 and 0.261, and the ATE with loop
-      closing was 0.652 m against 0.316 m without (run 1). Revisit once
+- [ ] **Same-heading look-alikes (corridor1, 2026-10-09; DESIGN "Loop
+      Closing").** A regular corridor pattern repeats 7–30 m apart with the
+      same heading. The pairs' normals agree, so the normal gate cannot
+      reject such a loop: examples are frames 2215–2236 against 692–807
+      (14.9 m apart), 3210→792 (22 m) and 5017→2950 (30 m). With the gate in
+      place, every loop-closing smoke run still corrected at least one of
+      them. The correction leaves the two ends of the map rotated against
+      each other, and the next local BA starts at 10⁷–10⁸ with 25–60 %
+      outliers. Candidates, to decide with the user:
+      - a map-distance check: the query and the match region lie far apart
+        in the map's own geometry, which is safe in stereo while drift is
+        ≪ 15 m;
+      - a check that the hypothesized correction agrees with the map.
+- [ ] **The normal gate blocks true loops once the map is rotated.** It
+      compares normals in map coordinates. After a same-heading false loop
+      is corrected, the two ends of the map are rotated against each other,
+      and the gate then rejects the true return: stereo run 1 of the
+      2026-10-09 smoke rejected 178 return candidates 0.1–1.0 m apart at
+      0.54–1.00, and mono run 1 rejected 70. Before such a correction it
+      rejected no true loop in any run. Large mono rotation drift would do
+      the same. Comparing the normals through the hypothesized Sim3
+      measures something else, so this is not a fix in itself; decide
+      together with the same-heading item above.
+- [ ] **Verify a correction before publishing it** (rejected for now, user
+      decision 2026-10-09): check the reprojection error of the fused points
+      after the essential graph, or the next local BA's initial cost, and
+      drop the correction if it breaks the map. Keep it as an option if the
+      gates above are not enough.
+- [ ] **Mono scale after corrections:** mono loops carry extreme scales after
+      wrong corrections (0.314–1.774 in the 2026-10-09 smoke). Revisit once
       wrong loops are rejected.
 - [ ] **Single loop connection:** in corridor maps most corrections had only
       the query–match loop connection (other new links share < 100 points,
       ORB's `minFeat`), so the essential graph pulls the loop through one
-      edge. ORB-SLAM3 behaves the same; global BA (4c) is what it relies on.
+      edge. ORB-SLAM3 behaves the same and relies on global BA (4c).
 - [ ] **Global BA** (roadmap step 4c): ORB-SLAM3 runs a full BA in its own
       thread after every loop correction; we stop at the essential graph, so
       points keep the essential graph's (pose-only) correction and the loop's
@@ -440,8 +451,17 @@ Spec `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; DESIGN
       sigma; the `OptimizeSim3` finite-difference test uses a hand-written
       `exp(δ)∘S`, its FixScale test starts only at scale 1;
       `SearchBySim3Projection`'s depth-range and behind-camera gates are
-      untested; `OptimizeEssentialGraph` has no fix-scale-off test with a
-      non-unit corrected loop connection.
+      untested, and its radius is pinned only at level 0 and in x;
+      `OptimizeSim3`'s `RejectsOutliers` uses only gross outliers;
+      `SolveSim3Ransac`'s mirror-degenerate scenes peak at 11 of 20 inliers
+      (Task 2); `OptimizeEssentialGraph` has no fix-scale-off test with a
+      non-unit corrected loop connection, its end-to-start bar is easy (the
+      RMS and step ratio carry it), and its 8 tests take about 2.4 s in
+      Debug; the covisible-confirmation path of the normal gate has no test
+      of its own (the candidate and refinement paths do).
+- [ ] **`friend struct MapperTestAccess`** (`mapper.h`, Task 1): the first
+      friend test seam in the codebase, carried to Task 6 and still there;
+      replace it with the real `LoopDetected` path in the tests that use it.
 - [ ] **`SlamTest.MonoClosesLoop` costs 13.7 s** (three seeds, each with and
       without loop closing, lock-step): the longest test in `check_all`.
       Natural mono drift is a random walk, so the scale part needs a seed
@@ -500,8 +520,8 @@ Spec `docs/superpowers/specs/2026-10-07-relocalization-design.md`; DESIGN
       about 1 run in 20 (0.036–0.058 m), before and after ruling J alike
       (3 / 60 and 4 / 60); it passes alone and in `check_all`. The threaded
       Mapper's pace changes the map. Widen the bound or make the run
-      deterministic (`RunSetup::lock_step`, used by the loop tests, makes a
-      run independent of thread timing).
+      deterministic (`RunSetup::lock_step`, used by the loop tests, takes
+      the Tracker and Mapper of a run out of thread timing).
 - [ ] **Post-relocalization guard window** (ruling J) is 1 s of measurement
       timestamps and the map-size condition a fixed 20 Frames; ORB-SLAM3
       uses `mMaxFrames` = fps frames for both. Derive both from the frame

@@ -44,6 +44,13 @@ struct LoopCloserOptions {
     // at least refine_min_projection matches with the refined Sim3.
     size_t refine_min_optimized = 50;
     size_t refine_min_projection = 100;
+    // Normal consistency (an addition to ORB-SLAM3, user decision
+    // 2026-10-09): a candidate, a covisible confirmation or a later query's
+    // confirmation is rejected when more than this share of its final matched
+    // pairs (own map point, matched map point) have normals more than 60 deg
+    // apart; pairs with an undefined normal do not count. Opposite-facing
+    // false loops measured >= 0.89 on corridor1, true loops <= 0.05.
+    double max_normal_disagreement = 0.5;
     // Confirmations before a region is a loop (mnLoopNumCoincidences); later
     // queries in a row that fail to confirm before it is dropped
     // (mnLoopNumNotFound).
@@ -78,6 +85,21 @@ struct LoopCloserOptions {
     size_t max_events_in_flight = 16;
 };
 
+// The normal gate's measurement over matched pairs: pairs with both normals
+// defined, and the share of them more than 60 deg apart.
+struct NormalAgreement {
+    size_t pairs = 0;
+    double disagreement = 0.0;  // 0 without pairs
+};
+
+// A region, or a confirmation of one, that the normal gate rejected:
+// `frame`'s matches against `match_frame`'s window.
+struct NormalRejection {
+    map::FrameId frame;
+    map::FrameId match_frame;
+    NormalAgreement agreement;
+};
+
 // How far a detection got: the candidates, and per gate the most any of them
 // reached.
 struct CommonRegionStats {
@@ -87,6 +109,8 @@ struct CommonRegionStats {
     size_t coarse_projection_matches = 0;  // with the RANSAC Sim3
     size_t optimized_inliers = 0;
     size_t projection_matches = 0;         // with the optimized Sim3
+    // Candidates and covisible confirmations rejected by the normal gate.
+    std::vector<NormalRejection> normal_rejections;
 };
 
 // A place the query Frame shares with earlier Frames that are not covisible
@@ -107,6 +131,8 @@ struct CommonRegion {
     // Covisible Frames of the query that confirmed the region (at most
     // required_coincidences).
     size_t num_coincidences = 0;
+    // The normal gate's measurement over `matches`.
+    NormalAgreement normals;
 };
 
 struct CommonRegionResult {
@@ -138,6 +164,8 @@ struct CommonRegionResult {
 //      required_coincidences of them confirm, each by projection of the
 //      window's points with its pose relative to the query
 //      (confirmation_projection).
+// Steps 5 and 6 also need the normal gate (max_normal_disagreement); its
+// rejections are listed in the stats.
 // A Sim3 that is not finite or has a scale <= 0 drops the candidate. The
 // candidate with the most matches in step 5 wins. Deterministic. Reusable on
 // another map's replica (map merging).
@@ -149,13 +177,15 @@ template <typename TFeatureExtractor>
 // `match_frame` in a later query from the guess S_query_world: projection of
 // the match Frame's window points (confirmation_projection), OptimizeSim3 over
 // the matched query points (more than refine_min_optimized inliers),
-// projection with the refined Sim3 (refine_min_projection). None if a gate
-// fails or a Frame is unknown.
+// projection with the refined Sim3 (refine_min_projection), then the normal
+// gate on those matches. None if a gate fails or a Frame is unknown; a normal
+// rejection is added to `out_stats` if given.
 template <typename TFeatureExtractor>
 [[nodiscard]] std::optional<CommonRegion> RefineCommonRegion(const tracking::MapReplica<TFeatureExtractor>& replica,
                                                              map::FrameId query_frame, map::FrameId match_frame,
                                                              const geometry::Sim3& S_query_world,
-                                                             const LoopCloserOptions& options);
+                                                             const LoopCloserOptions& options,
+                                                             CommonRegionStats* out_stats = nullptr);
 
 } // namespace voyahslam::loop_closing
 

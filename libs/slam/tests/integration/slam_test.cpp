@@ -14,9 +14,9 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
-#include <iterator>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -525,9 +525,11 @@ struct RunSetup {
     loop_closing::LoopCloserOptions loop_closer_options;
     // Each frame to track is fed once the previous one is tracked, the Mapper
     // has handled every FrameTracked so far and has refined around every Frame
-    // it created (a Mapper that keeps up, as at camera rate, and a run that
-    // does not depend on thread timing); otherwise all at once, as fast as the
-    // Tracker goes.
+    // it created (a Mapper that keeps up, as at camera rate). The Tracker and
+    // the Mapper then no longer depend on thread timing; the LoopCloser is not
+    // gated, so when its LoopDetected reaches the Mapper still does (in
+    // practice runs agree to four digits). Otherwise all at once, as fast as
+    // the Tracker goes.
     bool lock_step = false;
 };
 
@@ -837,6 +839,12 @@ struct LoopRun {
     // pose, as the final map holds it: the drift between where the camera
     // ends and the map of where it started.
     double end_error = 0.0;
+    size_t num_end_pairs = 0;  // end frames with a first-lap reference: end_error's count
+    // Mean over those frames of the map's scale there (the distance moved
+    // over kScaleSpan frames, per true metre) over its scale at the
+    // reference: the scale drift between the start and the end of the run,
+    // 1 if none.
+    double end_scale_ratio = 1.0;
     size_t num_loops = 0;    // LoopDetected
     size_t num_corrections = 0;
     size_t num_lost = 0;     // TrackingLost
@@ -895,8 +903,13 @@ LoopRun RunLoop(const TSequence& sequence, size_t init_frames, bool monocular,
         }
         return nearest;
     };
-    double sum = 0.0;
-    size_t n = 0;
+    // The latest tracked centre per frame index, map 1.
+    std::vector<std::optional<geometry::TVector3DF>> tracked(sequence.frames.size());
+    for (const StampedPose& position : recorder.positions) {
+        if (position.map == 1) tracked[FrameIndexOf(position.timestamp)] = test::MapAlignment::Centre(position.pose);
+    }
+    double sum = 0.0, ratio_sum = 0.0;
+    size_t n = 0, num_ratios = 0;
     for (const StampedPose& position : recorder.positions) {
         const size_t k = FrameIndexOf(position.timestamp);
         if (position.map != 1 || k + kEndFrames <= last) continue;
@@ -915,8 +928,16 @@ LoopRun RunLoop(const TSequence& sequence, size_t init_frames, bool monocular,
         const geometry::TVector3DF estimated = (test::MapAlignment::Centre(position.pose) - reference_centre) / scale;
         sum += (estimated - (true_centre(k) - true_centre(*reference))).norm();
         ++n;
+        if (tracked[k - kScaleSpan]) {
+            const double end_scale = (test::MapAlignment::Centre(position.pose) - *tracked[k - kScaleSpan]).norm() /
+                                     (true_centre(k) - true_centre(k - kScaleSpan)).norm();
+            ratio_sum += end_scale / scale;
+            ++num_ratios;
+        }
     }
     run.end_error = n > 0 ? sum / static_cast<double>(n) : 0.0;
+    run.num_end_pairs = n;
+    run.end_scale_ratio = num_ratios > 0 ? ratio_sum / static_cast<double>(num_ratios) : 1.0;
     return run;
 }
 
@@ -924,11 +945,15 @@ LoopRun RunLoop(const TSequence& sequence, size_t init_frames, bool monocular,
 // expects: without, no loop and tracking to the end; with, the loop detected
 // on the return to the first lap's view and corrected, one map, no tracking
 // loss across the correction (the Tracker follows a real Mapper correction),
-// and an end error at most a third of the run without. Records the numbers
-// under `seed`, the sequence's; returns the run with loop closing.
+// and an end error, measured, at most a third of the run without. Records
+// the numbers under `seed`, the sequence's; returns both runs.
+struct LoopRuns {
+    LoopRun open;    // without loop closing
+    LoopRun closed;  // with it
+};
 template <typename TSequence>
-LoopRun ExpectClosesLoop(const TSequence& sequence, uint32_t seed, size_t init_frames, bool monocular,
-                         const mapping::MapperOptions& mapper_options) {
+LoopRuns ExpectClosesLoop(const TSequence& sequence, uint32_t seed, size_t init_frames, bool monocular,
+                          const mapping::MapperOptions& mapper_options) {
     const LoopRun open = RunLoop(sequence, init_frames, monocular, mapper_options, /*loop_closing=*/false);
     if (::testing::Test::HasFatalFailure()) return {};
     const LoopRun closed = RunLoop(sequence, init_frames, monocular, mapper_options, /*loop_closing=*/true);
@@ -946,7 +971,11 @@ LoopRun ExpectClosesLoop(const TSequence& sequence, uint32_t seed, size_t init_f
     EXPECT_EQ(closed.num_maps, 1u);
     EXPECT_EQ(closed.num_lost, 0u);
     EXPECT_TRUE(closed.tracked_to_end);
+    // Both errors are measured (end frames with a first-lap reference).
+    EXPECT_GE(open.num_end_pairs, kEndFrames / 2);
+    EXPECT_GE(closed.num_end_pairs, kEndFrames / 2);
     EXPECT_GT(open.end_error, 0.0);
+    EXPECT_GT(closed.end_error, 0.0);
     EXPECT_LE(closed.end_error, open.end_error / 3.0);
     if (!monocular) {
         EXPECT_DOUBLE_EQ(closed.loop_scale, 1.0);
@@ -956,37 +985,49 @@ LoopRun ExpectClosesLoop(const TSequence& sequence, uint32_t seed, size_t init_f
     ::testing::Test::RecordProperty(prefix + "end_error_with_m", std::to_string(closed.end_error));
     ::testing::Test::RecordProperty(prefix + "loop_frame", static_cast<int>(closed.loop_frame));
     ::testing::Test::RecordProperty(prefix + "loop_scale", std::to_string(closed.loop_scale));
-    return closed;
+    ::testing::Test::RecordProperty(prefix + "end_scale_ratio_without", std::to_string(open.end_scale_ratio));
+    ::testing::Test::RecordProperty(prefix + "end_scale_ratio_with", std::to_string(closed.end_scale_ratio));
+    return {open, closed};
 }
 
 // Seeds 1-3 of the loop. Mono drift is a random walk whose scale part varies
-// by scene (seeds 1-5 measured 0.4, 3.3, 0.3, 6.0, 3.0 %), so the scale drift
-// is expected over the range: some loop's Sim3 corrects more than 1.5 %.
+// by scene, so the scale correction is expected over the range: some seed
+// drifts in scale by more than 2 % between the start and the end of the run
+// (end_scale_ratio, against truth) without loop closing, and with it every
+// such drift is cut to at most a third.
 //
-// Measured (2026-10-09, end error without / with loop closing, three runs
-// each, identical to 4 digits): seed 1 0.0676 / 0.0101 m (loop at frame 236,
-// scale 0.996), seed 2 0.1139 / 0.0157 m (235, 0.967), seed 3 0.1429 /
-// 0.0060 m (225, 1.003); seeds 4-5 0.0876 / 0.0154 and 0.1447 / 0.0044 m.
+// Measured (2026-10-09, three runs each, identical to 4 digits; end error
+// without / with loop closing, end-of-run scale drift without / with): seed 1
+// 0.0676 / 0.0101 m, 5.5 / 0.4 % (loop at frame 236); seed 2 0.1139 / 0.0157
+// m, 0.7 / 1.4 % (235); seed 3 0.1429 / 0.0060 m, 4.6 / 0.5 % (225). One run
+// each of seeds 4-5: 0.0876 / 0.0154 and 0.1447 / 0.0044 m.
 TEST(SlamTest, MonoClosesLoop) {
     // As in MonoMapGrowsWhileLeavingInitialView: a well-conditioned initial map.
     mapping::MapperOptions mapper_options;
     mapper_options.initializer.reconstruction.min_parallax_deg = 4.0;
+    constexpr double kScaleDrift = 0.02;  // log scale
     double max_scale_drift = 0.0;
     for (uint32_t seed = 1; seed <= 3; ++seed) {
         SCOPED_TRACE("seed " + std::to_string(seed));
         test::SyntheticSequenceOptions options = LoopOptions();
         options.seed = seed;
-        const LoopRun closed = ExpectClosesLoop(test::MakeSyntheticSequence(options), seed, /*init_frames=*/30,
-                                                /*monocular=*/true, mapper_options);
+        const LoopRuns runs = ExpectClosesLoop(test::MakeSyntheticSequence(options), seed, /*init_frames=*/30,
+                                               /*monocular=*/true, mapper_options);
         if (HasFatalFailure()) return;
-        max_scale_drift = std::max(max_scale_drift, std::abs(std::log(closed.loop_scale)));
+        const double drift_without = std::abs(std::log(runs.open.end_scale_ratio));
+        const double drift_with = std::abs(std::log(runs.closed.end_scale_ratio));
+        max_scale_drift = std::max(max_scale_drift, drift_without);
+        if (drift_without > kScaleDrift) {
+            EXPECT_LE(drift_with, drift_without / 3.0);
+        }
     }
-    EXPECT_GT(max_scale_drift, 0.015);
+    EXPECT_GT(max_scale_drift, kScaleDrift);
 }
 
 // Measured (2026-10-09, end error without / with loop closing, three runs):
-// 0.0157 / 0.0023 m each, loop at frame 264. Seeds 2-5 (margin check, one run each): 0.0252 / 0.0043, 0.0457 /
-// 0.0115, 0.0186 / 0.0033, 0.0146 / 0.0019 m (ratio at most 0.25).
+// 0.0157 / 0.0023 m each, loop at frame 264. Seeds 2-5 (margin check, one
+// run each): 0.0252 / 0.0043, 0.0457 / 0.0115, 0.0186 / 0.0033, 0.0146 /
+// 0.0019 m (ratio at most 0.25).
 TEST(SlamTest, StereoClosesLoop) {
     test::SyntheticStereoSequenceOptions options;
     options.trajectory = LoopOptions();

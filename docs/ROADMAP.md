@@ -6,9 +6,9 @@ execution; nothing is merged without an explicit "merge and push".
 Done: tracking (sub-project 1), camera model (raw-pixel residuals),
 keyframes and map growth (sub-project 2, merged b93fcf4), restructure
 (step 0, merged 7426697), map quality (step 1, merged 9da7081), own DBoW2
-(step 2, merged 6fb863a), relocalization (step 3, merged 6afacc7), loop
-detection and correction (step 4a+4b, branch `feat/loop-closing`; its
-corridor1 smoke Musts are missed, see below).
+(step 2, merged 6fb863a), relocalization (step 3, merged 6afacc7).
+Implemented, not done: loop detection and correction (step 4a+4b, branch
+`feat/loop-closing`; its corridor1 smoke Musts are missed, see below).
 
 ## 0. Restructure (done 2026-10-07)
 
@@ -146,20 +146,26 @@ RANSAC, `OptimizeSim3`, projections, three confirmations) and publishes
 (`CorrectLoop`: window, points, `SearchAndFuse`, essential graph, loop edge)
 as one `MapTransaction` at a new map epoch; the Tracker's last frame follows
 its reference Frame. The map has a spanning tree and loop edges. The apps
-take `--no_loop_closing`. Synthetic loops (integration): the end error with
+take `--no_loop_closing`. The LoopCloser adds a normal-consistency gate.
+Synthetic loops (integration): the end error with
 loop closing is 0.04–0.15 of the error without (mono over three seeds,
 stereo), with no tracking loss across the correction. Smoke on corridor1
 (Release, `--vocabulary`, full sequence, two runs each):
 
+With the normal-consistency gate (a user decision beyond ORB-SLAM3), fix
+round 1:
+
 | Run | Result |
 |---|---|
-| Mono, loop closing | 4–6 loops corrected per run; nearby-view loops clean, but wrong ones (run 1: 2773→2662, 3207→791; run 2: 2266→1590, 3747→3506; views far apart or facing the other way) break the map: run 1 one map, ATE Sim3 0.652 m; run 2 two maps |
-| Mono, no loop closing | one map, ATE Sim3 0.316 / 0.422 m |
-| Stereo, loop closing | 4 loops corrected per run (208–814 ms); the wrong loop 2262–2265→1587 loses map 1 about 20 frames later, then 3 more maps |
-| Stereo, no loop closing | one map, ATE SE3 0.077 / 0.077 m |
+| Mono, loop closing | one map in both runs; opposite-facing false loops rejected (0.84–1.00); same-heading false loops 7–22 m apart corrected (run 1: then true returns rejected too); ATE Sim3 0.679 / 0.669 m |
+| Mono, no loop closing | one map, ATE Sim3 0.341 / 0.500 m |
+| Stereo, loop closing | one map, no extra loss; opposite-facing loops rejected (0.93–1.00); a same-heading false loop 22–30 m apart corrected per run, then true returns rejected; ATE SE3 1.295 / 18.16 m |
+| Stereo, no loop closing | one map, ATE SE3 0.098 / 0.138 m |
 
-The smoke Musts are **missed**. Nothing was tuned. Rejecting wrong loops is
-in TODO, to decide with the user.
+Before the gate (e529d07), the opposite-facing loop 2262→1587 cost map 1 in
+both stereo runs (4 maps) and mono run 2 (2 maps). The smoke Musts are
+**missed**; nothing was tuned. Same-heading look-alikes are in TODO for a
+decision with the user.
 
 Spec: `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; see
 DESIGN "Loop Closing" and the 2026-10-09 decisions-log entries. Out of scope

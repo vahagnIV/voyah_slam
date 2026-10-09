@@ -90,6 +90,7 @@ private:
     void ClearMap(map::MapId lost_map);
     void DetectLoop(map::FrameId query);
     void PublishLoop(map::FrameId query, const PendingRegion& region);
+    void LogNormalRejections(const CommonRegionStats& stats);
 
     const LoopCloserOptions options_;
     const std::shared_ptr<const TVocabulary> vocabulary_;

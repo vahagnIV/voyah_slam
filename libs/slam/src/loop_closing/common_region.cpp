@@ -109,6 +109,37 @@ PointMatches Project(const TReplica<TFeatureExtractor>& replica, const TKeyFrame
     return matches;
 }
 
+// The normal gate's angle: normals more than 60 deg apart disagree.
+constexpr double kMaxNormalCosine = 0.5;
+
+// Over the features with an own point in `own_points` and a match in
+// `matches`, the pairs whose normals are both defined, and the share of them
+// more than 60 deg apart.
+template <typename TFeatureExtractor>
+NormalAgreement CompareNormals(const TReplica<TFeatureExtractor>& replica, const PointMatches& own_points,
+                               const PointMatches& matches) {
+    size_t pairs = 0;
+    size_t disagreeing = 0;
+    for (size_t i = 0; i < matches.size() && i < own_points.size(); ++i) {
+        if (!matches[i] || !own_points[i]) {
+            continue;
+        }
+        const geometry::TPoint3DF& a = replica.Normal(*own_points[i]);
+        const geometry::TPoint3DF& b = replica.Normal(*matches[i]);
+        const double norms = a.norm() * b.norm();
+        if (!(norms > 0.0) || !std::isfinite(norms)) {
+            continue;  // undefined
+        }
+        ++pairs;
+        disagreeing += a.dot(b) < kMaxNormalCosine * norms ? 1 : 0;
+    }
+    return {pairs, pairs > 0 ? static_cast<double>(disagreeing) / static_cast<double>(pairs) : 0.0};
+}
+
+bool Disagrees(const NormalAgreement& agreement, const LoopCloserOptions& options) {
+    return agreement.disagreement > options.max_normal_disagreement;
+}
+
 size_t Count(const PointMatches& matches) {
     return static_cast<size_t>(std::count_if(matches.begin(), matches.end(), [](const auto& m) { return m.has_value(); }));
 }
@@ -328,6 +359,12 @@ CommonRegionResult DetectCommonRegion(const tracking::MapReplica<TFeatureExtract
         if (num_matches < options.min_projection) {
             continue;
         }
+        // The normal gate (not in ORB-SLAM3).
+        const NormalAgreement normals = CompareNormals(replica, query_points, matches);
+        if (Disagrees(normals, options)) {
+            result.stats.normal_rejections.push_back({query_frame, candidate, normals});
+            continue;
+        }
 
         // 6. Confirmations by the query's covisible Frames
         // (DetectCommonRegionsFromLastKF).
@@ -345,12 +382,21 @@ CommonRegionResult DetectCommonRegion(const tracking::MapReplica<TFeatureExtract
             const PointMatches confirming =
                 Project(replica, *neighbour, S_neighbour_world, window_points, options.confirmation_radius,
                         options.confirmation_max_distance, options);
-            num_coincidences += Count(confirming) >= options.confirmation_projection ? 1 : 0;
+            if (Count(confirming) < options.confirmation_projection) {
+                continue;
+            }
+            const NormalAgreement confirming_normals =
+                CompareNormals(replica, PointsOf(replica, *neighbour), confirming);
+            if (Disagrees(confirming_normals, options)) {
+                result.stats.normal_rejections.push_back({frame, candidate, confirming_normals});
+                continue;
+            }
+            ++num_coincidences;
         }
 
         if (!result.region || num_matches > result.region->num_matches) {
-            result.region = CommonRegion{candidate,          optimized->S_12, S_query_world,
-                                         std::move(matches), num_matches,     num_coincidences};
+            result.region = CommonRegion{candidate,   optimized->S_12,  S_query_world, std::move(matches),
+                                         num_matches, num_coincidences, normals};
         }
     }
     return result;
@@ -360,7 +406,7 @@ template <typename TFeatureExtractor>
 std::optional<CommonRegion> RefineCommonRegion(const tracking::MapReplica<TFeatureExtractor>& replica,
                                                map::FrameId query_frame, map::FrameId match_frame,
                                                const geometry::Sim3& S_query_world,
-                                               const LoopCloserOptions& options) {
+                                               const LoopCloserOptions& options, CommonRegionStats* out_stats) {
     const TKeyFrame<TFeatureExtractor>* query = replica.keyframe(query_frame);
     const TKeyFrame<TFeatureExtractor>* match = replica.keyframe(match_frame);
     if (query == nullptr || match == nullptr || !IsValid(S_query_world)) {
@@ -390,7 +436,15 @@ std::optional<CommonRegion> RefineCommonRegion(const tracking::MapReplica<TFeatu
     if (num_matches < options.refine_min_projection) {
         return std::nullopt;
     }
-    return CommonRegion{match_frame, optimized->S_12, refined, std::move(refined_matches), num_matches, 0};
+    // The normal gate (not in ORB-SLAM3).
+    const NormalAgreement normals = CompareNormals(replica, PointsOf(replica, *query), refined_matches);
+    if (Disagrees(normals, options)) {
+        if (out_stats != nullptr) {
+            out_stats->normal_rejections.push_back({query_frame, match_frame, normals});
+        }
+        return std::nullopt;
+    }
+    return CommonRegion{match_frame, optimized->S_12, refined, std::move(refined_matches), num_matches, 0, normals};
 }
 
 #define INSTANTIATE_COMMON_REGION(FE)                                                                       \
@@ -398,7 +452,7 @@ std::optional<CommonRegion> RefineCommonRegion(const tracking::MapReplica<TFeatu
                                                        const LoopCloserOptions&);                           \
     template std::optional<CommonRegion> RefineCommonRegion<FE>(const tracking::MapReplica<FE>&, map::FrameId, \
                                                                 map::FrameId, const geometry::Sim3&,        \
-                                                                const LoopCloserOptions&);
+                                                                const LoopCloserOptions&, CommonRegionStats*);
 
 INSTANTIATE_COMMON_REGION(features::SIFTFeatureExtractor)
 INSTANTIATE_COMMON_REGION(features::OrbFeatureExtractor)

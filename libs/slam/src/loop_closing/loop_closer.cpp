@@ -90,7 +90,10 @@ void LoopCloser<TFeatureExtractor>::DetectLoop(map::FrameId query) {
         if (last != nullptr && current != nullptr) {
             const geometry::Sim3 S_query_world =
                 geometry::Compose(ToSim3(current->T_cw * last->T_cw.Inverse()), pending_->S_last_world);
-            confirmed = RefineCommonRegion(replica_, query, pending_->match_frame, S_query_world, options_);
+            CommonRegionStats refine_stats;
+            confirmed =
+                RefineCommonRegion(replica_, query, pending_->match_frame, S_query_world, options_, &refine_stats);
+            LogNormalRejections(refine_stats);
         }
         if (confirmed) {
             ++pending_->num_coincidences;
@@ -113,17 +116,28 @@ void LoopCloser<TFeatureExtractor>::DetectLoop(map::FrameId query) {
 
     const CommonRegionResult result = DetectCommonRegion(replica_, query, options_);
     last_stats_ = result.stats;
+    LogNormalRejections(result.stats);
     if (!result.region) {
         return;
     }
     const CommonRegion& region = *result.region;
-    log_->debug("Frame {} shares a region with Frame {}: {} matches, {} confirmations", query.value,
-                region.match_frame.value, region.num_matches, region.num_coincidences);
+    log_->debug("Frame {} shares a region with Frame {}: {} matches, {} confirmations, {:.2f} of {} normals disagree",
+                query.value, region.match_frame.value, region.num_matches, region.num_coincidences,
+                region.normals.disagreement, region.normals.pairs);
     pending_ = PendingRegion{region.match_frame, query,           region.S_query_world, region.matches,
                              region.num_coincidences, 0};
     if (pending_->num_coincidences >= options_.required_coincidences) {
         PublishLoop(query, *pending_);
         pending_.reset();
+    }
+}
+
+template <typename TFeatureExtractor>
+void LoopCloser<TFeatureExtractor>::LogNormalRejections(const CommonRegionStats& stats) {
+    for (const NormalRejection& rejection : stats.normal_rejections) {
+        log_->debug("Normal gate: Frame {} against the region of Frame {} rejected ({:.2f} of {} pairs disagree)",
+                    rejection.frame.value, rejection.match_frame.value, rejection.agreement.disagreement,
+                    rejection.agreement.pairs);
     }
 }
 
