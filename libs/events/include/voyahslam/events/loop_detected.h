@@ -22,10 +22,11 @@ struct LoopDetected
     map::MapId match_map_id{0};
     map::FrameId query_frame{};
     map::FrameId match_frame{};
-    // Camera similarity x_query = S_query_to_match * x_match (ORB-SLAM3 gScm):
-    // the query's corrected pose is S_query_to_match composed with the match
-    // Frame's T_cw. Scale 1 for a binocular map.
-    geometry::Sim3 S_query_to_match;
+    // ORB-SLAM3 Scm: the similarity from the match camera to the query
+    // camera, x_query = S_query_match * x_match (camera coordinates). The
+    // query's corrected pose is S_query_match composed with the match Frame's
+    // T_cw. Scale 1 for a binocular map.
+    geometry::Sim3 S_query_match;
     // (query point, match point): the query Frame's points matched to the
     // match side's points.
     std::vector<std::pair<map::MapPointId, map::MapPointId>> matched_points;
@@ -36,7 +37,7 @@ struct LoopDetected
         match_map_id = map::MapId{0};
         query_frame = {};
         match_frame = {};
-        S_query_to_match = {};
+        S_query_match = {};
         matched_points.clear();
         priority = false;
     }

@@ -68,38 +68,48 @@ The plan verifies each threshold against the ORB-SLAM3 source.
 **Candidates** (`DetectNBestCandidates`).
 - Database hits come from `FrameDatabase::Query`, excluding the query
   Frame's covisible Frames.
-- Keep `common ≥ 0.8·max`, and compute group scores over the top 10
-  covisible Frames.
+- Keep `common > int(0.8·max)` (max over the remaining hits), and compute
+  group scores over the top 10 covisible Frames.
 - Take the best `num_candidates` (3).
 
 **Per candidate** (`DetectCommonRegionsFromBoW`):
-1. **Window:** the candidate plus its top `window` (5) covisible Frames.
+1. **Window:** the candidate plus its top `num_covisibles` (10) covisible
+   Frames. A window holding a Frame covisible with the query drops the
+   candidate.
 2. **Matching:** `SearchByBoW` from the query against each window Frame,
    keeping map points only. The result must reach `min_bow_matches` (20).
 3. **RANSAC:** `geometry::SolveSim3Ransac` on the 3-D point pairs.
    - The query side's points come from its observations; the window side's
      points are the matched map points.
    - The scale is fixed to 1 for stereo.
-   - At least `min_sim3_inliers` (20) inliers.
-4. **First projection:** `features::SearchBySim3Projection` of the window's
-   points, then `optimization::OptimizeSim3`. At least `min_optimized` (15)
-   inliers.
-5. **Second projection:** with the optimized Sim3, at least `min_projection`
-   (100) matches makes it a candidate loop.
+   - At least `min_sim3_inliers` (15) inliers.
+4. **First projection:** the window's map points projected into the query
+   through the RANSAC Sim3 (`features::SearchPointsBySim3`, ORB-SLAM3
+   `SearchByProjection(KF, Scw)`, th 8, ratio 1.5), into a fresh match list;
+   at least `min_coarse_projection` (50). Then `optimization::OptimizeSim3`
+   over those matches: at least `min_optimized` (20) inliers.
+5. **Second projection:** the window's points with the optimized Sim3 (th 5,
+   ratio 1.0); at least `min_projection` (80) matches makes it a candidate
+   loop.
 
 **Consistency** (`mnLoopNumCoincidences`).
 - A candidate is confirmed `required_coincidences` (3) times before it
   becomes a loop.
-- Confirmations come from the query's covisible Frames (ORB-SLAM3
-  `DetectAndReffineSim3FromLastKF`, at least 50 projection matches), or from
-  later queries within `max_unconfirmed_queries`.
-- A failed confirmation resets the count.
+- Confirmations come from the query's top 10 covisible Frames (ORB-SLAM3
+  `DetectCommonRegionsFromLastKF`: at least `confirmation_projection` (30)
+  projection matches, th 3, ratio 1.5), or from later queries (ORB-SLAM3
+  `DetectAndReffineSim3FromLastKF`: 30 projection matches, more than
+  `refine_min_optimized` (50) OptimizeSim3 inliers, then
+  `refine_min_projection` (100) projection matches with the refined Sim3).
+- After `max_unconfirmed_queries` (2) later queries in a row fail to confirm,
+  the pending region is dropped.
 
 **`LoopDetected`** carries:
 - `query_map_id`, `match_map_id` (equal for now), `query_frame` and
   `match_frame`;
-- the Sim3 `S_query_to_match`, as scale s, rotation R and translation t,
-  with s = 1 for stereo;
+- the Sim3 `S_query_match` (ORB-SLAM3 Scm: x_query = S·x_match in camera
+  coordinates), as scale s, rotation R and translation t, with s = 1 for
+  stereo;
 - the matched pairs `(query_point, match_point)`.
 
 **New in algs:**
@@ -114,9 +124,13 @@ The plan verifies each threshold against the ORB-SLAM3 source.
     pixels, robust, 5 + 5 iterations;
   - outliers removed between the stages;
   - the scale is fixed for stereo.
-- **`features::SearchBySim3Projection`:** ORB-SLAM3
-  `SearchByProjection(KeyFrame*, Sim3, …)`, using ORB-exact radii like
-  `SearchFromFrame`.
+- **`features::SearchBySim3Projection`:** ORB-SLAM2 `SearchBySim3` (mutual
+  matches between two Frames), using ORB-exact radii like `SearchFromFrame`.
+  Not used by detection since the Task 5 review.
+- **`features::SearchPointsBySim3`:** ORB-SLAM3 `SearchByProjection(KeyFrame*,
+  Scw, points, matched, th, ratioHamming)`: a list of map points projected
+  into one Frame through a Sim3 (folded to `[R, t/s]`), scale-invariance and
+  viewing-angle gates, levels [l−1, l], radius th·1.2^l.
 
 ## 3. Correction (Mapper, ORB-SLAM3 `CorrectLoop`)
 
@@ -126,7 +140,7 @@ match Frame is culled, or a correction is already running.
 **Steps:**
 1. **Window:** the query Frame plus its covisible Frames.
 2. **Window poses:**
-   - the corrected Sim3 of the query is `S_query_to_match` composed with the
+   - the corrected Sim3 of the query is `S_query_match` composed with the
      match Frame's pose;
    - each window Frame keeps its relative Sim3 to the query.
 3. **Points:**
@@ -174,13 +188,19 @@ a Sim3, so map merging can call them.
 
 ## 4. Options
 
-- **`LoopCloserOptions`:**
+- **`LoopCloserOptions`** (values from ORB-SLAM3 source: `LoopClosing.cc`,
+  `KeyFrameDatabase.cc`):
   - `min_map_frames` 12;
-  - `num_candidates` 3, `window` 5;
-  - `min_bow_matches` 20, `min_sim3_inliers` 20, `min_optimized` 15;
-  - `min_projection` 100, `confirmation_projection` 50;
-  - `required_coincidences` 3, `max_unconfirmed_queries` 3;
-  - RANSAC 300 iterations, confidence 0.99, χ² 9.21.
+  - `num_candidates` 3, `num_covisibles` 10 (window, group scores, query
+    confirmations);
+  - `min_bow_matches` 20, `min_sim3_inliers` 15, `min_coarse_projection` 50,
+    `min_optimized` 20, `min_projection` 80;
+  - `confirmation_projection` 30, `refine_min_optimized` 50 (strictly more),
+    `refine_min_projection` 100;
+  - `required_coincidences` 3, `max_unconfirmed_queries` 2;
+  - RANSAC 300 iterations, confidence 0.99, χ² 9.21;
+  - projection radii th 8 / 5 / 3 px at level 0, descriptor distances
+    75 / 50 / 75 (TH_LOW × ratio); SearchByBoW ratio 0.9.
 - **`MapperOptions::loop`:**
   - `min_essential_weight` 100;
   - `essential_iterations` 20;

@@ -131,11 +131,13 @@ struct SceneFrame {
     std::vector<map::MapPointId> points;
 };
 
-// Frame `id` at true pose `T_true` (map pose `T_map`) observing every point of
-// `region` in its image as point first_id + i, plus kExtras random features.
+// Frame `id` at true pose `T_true` (map pose `T_map`) observing every point i
+// of `region` in its image as point ids[i] (Observe: first_id + i), plus
+// kExtras random features.
 // Binocular frames carry the left image twice (detection reads the left one).
-SceneFrame Observe(map::FrameId id, const RigidTransformation& T_true, const RigidTransformation& T_map,
-                   const std::vector<ScenePoint>& region, uint32_t first_id, bool binocular, std::mt19937& rng) {
+SceneFrame ObserveIds(map::FrameId id, const RigidTransformation& T_true, const RigidTransformation& T_map,
+                      const std::vector<ScenePoint>& region, const std::vector<uint32_t>& ids, bool binocular,
+                      std::mt19937& rng) {
     const geometry::TMatrix33F K = test::SyntheticIntrinsics();
     std::normal_distribution<double> noise(0.0, 1.0);
     std::uniform_real_distribution<double> any_pixel(0.0, kImageSize);
@@ -150,7 +152,7 @@ SceneFrame Observe(map::FrameId id, const RigidTransformation& T_true, const Rig
         const geometry::TPoint2DF uv = (K * Xc).hnormalized() + kPixelNoise * geometry::TPoint2DF(noise(rng), noise(rng));
         if (uv.x() < 0.0 || uv.x() >= kImageSize || uv.y() < 0.0 || uv.y() >= kImageSize) continue;
         frame.features.push_back(static_cast<uint32_t>(pixels.size()));
-        frame.points.push_back(map::MapPointId{first_id + static_cast<uint32_t>(i)});
+        frame.points.push_back(map::MapPointId{ids[i]});
         pixels.push_back(uv);
         descriptors.push_back(test::detail::FlipBits(region[i].descriptor, kBitFlips, rng));
         angles.push_back(region[i].angle + kAngleNoise * noise(rng));
@@ -187,6 +189,13 @@ SceneFrame Observe(map::FrameId id, const RigidTransformation& T_true, const Rig
         frame.measurement = features::TMonocularMeasurement<Extractor>(make_features(), K, nullptr, timestamp);
     }
     return frame;
+}
+
+SceneFrame Observe(map::FrameId id, const RigidTransformation& T_true, const RigidTransformation& T_map,
+                   const std::vector<ScenePoint>& region, uint32_t first_id, bool binocular, std::mt19937& rng) {
+    std::vector<uint32_t> ids(region.size());
+    for (size_t i = 0; i < ids.size(); ++i) ids[i] = first_id + static_cast<uint32_t>(i);
+    return ObserveIds(id, T_true, T_map, region, ids, binocular, rng);
 }
 
 // New points of a transaction: ids first_id.., map positions, descriptors,
@@ -285,22 +294,26 @@ public:
         return Run();
     }
 
+    // Runs the LoopCloser; returns what it published, or nothing while held.
     std::vector<Loop> Run() {
         while (loop_closer_.ProcessPending()) {
         }
-        return Take();
+        return hold_ ? std::vector<Loop>{} : Take();
     }
+
+    // While held, published events stay in the queue (in flight).
+    void set_hold(bool hold) { hold_ = hold; }
 
     LoopCloser<Extractor>& loop_closer() { return loop_closer_; }
 
-private:
+    // Takes (and acknowledges) everything published.
     std::vector<Loop> Take() {
         std::vector<Loop> loops;
         while (events::Event* event = listener_.GetNextEvent()) {
             if (event->type != events::EventType::LoopDetected) continue;
             const auto& loop = *static_cast<events::LoopDetected*>(event);
             loops.push_back({loop.map_id, loop.query_map_id, loop.match_map_id, loop.query_frame,
-                             loop.match_frame, loop.S_query_to_match, loop.matched_points});
+                             loop.match_frame, loop.S_query_match, loop.matched_points});
         }
         return loops;
     }
@@ -316,6 +329,7 @@ private:
     events::AsyncObserver capture_;
     events::Listener listener_ = capture_.GetListener();
     std::optional<map::FrameId> previous_;
+    bool hold_ = false;
 };
 
 // How the camera comes back to region A.
@@ -331,7 +345,7 @@ constexpr size_t kReturnFrames = 5;  // L0..L4 come back to region A
 
 // The synthetic loop. Frames 0..4 (E) map region A (points 0..399) from the
 // start; frames 5..11 (B) map region B (points 400..799) elsewhere; frames
-// 12..16 (L) return to region A's place, 5 cm off the start poses, through
+// 12..16 (L) return to region A's place, 0.4..0.8 m off the start poses, through
 // `revisit`. A drifted revisit sees region A through new points 800..1199
 // whose map positions are drift(X), from map poses consistent with them (scale
 // folded into the translation).
@@ -361,6 +375,7 @@ public:
     }
     static constexpr uint32_t kRegionB = kRegionPoints;
     static constexpr uint32_t kRevisit = 2 * kRegionPoints;
+    static constexpr uint32_t kElsewhere = 3 * kRegionPoints;
 
     // Publishes E0..E4 and B0..B6; returns what the LoopCloser published.
     std::vector<Loop> PublishStartAndMiddle(Harness& harness) {
@@ -391,6 +406,30 @@ public:
         const NewPoints points =
             k == 0 ? PointsOf(revisited_, kRevisit, drift_, Centre(MapPose(T_true)), rng_) : NewPoints{};
         return harness.Publish(frame, points);
+    }
+
+    // Publishes Frame `id` at the first return pose observing region A
+    // through its own points (even i) and the revisit's (odd i): a Frame
+    // covisible with both the start Frames and the return Frames. After L0.
+    std::vector<Loop> PublishBridge(Harness& harness, map::FrameId id) {
+        std::vector<uint32_t> ids(region_a_.size());
+        for (size_t i = 0; i < ids.size(); ++i) {
+            ids[i] = static_cast<uint32_t>(i % 2 == 0 ? i : kRevisit + i);
+        }
+        const RigidTransformation T_true = ReturnPose(0);
+        return harness.Publish(ObserveIds(id, T_true, MapPose(T_true), region_a_, ids, binocular_, rng_));
+    }
+
+    // Publishes Frame `id` looking at a region C far from everything (its
+    // points are added with the first such Frame).
+    std::vector<Loop> PublishElsewhere(Harness& harness, map::FrameId id) {
+        const RigidTransformation T = Pose(200.0, 0.0, 0.0, 0.0);
+        NewPoints points;
+        if (region_c_.empty()) {
+            region_c_ = MakeRegion(kRegionPoints, T, 0xFF, rng_);
+            points = PointsOf(region_c_, kElsewhere, Sim3{}, Centre(T), rng_);
+        }
+        return harness.Publish(Observe(id, T, T, region_c_, kElsewhere, binocular_, rng_), points);
     }
 
     // The true camera similarity of a drifted revisit, x_query = S x_match:
@@ -426,6 +465,7 @@ private:
     std::vector<ScenePoint> region_a_;
     std::vector<ScenePoint> region_b_;
     std::vector<ScenePoint> revisited_;
+    std::vector<ScenePoint> region_c_;
 };
 
 // Mono drift: 10 % scale, 4 deg of rotation, 0.5 m of translation.
@@ -466,16 +506,19 @@ void ExpectLoopAtThirdConfirmation(uint32_t seed, const Sim3& drift, bool binocu
                 DetectCommonRegion(loop_closer.replica(), LoopScene::ReturnId(0), LoopCloserOptions{});
 
             const CommonRegionStats& stats = result.stats;
-            ::testing::Test::RecordProperty("seed" + std::to_string(seed) + (binocular ? "_stereo" : "_mono"),
-                                            "bow " + std::to_string(stats.bow_matches) + " ransac " +
-                                                std::to_string(stats.ransac_inliers) + " optimized " +
-                                                std::to_string(stats.optimized_inliers) + " projection " +
-                                                std::to_string(stats.projection_matches));
+            ::testing::Test::RecordProperty(
+                "seed" + std::to_string(seed) + (binocular ? "_stereo" : "_mono"),
+                "bow " + std::to_string(stats.bow_matches) + " ransac " + std::to_string(stats.ransac_inliers) +
+                    " coarse " + std::to_string(stats.coarse_projection_matches) + " optimized " +
+                    std::to_string(stats.optimized_inliers) + " projection " +
+                    std::to_string(stats.projection_matches));
             ASSERT_TRUE(result.region.has_value());
-            EXPECT_GE(stats.bow_matches, 2 * 20u);
-            EXPECT_GE(stats.ransac_inliers, 2 * 20u);
-            EXPECT_GE(stats.optimized_inliers, 2 * 15u);
-            EXPECT_GE(stats.projection_matches, 2 * 100u);
+            const LoopCloserOptions options;
+            EXPECT_GE(stats.bow_matches, 2 * options.min_bow_matches);
+            EXPECT_GE(stats.ransac_inliers, 2 * options.min_sim3_inliers);
+            EXPECT_GE(stats.coarse_projection_matches, 2 * options.min_coarse_projection);
+            EXPECT_GE(stats.optimized_inliers, 2 * options.min_optimized);
+            EXPECT_GE(stats.projection_matches, 2 * options.min_projection);
         }
     }
 
@@ -524,9 +567,12 @@ TEST(LoopCloserTest, StereoLoopKeepsUnitScale) {
     }
 }
 
-// Review Focus 4: coming back to region A through its own (tracked) points
-// makes the return Frames covisible with every Frame of the place: no
-// candidate survives, and no loop is published.
+bool IsStartFrame(map::FrameId frame) { return frame.value < kStartFrames; }
+
+// Review Focus 4, the database filter: coming back to region A through its
+// own (tracked) points makes the return Frames covisible with every Frame of
+// the place, so no start Frame is a candidate (region B's Frames are, and do
+// not match), and no loop is published.
 TEST(LoopCloserTest, CovisibleRevisitIsNotALoop) {
     for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
         SCOPED_TRACE("seed " + std::to_string(seed));
@@ -536,10 +582,72 @@ TEST(LoopCloserTest, CovisibleRevisitIsNotALoop) {
         for (size_t k = 0; k < kReturnFrames; ++k) {
             EXPECT_TRUE(scene.PublishReturn(harness, k).empty()) << "L" << k;
             EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u) << "L" << k;
-            // Region B's Frames are the only candidates, and do not match.
-            EXPECT_EQ(harness.loop_closer().last_stats().bow_matches, 0u) << "L" << k;
+            const CommonRegionStats& stats = harness.loop_closer().last_stats();
+            EXPECT_FALSE(stats.candidates.empty()) << "L" << k;
+            EXPECT_TRUE(std::none_of(stats.candidates.begin(), stats.candidates.end(), IsStartFrame)) << "L" << k;
+            EXPECT_EQ(stats.bow_matches, 0u) << "L" << k;
         }
     }
+}
+
+// Review Focus 4, the window guard (bAbortByNearKF): a bridge Frame observes
+// region A through both its own points and the revisit's, so the start
+// Frames are not covisible with the return Frames but their windows hold a
+// Frame that is. The start Frames are candidates, and none is matched.
+TEST(LoopCloserTest, CandidateWindowTouchingQueryIsNotALoop) {
+    for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+        SCOPED_TRACE("seed " + std::to_string(seed));
+        Harness harness(MakeRegionVocabulary());
+        LoopScene scene(seed, Revisit::Drifted, MonoDrift(), false);
+        ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
+        ASSERT_TRUE(scene.PublishReturn(harness, 0).empty());
+        ASSERT_TRUE(scene.PublishBridge(harness, map::FrameId{100}).empty());
+        for (size_t k = 1; k < kReturnFrames; ++k) {
+            EXPECT_TRUE(scene.PublishReturn(harness, k).empty()) << "L" << k;
+            EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u) << "L" << k;
+            const CommonRegionStats& stats = harness.loop_closer().last_stats();
+            EXPECT_TRUE(std::any_of(stats.candidates.begin(), stats.candidates.end(), IsStartFrame)) << "L" << k;
+            EXPECT_EQ(stats.bow_matches, 0u) << "L" << k;
+        }
+    }
+}
+
+// mnLoopNumNotFound: a pending region that max_unconfirmed_queries (2) later
+// queries in a row fail to confirm is dropped.
+TEST(LoopCloserTest, FailedConfirmationsDropPendingRegion) {
+    Harness harness(MakeRegionVocabulary());
+    LoopScene scene(1, Revisit::Drifted, MonoDrift(), false);
+    ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
+    ASSERT_TRUE(scene.PublishReturn(harness, 0).empty());
+    ASSERT_TRUE(scene.PublishReturn(harness, 1).empty());
+    ASSERT_EQ(harness.loop_closer().num_coincidences(), 1u);
+
+    EXPECT_TRUE(scene.PublishElsewhere(harness, map::FrameId{101}).empty());
+    EXPECT_EQ(harness.loop_closer().num_coincidences(), 1u);  // one failure: kept
+    EXPECT_TRUE(scene.PublishElsewhere(harness, map::FrameId{102}).empty());
+    EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);  // two: dropped
+}
+
+// LoopDetected is published with TryCreate: with every event in flight (here
+// max_events_in_flight 1, held by the consumer) a loop is dropped, not an
+// abort, and the next free event serves the next detection.
+TEST(LoopCloserTest, DropsLoopWhileEventsAreInFlight) {
+    LoopCloserOptions options;
+    options.max_events_in_flight = 1;
+    Harness harness(MakeRegionVocabulary(), options);
+    LoopScene scene(1, Revisit::Drifted, MonoDrift(), false);
+    ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
+    harness.set_hold(true);
+    for (size_t k = 0; k < kReturnFrames; ++k) {
+        scene.PublishReturn(harness, k);
+    }
+    // L3 publishes the loop; L4 finds it again (3 covisible confirmations)
+    // while the first event is still in flight.
+    EXPECT_EQ(harness.loop_closer().num_dropped_loops(), 1u);
+    harness.set_hold(false);
+    const std::vector<Loop> loops = harness.Take();
+    ASSERT_EQ(loops.size(), 1u);
+    EXPECT_EQ(loops[0].query_frame, LoopScene::ReturnId(3));
 }
 
 // A place that looks like region A (the same descriptors) with another 3-D
@@ -553,7 +661,7 @@ TEST(LoopCloserTest, UnmappedLookAlikeRejected) {
         for (size_t k = 0; k < kReturnFrames; ++k) {
             EXPECT_TRUE(scene.PublishReturn(harness, k).empty()) << "L" << k;
             const CommonRegionStats& stats = harness.loop_closer().last_stats();
-            EXPECT_GE(stats.bow_matches, 2 * 20u) << "L" << k;
+            EXPECT_GE(stats.bow_matches, 2 * LoopCloserOptions{}.min_bow_matches) << "L" << k;
             EXPECT_EQ(stats.projection_matches, 0u) << "L" << k;
             EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u) << "L" << k;
         }
@@ -611,21 +719,33 @@ TEST(LoopCloserTest, NoVocabularyDoesNothing) {
     EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
 }
 
-TEST(LoopCloserOptionsTest, SpecDefaults) {
+// The ORB-SLAM3 source values (LoopClosing.cc, KeyFrameDatabase.cc).
+TEST(LoopCloserOptionsTest, OrbSlam3Defaults) {
     const LoopCloserOptions options;
     EXPECT_EQ(options.min_map_frames, 12u);
     EXPECT_EQ(options.num_candidates, 3u);
-    EXPECT_EQ(options.window, 5u);
+    EXPECT_EQ(options.num_covisibles, 10u);
     EXPECT_EQ(options.min_bow_matches, 20u);
-    EXPECT_EQ(options.min_sim3_inliers, 20u);
-    EXPECT_EQ(options.min_optimized, 15u);
-    EXPECT_EQ(options.min_projection, 100u);
-    EXPECT_EQ(options.confirmation_projection, 50u);
+    EXPECT_EQ(options.min_sim3_inliers, 15u);
+    EXPECT_EQ(options.min_coarse_projection, 50u);
+    EXPECT_EQ(options.min_optimized, 20u);
+    EXPECT_EQ(options.min_projection, 80u);
+    EXPECT_EQ(options.confirmation_projection, 30u);
+    EXPECT_EQ(options.refine_min_optimized, 50u);
+    EXPECT_EQ(options.refine_min_projection, 100u);
     EXPECT_EQ(options.required_coincidences, 3u);
-    EXPECT_EQ(options.max_unconfirmed_queries, 3u);
+    EXPECT_EQ(options.max_unconfirmed_queries, 2u);
     EXPECT_EQ(options.ransac_iterations, 300);
     EXPECT_DOUBLE_EQ(options.ransac_confidence, 0.99);
     EXPECT_DOUBLE_EQ(options.ransac_chi2, 9.21);
+    EXPECT_DOUBLE_EQ(options.min_common_words_ratio, 0.8);
+    EXPECT_DOUBLE_EQ(options.bow_nn_ratio, 0.9);
+    EXPECT_DOUBLE_EQ(options.coarse_projection_radius, 8.0);
+    EXPECT_DOUBLE_EQ(options.coarse_projection_max_distance, 75.0);
+    EXPECT_DOUBLE_EQ(options.projection_radius, 5.0);
+    EXPECT_DOUBLE_EQ(options.projection_max_distance, 50.0);
+    EXPECT_DOUBLE_EQ(options.confirmation_radius, 3.0);
+    EXPECT_DOUBLE_EQ(options.confirmation_max_distance, 75.0);
 }
 
 } // namespace

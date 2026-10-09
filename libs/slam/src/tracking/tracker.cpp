@@ -36,17 +36,7 @@ double TimestampOf(const TMeasurement& measurement) {
     return std::visit([](const auto& m) { return m.timestamp(); }, measurement);
 }
 
-// The monocular measurement matched against the map: the left image of a
-// binocular one.
-template <typename TFeatureExtractor>
-const features::TMonocularMeasurement<TFeatureExtractor>& LeftOf(
-    const features::TMeasurement<TFeatureExtractor>& measurement) {
-    if (const auto* binocular =
-            std::get_if<features::TBinocularMeasurement<TFeatureExtractor>>(&measurement)) {
-        return binocular->left();
-    }
-    return std::get<features::TMonocularMeasurement<TFeatureExtractor>>(measurement);
-}
+using features::LeftOf;
 
 size_t CountMatches(const std::vector<int64_t>& matches) {
     size_t count = 0;

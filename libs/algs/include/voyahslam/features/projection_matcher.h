@@ -458,6 +458,88 @@ template <typename TFeatureExtractor>
     return matches;
 }
 
+// ORB-SLAM3 ORBmatcher::SearchByProjection(KeyFrame*, Sim3 Scw, vpPoints, vpMatched, th,
+// ratioHamming), loop detection's projection: projects each alive `candidates` point with a
+// reference that is not yet in out_matches (per current feature, MapPointId value or -1) into
+// `current` through S_cw, as the rigid [R, t / s] (the camera in the points' units), and matches
+// it to the closest unmatched current feature at levels [l - 1, l] within th * level_scale^l px,
+// l the level predicted from its reference, accepted at <= max_distance. Skipped: behind the
+// camera, beyond the ray-angle limit, outside the raw-point bounding box, a camera distance
+// outside the reference's scale-invariance range [(1 - scale_slack) d_min, (1 + scale_slack)
+// d_max] (d_max = d_ref * level_scale^l_ref, d_min = d_max / level_scale^max_level), or a
+// viewing direction more than 60 deg from the point's normal. No orientation check. Returns the
+// number added.
+template <typename TFeatureExtractor, typename TPointSource>
+size_t SearchPointsBySim3(const TMonocularMeasurement<TFeatureExtractor>& current, const geometry::Sim3& S_cw,
+                          std::span<const map::MapPointId> candidates, const TPointSource& points,
+                          std::vector<int64_t>& out_matches, double th, double max_distance,
+                          const ProjectionMatcherOptions& options) {
+    assert(static_cast<Eigen::Index>(out_matches.size()) == current.points().cols());
+    const size_t num_points = points.num_points();
+    std::vector<bool> already_matched(num_points, false);
+    for (const int64_t id : out_matches) {
+        if (id >= 0 && static_cast<uint64_t>(id) < num_points) {
+            already_matched[static_cast<size_t>(id)] = true;
+        }
+    }
+    const geometry::RigidTransformation T_cw(S_cw.R, S_cw.t / S_cw.scale);
+    const geometry::TPoint3DF centre = T_cw.Inverse().translation();
+    const FeatureGrid grid(current.distorted_points(), current.levels());
+    const detail::ProjectionGate gate(current.camera(), current.distorted_points(), options.max_ray_angle_deg);
+    const double max_level_scale = std::pow(options.level_scale, options.max_level);
+
+    size_t added = 0;
+    for (const map::MapPointId id : candidates) {
+        if (id.value >= num_points || already_matched[id.value] || !points.IsAlive(id)) {
+            continue;
+        }
+        const auto& reference = points.Reference(id);
+        if (!reference) {
+            continue;
+        }
+        const geometry::TPoint3DF X = points.Position(id);
+        const std::optional<geometry::TPoint2DF> uv = gate.Project(T_cw.Transform(X));
+        if (!uv) {
+            continue;
+        }
+        const geometry::TPoint3DF view = X - centre;
+        const double distance = view.norm();
+        const double max_scale_distance = reference->distance * std::pow(options.level_scale, reference->level);
+        const double min_scale_distance = max_scale_distance / max_level_scale;
+        if (distance < (1.0 - options.scale_slack) * min_scale_distance ||
+            distance > (1.0 + options.scale_slack) * max_scale_distance) {
+            continue;
+        }
+        const geometry::TPoint3DF normal = points.Normal(id);
+        if (!(view.dot(normal) >= 0.5 * distance * normal.norm())) {
+            continue;
+        }
+        const int level = detail::PredictLevel(*reference, distance, options.level_scale, options.max_level);
+        const double radius = th * std::pow(options.level_scale, level);
+        const typename TFeatureExtractor::TDescriptor descriptor = points.Descriptor(id);
+        double best = std::numeric_limits<double>::infinity();
+        Eigen::Index best_index = -1;
+        for (const Eigen::Index j : grid.FeaturesInArea(*uv, radius, level - 1, level)) {
+            if (out_matches[static_cast<size_t>(j)] >= 0) {
+                continue;
+            }
+            const typename TFeatureExtractor::TDescriptor candidate = current.descriptors().col(j);
+            const double d = static_cast<double>(TFeatureExtractor::Distance(descriptor, candidate));
+            if (d < best) {
+                best = d;
+                best_index = j;
+            }
+        }
+        if (best_index < 0 || best > max_distance) {
+            continue;
+        }
+        out_matches[static_cast<size_t>(best_index)] = static_cast<int64_t>(id.value);
+        already_matched[id.value] = true;
+        ++added;
+    }
+    return added;
+}
+
 }  // namespace voyahslam::features
 
 #endif  // VOYAHSLAM_FEATURES_PROJECTION_MATCHER_H

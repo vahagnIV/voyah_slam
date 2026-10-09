@@ -749,5 +749,65 @@ TEST(ProjectionMatcherTest, SearchBySim3MutualMatches) {
     EXPECT_EQ(SearchBySim3(1.0, 1.0, true), (Pairs{{0, 0}}));
 }
 
+
+// SearchPointsBySim3 (loop detection's ORB-SLAM3 SearchByProjection(KF, Scw)):
+// the point at (1, 0, 5) observed from the origin at level 0 (reference
+// distance ~5.1, so camera distances up to 1.2 x 5.1 pass the scale gate).
+class SearchPointsBySim3Test : public ::testing::Test {
+protected:
+    SearchPointsBySim3Test() {
+        AddPoints(replica_, {{kPoint, MakeDescriptor(1)}});
+        CreateKeyFrame(replica_, 0, Eigen::Vector3d::Zero(), {0}, {0});
+    }
+
+    std::vector<int64_t> Search(const Measurement& current, const geometry::Sim3& S_cw, double th = 8.0,
+                                std::vector<int64_t> matches = {}) const {
+        if (matches.empty()) matches.assign(static_cast<size_t>(current.points().cols()), -1);
+        const std::vector<map::MapPointId> points = {{0}};
+        SearchPointsBySim3<TestExtractor>(current, S_cw, points, replica_, matches, th, 75.0,
+                                          ProjectionMatcherOptions{});
+        return matches;
+    }
+
+    const Eigen::Vector3d kPoint{1.0, 0.0, 5.0};
+    TReplica replica_;
+};
+
+TEST_F(SearchPointsBySim3Test, RadiusIsThPixelsAtLevelZero) {
+    const geometry::Sim3 identity;
+    const geometry::TPoint2DF uv = Project(kPoint);
+    EXPECT_EQ(Search(MakeMeasurement({{uv + geometry::TPoint2DF(7.0, 0.0), MakeDescriptor(1), 0}}), identity)[0], 0);
+    EXPECT_EQ(CountMatches(Search(MakeMeasurement({{uv + geometry::TPoint2DF(9.0, 0.0), MakeDescriptor(1), 0}}),
+                                  identity)),
+              0u);
+}
+
+TEST_F(SearchPointsBySim3Test, ScaleIsFoldedIntoTheCamera) {
+    // S_cw = 2 [I | (0.4, 0, 0)]: the rigid [I | (0.2, 0, 0)] projects alike,
+    // and the camera is ~5.2 from the point in the map's units (in range);
+    // unfolded, s R X + t is ~10.4 away, beyond the scale gate.
+    const geometry::Sim3 S_cw{2.0, geometry::TMatrix33F::Identity(), geometry::TVector3DF(0.4, 0.0, 0.0)};
+    const geometry::TPoint2DF uv = Project(kPoint + Eigen::Vector3d(0.2, 0.0, 0.0));
+    EXPECT_EQ(Search(MakeMeasurement({{uv, MakeDescriptor(1), 0}}), S_cw)[0], 0);
+    // The same camera at scale 1 sees the point from 2x farther: rejected.
+    const geometry::Sim3 far{1.0, geometry::TMatrix33F::Identity(), geometry::TVector3DF(0.2, 0.0, 5.0)};
+    const geometry::TPoint2DF far_uv = Project(kPoint + Eigen::Vector3d(0.2, 0.0, 5.0));
+    EXPECT_EQ(CountMatches(Search(MakeMeasurement({{far_uv, MakeDescriptor(1), 0}}), far)), 0u);
+}
+
+TEST_F(SearchPointsBySim3Test, SkipsMatchedPointsAndFeatures) {
+    const geometry::Sim3 identity;
+    const geometry::TPoint2DF uv = Project(kPoint);
+    const Measurement current = MakeMeasurement({
+        {uv, MakeDescriptor(1), 0},
+        {uv + geometry::TPoint2DF(1.0, 0.0), MakeDescriptor(1, 1), 0},
+    });
+    std::vector<int64_t> taken(static_cast<size_t>(current.points().cols()), -1);
+    taken[0] = 7;  // the exact feature is another point's: the next one is taken
+    EXPECT_EQ(Search(current, identity, 8.0, taken)[1], 0);
+    taken[0] = 0;  // the point is already matched: nothing added
+    EXPECT_EQ(CountMatches(Search(current, identity, 8.0, taken)), 1u);
+}
+
 }  // namespace
 }  // namespace voyahslam::features
