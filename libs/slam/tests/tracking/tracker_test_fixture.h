@@ -65,6 +65,7 @@ struct Captured {
     std::vector<map::MapPointId> observed_points;
     std::vector<map::MapPointId> visible_points;
     std::vector<map::FrameId> local_frames;
+    uint32_t map_epoch = 0;
 };
 
 inline size_t FrameIndexOf(double timestamp) {
@@ -157,6 +158,7 @@ protected:
                 c.observed_points = tracked.observed_points;
                 c.visible_points = tracked.visible_points;
                 c.local_frames = tracked.local_frames;
+                c.map_epoch = tracked.map_epoch;
             } else if (event->type == events::EventType::TrackingLost) {
                 const auto& lost = *static_cast<events::TrackingLost*>(event);
                 c.timestamp = lost.timestamp;

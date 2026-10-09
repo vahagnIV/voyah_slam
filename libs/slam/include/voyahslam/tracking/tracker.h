@@ -129,7 +129,14 @@ struct TrackerOptions {
 // observations into the last frame's matches, so the next motion-model search
 // uses the Mapper's new points at once. Then the last frame's matches follow
 // the transaction's replaced points (loser -> winner) and drop its removed
-// points.
+// points. A loop correction (a transaction raising the map epoch) moves the
+// world under the last frame: while Tracking, the last frame keeps its pose
+// relative to its reference Frame, T_last <- T_last * T_ref_old^-1 *
+// T_ref_new (loop-closing spec section 3), or, if the reference Frame is gone,
+// relative to the Frame observing most of its matches; the velocity is
+// relative and unchanged. While RecentlyLost or Lost there is no last frame:
+// relocalization and a new map use the corrected replica. FrameTracked
+// carries the replica's epoch.
 template <typename TFeatureExtractor>
 class Tracker : public events::EventNode {
 public:
@@ -201,6 +208,18 @@ private:
     bool AdoptMapOf(const events::Event& event);
     void ApplyEvent(const events::Event& event);
     void OnMapTransaction(const events::MapTransaction<TFeatureExtractor>& transaction);
+    // A Frame's pose before a loop correction is applied.
+    struct FramePose {
+        map::FrameId frame;
+        geometry::RigidTransformation T_cw;
+    };
+    // The Frames last_frame_ may follow through a loop correction, with their
+    // current poses: the reference Frame first, then the Frames observing its
+    // matches, most matches first. Empty unless Tracking.
+    [[nodiscard]] std::vector<FramePose> AnchorsBeforeCorrection() const;
+    // After the correction: last_frame_ keeps its pose relative to the first
+    // anchor still in the replica; unchanged if none is.
+    void FollowCorrection(const std::vector<FramePose>& anchors);
     // Makes the replica's Frame `start_frame` the last frame and starts tracking.
     void StartTracking(map::FrameId start_frame);
     // Merges `frame`'s observations into last_frame_.matches if it is made of

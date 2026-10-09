@@ -117,9 +117,55 @@ bool Tracker<TFeatureExtractor>::AdoptMapOf(const events::Event& event) {
 
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
+    if (event.type != events::EventType::MapTransaction) {
+        replica_.Apply(event);
+        return;
+    }
+    const auto& transaction = static_cast<const events::MapTransaction<TFeatureExtractor>&>(event);
+    // A loop correction: the anchors' poses before it, to follow after it.
+    const bool correction = !transaction.new_map && transaction.map_id == replica_.map_id() &&
+                            transaction.map_epoch > replica_.map_epoch();
+    std::vector<FramePose> anchors;
+    if (correction) anchors = AnchorsBeforeCorrection();
     replica_.Apply(event);
-    if (event.type == events::EventType::MapTransaction) {
-        OnMapTransaction(static_cast<const events::MapTransaction<TFeatureExtractor>&>(event));
+    if (correction) FollowCorrection(anchors);
+    OnMapTransaction(transaction);
+}
+
+template <typename TFeatureExtractor>
+auto Tracker<TFeatureExtractor>::AnchorsBeforeCorrection() const -> std::vector<FramePose> {
+    std::vector<FramePose> anchors;
+    if (state() != TrackerState::Tracking) {
+        return anchors;  // no last frame: nothing follows
+    }
+    if (reference_frame_id_) {
+        if (const auto* reference = replica_.keyframe(*reference_frame_id_)) {
+            anchors.push_back({reference->id, reference->T_cw});
+        }
+    }
+    for (const auto& [frame, count] : detail::FramesObservingMatches(replica_, last_frame_.matches)) {
+        if (!reference_frame_id_ || frame != *reference_frame_id_) {
+            anchors.push_back({frame, replica_.keyframe(frame)->T_cw});
+        }
+    }
+    return anchors;
+}
+
+template <typename TFeatureExtractor>
+void Tracker<TFeatureExtractor>::FollowCorrection(const std::vector<FramePose>& anchors) {
+    for (const FramePose& anchor : anchors) {
+        if (const auto* frame = replica_.keyframe(anchor.frame)) {
+            // T_cw convention: T_last * T_ref^-1 (the last camera relative to
+            // the reference) is unchanged.
+            last_frame_.T_cw = last_frame_.T_cw * anchor.T_cw.Inverse() * frame->T_cw;
+            log_->debug("Loop correction (epoch {}): last frame follows Frame {}",
+                        replica_.map_epoch(), anchor.frame.value);
+            return;
+        }
+    }
+    if (state() == TrackerState::Tracking) {
+        log_->warn("Loop correction (epoch {}): no Frame of the last frame left; last frame not moved",
+                   replica_.map_epoch());
     }
 }
 

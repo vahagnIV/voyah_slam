@@ -17,6 +17,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <numbers>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -747,6 +748,158 @@ TEST_F(TrackerDefaultBowTest, SmallMapGoesStraightToLostByDefault) {
     ASSERT_EQ(captured.size(), 1u);
     EXPECT_TRUE(captured[0].final);
     EXPECT_EQ(tracker_.state(), TrackerState::Lost);
+}
+
+// Loop corrections (loop-closing spec section 3, Tracker).
+
+// The root vocabulary and relocalization on any map, so RecentlyLost and
+// relocalization are reachable on the small synthetic stereo map.
+TrackerOptions LoopOptions() {
+    TrackerOptions options;
+    options.relocalization.min_map_frames_to_relocalize = 0;
+    return options;
+}
+
+// The Mapper's map does not see the injected corrections: each test checks
+// the Tracker's first frame after one, which is tracked before any Mapper
+// transaction about it.
+class TrackerLoopTest : public TrackerTest {
+protected:
+    TrackerLoopTest() : TrackerTest({}, LoopOptions(), MakeRootVocabulary()) {}
+
+    // 15 degrees of yaw and 0.4 m: ~100 px at fx = 380, beyond the
+    // zero-motion window (4 x 7 px, retried at x2).
+    static geometry::RigidTransformation WorldMove() {
+        const double angle = 15.0 * std::numbers::pi / 180.0;
+        const geometry::TMatrix33F rotation =
+            Eigen::AngleAxis<precision_t>(angle, geometry::TVector3DF::UnitY()).toRotationMatrix();
+        return {rotation, geometry::TVector3DF(0.3, -0.1, 0.25)};
+    }
+
+    // A loop correction of the replica, as the Mapper publishes one: the world
+    // moves by `S` (p_new = S p_old), so every Frame's T_cw becomes
+    // T_cw * S^-1 and every alive point S p, its normal rotated; the epoch is
+    // `epoch`. Frames in `removed_frames` are culled in the same transaction.
+    void InjectCorrection(const geometry::RigidTransformation& S, uint32_t epoch,
+                          const std::vector<map::FrameId>& removed_frames = {}) {
+        const MapReplica<Extractor>& replica = tracker_.replica();
+        auto* correction = transaction_pool_.Create();
+        correction->map_id = replica.map_id();
+        correction->map_epoch = epoch;
+        for (const map::FrameId id : replica.keyframe_ids()) {
+            correction->updated_poses.emplace_back(id, replica.keyframe(id)->T_cw * S.Inverse());
+        }
+        std::vector<map::MapPointId> alive;
+        for (uint32_t p = 0; p < replica.num_points(); ++p) {
+            if (replica.IsAlive(map::MapPointId{p})) alive.push_back(map::MapPointId{p});
+        }
+        correction->ResizeUpdatedPoints(static_cast<uint32_t>(alive.size()));
+        for (size_t i = 0; i < alive.size(); ++i) {
+            const auto col = static_cast<Eigen::Index>(i);
+            correction->updated_ids[i] = alive[i];
+            correction->updated_positions.col(col) = S.Transform(replica.Position(alive[i]));
+            correction->updated_normals.col(col) = S.rotation() * replica.Normal(alive[i]);
+            correction->updated_descriptors.col(col) = replica.Descriptor(alive[i]);
+        }
+        correction->removed_frames = removed_frames;
+        injector_.Notify(correction);
+        Drain();
+        ASSERT_EQ(tracker_.replica().map_epoch(), epoch);
+        ASSERT_TRUE(tracker_.replica().CheckConsistency());
+    }
+
+    // Initializes on frame 0 and tracks frames 1..last; returns the last
+    // FrameTracked.
+    Captured TrackUpTo(const test::SyntheticStereoSequence& sequence, size_t last) {
+        EXPECT_EQ(InitializeStereo(sequence, 0), 0u);
+        Captured tracked{};
+        for (size_t k = 1; k <= last; ++k) {
+            const auto captured = Feed(sequence.frames[k].measurement);
+            EXPECT_EQ(captured.size(), 1u) << "frame " << k;
+            if (captured.size() == 1) {
+                EXPECT_EQ(captured[0].type, events::EventType::FrameTracked) << "frame " << k;
+                tracked = captured[0];
+            }
+        }
+        return tracked;
+    }
+
+    // The corrected map's alignment to ground truth: its world is S applied
+    // to the camera of frame 0.
+    static test::MapAlignment CorrectedAlignment(const test::SyntheticStereoSequence& sequence,
+                                                 const geometry::RigidTransformation& S) {
+        return test::MapAlignment(S * sequence.frames[0].T_cw);
+    }
+};
+
+TEST_F(TrackerLoopTest, LastFrameFollowsReferenceAfterCorrection) {
+    const auto sequence = StereoSequence();
+    TrackUpTo(sequence, 3);
+    const geometry::RigidTransformation S = WorldMove();
+    InjectCorrection(S, 1);
+
+    // The motion model predicts from the shifted last frame: the next frame
+    // is tracked at once, in the corrected world.
+    const auto captured = Feed(sequence.frames[4].measurement);
+    ExpectTrackedMetric(captured, sequence.frames[4].T_cw, CorrectedAlignment(sequence, S), 4,
+                        events::TrackingStage::MotionModel);
+    EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
+}
+
+TEST_F(TrackerLoopTest, FollowsAnotherFrameWhenReferenceCulled) {
+    // The reference Frame is culled by the correction: the last frame follows
+    // another Frame observing its points.
+    const auto sequence = StereoSequence();
+    size_t last = 1;
+    Captured tracked = TrackUpTo(sequence, last);
+    while (tracker_.replica().num_keyframes() < 2 && last + 1 < sequence.frames.size()) {
+        const auto captured = Feed(sequence.frames[++last].measurement);
+        ASSERT_EQ(captured.size(), 1u) << "frame " << last;
+        ASSERT_EQ(captured[0].type, events::EventType::FrameTracked) << "frame " << last;
+        tracked = captured[0];
+    }
+    ASSERT_GE(tracker_.replica().num_keyframes(), 2u);
+    ASSERT_TRUE(tracked.has_reference);
+    const geometry::RigidTransformation S = WorldMove();
+    InjectCorrection(S, 1, {tracked.frame_id});
+    ASSERT_EQ(tracker_.replica().keyframe(tracked.frame_id), nullptr);
+
+    const size_t next = last + 1;
+    const auto captured = Feed(sequence.frames[next].measurement);
+    ExpectTrackedMetric(captured, sequence.frames[next].T_cw, CorrectedAlignment(sequence, S), next,
+                        events::TrackingStage::MotionModel);
+}
+
+TEST_F(TrackerLoopTest, FrameTrackedCarriesEpoch) {
+    const auto sequence = StereoSequence();
+    EXPECT_EQ(TrackUpTo(sequence, 1).map_epoch, 0u);
+    InjectCorrection(geometry::RigidTransformation::Identity(), 1);
+
+    const auto captured = Feed(sequence.frames[2].measurement);
+    ASSERT_EQ(captured.size(), 1u);
+    ASSERT_EQ(captured[0].type, events::EventType::FrameTracked);
+    EXPECT_EQ(captured[0].map_epoch, 1u);
+}
+
+TEST_F(TrackerLoopTest, CorrectionWhileRecentlyLost) {
+    // Review Focus 5: no last frame to shift; relocalization finds the next
+    // frame in the corrected replica.
+    const auto sequence = StereoSequence();
+    TrackUpTo(sequence, 3);
+    const auto lost = Feed(test::MakeBinocular(0, 4 * kFrameInterval));
+    ASSERT_EQ(lost.size(), 1u);
+    ASSERT_EQ(lost[0].type, events::EventType::TrackingLost);
+    ASSERT_EQ(tracker_.state(), TrackerState::RecentlyLost);
+    const geometry::RigidTransformation S = WorldMove();
+    InjectCorrection(S, 1);
+    EXPECT_EQ(tracker_.state(), TrackerState::RecentlyLost);
+    EXPECT_TRUE(tracker_.last_matches().empty());
+
+    const auto captured = Feed(sequence.frames[5].measurement);
+    ExpectTrackedMetric(captured, sequence.frames[5].T_cw, CorrectedAlignment(sequence, S), 5,
+                        events::TrackingStage::Relocalization);
+    EXPECT_EQ(captured[0].map_epoch, 1u);
+    EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
 }
 
 } // namespace
