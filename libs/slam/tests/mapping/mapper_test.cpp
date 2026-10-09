@@ -5,16 +5,21 @@
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
 #include <voyahslam/events/observable.h>
+#include <voyahslam/geometry/sim3.h>
 #include <voyahslam/mapping/mapper.h>
 #include <voyahslam/memory/object_pool.h>
 #include <voyahslam/tracking/map_replica.h>
 
 #include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
+#include <numbers>
 #include <numeric>
 #include <optional>
 #include <random>
@@ -27,8 +32,9 @@
 
 namespace voyahslam::mapping {
 
-// The Mapper's private graph edit for tests: publishes a transaction that
-// adds a loop edge between Frames `a` and `b` of the current map.
+// The Mapper's private steps for tests: publishes a transaction that adds a
+// loop edge between Frames `a` and `b` of the current map; runs the loop
+// correction's CorrectWindow (nothing published) and reads the map back.
 struct MapperTestAccess {
     template <typename TFeatureExtractor>
     static void PublishLoopEdge(Mapper<TFeatureExtractor>& out_mapper, map::FrameId a,
@@ -36,6 +42,19 @@ struct MapperTestAccess {
         auto* event = out_mapper.CreateTransaction();
         out_mapper.AddLoopEdge(a, b, *event);
         out_mapper.observable_.Notify(event);
+    }
+    template <typename TFeatureExtractor>
+    static void CorrectWindow(Mapper<TFeatureExtractor>& out_mapper, const std::vector<map::FrameId>& window,
+                              const geometry::Sim3& S_query_world) {
+        out_mapper.CorrectWindow(window, S_query_world);
+    }
+    template <typename TFeatureExtractor>
+    static geometry::RigidTransformation Pose(const Mapper<TFeatureExtractor>& mapper, map::FrameId frame) {
+        return mapper.FindKeyFrame(frame)->pose();
+    }
+    template <typename TFeatureExtractor>
+    static geometry::TPoint3DF Position(const Mapper<TFeatureExtractor>& mapper, map::MapPointId point) {
+        return mapper.map_points_.Position(point);
     }
 };
 
@@ -2910,6 +2929,645 @@ TEST(MapperBowTest, OneNodeVocabularyMatchesNull) {
     }
     EXPECT_GT(num_new_points, 0u);
     ExpectSamePublished(expected, actual);
+}
+
+
+// Loop correction (loop-closing spec section 3; ORB-SLAM3 CorrectLoop). A
+// stereo scene built through the Mapper's own inbox: Frames E0..E3 map region
+// A from the start (E0 initializes the map, at the origin), B0..B3 turn around
+// and map region B behind the start, posed with half the drift (about the
+// origin), and L0..L3 come back to region A
+// through new points, posed with the full drift, so their side of the map is
+// drift(true world). A LoopDetected from L3 to E1 with the true similarity
+// closes the loop.
+
+constexpr Eigen::Index kLoopRegionPoints = 500;
+constexpr size_t kLoopSideFrames = 4;
+constexpr size_t kLoopMatch = 1;  // E1
+
+enum class LoopSide : uint8_t { Start, Middle, Return };
+
+geometry::RigidTransformation LoopPose(double x, double y, double z, double yaw_deg) {
+    const geometry::TMatrix33F R =
+        Eigen::AngleAxis<double>(yaw_deg * std::numbers::pi / 180.0, geometry::TVector3DF::UnitY())
+            .toRotationMatrix();
+    return {R, -R * geometry::TVector3DF(x, y, z)};
+}
+
+geometry::RigidTransformation StartPose(size_t k) {
+    return LoopPose(0.1 * static_cast<double>(k), 0.0, 0.0, 0.5 * static_cast<double>(k));
+}
+geometry::RigidTransformation MiddlePose(size_t k) {
+    return LoopPose(0.5 + 0.1 * static_cast<double>(k), 0.0, -0.5, 180.0 + 0.5 * static_cast<double>(k));
+}
+geometry::RigidTransformation ReturnPose(size_t k) {
+    return LoopPose(0.3 + 0.1 * static_cast<double>(k), 0.05, 0.2, 2.0 + 0.5 * static_cast<double>(k));
+}
+
+// `fraction` of the drift: 4 deg of rotation and 0.5 m of translation in
+// full; scale 1 (stereo).
+geometry::Sim3 LoopDrift(double fraction) {
+    const geometry::TVector3DF axis = geometry::TVector3DF(0.2, 1.0, -0.1).normalized();
+    return {1.0,
+            Eigen::AngleAxis<double>(fraction * 4.0 * std::numbers::pi / 180.0, axis).toRotationMatrix(),
+            fraction * geometry::TVector3DF(0.4, -0.1, 0.3)};
+}
+
+// The map pose of a camera at true pose `T_true` in a map whose world is
+// drift(true world): T_true ∘ drift⁻¹.
+geometry::RigidTransformation Drifted(const geometry::RigidTransformation& T_true, const geometry::Sim3& drift) {
+    const geometry::Sim3 inverse = geometry::Inverse(drift);
+    return {T_true.rotation() * inverse.R, T_true.rotation() * inverse.t + T_true.translation()};
+}
+
+geometry::Sim3 ToSim3(const geometry::RigidTransformation& T) { return {1.0, T.rotation(), T.translation()}; }
+
+double RotationDeg(const geometry::TMatrix33F& a, const geometry::TMatrix33F& b) {
+    return Eigen::AngleAxis<double>(a.transpose() * b).angle() * 180.0 / std::numbers::pi;
+}
+
+class MapperLoopTest : public MapperQualityTest {
+protected:
+    explicit MapperLoopTest(MapperOptions options = SceneOptions(/*cull_frames=*/false))
+        : MapperQualityTest(options) {}
+
+    // Every tracked measurement becomes a Frame (need_close as soon as one
+    // close point is untracked); no recent point is culled; Frames are culled
+    // only if asked.
+    static MapperOptions SceneOptions(bool cull_frames) {
+        MapperOptions options;
+        options.keyframe.close_tracked_max = std::numeric_limits<size_t>::max();
+        options.keyframe.close_untracked_min = 0;
+        options.map_quality.min_found_ratio = 0.0;
+        options.map_quality.min_obs_stereo = 0;
+        if (!cull_frames) options.map_quality.redundancy_ratio = 2.0;
+        return options;
+    }
+
+    struct SceneFrame {
+        map::FrameId id;
+        LoopSide side;
+        geometry::RigidTransformation T_true;
+        std::vector<Eigen::Index> scene_of_feature;  // per left feature, -1 for extras
+    };
+
+    // Regions A (points 0..499, 2..4 m in front of the origin) and B (points
+    // 500..999, in front of MiddlePose(0)); E0 sees more than the 500
+    // features a stereo initialization needs.
+    void MakeRegions() {
+        const geometry::TMatrix33F K_inverse = test::SyntheticStereoIntrinsics().inverse();
+        std::uniform_real_distribution<double> pixel(150.0, 874.0);
+        std::uniform_real_distribution<double> depth(2.0, 4.0);
+        std::uniform_real_distribution<double> angle(0.0, 2.0 * std::numbers::pi);
+        points_w_.resize(3, 2 * kLoopRegionPoints);
+        for (Eigen::Index i = 0; i < 2 * kLoopRegionPoints; ++i) {
+            const geometry::RigidTransformation T_wc = (i < kLoopRegionPoints ? StartPose(0) : MiddlePose(0)).Inverse();
+            const geometry::TVector3DF ray(pixel(rng_), pixel(rng_), 1.0);
+            points_w_.col(i) = T_wc.Transform(geometry::TPoint3DF(depth(rng_) * (K_inverse * ray)));
+            descriptors_.push_back(test::detail::RandomDescriptor(rng_));
+            angles_.push_back(angle(rng_));
+        }
+    }
+
+    // The stereo-matched view of every scene point in front of a camera at
+    // `T_true`, plus random extras; scene_of_feature per left feature.
+    TBinocularMeasurement View(const geometry::RigidTransformation& T_true, double timestamp,
+                               std::vector<Eigen::Index>& out_scene_of_feature) {
+        constexpr double kImageSize = 1024.0;
+        constexpr size_t kExtras = 20;
+        const features::StereoRig rig = test::SyntheticStereoRig();
+        const geometry::TMatrix33F K = test::SyntheticStereoIntrinsics();
+        std::normal_distribution<double> noise(0.0, 0.5);
+        std::uniform_real_distribution<double> any_pixel(0.0, kImageSize);
+        std::uniform_real_distribution<double> any_angle(0.0, 2.0 * std::numbers::pi);
+        struct Record {
+            geometry::TPoint2DF pixel;
+            test::detail::SyntheticDescriptor descriptor;
+            double angle;
+            Eigen::Index scene;
+        };
+        const auto in_image = [&](const geometry::TPoint2DF& p) {
+            return p.x() >= 0.0 && p.x() < kImageSize && p.y() >= 0.0 && p.y() < kImageSize;
+        };
+        std::vector<Record> left, right;
+        for (Eigen::Index i = 0; i < points_w_.cols(); ++i) {
+            const geometry::TPoint3DF X = T_true.Transform(geometry::TPoint3DF(points_w_.col(i)));
+            const geometry::TPoint3DF X_r = rig.T_rl.Transform(X);
+            if (X.z() <= 0.0 || X_r.z() <= 0.0) continue;
+            const geometry::TPoint2DF uv = (K * X).hnormalized();
+            const geometry::TPoint2DF uv_r = (K * X_r).hnormalized();
+            if (!in_image(uv) || !in_image(uv_r)) continue;
+            const auto s = static_cast<size_t>(i);
+            left.push_back({uv + geometry::TPoint2DF(noise(rng_), noise(rng_)),
+                            test::detail::FlipBits(descriptors_[s], 3, rng_), angles_[s], i});
+            right.push_back({uv_r + geometry::TPoint2DF(noise(rng_), noise(rng_)),
+                             test::detail::FlipBits(descriptors_[s], 3, rng_), angles_[s], i});
+        }
+        for (std::vector<Record>* image : {&left, &right}) {
+            for (size_t e = 0; e < kExtras; ++e) {
+                image->push_back({geometry::TPoint2DF(any_pixel(rng_), any_pixel(rng_)),
+                                  test::detail::RandomDescriptor(rng_), any_angle(rng_), -1});
+            }
+        }
+        const auto build = [&](std::vector<Record>& records) {
+            std::shuffle(records.begin(), records.end(), rng_);
+            const auto n = static_cast<Eigen::Index>(records.size());
+            geometry::TPoints2DF points(2, n);
+            geometry::TRowVectorF feature_angles(n);
+            TDescriptors feature_descriptors(Extractor::DescriptorSize, n);
+            for (Eigen::Index j = 0; j < n; ++j) {
+                const Record& record = records[static_cast<size_t>(j)];
+                points.col(j) = record.pixel;
+                feature_angles[j] = record.angle;
+                feature_descriptors.col(j) = record.descriptor;
+            }
+            return test::TestImageFeatures(std::move(points), geometry::TRowVectorF::Ones(n),
+                                           std::move(feature_angles), std::move(feature_descriptors),
+                                           features::TLevels::Zero(n));
+        };
+        test::TestImageFeatures left_features = build(left);
+        test::TestImageFeatures right_features = build(right);
+        out_scene_of_feature.clear();
+        for (const Record& record : left) out_scene_of_feature.push_back(record.scene);
+        TBinocularMeasurement measurement(std::move(left_features), std::move(right_features), rig, timestamp);
+        measurement.SetStereoMatches(features::MatchStereo<Extractor>(measurement, features::StereoMatcherOptions{}));
+        return measurement;
+    }
+
+    // Region A's scene index for a region-A view, B's for a region-B view.
+    static LoopSide SideOf(size_t frame_index) {
+        return frame_index < kLoopSideFrames ? LoopSide::Start
+               : frame_index < 2 * kLoopSideFrames ? LoopSide::Middle
+                                                   : LoopSide::Return;
+    }
+
+    // The alive point of `side` per scene point, from the replica's Frames of
+    // that side.
+    std::vector<std::optional<map::MapPointId>> SidePoints(LoopSide side) const {
+        std::vector<std::optional<map::MapPointId>> points(static_cast<size_t>(points_w_.cols()));
+        for (const SceneFrame& frame : frames_) {
+            const tracking::ReplicaKeyFrame<Extractor>* keyframe = replica_.keyframe(frame.id);
+            if (frame.side != side || keyframe == nullptr) continue;
+            for (const auto& [feature, point] : keyframe->observations) {
+                const Eigen::Index scene = frame.scene_of_feature[feature];
+                if (scene >= 0 && replica_.IsAlive(point)) points[static_cast<size_t>(scene)] = point;
+            }
+        }
+        return points;
+    }
+
+    // Builds the scene: E0 initializes the map, every other view becomes a
+    // Frame tracking every point its side has mapped and it sees, except one
+    // scene point in five (rotating), which it maps anew.
+    void BuildScene() {
+        MakeRegions();
+        for (size_t k = 0; k < 3 * kLoopSideFrames; ++k) {
+            const LoopSide side = SideOf(k);
+            const size_t j = k % kLoopSideFrames;
+            const geometry::RigidTransformation T_true =
+                side == LoopSide::Start ? StartPose(j) : side == LoopSide::Middle ? MiddlePose(j) : ReturnPose(j);
+            const geometry::RigidTransformation T_map =
+                side == LoopSide::Start ? T_true : Drifted(T_true, LoopDrift(side == LoopSide::Middle ? 0.5 : 1.0));
+            SceneFrame frame{{}, side, T_true, {}};
+            const double timestamp = 0.05 * static_cast<double>(k);
+            TBinocularMeasurement measurement = View(T_true, timestamp, frame.scene_of_feature);
+            if (k == 0) {
+                PublishInitializationMeasurement(std::move(measurement));
+                Drain();
+                const std::vector<Published> initial = TakeCaptured();
+                ASSERT_EQ(initial.size(), 1u);
+                frame.id = initial[0].frame().frame_id;
+                frames_.push_back(std::move(frame));
+                continue;
+            }
+            const std::vector<std::optional<map::MapPointId>> mapped = SidePoints(side);
+            auto* event = frame_tracked_pool_.Create();
+            event->map_id = map::MapId{1};
+            event->timestamp = timestamp;
+            event->pose = T_map;
+            for (size_t f = 0; f < frame.scene_of_feature.size(); ++f) {
+                const Eigen::Index scene = frame.scene_of_feature[f];
+                if (scene < 0 || static_cast<size_t>(scene) % 5 == k % 5) continue;
+                if (const auto& point = mapped[static_cast<size_t>(scene)]) {
+                    event->observed_features.push_back(static_cast<uint32_t>(f));
+                    event->observed_points.push_back(*point);
+                }
+            }
+            event->measurement = std::move(measurement);
+            event->reference_frame_id = frames_.back().id;
+            event->num_matches = static_cast<uint32_t>(event->observed_points.size());
+            event->num_inliers = 20;
+            tracker_.Notify(event);
+            Drain();
+            const std::vector<Published> created = TakeCaptured();
+            ASSERT_EQ(created.size(), 2u) << "view " << k;
+            frame.id = created[0].frame().frame_id;
+            frames_.push_back(std::move(frame));
+        }
+    }
+
+    [[nodiscard]] const SceneFrame& Query() const { return frames_.back(); }
+    [[nodiscard]] const SceneFrame& Match() const { return frames_[kLoopMatch]; }
+
+    // The query's points paired with the start side's points of the same
+    // scene point (as the LoopCloser would match them).
+    std::vector<std::pair<map::MapPointId, map::MapPointId>> MatchedPoints() const {
+        const std::vector<std::optional<map::MapPointId>> start = SidePoints(LoopSide::Start);
+        std::vector<std::pair<map::MapPointId, map::MapPointId>> pairs;
+        for (const auto& [feature, point] : replica_.keyframe(Query().id)->observations) {
+            const Eigen::Index scene = Query().scene_of_feature[feature];
+            if (scene >= 0 && start[static_cast<size_t>(scene)]) {
+                pairs.emplace_back(point, *start[static_cast<size_t>(scene)]);
+            }
+        }
+        return pairs;
+    }
+
+    // The true similarity from the match camera to the query camera.
+    [[nodiscard]] geometry::Sim3 TrueS() const { return ToSim3(Query().T_true * Match().T_true.Inverse()); }
+
+    void PublishLoop(map::FrameId query, map::FrameId match, const geometry::Sim3& S,
+                     const std::vector<std::pair<map::MapPointId, map::MapPointId>>& matched_points,
+                     uint32_t query_map = 1, uint32_t match_map = 1) {
+        auto* event = loop_pool_.Create();
+        event->map_id = map::MapId{query_map};
+        event->query_map_id = map::MapId{query_map};
+        event->match_map_id = map::MapId{match_map};
+        event->query_frame = query;
+        event->match_frame = match;
+        event->S_query_match = S;
+        event->matched_points = matched_points;
+        tracker_.Notify(event);
+    }
+
+    // The loop of the scene: L3 with E1, the true similarity, all pairs.
+    void PublishSceneLoop() { PublishLoop(Query().id, Match().id, TrueS(), MatchedPoints()); }
+
+    struct SideError {
+        double centre = 0.0;    // mean camera-centre error, m
+        double rotation = 0.0;  // mean rotation error, deg
+    };
+    // The replica's mean pose error of the alive Frames of `side`.
+    [[nodiscard]] SideError PoseError(LoopSide side) const {
+        SideError error;
+        size_t count = 0;
+        for (const SceneFrame& frame : frames_) {
+            const tracking::ReplicaKeyFrame<Extractor>* keyframe = replica_.keyframe(frame.id);
+            if (frame.side != side || keyframe == nullptr) continue;
+            error.centre += (keyframe->T_cw.Inverse().translation() - frame.T_true.Inverse().translation()).norm();
+            error.rotation += RotationDeg(keyframe->T_cw.rotation(), frame.T_true.rotation());
+            ++count;
+        }
+        EXPECT_GT(count, 0u);
+        error.centre /= static_cast<double>(std::max<size_t>(count, 1));
+        error.rotation /= static_cast<double>(std::max<size_t>(count, 1));
+        return error;
+    }
+    // The replica's mean position error of the points `frame` observes.
+    [[nodiscard]] double PointError(const SceneFrame& frame) const {
+        double sum = 0.0;
+        size_t count = 0;
+        for (const auto& [feature, point] : replica_.keyframe(frame.id)->observations) {
+            const Eigen::Index scene = frame.scene_of_feature[feature];
+            if (scene < 0) continue;
+            sum += (replica_.Position(point) - geometry::TPoint3DF(points_w_.col(scene))).norm();
+            ++count;
+        }
+        EXPECT_GT(count, 0u);
+        return sum / static_cast<double>(std::max<size_t>(count, 1));
+    }
+
+    // Publishes the scene's loop and returns its one transaction.
+    Published CorrectSceneLoop() {
+        PublishSceneLoop();
+        Drain();
+        std::vector<Published> published = TakeCaptured();
+        EXPECT_EQ(published.size(), 1u);
+        return published.empty() ? Published{} : published[0];
+    }
+
+    std::mt19937 rng_{11};
+    geometry::TPoints3DF points_w_;
+    std::vector<test::detail::SyntheticDescriptor> descriptors_;
+    std::vector<double> angles_;
+    std::vector<SceneFrame> frames_;
+    memory::ObjectPool<events::LoopDetected, memory::ThreadSafePolicy> loop_pool_{8};
+};
+
+class MapperLoopCullingTest : public MapperLoopTest {
+protected:
+    MapperLoopCullingTest()
+        : MapperLoopTest(SceneOptions(/*cull_frames=*/true)) {}
+};
+
+TEST_F(MapperLoopTest, CorrectsWindowPointsAndGraph) {
+    BuildScene();
+    ASSERT_EQ(frames_.size(), 3 * kLoopSideFrames);
+    ASSERT_EQ(replica_.num_keyframes(), 3 * kLoopSideFrames);
+    const SideError start_before = PoseError(LoopSide::Start);
+    const SideError middle_before = PoseError(LoopSide::Middle);
+    const SideError return_before = PoseError(LoopSide::Return);
+    const double points_before = PointError(Query());
+    // The stereo error of the start side's points (0.5 px at 2..4 m).
+    const double match_points = PointError(Match());
+    const geometry::RigidTransformation match_before = replica_.keyframe(Match().id)->T_cw;
+
+    const auto start = std::chrono::steady_clock::now();
+    const Published corrected = CorrectSceneLoop();
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    ExpectReplicaConsistent();
+
+    const SideError start_after = PoseError(LoopSide::Start);
+    const SideError middle_after = PoseError(LoopSide::Middle);
+    const SideError return_after = PoseError(LoopSide::Return);
+    const double points_after = PointError(Query());
+    const auto change = [](double before, double after) {
+        return std::to_string(before) + " -> " + std::to_string(after);
+    };
+    RecordProperty("return_centre_m", change(return_before.centre, return_after.centre));
+    RecordProperty("return_rotation_deg", change(return_before.rotation, return_after.rotation));
+    RecordProperty("middle_centre_m", change(middle_before.centre, middle_after.centre));
+    RecordProperty("middle_rotation_deg", change(middle_before.rotation, middle_after.rotation));
+    RecordProperty("start_centre_m", change(start_before.centre, start_after.centre));
+    RecordProperty("query_points_m",
+                   change(points_before, points_after) + " (match " + std::to_string(match_points) + ")");
+    RecordProperty("correction_ms", std::to_string(ms));
+
+    // The drift before: about 0.5 m and 4 deg at the loop, half in between.
+    EXPECT_GT(return_before.centre, 0.3);
+    EXPECT_GT(return_before.rotation, 3.0);
+    EXPECT_GT(points_before, 0.3);
+    EXPECT_GT(middle_before.centre, 0.15);
+    // After: the loop is closed (the query observes start points, as exact as
+    // their stereo depths), and the middle's centres follow. Not its
+    // rotations: the identity-weighted Sim3 edges of ORB-SLAM3's essential
+    // graph trade rotation for translation across the two tree edges that
+    // alone hold the middle (2 -> 3.2 deg here; a pure translation drift
+    // rotates it too).
+    EXPECT_LT(return_after.centre, 0.03);
+    EXPECT_LT(return_after.rotation, 0.3);
+    EXPECT_LT(points_after, 1.2 * match_points);
+    EXPECT_LT(middle_after.centre, 0.5 * middle_before.centre);
+    EXPECT_LT(start_after.centre, 0.01);
+    EXPECT_LT(start_after.rotation, 0.1);
+    // The match Frame is fixed.
+    const geometry::RigidTransformation& match_after = replica_.keyframe(Match().id)->T_cw;
+    EXPECT_LT((match_after.translation() - match_before.translation()).norm(), 1e-9);
+    EXPECT_LT(RotationDeg(match_after.rotation(), match_before.rotation()), 1e-6);
+    EXPECT_EQ(corrected.added_loop_edges,
+              (std::vector<std::pair<map::FrameId, map::FrameId>>{{Query().id, Match().id}}));
+    EXPECT_EQ(replica_.loop_edges(Query().id), std::set<map::FrameId>{Match().id});
+    EXPECT_EQ(replica_.loop_edges(Match().id), std::set<map::FrameId>{Query().id});
+}
+
+TEST_F(MapperLoopTest, FusesLoopPoints) {
+    BuildScene();
+    const auto pairs = MatchedPoints();
+    ASSERT_GE(pairs.size(), 100u);
+    const Published corrected = CorrectSceneLoop();
+    ExpectReplicaConsistent();
+    // Each pair's query point is replaced by its match point, or by the
+    // point SearchAndFuse later merged that one into (a start-side duplicate
+    // of the same scene point).
+    std::map<uint32_t, map::MapPointId> winner_of;
+    for (const events::ReplacedPoint& replaced : corrected.replaced_points) {
+        winner_of[replaced.loser.value] = replaced.winner;
+    }
+    for (const auto& [query_point, match_point] : pairs) {
+        EXPECT_FALSE(replica_.IsAlive(query_point)) << "query point " << query_point.value;
+        ASSERT_TRUE(winner_of.contains(query_point.value)) << "query point " << query_point.value;
+        map::MapPointId final_point = winner_of[query_point.value];
+        EXPECT_TRUE(final_point == match_point || winner_of.contains(match_point.value))
+            << "query point " << query_point.value;
+        for (size_t step = 0; step < winner_of.size() && winner_of.contains(final_point.value); ++step) {
+            final_point = winner_of[final_point.value];
+        }
+        EXPECT_TRUE(replica_.IsAlive(final_point)) << "query point " << query_point.value;
+    }
+    // SearchAndFuse: the return Frames observe region A through the start
+    // side's points, almost no return-side point is left.
+    const std::vector<std::optional<map::MapPointId>> start = SidePoints(LoopSide::Start);
+    size_t num_start = 0, num_return = 0;
+    for (const SceneFrame& frame : frames_) {
+        if (frame.side != LoopSide::Return) continue;
+        for (const auto& [feature, point] : replica_.keyframe(frame.id)->observations) {
+            const Eigen::Index scene = frame.scene_of_feature[feature];
+            if (scene < 0) continue;
+            const bool from_start = std::any_of(frames_.begin(), frames_.end(), [&](const SceneFrame& other) {
+                return other.side == LoopSide::Start && replica_.keyframe(other.id) != nullptr &&
+                       replica_.covisibility().Contains(other.id, point);
+            });
+            ++(from_start ? num_start : num_return);
+        }
+    }
+    RecordProperty("return_observations_start_return", std::to_string(num_start) + " / " + std::to_string(num_return));
+    EXPECT_GE(num_start, 9 * num_return);
+}
+
+TEST_F(MapperLoopTest, PublishesOneTransactionWithEpoch) {
+    BuildScene();
+    const Published corrected = CorrectSceneLoop();
+    EXPECT_EQ(corrected.type, events::EventType::MapTransaction);
+    EXPECT_EQ(corrected.map_id, map::MapId{1});
+    EXPECT_FALSE(corrected.new_map);
+    EXPECT_TRUE(corrected.frames.empty());
+    EXPECT_EQ(corrected.count, 0u);
+    EXPECT_EQ(corrected.map_epoch, 1u);
+    EXPECT_EQ(replica_.map_epoch(), 1u);
+    // Every Frame's pose and every alive point.
+    EXPECT_EQ(corrected.updated_poses.size(), replica_.num_keyframes());
+    size_t num_alive = 0;
+    for (uint32_t p = 0; p < replica_.num_points(); ++p) num_alive += replica_.IsAlive(map::MapPointId{p});
+    EXPECT_EQ(corrected.updated_ids.size(), num_alive);
+    EXPECT_FALSE(corrected.replaced_points.empty());
+    EXPECT_FALSE(corrected.added_observations.empty());
+    ExpectReplicaConsistent();
+
+    // Later transactions carry the new epoch.
+    std::vector<Eigen::Index> scene_of_feature;
+    auto* event = frame_tracked_pool_.Create();
+    event->map_id = map::MapId{1};
+    event->timestamp = 10.0;
+    event->pose = replica_.keyframe(Query().id)->T_cw;
+    event->measurement = View(Query().T_true, 10.0, scene_of_feature);
+    event->reference_frame_id = Query().id;
+    event->num_inliers = 20;
+    event->map_epoch = 1;
+    tracker_.Notify(event);
+    Drain();
+    const std::vector<Published> created = TakeCaptured();
+    ASSERT_EQ(created.size(), 2u);
+    EXPECT_EQ(created[0].map_epoch, 1u);
+    EXPECT_EQ(created[1].map_epoch, 1u);
+}
+
+TEST_F(MapperLoopTest, StaleEpochCreatesNoFrame) {
+    BuildScene();
+    CorrectSceneLoop();
+    const size_t num_keyframes = mapper_.num_keyframes();
+    // A FrameTracked of the replica before the correction: weak, but no
+    // Frame; its points are still counted.
+    const std::vector<map::MapPointId> points = mapper_.covisibility().Points(Query().id);
+    ASSERT_FALSE(points.empty());
+    const uint32_t visible = mapper_.NumVisible(points[0]);
+    const uint32_t found = mapper_.NumFound(points[0]);
+    for (const uint32_t epoch : {0u, 1u}) {
+        std::vector<Eigen::Index> scene_of_feature;
+        auto* event = frame_tracked_pool_.Create();
+        event->map_id = map::MapId{1};
+        event->timestamp = 10.0 + epoch;
+        event->pose = replica_.keyframe(Query().id)->T_cw;
+        event->measurement = View(Query().T_true, 10.0 + epoch, scene_of_feature);
+        event->visible_points = {points[0]};
+        event->observed_points = {points[0]};
+        event->observed_features = {0};
+        event->reference_frame_id = Query().id;
+        event->num_inliers = 20;
+        event->map_epoch = epoch;
+        tracker_.Notify(event);
+        Drain();
+        const std::vector<Published> created = TakeCaptured();
+        if (epoch == 0) {
+            EXPECT_TRUE(created.empty());
+            EXPECT_EQ(mapper_.num_keyframes(), num_keyframes);
+            EXPECT_EQ(mapper_.NumVisible(points[0]), visible + 1);
+            EXPECT_EQ(mapper_.NumFound(points[0]), found + 1);
+        } else {
+            EXPECT_EQ(created.size(), 2u);  // the current epoch creates it
+            EXPECT_EQ(mapper_.num_keyframes(), num_keyframes + 1);
+        }
+    }
+}
+
+TEST_F(MapperLoopCullingTest, RejectsLoopWithCulledFrames) {
+    // Review Focus 1. Frames E1..E3 repeat E0's view: with Frame culling some
+    // of them go. A loop naming a culled Frame, as the query or as the match,
+    // is ignored; a loop of alive Frames is corrected, and its transaction
+    // names no culled Frame.
+    BuildScene();
+    std::vector<map::FrameId> culled;
+    for (const SceneFrame& frame : frames_) {
+        if (replica_.keyframe(frame.id) == nullptr) culled.push_back(frame.id);
+    }
+    RecordProperty("culled", std::to_string(culled.size()));
+    ASSERT_FALSE(culled.empty());
+    std::optional<map::FrameId> alive_match;
+    for (size_t k = 0; k < kLoopSideFrames; ++k) {
+        if (replica_.keyframe(frames_[k].id) != nullptr) alive_match = frames_[k].id;
+    }
+    ASSERT_TRUE(alive_match.has_value());
+    for (const map::FrameId frame : culled) {
+        PublishLoop(Query().id, frame, TrueS(), {});
+        PublishLoop(frame, *alive_match, TrueS(), {});
+    }
+    Drain();
+    EXPECT_TRUE(TakeCaptured().empty());
+    EXPECT_EQ(replica_.map_epoch(), 0u);
+
+    // Alive: the query and, as the match, the first alive start Frame.
+    const SceneFrame* match = nullptr;
+    for (size_t k = 0; k < kLoopSideFrames && match == nullptr; ++k) {
+        if (replica_.keyframe(frames_[k].id) != nullptr) match = &frames_[k];
+    }
+    ASSERT_NE(match, nullptr);
+    ASSERT_NE(replica_.keyframe(Query().id), nullptr);
+    PublishLoop(Query().id, match->id, ToSim3(Query().T_true * match->T_true.Inverse()), MatchedPoints());
+    Drain();
+    const std::vector<Published> corrected = TakeCaptured();
+    ASSERT_EQ(corrected.size(), 1u);
+    EXPECT_EQ(corrected[0].map_epoch, 1u);
+    for (const map::FrameId frame : culled) {
+        for (const auto& [posed, pose] : corrected[0].updated_poses) EXPECT_NE(posed, frame);
+        for (const auto& added : corrected[0].added_observations) EXPECT_NE(added.frame, frame);
+        for (const auto& removed : corrected[0].removed_observations) EXPECT_NE(removed.frame, frame);
+    }
+    ExpectReplicaConsistent();
+}
+
+TEST_F(MapperLoopTest, IgnoresDuplicateLoop) {
+    // Review Focus 2: the LoopCloser keeps finding the place until the
+    // correction reaches its replica. The same loop again, and the query's
+    // neighbour with the match's neighbour, are ignored.
+    BuildScene();
+    const auto pairs = MatchedPoints();
+    CorrectSceneLoop();
+    PublishLoop(Query().id, Match().id, TrueS(), pairs);
+    const SceneFrame& neighbour = frames_[frames_.size() - 2];
+    const SceneFrame& match_neighbour = frames_[kLoopMatch + 1];
+    PublishLoop(neighbour.id, match_neighbour.id, ToSim3(neighbour.T_true * match_neighbour.T_true.Inverse()), {});
+    Drain();
+    EXPECT_TRUE(TakeCaptured().empty());
+    EXPECT_EQ(replica_.map_epoch(), 1u);
+}
+
+TEST_F(MapperLoopTest, MonoWindowFoldsScale) {
+    // Mono: a window moved by a similarity of scale 1.25. The query's pose is
+    // [R t/s], and in every window camera each point the window observes
+    // keeps its direction with its depth divided by the scale (X' = S_new^-1
+    // S_old X, the scale folded into the translation). Other Frames and
+    // points stay.
+    SetUpMonoMap();
+    ASSERT_LT(next_ + 16, sequence_.frames.size());
+    const map::FrameId other = CreateMonoFrame(next_ + 8).frame().frame_id;
+    const map::FrameId query = CreateMonoFrame(next_ + 16).frame().frame_id;
+    const std::vector<map::FrameId> window = {query, other};
+    const map::CovisibilityIndex& covisibility = mapper_.covisibility();
+    ASSERT_FALSE(covisibility.Points(query).empty());
+
+    const geometry::TVector3DF axis = geometry::TVector3DF(0.3, 1.0, 0.2).normalized();
+    const geometry::Sim3 S{1.25, Eigen::AngleAxis<double>(0.1, axis).toRotationMatrix(),
+                           geometry::TVector3DF(0.2, -0.1, 0.3)};
+    std::map<uint32_t, geometry::TPoint3DF> before;
+    for (uint32_t p = 0; p < replica_.num_points(); ++p) {
+        if (replica_.IsAlive(map::MapPointId{p})) before[p] = MapperTestAccess::Position(mapper_, {p});
+    }
+    std::map<uint32_t, geometry::RigidTransformation> poses;
+    for (const map::FrameId frame : window) poses[frame.value] = MapperTestAccess::Pose(mapper_, frame);
+    const geometry::RigidTransformation first_pose = MapperTestAccess::Pose(mapper_, first_.frame_id);
+    const geometry::RigidTransformation second_pose = MapperTestAccess::Pose(mapper_, second_.frame_id);
+    MapperTestAccess::CorrectWindow(mapper_, window, S);
+    EXPECT_EQ(MapperTestAccess::Pose(mapper_, first_.frame_id).translation(), first_pose.translation());
+    EXPECT_EQ(MapperTestAccess::Pose(mapper_, second_.frame_id).translation(), second_pose.translation());
+    EXPECT_EQ(MapperTestAccess::Pose(mapper_, second_.frame_id).rotation(), second_pose.rotation());
+
+    const geometry::RigidTransformation query_pose = MapperTestAccess::Pose(mapper_, query);
+    EXPECT_LT(RotationDeg(query_pose.rotation(), S.R), 1e-9);
+    EXPECT_LT((query_pose.translation() - S.t / S.scale).norm(), 1e-12);
+    std::set<uint32_t> moved;
+    for (const map::FrameId frame : window) {
+        const geometry::RigidTransformation pose = MapperTestAccess::Pose(mapper_, frame);
+        for (const map::MapPointId point : covisibility.Points(frame)) {
+            const geometry::TPoint3DF old_camera = poses[frame.value].Transform(before[point.value]);
+            const geometry::TPoint3DF new_camera = pose.Transform(MapperTestAccess::Position(mapper_, point));
+            EXPECT_LT((new_camera - old_camera / S.scale).norm(), 1e-9 * old_camera.norm())
+                << "Frame " << frame.value << " point " << point.value;
+            moved.insert(point.value);
+        }
+    }
+    size_t num_still = 0;
+    for (const auto& [p, X] : before) {
+        if (moved.contains(p)) continue;
+        EXPECT_EQ(MapperTestAccess::Position(mapper_, {p}), X) << "point " << p;
+        ++num_still;
+    }
+    EXPECT_FALSE(moved.empty());
+    RecordProperty("moved_still", std::to_string(moved.size()) + " / " + std::to_string(num_still));
+}
+
+TEST_F(MapperLoopTest, IgnoresLoopOfOldMap) {
+    // Review Focus 3: a loop of map 1 arrives once map 1 is gone.
+    BuildScene();
+    const auto pairs = MatchedPoints();
+    PublishTrackingLost(1, 5.0);
+    Drain();
+    InitializeStereo(6.0);
+    ASSERT_EQ(mapper_.current_map_id(), map::MapId{2});
+    PublishLoop(Query().id, Match().id, TrueS(), pairs);  // map 1
+    PublishLoop(Query().id, Match().id, TrueS(), pairs, 2, 1);
+    PublishLoop(Query().id, Match().id, TrueS(), pairs, 1, 2);
+    Drain();
+    EXPECT_TRUE(TakeCaptured().empty());
+    EXPECT_EQ(replica_.map_epoch(), 0u);
 }
 
 } // namespace

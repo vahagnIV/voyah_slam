@@ -154,6 +154,8 @@ void LoopCloser<TFeatureExtractor>::PublishLoop(map::FrameId query, const Pendin
     event->query_frame = query;
     event->match_frame = region.match_frame;
     event->S_query_match = S_query_match;
+    // Urgent: the Mapper's running local BA stops for the correction.
+    event->priority = true;
     const PointMatches query_points = PointsOf(replica_, *query_keyframe);
     for (size_t i = 0; i < region.matches.size() && i < query_points.size(); ++i) {
         if (region.matches[i] && query_points[i] && *region.matches[i] != *query_points[i]) {

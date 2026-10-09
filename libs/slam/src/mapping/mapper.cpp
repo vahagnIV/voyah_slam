@@ -122,8 +122,11 @@ void Mapper<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
         case events::EventType::TrackingLost:
             OnTrackingLost(static_cast<const events::TrackingLost&>(event));
             return;
+        case events::EventType::LoopDetected:
+            OnLoopDetected(static_cast<const events::LoopDetected&>(event));
+            return;
         default:
-            return;  // LoopDetected: handled later
+            return;
     }
 }
 
@@ -231,6 +234,13 @@ void Mapper<TFeatureExtractor>::OnFrameTracked(
         return;  // no map yet, or an older map's
     }
     CountTrackedPoints(event);
+    if (event.map_epoch < map_epoch_) {
+        // Tracked against the map before a loop correction: its pose and
+        // observations are of the uncorrected map (loop-closing spec section 3).
+        log_->debug("FrameTracked t={:.3f}: epoch {} before the map's {} -> no Frame", event.timestamp,
+                    event.map_epoch, map_epoch_);
+        return;
+    }
     const KeyFrameSignals signals = MeasureSignals(event);
     const bool guarded = InRelocalizationGuard(event);
     const bool create = !guarded && ShouldCreateFrame(signals, options_.keyframe);
