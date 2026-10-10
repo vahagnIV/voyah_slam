@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -207,9 +208,9 @@ void Tracker<TFeatureExtractor>::StartTracking(map::FrameId start_frame) {
     // The start Frame is the last frame; its observations are its matches.
     last_frame_ = {};
     if (const auto* keyframe = replica_.keyframe(start_frame)) {
-        last_frame_.measurement = keyframe->measurement;
+        last_frame_.measurement = keyframe->shared_measurement;
         last_frame_.T_cw = keyframe->T_cw;
-        last_frame_.matches.assign(static_cast<size_t>(LeftOf<TFeatureExtractor>(keyframe->measurement)
+        last_frame_.matches.assign(static_cast<size_t>(LeftOf<TFeatureExtractor>(keyframe->measurement())
                                                            .points()
                                                            .cols()),
                                    -1);
@@ -232,7 +233,7 @@ void Tracker<TFeatureExtractor>::StartTracking(map::FrameId start_frame) {
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::MergeOwnFrame(const events::NewFrame<TFeatureExtractor>& frame) {
     if (last_frame_.matches.empty() ||
-        TimestampOf(frame.measurement) != TimestampOf(last_frame_.measurement)) {
+        TimestampOf(*frame.measurement) != TimestampOf(*last_frame_.measurement)) {
         return;
     }
     const size_t num = std::min(frame.observed_features.size(), frame.observed_points.size());
@@ -307,7 +308,8 @@ void Tracker<TFeatureExtractor>::ProcessRecentlyLost(TMeasurement& measurement) 
 
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::AcceptPose(TMeasurement& measurement, PoseResult pose) {
-    last_frame_.measurement = std::move(measurement);
+    // The tracked measurement becomes immutable and shared from here on.
+    last_frame_.measurement = std::make_shared<const TMeasurement>(std::move(measurement));
     last_frame_.T_cw = pose.T_cw;
     last_frame_.matches = std::move(pose.matches);
     if (pose.reference_frame_id) {
@@ -357,8 +359,13 @@ auto Tracker<TFeatureExtractor>::TrackFromLastFrame(const TMeasurement& measurem
     -> std::optional<PoseResult> {
     const TrackingOptions& tracking = options_.tracking;
     const char* step = ToString(stage);
+    if (last_frame_.measurement == nullptr) {
+        // No last frame (its start Frame was missing): nothing to match.
+        log_->debug("{} failed: 0 matches (< {})", step, tracking.min_motion_matches);
+        return std::nullopt;
+    }
     const auto& current = LeftOf<TFeatureExtractor>(measurement);
-    const auto& last = LeftOf<TFeatureExtractor>(last_frame_.measurement);
+    const auto& last = LeftOf<TFeatureExtractor>(*last_frame_.measurement);
     const auto search = [&](double radius_px) {
         return features::SearchFromLastFrame<TFeatureExtractor>(
             current, predicted, last, last_frame_.matches, replica_, radius_px, options_.matcher);
@@ -400,7 +407,7 @@ auto Tracker<TFeatureExtractor>::TrackReferenceFrame(const TMeasurement& measure
         return std::nullopt;
     }
     const auto& current = LeftOf<TFeatureExtractor>(measurement);
-    const auto& frame = LeftOf<TFeatureExtractor>(reference->measurement);
+    const auto& frame = LeftOf<TFeatureExtractor>(reference->measurement());
     bow::BowVector current_bow;
     bow::FeatureVector current_features;
     // The Mapper's levels: the Frames' and the current frame's FeatureVectors
@@ -543,7 +550,7 @@ void Tracker<TFeatureExtractor>::PublishFrameTracked(const PoseResult& pose) {
     auto* event = frame_tracked_pool_.Create();
     event->map_id = current_map_id();
     event->priority = false;
-    event->timestamp = TimestampOf(last_frame_.measurement);
+    event->timestamp = TimestampOf(*last_frame_.measurement);
     event->pose = last_frame_.T_cw;
     event->measurement = last_frame_.measurement;
     for (size_t feature = 0; feature < last_frame_.matches.size(); ++feature) {

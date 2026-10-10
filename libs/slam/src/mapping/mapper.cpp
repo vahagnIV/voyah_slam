@@ -175,7 +175,10 @@ void Mapper<TFeatureExtractor>::OnInitializationMeasurement(
     }
 
     for (auto& keyframe : initial->keyframes) {
-        AddKeyFrame(next_frame_id_, keyframe.T_cw, std::move(keyframe.measurement));
+        // The initial Frames' measurements come from InitializationMeasurement
+        // events, not from FrameTracked: they become shared here, once.
+        AddKeyFrame(next_frame_id_, keyframe.T_cw,
+                    std::make_shared<const TMeasurement>(std::move(keyframe.measurement)));
         ++next_frame_id_.value;
     }
     map_points_ = {};
@@ -278,7 +281,7 @@ bool Mapper<TFeatureExtractor>::InRelocalizationGuard(
 template <typename TFeatureExtractor>
 auto Mapper<TFeatureExtractor>::AddKeyFrame(map::FrameId id,
                                             const geometry::RigidTransformation& pose,
-                                            TMeasurement&& measurement) -> const TKeyFrame& {
+                                            TSharedMeasurement measurement) -> const TKeyFrame& {
     KeyFrameRecord& record =
         *keyframes_.emplace_back(KeyFrameRecord{TKeyFrame(id, pose, std::move(measurement)), {}, {}});
     if (vocabulary_) {
@@ -446,7 +449,7 @@ KeyFrameSignals Mapper<TFeatureExtractor>::MeasureSignals(
     }
 
     const auto* binocular =
-        std::get_if<features::TBinocularMeasurement<TFeatureExtractor>>(&event.measurement);
+        std::get_if<features::TBinocularMeasurement<TFeatureExtractor>>(event.measurement.get());
     signals.stereo = binocular != nullptr;
     if (binocular) {
         const double close_depth =
@@ -482,7 +485,7 @@ void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureE
     // out of range or already paired, is skipped.
     const map::FrameId id = next_frame_id_;
     ++next_frame_id_.value;
-    const TKeyFrame& keyframe = AddKeyFrame(id, event.pose, TMeasurement(event.measurement));
+    const TKeyFrame& keyframe = AddKeyFrame(id, event.pose, event.measurement);
     const auto num_features =
         static_cast<size_t>(LeftOf<TFeatureExtractor>(keyframe.measurement()).points().cols());
     AddFramePart(keyframe, *created);
@@ -854,7 +857,7 @@ events::NewFrame<TFeatureExtractor>& Mapper<TFeatureExtractor>::AddFramePart(
     events::NewFrame<TFeatureExtractor>& part = out_event.added_frames.emplace_back();
     part.id = keyframe.id();
     part.T_cw = keyframe.pose();
-    part.measurement = keyframe.measurement();
+    part.measurement = keyframe.shared_measurement();
     const KeyFrameRecord* record = FindRecord(keyframe.id());
     assert(record != nullptr);
     part.parent = record->parent;

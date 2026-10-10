@@ -147,7 +147,7 @@ protected:
                 c.pose = tracked.pose;
                 c.timestamp = tracked.timestamp;
                 c.measurement_timestamp = std::visit([](const auto& m) { return m.timestamp(); },
-                                                     tracked.measurement);
+                                                     *tracked.measurement);
                 c.num_observed_features = tracked.observed_features.size();
                 c.num_observed_points = tracked.observed_points.size();
                 c.stage = tracked.stage;
@@ -177,7 +177,7 @@ protected:
         const std::vector<map::FrameId> ids = replica.keyframe_ids();
         const auto truth_of = [&](map::FrameId id) {
             const double timestamp = std::visit([](const auto& m) { return m.timestamp(); },
-                                                replica.keyframe(id)->measurement);
+                                                replica.keyframe(id)->measurement());
             return T_cw_of_frame[FrameIndexOf(timestamp)];
         };
         if (!monocular) {

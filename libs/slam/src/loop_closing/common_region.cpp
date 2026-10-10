@@ -96,7 +96,7 @@ template <typename TFeatureExtractor>
 PointMatches Project(const TReplica<TFeatureExtractor>& replica, const TKeyFrame<TFeatureExtractor>& keyframe,
                      const geometry::Sim3& S_cw, const std::vector<map::MapPointId>& points, double th,
                      double max_distance, const LoopCloserOptions& options) {
-    const TMonocular<TFeatureExtractor>& left = LeftOf<TFeatureExtractor>(keyframe.measurement);
+    const TMonocular<TFeatureExtractor>& left = LeftOf<TFeatureExtractor>(keyframe.measurement());
     std::vector<int64_t> found(static_cast<size_t>(left.points().cols()), -1);
     features::SearchPointsBySim3<TFeatureExtractor>(left, S_cw, points, replica, found, th, max_distance,
                                                     options.matcher);
@@ -155,8 +155,8 @@ std::optional<optimization::Sim3Match> MakeSim3Match(const TReplica<TFeatureExtr
                                                      const TKeyFrame<TFeatureExtractor>& match,
                                                      map::MapPointId match_point,
                                                      const LoopCloserOptions& options) {
-    const TMonocular<TFeatureExtractor>& query_left = LeftOf<TFeatureExtractor>(query.measurement);
-    const TMonocular<TFeatureExtractor>& match_left = LeftOf<TFeatureExtractor>(match.measurement);
+    const TMonocular<TFeatureExtractor>& query_left = LeftOf<TFeatureExtractor>(query.measurement());
+    const TMonocular<TFeatureExtractor>& match_left = LeftOf<TFeatureExtractor>(match.measurement());
     const auto feature1 = static_cast<Eigen::Index>(query_feature);
     optimization::Sim3Match pair{query.T_cw.Transform(replica.Position(query_point)),
                                  query_left.distorted_points().col(feature1),
@@ -201,7 +201,7 @@ std::optional<optimization::Sim3OptimizationResult> Optimize(const TReplica<TFea
         }
     }
     optimization::Sim3OptimizationResult result = optimization::OptimizeSim3(
-        LeftOf<TFeatureExtractor>(query.measurement).camera(), LeftOf<TFeatureExtractor>(match.measurement).camera(),
+        LeftOf<TFeatureExtractor>(query.measurement()).camera(), LeftOf<TFeatureExtractor>(match.measurement()).camera(),
         pairs, initial, FixesScale(query));
     if (!result.success || !IsValid(result.S_12)) {
         return std::nullopt;
@@ -245,7 +245,7 @@ CommonRegionResult DetectCommonRegion(const tracking::MapReplica<TFeatureExtract
         return result;
     }
     const map::CovisibilityIndex& covisibility = replica.covisibility();
-    const TMonocular<TFeatureExtractor>& query_left = LeftOf<TFeatureExtractor>(query->measurement);
+    const TMonocular<TFeatureExtractor>& query_left = LeftOf<TFeatureExtractor>(query->measurement());
     const bool fix_scale = FixesScale(*query);
     const PointMatches query_points = PointsOf(replica, *query);
     std::set<map::FrameId> connected;
@@ -277,7 +277,7 @@ CommonRegionResult DetectCommonRegion(const tracking::MapReplica<TFeatureExtract
         for (const map::FrameId frame : window) {
             const TKeyFrame<TFeatureExtractor>& keyframe = *replica.keyframe(frame);
             const PointMatches found = features::SearchByBoW<TFeatureExtractor>(
-                LeftOf<TFeatureExtractor>(keyframe.measurement), keyframe.features, PointsOf(replica, keyframe),
+                LeftOf<TFeatureExtractor>(keyframe.measurement()), keyframe.features, PointsOf(replica, keyframe),
                 query_left, query->features, bow_options);
             for (size_t i = 0; i < found.size(); ++i) {
                 if (!found[i] || !query_points[i]) {
@@ -296,7 +296,7 @@ CommonRegionResult DetectCommonRegion(const tracking::MapReplica<TFeatureExtract
 
         // 3. RANSAC between the query's camera and the candidate's.
         const TKeyFrame<TFeatureExtractor>& match = *replica.keyframe(candidate);
-        const TMonocular<TFeatureExtractor>& match_left = LeftOf<TFeatureExtractor>(match.measurement);
+        const TMonocular<TFeatureExtractor>& match_left = LeftOf<TFeatureExtractor>(match.measurement());
         std::vector<geometry::TPoint3DF> X1, X2;
         std::vector<geometry::TPoint2DF> pixels1, pixels2;
         std::vector<double> sigmas1, sigmas2;

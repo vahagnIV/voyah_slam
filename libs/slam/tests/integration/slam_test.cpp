@@ -125,7 +125,7 @@ public:
             for (const auto& frame : transaction.added_frames) {
                 keyframes.push_back({map, frame.T_cw,
                                      std::visit([](const auto& m) { return m.timestamp(); },
-                                                frame.measurement),
+                                                *frame.measurement),
                                      events::TrackingStage::MotionModel, frame.id});
             }
             transaction_new_points.push_back(transaction.num_new_points());
@@ -733,6 +733,78 @@ std::shared_ptr<const OrbSlam::TMapper::TVocabulary> RootVocabulary() {
         TVocabulary::FromTree(2, 1, {0, 0, 0}, std::move(descriptors), {0.0, 1.0, 1.0}));
 }
 
+// A Frame's measurement is one immutable object (spec section 1): the
+// Mapper's Frame, the Tracker's replica and the LoopCloser's replica hold the
+// same one, not copies. The first 40 frames of the stereo leave-the-view run,
+// each fed once the previous one is tracked; then every Frame the replicas
+// hold is compared.
+TEST(SlamTest, MeasurementsAreShared) {
+    test::SyntheticStereoSequenceOptions options;
+    options.trajectory = LeavingInitialViewOptions();
+    options.trajectory.num_points = 700;  // as StereoMapGrowsWhileLeavingInitialView
+    const test::SyntheticStereoSequence sequence = test::MakeSyntheticStereoSequence(options);
+    mapping::MapperOptions mapper_options;
+    mapper_options.initializer.stereo_min_features = 150;
+    // The LoopCloser keeps a replica only with loop closing in effect; no
+    // detection runs (the map never reaches min_map_frames), no global BA.
+    loop_closing::LoopCloserOptions loop_closer_options;
+    loop_closer_options.enabled = true;
+    loop_closer_options.min_map_frames = 1000;
+    global_ba::GlobalBaOptions global_ba_options;
+    global_ba_options.enabled = false;
+    constexpr size_t kNumFrames = 40;
+
+    // Lifetimes as in EndToEndInitializeTrackLoseReinitialize.
+    ProtocolRecorder recorder;
+    OrbSlam slam(mapper_options, {}, RootVocabulary(), loop_closer_options, global_ba_options);
+    recorder.Attach(slam);
+    struct StopAndDrain {
+        OrbSlam& slam;
+        ProtocolRecorder& recorder;
+        ~StopAndDrain() {
+            slam.Stop();
+            recorder.Poll();
+        }
+    } stop_and_drain{slam, recorder};
+    slam.Start();
+    // Frame 0 builds the map.
+    slam.tracker().Track(sequence.frames[0].measurement);
+    ASSERT_TRUE(recorder.WaitFor([&] { return slam.tracker().state() == tracking::TrackerState::Tracking; },
+                                 std::chrono::seconds(120)));
+    for (size_t i = 1; i < kNumFrames; ++i) {
+        slam.tracker().Track(sequence.frames[i].measurement);
+        ASSERT_TRUE(recorder.WaitFor(
+            [&] {
+                return !recorder.positions.empty() && FrameIndexOf(recorder.positions.back().timestamp) == i;
+            },
+            std::chrono::seconds(120)))
+            << "frame " << i;
+    }
+    slam.Stop();
+    // What the Mapper published before it stopped reaches both replicas.
+    while (slam.tracker().ProcessPending()) {
+    }
+    while (slam.loop_closer().ProcessPending()) {
+    }
+
+    const auto& tracker_replica = slam.tracker().replica();
+    const auto& loop_closer_replica = slam.loop_closer().replica();
+    const std::vector<map::FrameId> frames = tracker_replica.keyframe_ids();
+    ASSERT_GE(frames.size(), 2u);
+    EXPECT_EQ(loop_closer_replica.keyframe_ids(), frames);
+    for (const map::FrameId id : frames) {
+        SCOPED_TRACE("Frame " + std::to_string(id.value));
+        const auto* mapper_frame = slam.mapper().KeyFrame(id);
+        const auto* tracker_frame = tracker_replica.keyframe(id);
+        const auto* loop_closer_frame = loop_closer_replica.keyframe(id);
+        ASSERT_NE(mapper_frame, nullptr);
+        ASSERT_NE(loop_closer_frame, nullptr);
+        EXPECT_EQ(&tracker_frame->measurement(), &mapper_frame->measurement());
+        EXPECT_EQ(&loop_closer_frame->measurement(), &mapper_frame->measurement());
+        EXPECT_GE(mapper_frame->shared_measurement().use_count(), 3);
+    }
+}
+
 // The leave-the-view run with a vocabulary and a 1 s blackout (frames
 // 31-50) soon after the Mapper's latest Frame (mono: frame 30, stereo:
 // frame 26), so the camera reappears in the mapped area: the Tracker becomes
@@ -938,7 +1010,7 @@ double PointsRmsError(const TSequence& sequence, const ProtocolRecorder& recorde
     std::map<uint32_t, std::map<Eigen::Index, size_t>> votes;
     for (const map::FrameId id : replica.keyframe_ids()) {
         const auto* frame = replica.keyframe(id);
-        const double timestamp = std::visit([](const auto& m) { return m.timestamp(); }, frame->measurement);
+        const double timestamp = std::visit([](const auto& m) { return m.timestamp(); }, frame->measurement());
         const auto& point_of_feature = sequence.frames.at(FrameIndexOf(timestamp)).point_of_feature;
         for (const auto& [feature, point] : frame->observations) {
             if (replica.IsAlive(point)) ++votes[point.value][point_of_feature.at(feature)];

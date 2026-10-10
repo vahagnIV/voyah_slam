@@ -26,7 +26,9 @@ struct FrameTracked
     , memory::Recyclable<FrameTracked<TFeatureExtractor>, memory::ThreadSafePolicy> {
     double timestamp = 0.0;
     geometry::RigidTransformation pose;  // T_cw (world -> camera), after pose optimization
-    features::TMeasurement<TFeatureExtractor> measurement;  // binocular: stereo-matched
+    // Binocular: stereo-matched. Shared with the Tracker and, once it is a
+    // Frame, with the map; immutable.
+    features::TSharedMeasurement<TFeatureExtractor> measurement;
     // Inlier matches as pairs: (left) feature observed_features[i] of
     // `measurement` observes map point observed_points[i] of map `map_id`.
     std::vector<uint32_t> observed_features;
@@ -44,9 +46,11 @@ struct FrameTracked
     // The correction epoch of the map, as the Tracker's replica knew it.
     uint32_t map_epoch = 0;
 
-    // Called by the pool on reuse; keeps the vectors' capacity.
+    // Called by the pool on reuse; keeps the vectors' capacity and releases
+    // the measurement.
     void Reset() {
         timestamp = 0.0;
+        measurement.reset();
         observed_features.clear();
         observed_points.clear();
         visible_points.clear();

@@ -242,7 +242,7 @@ TEST_F(TrackerTest, MergesOwnFrameObservationsIntoLastFrame) {
         auto& added = created->added_frames.emplace_back();
         added.id = map::FrameId{frame};
         added.T_cw = sequence.frames[1].T_cw;
-        added.measurement = measurement;
+        added.measurement = test::Share(measurement);
         added.observed_features = unmatched;
         added.observed_points = {map::MapPointId{new_id}, map::MapPointId{0}};
         created->new_points_start_id = map::MapPointId{new_id};

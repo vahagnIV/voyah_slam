@@ -2,6 +2,7 @@
 
 #include <Eigen/Geometry>
 #include <algorithm>
+#include <memory>
 #include <set>
 #include <utility>
 #include <vector>
@@ -79,7 +80,7 @@ void AddFrame(TTransaction& out_event, uint32_t frame, const geometry::RigidTran
     events::NewFrame<Extractor>& added = out_event.added_frames.emplace_back();
     added.id = {frame};
     added.T_cw = pose;
-    added.measurement = MakeMeasurement(levels);
+    added.measurement = std::make_shared<const features::TMeasurement<Extractor>>(MakeMeasurement(levels));
     for (const auto& [feature, point] : observations) {
         added.observed_features.push_back(feature);
         added.observed_points.push_back({point});

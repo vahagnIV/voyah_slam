@@ -123,7 +123,7 @@ public:
                 events::NewFrame<Extractor>& added = transaction.added_frames.emplace_back();
                 added.id = {static_cast<uint32_t>(k)};
                 added.T_cw = scene.poses[k];
-                added.measurement = Measure(scene.poses[k]);
+                added.measurement = test::Share(Measure(scene.poses[k]));
                 if (k > 0) added.parent = map::FrameId{static_cast<uint32_t>(k - 1)};
                 for (size_t i = 0; i < scene.points.size(); ++i) {
                     added.observed_features.push_back(static_cast<uint32_t>(i));

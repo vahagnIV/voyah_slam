@@ -45,7 +45,9 @@ template <typename TFeatureExtractor>
 struct NewFrame {
     map::FrameId id;
     geometry::RigidTransformation T_cw;  // world -> camera
-    features::TMeasurement<TFeatureExtractor> measurement;  // carries the timestamp
+    // Carries the timestamp. The Frame's own (shared, immutable): consumers
+    // keep this pointer, never a copy.
+    features::TSharedMeasurement<TFeatureExtractor> measurement;
     std::vector<uint32_t> observed_features;
     std::vector<map::MapPointId> observed_points;
     // The BoW data of the measurement's (left) descriptors: filled by a Mapper
@@ -126,7 +128,8 @@ struct MapTransaction
         updated_descriptors.Resize(count);
     }
 
-    // Called by the pool on reuse; clears every part and keeps its capacity.
+    // Called by the pool on reuse; clears every part and keeps its capacity
+    // (clearing added_frames releases their measurements).
     void Reset() {
         new_map = false;
         start_frame.reset();

@@ -282,7 +282,7 @@ Detailed spec: `docs/superpowers/specs/2026-09-30-core-slam-data-structures-desi
 | `MapPointId`, `FrameId` | `map/*_id.h` | Strong ID wrappers. |
 | `MapPointStorage<FE>` | `map/map_point_storage.h` | SoA: positions, descriptors, normals, num observations, valid flags. |
 | `MonocularMeasurement<T, L>` | `features/monocular_measurement.h` | `ImageFeatures` + K, raw keypoints (`distorted_points()`), undistorted & normalized points, `camera()` (`geometry::Camera`: K + distortion pointer), `timestamp()`. |
-| `Frame<FE, TMeasurement>` | `map/frame.h` | Keyframe: id, pose, measurement; `timestamp()` comes from the measurement. `MonoFrame<FE>`, `StereoFrame<FE>` aliases. |
+| `Frame<FE, TMeasurement>` | `map/frame.h` | Keyframe: id, pose, measurement (held as `shared_ptr<const TMeasurement>`, never null, since 2026-10-10; `measurement()` reads it, `shared_measurement()` shares it); `timestamp()` comes from the measurement. `MonoFrame<FE>`, `StereoFrame<FE>` aliases. |
 | `ObservationStorage<Type>` | `map/observation_storage.h` | SoA observation table; stereo fields compiled out for mono. Unused by the Mapper since 2026-10-07 (the `CovisibilityIndex` is its observation record). |
 | `CovisibilityIndex` | `map/covisibility_index.h` | Per point its observing Frames, per Frame its points; `Remove`, `RemovePoint`, `RemoveFrame` keep both sides in step. |
 | `StereoRig` | `features/stereo_rig.h` | K left/right, `T_rl` (left → right: `p_r = T_rl p_l`), baseline, distortion models. |
@@ -302,7 +302,7 @@ The distortion models now live in `geometry/distortion_models/` (moved from
 
 | Event | Producer → Consumer | Payload |
 |---|---|---|
-| `FrameTracked<FE>` | Tracker → Mapper, viewer | every tracked measurement: timestamp, pose (`T_cw` after `OptimizePose`), measurement copy (binocular: stereo-matched), inlier pairs `observed_features[i]` -> `observed_points[i]`, `visible_points` (local points passing the projection gate, matched ones included), `reference_frame_id` (optional), `local_frames`, `stage` (the source of the initial pose the local-map step refined: `MotionModel` / `ZeroMotion` / `ReferenceFrame` / `Relocalization`; 2026-10-08, ruling C), `num_matches`, `num_inliers`, `urgent` (mirrored in `Event::priority`), `map_epoch` (the Tracker replica's epoch; since 2026-10-09 the Mapper drops a `FrameTracked` of an older epoch, after counting its visible/found) |
+| `FrameTracked<FE>` | Tracker → Mapper, viewer | every tracked measurement: timestamp, pose (`T_cw` after `OptimizePose`), the shared measurement (binocular: stereo-matched; since 2026-10-10 a `shared_ptr<const>`, not a copy), inlier pairs `observed_features[i]` -> `observed_points[i]`, `visible_points` (local points passing the projection gate, matched ones included), `reference_frame_id` (optional), `local_frames`, `stage` (the source of the initial pose the local-map step refined: `MotionModel` / `ZeroMotion` / `ReferenceFrame` / `Relocalization`; 2026-10-08, ruling C), `num_matches`, `num_inliers`, `urgent` (mirrored in `Event::priority`), `map_epoch` (the Tracker replica's epoch; since 2026-10-09 the Mapper drops a `FrameTracked` of an older epoch, after counting its visible/found) |
 | `MapTransaction<FE>` | Mapper → all | **every Mapper change, as one atomic transaction** (since 2026-10-07; replaces `KeyFrameCreated`, `MapCreated`, `MapPointsUpdated`, `MapPointsRemoved`, `KeyFramePoseUpdated`). Parts, each possibly empty: `new_map` + `start_frame`; added Frames (id, `T_cw`, measurement, own observations, and since 2026-10-08 the Frame's `bow::BowVector bow` and `bow::FeatureVector features`, empty without a vocabulary); new points (`new_points_start_id`, contiguous ids, positions / normals / descriptors); `added_observations` (frame, feature, point, depth and right index, -1 when absent); updated points (ids, positions, normals, descriptors); `replaced_points` (loser, winner); `removed_points`; `updated_poses`; `removed_observations`; `removed_frames`; since 2026-10-09 (loop closing) the map graph and epoch: `NewFrame::parent` (spanning tree), `parent_changes` (frame, new parent), `added_loop_edges` (frame, frame) and `map_epoch` (+1 per loop correction; 0 for a new map). A loop correction is one more transaction carrying every corrected pose and point. Pooled (256 in the Mapper): a transaction is recycled once every consumer has acknowledged it, so consumers apply on receipt (the LoopCloser too, since 2026-10-10) and never hold one for long work. Apply order and contract: see "Map Quality" |
 | `LoopDetected` | LoopCloser → Mapper | `query_map_id`, `match_map_id` (equal for now), `query_frame`, `match_frame`, `S_query_match` (`geometry::Sim3`, x_query = S · x_match in camera coordinates, ORB Scm; scale 1 for stereo), `matched_points` ((query point, match point) pairs). `priority` (interrupts a running local BA) unless a loop was already published at the LoopCloser replica's epoch. Pool of 16, published with `TryCreate`. See "Loop Closing" |
 | `GlobalBAFinished` | GlobalBA → Mapper | `map_id`, `map_epoch` (N, the correction epoch optimized), `frame_poses` ((FrameId, T_cw) of every Frame of the run), `point_positions` ((MapPointId, world position) of every point of the run): plain data only. `priority` (interrupts a running local BA). Pool of `GlobalBaOptions::max_events_in_flight` (2), published with `TryCreate` (exhausted: the result is dropped and counted). The Mapper merges it as one `MapTransaction` at N + 1, or rejects it (another map or epoch). About 1.2 MB for a corridor1 map of 600 Frames and 38k points. See "Global BA" |
@@ -342,12 +342,24 @@ Rules:
   measurement, event and `Camera` copy (the app's calibration objects live for
   the whole run). A serializer turns such references into values (inline, or sent
   once and referenced). Everything mutable or short-lived travels by value —
-  e.g. a pointer to a reused Tracker buffer is never allowed.
+  e.g. a pointer to a reused Tracker buffer is never allowed. The one shared
+  payload (since 2026-10-10) is a Frame's measurement: immutable after the
+  Tracker creates it, it travels as `shared_ptr<const ...>` (owning, so it lives
+  as long as any holder), and a serializer sends it by value.
 - **Measurement variant (resolves OQ 24).** `features/measurement.h` defines
   `TMonocularMeasurement<FE>`, `TBinocularMeasurement<FE>` and
-  `TMeasurement<FE> = std::variant<mono, binocular>`. `MapTransaction` (per
-  added Frame), `FrameTracked` and `InitializationMeasurement` hold a
-  `TMeasurement<FE>`, so mono and stereo share one event type each.
+  `TMeasurement<FE> = std::variant<mono, binocular>`, so mono and stereo
+  share one event type each. `InitializationMeasurement` holds a
+  `TMeasurement<FE>` by value. `FrameTracked` and `MapTransaction` (per added
+  Frame) hold a **`TSharedMeasurement<FE> = std::shared_ptr<const
+  TMeasurement<FE>>`** (since 2026-10-10, map-merging spec section 1): the
+  Tracker creates it with `std::make_shared` once per tracked frame (after
+  stereo matching, in `AcceptPose`), and the Mapper's Frame, its `NewFrame`
+  and every replica's `ReplicaKeyFrame` keep that same object; nothing writes
+  to it afterwards (`const` by type). The only other creator is the Mapper,
+  for a new map's initial Frames, whose measurements come from
+  `InitializationMeasurement` copies. A pooled event releases its pointer on
+  reuse (`Reset()`).
 - **`map_id`.** `map::MapId` (`map/map_id.h`, strong `uint32_t`; ids start at
   1, only increase, `MapId{0}` = not tied to a map). `Event` has a public
   `map_id` field that **producers must set on every publish** (pooled events
@@ -973,7 +985,7 @@ the user has their own designs for them).
 Tracker's private copy of the map, touched only on the Tracker thread and fed
 by the Mapper's events with the `map_id` rule (0 exempt, older ignored, newer
 clears and adopts). It stores point position/descriptor/normal/alive,
-keyframes (`T_cw`, measurement copy, observations) and, per point, the first
+keyframes (`T_cw`, the shared measurement, observations) and, per point, the first
 keyframe observation as a `map::PointReference` (keyframe, feature, pyramid
 level, distance to the camera centre). It does not count events (decision R).
 
@@ -2681,6 +2693,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-10 | (Global BA final review, M4) A global-BA merge raises the map epoch, so it also drops the LoopCloser's pending region (deviation from ORB-SLAM3, which does not reset it). Also: `Publish` is skipped if `Stop()` was requested after the run's last poll, and the destructor requests a stop before joining. | The pending region's `S_last_world` is in pre-merge coordinates; the cost is that a partly confirmed loop restarts after each merge. A stopped adjuster publishes nothing, as its header says. |
 | 2026-10-10 | (Global BA Task 5, review minor) `Slam` creates the GlobalBA only with loop closing **in effect**: a vocabulary as well as `LoopCloserOptions::enabled` and `GlobalBaOptions::enabled`. The apps print "Global BA: on/off" from `slam.global_ba()`. Spec section 4 amended (there is no `SlamOptions`: `GlobalBaOptions` is a constructor parameter). | Without a vocabulary the LoopCloser never detects a loop, so a GlobalBA thread would only idle while the app printed "off"; now the printout and the object agree by construction. |
 | 2026-10-10 | Global BA smoke result (corridor1 full, Release, `--vocabulary --loop_closing`, two runs each with and without `--no_global_ba`; "Global BA"): no crash, and no tracking loss caused by a merge (every loss began 0.1–1.0 s after an essential-graph loop correction or long after any merge; the Musts are met). Global BA runs started: mono 4 and 4 (0 and 3 interrupted), completed in 3.4–28.2 s; stereo 4 and 3 (none interrupted), 3.3–85.2 s; merges 3.8–31.7 ms; results 0.56–3.31 MB; nothing dropped or rejected. Peak RSS: stereo 4.23 GB with against 2.28 / 2.33 GB without; mono 2.24 / 2.38 against 1.51 / 1.47 GB. Both mono runs and stereo run 2 with global BA lost map 1 after false-loop corrections (2, 2 and 4 maps) while the runs without kept one map: not separable from run-to-run loop variance with two runs, not tuned. ATE not comparable (map 1 only where it was lost; stereo run 1 SE3 18.68 m from a false loop; without: mono Sim3 0.707 / 0.645 m, stereo SE3 0.836 / 0.768 m). | Spec section 5 has no ATE Must: corridor1's false loops still dominate (step 6). |
+| 2026-10-10 | (Map merging Task 1, spec section 1) A Frame's measurement is **shared and immutable**: `TSharedMeasurement<FE> = std::shared_ptr<const TMeasurement<FE>>` in `FrameTracked`, `NewFrame`, the Mapper's `Frame` and every `ReplicaKeyFrame` (read through `measurement()`). The Tracker creates it once per tracked frame (`AcceptPose`, after stereo matching); the Mapper wraps a new map's initial Frames (from `InitializationMeasurement`, which keeps its by-value copy). Audit: nothing writes to a measurement after creation (the only write, `SetStereoMatches`, runs before tracking). Pooled `FrameTracked` / `MapTransaction` release it in `Reset()`. | Each event and each replica copied about 1 MB per Frame; the Atlas (every replica holding every map) would multiply that. `const` by type makes lock-free sharing safe; ownership by `shared_ptr` keeps the pointer rule (no raw pointers to short-lived data). |
 
 ## 9. Open Questions
 

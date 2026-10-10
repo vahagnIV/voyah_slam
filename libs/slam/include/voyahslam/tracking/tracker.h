@@ -143,6 +143,7 @@ public:
     using TMonocularMeasurement = features::TMonocularMeasurement<TFeatureExtractor>;
     using TBinocularMeasurement = features::TBinocularMeasurement<TFeatureExtractor>;
     using TMeasurement = features::TMeasurement<TFeatureExtractor>;
+    using TSharedMeasurement = features::TSharedMeasurement<TFeatureExtractor>;
 
     // `vocabulary` (may be null) is immutable and shared read-only with the
     // Mapper.
@@ -186,7 +187,9 @@ public:
 
 private:
     struct LastFrame {
-        TMeasurement measurement;
+        // Null when there is no last frame. A tracked frame's measurement is
+        // created here (AcceptPose), once, and shared by its FrameTracked.
+        TSharedMeasurement measurement;
         geometry::RigidTransformation T_cw;
         std::vector<int64_t> matches;  // per (left) feature: MapPointId value or -1
     };

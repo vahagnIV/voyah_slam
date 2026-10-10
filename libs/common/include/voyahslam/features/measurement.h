@@ -1,6 +1,7 @@
 #ifndef VOYAHSLAM_FEATURES_MEASUREMENT_H
 #define VOYAHSLAM_FEATURES_MEASUREMENT_H
 
+#include <memory>
 #include <variant>
 #include <voyahslam/features/binocular_measurement.h>
 #include <voyahslam/features/monocular_measurement.h>
@@ -20,6 +21,12 @@ using TBinocularMeasurement =
 template <typename TFeatureExtractor>
 using TMeasurement =
     std::variant<TMonocularMeasurement<TFeatureExtractor>, TBinocularMeasurement<TFeatureExtractor>>;
+
+// A measurement as the map holds it: created once by the Tracker for a
+// tracked frame, then immutable and shared read-only by the events and every
+// thread's replica (no copies, no locks).
+template <typename TFeatureExtractor>
+using TSharedMeasurement = std::shared_ptr<const TMeasurement<TFeatureExtractor>>;
 
 // The image matched against the map: the left one of a binocular measurement,
 // the measurement itself for a monocular one.

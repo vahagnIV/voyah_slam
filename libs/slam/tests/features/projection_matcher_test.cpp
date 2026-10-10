@@ -128,7 +128,9 @@ void AddPoints(TReplica& out_replica, const std::vector<Point>& points) {
     memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> pool(1);
     TTransaction* event = pool.Create();
     event->map_id = {1};
-    event->added_frames.emplace_back().id = {1000 + static_cast<uint32_t>(out_replica.num_points())};
+    events::NewFrame<TestExtractor>& added = event->added_frames.emplace_back();
+    added.id = {1000 + static_cast<uint32_t>(out_replica.num_points())};
+    added.measurement = test::Share(features::TMonocularMeasurement<TestExtractor>{});
     event->new_points_start_id = {static_cast<uint32_t>(out_replica.num_points())};
     event->ResizeNewPoints(static_cast<uint32_t>(points.size()));
     for (size_t i = 0; i < points.size(); ++i) {
@@ -163,7 +165,7 @@ void CreateKeyFrame(TReplica& out_replica, uint32_t frame, const Eigen::Vector3d
     added.T_cw = geometry::RigidTransformation(geometry::TMatrix33F::Identity(), -centre);
     std::vector<Feature> features;
     for (const int level : levels) features.push_back({{kCx, kCy}, MakeDescriptor(9000), level, 0.0});
-    added.measurement = MakeMeasurement(features, {});
+    added.measurement = test::Share(MakeMeasurement(features, {}));
     for (size_t i = 0; i < points.size(); ++i) {
         added.observed_features.push_back(static_cast<uint32_t>(i));
         added.observed_points.push_back({points[i]});
@@ -626,7 +628,7 @@ SyntheticMap BuildSyntheticMap() {
         if (event->type != events::EventType::MapTransaction) continue;
         result.scene_of_point.resize(result.replica.num_points(), -1);
         for (const auto& created : static_cast<const TTransaction*>(event)->added_frames) {
-            const auto& measurement = std::get<TMonocular>(created.measurement);
+            const auto& measurement = std::get<TMonocular>(*created.measurement);
             const auto k = static_cast<size_t>(std::lround(
                 measurement.timestamp() / test::SyntheticSequenceOptions{}.frame_interval));
             EXPECT_EQ(measurement.points().cols(), frames[k].measurement.points().cols());

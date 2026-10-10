@@ -149,6 +149,7 @@ template <typename TFeatureExtractor>
 class Mapper : public events::EventNode {
 public:
     using TMeasurement = features::TMeasurement<TFeatureExtractor>;
+    using TSharedMeasurement = features::TSharedMeasurement<TFeatureExtractor>;
     using TKeyFrame = map::Frame<TFeatureExtractor, TMeasurement>;
     using TVocabulary = bow::Vocabulary<TFeatureExtractor>;
 
@@ -225,6 +226,9 @@ public:
     // loop partners; none / empty if it is not in the map. Same thread rule.
     [[nodiscard]] std::optional<map::FrameId> Parent(map::FrameId frame) const;
     [[nodiscard]] std::set<map::FrameId> LoopEdges(map::FrameId frame) const;
+    // The current map's Frame `frame`; nullptr if it is not in the map. Same
+    // thread rule.
+    [[nodiscard]] const TKeyFrame* KeyFrame(map::FrameId frame) const { return FindKeyFrame(frame); }
 
 private:
     friend struct MapperTestAccess;
@@ -277,7 +281,7 @@ private:
     // Appends Frame `id` to the current map, with its bag of words when there
     // is a vocabulary; returns it.
     const TKeyFrame& AddKeyFrame(map::FrameId id, const geometry::RigidTransformation& pose,
-                                 TMeasurement&& measurement);
+                                 TSharedMeasurement measurement);
     // The current map's Frame `id` with its bag of words; nullptr if it is not
     // in the map (or was culled).
     [[nodiscard]] const KeyFrameRecord* FindRecord(map::FrameId id) const;

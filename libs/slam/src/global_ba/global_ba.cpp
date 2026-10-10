@@ -28,8 +28,8 @@ std::optional<GlobalBaSolution> RunGlobalBa(const tracking::MapReplica<TFeatureE
         frame_index.emplace(frames[i].value, i);
         problem.keyframe_poses.push_back(keyframe.T_cw);
         problem.keyframe_fixed.push_back(i == 0);
-        problem.keyframe_cameras.push_back(features::LeftOf<TFeatureExtractor>(keyframe.measurement).camera());
-        problem.keyframe_stereo.push_back(mapping::detail::BaStereoOf<TFeatureExtractor>(keyframe.measurement));
+        problem.keyframe_cameras.push_back(features::LeftOf<TFeatureExtractor>(keyframe.measurement()).camera());
+        problem.keyframe_stereo.push_back(mapping::detail::BaStereoOf<TFeatureExtractor>(keyframe.measurement()));
     }
 
     // Every alive point with an observation, with all its observations.
@@ -46,7 +46,7 @@ std::optional<GlobalBaSolution> RunGlobalBa(const tracking::MapReplica<TFeatureE
         for (const map::PointObservation& observation : replica.covisibility().Observations(points[p])) {
             const size_t k = frame_index.at(observation.frame.value);
             problem.observations.push_back(mapping::detail::BaObservationOf<TFeatureExtractor>(
-                replica.keyframe(observation.frame)->measurement, observation.feature, k, p,
+                replica.keyframe(observation.frame)->measurement(), observation.feature, k, p,
                 options.sigma_px, options.level_scale));
         }
     }

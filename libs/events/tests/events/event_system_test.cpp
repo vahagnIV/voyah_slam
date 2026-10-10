@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <atomic>
+#include <memory>
 #include <variant>
 #include <thread>
 #include <vector>
@@ -366,6 +367,33 @@ TEST(EventSystemTest, RecycledFrameTrackedIsReset) {
     reused->Recycle();
 }
 
+// A pooled event keeps its slot's object alive; on reuse it lets go of the
+// shared measurement it carried.
+TEST(EventSystemTest, RecycledEventsReleaseTheirMeasurement) {
+    using TMeasurement = features::TMeasurement<features::OrbFeatureExtractor>;
+    const auto measurement = std::make_shared<const TMeasurement>(
+        features::TMonocularMeasurement<features::OrbFeatureExtractor>{});
+
+    memory::ObjectPool<OrbFrameTracked, memory::ThreadSafePolicy> tracked_pool(1);
+    auto* tracked = tracked_pool.Create();
+    tracked->measurement = measurement;
+    tracked->Recycle();
+    memory::ObjectPool<OrbMapTransaction, memory::ThreadSafePolicy> transaction_pool(1);
+    auto* transaction = transaction_pool.Create();
+    transaction->added_frames.emplace_back().measurement = measurement;
+    transaction->Recycle();
+    EXPECT_EQ(measurement.use_count(), 3);
+
+    auto* reused_tracked = tracked_pool.Create();
+    ASSERT_EQ(reused_tracked, tracked);
+    EXPECT_EQ(reused_tracked->measurement, nullptr);
+    auto* reused_transaction = transaction_pool.Create();
+    ASSERT_EQ(reused_transaction, transaction);
+    EXPECT_EQ(measurement.use_count(), 1);
+    reused_tracked->Recycle();
+    reused_transaction->Recycle();
+}
+
 TEST(EventSystemTest, RecycledTrackingLostIsReset) {
     memory::ObjectPool<TrackingLost, memory::ThreadSafePolicy> pool(1);
     auto* event = pool.Create();
@@ -456,14 +484,15 @@ TEST(EventSystemTest, NewFrameHoldsMonoOrStereo) {
     memory::ObjectPool<OrbMapTransaction, memory::ThreadSafePolicy> pool(1);
 
     auto* event = pool.Create();
-    event->added_frames.emplace_back().measurement =
-        features::TMonocularMeasurement<features::OrbFeatureExtractor>{};
+    using TMeasurement = features::TMeasurement<features::OrbFeatureExtractor>;
+    event->added_frames.emplace_back().measurement = std::make_shared<const TMeasurement>(
+        features::TMonocularMeasurement<features::OrbFeatureExtractor>{});
     EXPECT_TRUE(std::holds_alternative<features::TMonocularMeasurement<features::OrbFeatureExtractor>>(
-        event->added_frames[0].measurement));
-    event->added_frames.emplace_back().measurement =
-        features::TBinocularMeasurement<features::OrbFeatureExtractor>{};
+        *event->added_frames[0].measurement));
+    event->added_frames.emplace_back().measurement = std::make_shared<const TMeasurement>(
+        features::TBinocularMeasurement<features::OrbFeatureExtractor>{});
     EXPECT_TRUE(std::holds_alternative<features::TBinocularMeasurement<features::OrbFeatureExtractor>>(
-        event->added_frames[1].measurement));
+        *event->added_frames[1].measurement));
     event->Recycle();
 }
 

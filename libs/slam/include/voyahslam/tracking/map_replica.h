@@ -2,6 +2,7 @@
 #define VOYAHSLAM_TRACKING_MAP_REPLICA_H
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -29,7 +30,9 @@ template <typename TFeatureExtractor>
 struct ReplicaKeyFrame {
     map::FrameId id{};
     geometry::RigidTransformation T_cw;  // world -> camera
-    features::TMeasurement<TFeatureExtractor> measurement;
+    // The Frame's measurement, shared with the Mapper and the other replicas
+    // (immutable; never null once the Frame is added).
+    features::TSharedMeasurement<TFeatureExtractor> shared_measurement;
     std::vector<std::pair<uint32_t, map::MapPointId>> observations;  // (feature, point)
     // The Mapper's BoW data of the left descriptors; empty without a vocabulary.
     bow::BowVector bow;
@@ -39,6 +42,10 @@ struct ReplicaKeyFrame {
     std::optional<map::FrameId> parent;
     std::set<map::FrameId> children;
     std::set<map::FrameId> loop_edges;
+
+    [[nodiscard]] const features::TMeasurement<TFeatureExtractor>& measurement() const {
+        return *shared_measurement;
+    }
 };
 
 // The Tracker's private copy of the map, built only from Mapper events and
@@ -212,11 +219,12 @@ void MapReplica<TFeatureExtractor>::ApplyTransaction(
     // 2. Frames, then their parents (a parent may be added in the same
     // transaction), then loop edges; their observations follow the points.
     for (const events::NewFrame<TFeatureExtractor>& added : transaction.added_frames) {
+        assert(added.measurement != nullptr);
         if (keyframes_.contains(added.id)) RemoveFrame(added.id);
         ReplicaKeyFrame<TFeatureExtractor>& keyframe = keyframes_[added.id];
         keyframe.id = added.id;
         keyframe.T_cw = added.T_cw;
-        keyframe.measurement = added.measurement;
+        keyframe.shared_measurement = added.measurement;
         keyframe.bow = added.bow;
         keyframe.features = added.features;
         database_.Add(added.id, added.bow);
@@ -311,7 +319,7 @@ void MapReplica<TFeatureExtractor>::AddObservation(map::FrameId frame, uint32_t 
     const auto it = keyframes_.find(frame);
     if (it == keyframes_.end() || !IsAlive(point) || covisibility_.Contains(frame, point)) return;
     ReplicaKeyFrame<TFeatureExtractor>& keyframe = it->second;
-    if (feature >= static_cast<uint32_t>(detail::LeftLevels(keyframe.measurement).size())) return;
+    if (feature >= static_cast<uint32_t>(detail::LeftLevels(keyframe.measurement()).size())) return;
     keyframe.observations.emplace_back(feature, point);
     covisibility_.Add(frame, feature, point);
     if (!references_[point.value]) SetReference(point, keyframe, feature);
@@ -397,7 +405,7 @@ void MapReplica<TFeatureExtractor>::SetReference(map::MapPointId point,
                                                  const ReplicaKeyFrame<TFeatureExtractor>& keyframe,
                                                  uint32_t feature) {
     // A binocular keyframe's reference level is the left feature's level.
-    const auto& levels = detail::LeftLevels(keyframe.measurement);
+    const auto& levels = detail::LeftLevels(keyframe.measurement());
     const geometry::TPoint3DF centre = keyframe.T_cw.Inverse().translation();
     references_[point.value] = map::PointReference{
         keyframe.id, static_cast<Eigen::Index>(feature), static_cast<int>(levels(feature)),

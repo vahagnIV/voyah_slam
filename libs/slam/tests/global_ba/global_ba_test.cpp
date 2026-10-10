@@ -115,7 +115,7 @@ void BuildMap(TReplica& out_replica, const Scene& scene, const std::vector<Rigid
             events::NewFrame<Extractor>& added = event.added_frames.emplace_back();
             added.id = {static_cast<uint32_t>(k)};
             added.T_cw = map_poses[k];
-            added.measurement = Measure(scene, scene.poses[k], stereo);
+            added.measurement = test::Share(Measure(scene, scene.poses[k], stereo));
             if (k > 0) added.parent = map::FrameId{static_cast<uint32_t>(k - 1)};
             for (size_t i = 0; i < map_points.size(); ++i) {
                 added.observed_features.push_back(static_cast<uint32_t>(i));
@@ -155,8 +155,8 @@ TEST(GlobalBaProblemTest, IncludesEveryFrameAndObservedPoint) {
         events::NewFrame<Extractor>& added = event.added_frames.emplace_back();
         added.id = {100};
         added.T_cw = scene.poses[2];
-        added.measurement = features::TMonocularMeasurement<Extractor>(
-            MakeFeatures(geometry::TPoints2DF(2, 0)), test::TestIntrinsics(), nullptr, 0.0);
+        added.measurement = test::Share(features::TMonocularMeasurement<Extractor>(
+            MakeFeatures(geometry::TPoints2DF(2, 0)), test::TestIntrinsics(), nullptr, 0.0));
         event.new_points_start_id = {num_scene};
         event.ResizeNewPoints(2);
         for (Eigen::Index i = 0; i < 2; ++i) {

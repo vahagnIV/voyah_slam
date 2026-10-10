@@ -288,7 +288,7 @@ public:
         events::NewFrame<Extractor>& added = transaction->added_frames.emplace_back();
         added.id = frame.id;
         added.T_cw = frame.T_cw;
-        added.measurement = frame.measurement;
+        added.measurement = test::Share(frame.measurement);
         added.observed_features = frame.features;
         added.observed_points = frame.points;
         if (!new_map) added.parent = previous_;

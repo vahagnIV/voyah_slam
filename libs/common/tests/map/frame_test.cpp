@@ -4,6 +4,8 @@
 #include <gtest/gtest.h>
 #include <Eigen/Geometry>
 
+#include <memory>
+
 namespace voyahslam::map {
 namespace {
 
@@ -27,7 +29,7 @@ TEST(FrameTest, MonoFrameConstruction) {
     auto measurement = OrbMonocularMeasurement(MakeFeatures(10), K, nullptr, 1.0);
 
     MonoFrame<features::OrbFeatureExtractor> frame(
-        FrameId{0}, pose, std::move(measurement));
+        FrameId{0}, pose, std::make_shared<const OrbMonocularMeasurement>(std::move(measurement)));
 
     EXPECT_EQ(frame.id(), FrameId{0});
     EXPECT_TRUE(frame.pose().ToMatrix34().isApprox(geometry::RigidTransformation::Identity().ToMatrix34()));
@@ -49,7 +51,8 @@ TEST(FrameTest, StereoFrameConstruction) {
         MakeFeatures(5), MakeFeatures(5), rig, 2.5);
 
     StereoFrame<features::OrbFeatureExtractor> frame(
-        FrameId{1}, pose, std::move(bcf));
+        FrameId{1}, pose,
+        std::make_shared<const features::BinocularMeasurement<uint8_t, 32>>(std::move(bcf)));
 
     EXPECT_EQ(frame.id(), FrameId{1});
     EXPECT_EQ(frame.measurement().left().points().cols(), 5);
@@ -62,7 +65,7 @@ TEST(FrameTest, MutablePose) {
     auto measurement = OrbMonocularMeasurement(MakeFeatures(3), K, nullptr, 0.0);
 
     MonoFrame<features::OrbFeatureExtractor> frame(
-        FrameId{0}, pose, std::move(measurement));
+        FrameId{0}, pose, std::make_shared<const OrbMonocularMeasurement>(std::move(measurement)));
 
     // Non-trivial rotation: 0.2 radians around X axis
     Eigen::AngleAxis<voyahslam::precision_t> angle_axis(0.2, geometry::TVector3DF::UnitX());

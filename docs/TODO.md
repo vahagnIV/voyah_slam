@@ -483,7 +483,10 @@ BA" (smoke table there).
       1.47 GB without and 2.24 / 2.38 GB with. Global BA adds another full
       replica plus the g2o problem of a full BA. Each replica holds every
       Frame's measurement; find what dominates (measurements, BoW,
-      per-replica copies, the BA problem) before trimming.
+      per-replica copies, the BA problem) before trimming. Since 2026-10-10
+      (map merging Task 1) the measurements are shared, not copied per
+      replica and event: the same run (default flags plus `--vocabulary`)
+      peaked at **1.21 GB** (1794 Frames, 114k points; 1.7 GB before).
 - [ ] **Global BA iteration or size cap:** on corridor1 (2026-10-10 smoke)
       a run took 3.3–28.2 s in mono and up to 82.5 / 85.2 s in stereo
       (1465 / 1654 Frames, 92k / 103k points), at 10 iterations; in mono

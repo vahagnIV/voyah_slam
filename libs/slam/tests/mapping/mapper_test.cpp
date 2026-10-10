@@ -197,16 +197,16 @@ protected:
                     frame.frame_id = added.id;
                     frame.pose = added.T_cw;
                     frame.timestamp =
-                        std::visit([](const auto& m) { return m.timestamp(); }, added.measurement);
+                        std::visit([](const auto& m) { return m.timestamp(); }, *added.measurement);
                     frame.observed_features = added.observed_features;
                     frame.observed_points = added.observed_points;
                     frame.bow = added.bow;
                     frame.features = added.features;
                     frame.parent = added.parent;
-                    if (const auto* mono = std::get_if<TMonocularMeasurement>(&added.measurement)) {
+                    if (const auto* mono = std::get_if<TMonocularMeasurement>(added.measurement.get())) {
                         frame.descriptors = mono->descriptors();
                     } else if (const auto* binocular =
-                                   std::get_if<TBinocularMeasurement>(&added.measurement)) {
+                                   std::get_if<TBinocularMeasurement>(added.measurement.get())) {
                         frame.descriptors = binocular->left().descriptors();
                         frame.depths = binocular->depths();
                     }
@@ -794,7 +794,7 @@ protected:
         event->map_id = map::MapId{map};
         event->timestamp = timestamp.value_or(sequence_.frames[index].measurement.timestamp());
         event->pose = pose.value_or(second_.pose);
-        event->measurement = sequence_.frames[index].measurement;
+        event->measurement = test::Share(sequence_.frames[index].measurement);
         for (const Pair& pair : pairs) {
             event->observed_features.push_back(pair.feature);
             event->observed_points.push_back(pair.point);
@@ -856,7 +856,7 @@ protected:
         event->map_id = map::MapId{1};
         event->timestamp = measurement.timestamp();
         event->pose = first.pose;
-        event->measurement = std::move(measurement);
+        event->measurement = test::Share(std::move(measurement));
         event->observed_features.assign(first.observed_features.begin(),
                                         first.observed_features.begin() + count);
         event->observed_points.assign(first.observed_points.begin(),
@@ -1256,7 +1256,7 @@ TEST_F(MapperFrameCreationTest, CreatesStereoFrame) {
     event->map_id = map::MapId{1};
     event->timestamp = 1.0;
     event->pose = first.pose;
-    event->measurement = StereoMeasurement(1.0);
+    event->measurement = test::Share(StereoMeasurement(1.0));
     event->observed_features.assign(first.observed_features.begin(),
                                     first.observed_features.begin() + count);
     event->observed_points.assign(first.observed_points.begin(),
@@ -1319,7 +1319,7 @@ TEST_F(MapperFrameCreationTest, RefPointsCountsStereoObservationsTwice) {
     event->map_id = map::MapId{1};
     event->timestamp = 0.05;  // well within max_interval: c1b (idle) decides
     event->pose = first.pose;
-    event->measurement = StereoMeasurement(0.05);
+    event->measurement = test::Share(StereoMeasurement(0.05));
     event->observed_features.assign(first.observed_features.begin(),
                                     first.observed_features.begin() + count);
     event->observed_points.assign(first.observed_points.begin(),
@@ -1582,7 +1582,7 @@ TEST_F(MapperFrameCreationTest, StereoNeighbourObservationCarriesDepth) {
         event->map_id = map::MapId{1};
         event->timestamp = measurements.back().timestamp();
         event->pose = stereo.frames[index].T_cw;
-        event->measurement = measurements.back();
+        event->measurement = test::Share(measurements.back());
         const auto& scene_of_feature = stereo.frames[index].point_of_feature;
         for (size_t f = 0; f < scene_of_feature.size() && event->observed_points.size() < 30; ++f) {
             const Eigen::Index scene = scene_of_feature[f];
@@ -1656,7 +1656,7 @@ protected:
         event->map_id = map::MapId{1};
         event->timestamp = timestamp;
         event->pose = pose;
-        event->measurement = StereoMeasurement(timestamp);
+        event->measurement = test::Share(StereoMeasurement(timestamp));
         for (const Pair& pair : pairs) {
             event->observed_features.push_back(pair.feature);
             event->observed_points.push_back(pair.point);
@@ -1698,7 +1698,7 @@ protected:
             if (!replica_.IsAlive(point)) continue;
             for (const map::PointObservation& o : replica_.covisibility().Observations(point)) {
                 const tracking::ReplicaKeyFrame<Extractor>* keyframe = replica_.keyframe(o.frame);
-                const auto& left = std::get<TMonocularMeasurement>(keyframe->measurement);
+                const auto& left = std::get<TMonocularMeasurement>(keyframe->measurement());
                 const geometry::TPoint2DF projected = left.camera().Project(
                     keyframe->T_cw.Transform(geometry::TPoint3DF(replica_.Position(point))));
                 sum += (projected - left.distorted_points().col(o.feature)).norm();
@@ -2020,7 +2020,7 @@ TEST_F(MapperFusionTest, StereoFusionKeepsPointIdentity) {
         event->map_id = map::MapId{1};
         event->timestamp = measurement.timestamp();
         event->pose = stereo.frames[index].T_cw;
-        event->measurement = measurement;
+        event->measurement = test::Share(measurement);
         const auto& scene_of_feature = stereo.frames[index].point_of_feature;
         for (size_t f = 0; f < scene_of_feature.size() && event->observed_points.size() < 30; ++f) {
             const Eigen::Index scene = scene_of_feature[f];
@@ -3172,7 +3172,7 @@ protected:
                     event->observed_points.push_back(*point);
                 }
             }
-            event->measurement = std::move(measurement);
+            event->measurement = test::Share(std::move(measurement));
             event->reference_frame_id = frames_.back().id;
             event->num_matches = static_cast<uint32_t>(event->observed_points.size());
             event->num_inliers = 20;
@@ -3411,7 +3411,7 @@ TEST_F(MapperLoopTest, PublishesOneTransactionWithEpoch) {
     event->map_id = map::MapId{1};
     event->timestamp = 10.0;
     event->pose = replica_.keyframe(Query().id)->T_cw;
-    event->measurement = View(Query().T_true, 10.0, scene_of_feature);
+    event->measurement = test::Share(View(Query().T_true, 10.0, scene_of_feature));
     event->reference_frame_id = Query().id;
     event->num_inliers = 20;
     event->map_epoch = 1;
@@ -3439,7 +3439,7 @@ TEST_F(MapperLoopTest, StaleEpochCreatesNoFrame) {
         event->map_id = map::MapId{1};
         event->timestamp = 10.0 + epoch;
         event->pose = replica_.keyframe(Query().id)->T_cw;
-        event->measurement = View(Query().T_true, 10.0 + epoch, scene_of_feature);
+        event->measurement = test::Share(View(Query().T_true, 10.0 + epoch, scene_of_feature));
         event->visible_points = {points[0]};
         event->observed_points = {points[0]};
         event->observed_features = {0};
@@ -3990,7 +3990,7 @@ TEST_F(MapperGlobalBaTest, PublishesOneTransactionAtNextEpoch) {
     event->map_id = map::MapId{1};
     event->timestamp = 10.0;
     event->pose = replica_.keyframe(Query().id)->T_cw;
-    event->measurement = View(Query().T_true, 10.0, scene_of_feature);
+    event->measurement = test::Share(View(Query().T_true, 10.0, scene_of_feature));
     event->reference_frame_id = Query().id;
     event->num_inliers = 20;
     event->map_epoch = 1;
@@ -4015,7 +4015,7 @@ TEST_F(MapperGlobalBaTest, ResultInterruptsLocalBa) {
     // Start Frame E1's view again, tracking the start side's points: local
     // BA has work, with E0 fixed.
     event->pose = replica_.keyframe(Match().id)->T_cw;
-    event->measurement = View(Match().T_true, 10.0, scene_of_feature);
+    event->measurement = test::Share(View(Match().T_true, 10.0, scene_of_feature));
     const std::vector<std::optional<map::MapPointId>> mapped = SidePoints(LoopSide::Start);
     for (size_t f = 0; f < scene_of_feature.size(); ++f) {
         const Eigen::Index scene = scene_of_feature[f];
