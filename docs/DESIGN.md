@@ -2907,7 +2907,7 @@ branch → review → merge to `master`. Update this document at the end.
   Closing"). The synthetic loop tests pass; the corridor1 smoke Musts are
   missed (same-heading look-alikes, roadmap step 6).
 
-- Global BA, roadmap step 4c (branch `feat/global-ba`, merge pending):
+- Global BA, roadmap step 4c (merged 9245f92):
   `RunGlobalBa` (ORB-SLAM3 `GlobalBundleAdjustemnt`, `bRobust = false`),
   `GlobalBAFinished`, the `GlobalBundleAdjuster` thread with its own replica
   (loop-edge trigger, apply-on-poll, interruption), the Mapper merge (tree

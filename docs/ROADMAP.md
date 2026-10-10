@@ -9,7 +9,7 @@ keyframes and map growth (sub-project 2, merged b93fcf4), restructure
 (step 2, merged 6fb863a), relocalization (step 3, merged 6afacc7), loop
 detection and correction (step 4a+4b: implemented (opt-in, off by default),
 merged 2026-10-10; corridor1 Musts missed → step 6), global BA (step 4c,
-done 2026-10-10 on branch `feat/global-ba`).
+merged 9245f92).
 
 ## 0. Restructure (done 2026-10-07)
 
@@ -174,7 +174,7 @@ Spec: `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; see
 DESIGN "Loop Closing" and the 2026-10-09 / 2026-10-10 decisions-log entries. Out of scope
 and in TODO: map merging (step 5), scale without IMU; global BA is 4c below.
 
-### 4c. Global BA (done 2026-10-10, branch `feat/global-ba`)
+### 4c. Global BA (merged 9245f92, 2026-10-10)
 
 **Result:** ORB-SLAM3's global BA (10 iterations, no robust kernel) runs
 after each loop correction in its own component, `GlobalBundleAdjuster`, on

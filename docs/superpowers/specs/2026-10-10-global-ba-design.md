@@ -1,7 +1,7 @@
 # Global Bundle Adjustment After Loop Correction — Design Spec
 
 Date: 2026-10-10
-Status: approved in conversation, pending spec review
+Status: approved and implemented; merged 9245f92 (2026-10-10)
 Roadmap: step 4c in `docs/ROADMAP.md`. It builds on step 4a+4b (loop closing,
 merged 5d94f69, opt-in).
 
