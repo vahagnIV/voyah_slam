@@ -4,6 +4,7 @@ voyah_add_test_binary(voyah_slam_tests
     SOURCES
         test_voyahslam.cpp
         features/projection_matcher_test.cpp
+        global_ba/global_ba_test.cpp
         loop_closing/loop_closer_test.cpp
         mapping/map_initializer_test.cpp
         mapping/mapper_test.cpp

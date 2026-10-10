@@ -11,6 +11,7 @@ enum class EventType : uint8_t {
     LoopDetected,
     FrameTracked,
     InitializationMeasurement,
+    GlobalBAFinished,
     TrackingLost,  // keep last: consumers size per-type tables by it
 };
 

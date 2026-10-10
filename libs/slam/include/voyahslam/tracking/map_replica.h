@@ -197,6 +197,7 @@ void MapReplica<TFeatureExtractor>::Apply(const events::Event& event) {
         case EventType::TrackingLost:
         case EventType::LoopDetected:
         case EventType::InitializationMeasurement:
+        case EventType::GlobalBAFinished:
             break;
     }
 }

@@ -381,11 +381,7 @@ void Mapper<TFeatureExtractor>::LocalBundleAdjust(
         problem.keyframe_poses.push_back(keyframe.pose());
         problem.keyframe_fixed.push_back(i >= num_optimized || frames[i] == first);
         problem.keyframe_cameras.push_back(detail::LeftOf<TFeatureExtractor>(keyframe.measurement()).camera());
-        const auto* binocular = detail::BinocularOf<TFeatureExtractor>(keyframe.measurement());
-        problem.keyframe_stereo.push_back(
-            binocular ? std::optional<optimization::StereoCameras>(
-                            optimization::StereoCameras{binocular->right().camera(), binocular->rig().T_rl})
-                      : std::nullopt);
+        problem.keyframe_stereo.push_back(detail::BaStereoOf<TFeatureExtractor>(keyframe.measurement()));
     }
     problem.points.resize(3, static_cast<Eigen::Index>(points.size()));
     // Per observation: its Frame and point, to apply the outlier verdicts.
@@ -396,18 +392,9 @@ void Mapper<TFeatureExtractor>::LocalBundleAdjust(
         for (const map::PointObservation& observation : covisibility_.Observations(points[p])) {
             const size_t k = frame_index.at(observation.frame.value);
             const TKeyFrame& keyframe = *FindKeyFrame(observation.frame);
-            const auto& left = detail::LeftOf<TFeatureExtractor>(keyframe.measurement());
-            const auto f = static_cast<Eigen::Index>(observation.feature);
-            optimization::BaObservation added{
-                k, p, left.distorted_points().col(f),
-                options_.fuse.sigma_px * std::pow(options_.fuse.level_scale, static_cast<double>(left.levels()(f)))};
-            if (const auto* binocular = detail::BinocularOf<TFeatureExtractor>(keyframe.measurement())) {
-                const int right = binocular->right_indices()(f);
-                if (right >= 0) {
-                    added.right_x = binocular->right().distorted_points()(0, right);
-                }
-            }
-            problem.observations.push_back(added);
+            problem.observations.push_back(detail::BaObservationOf<TFeatureExtractor>(
+                keyframe.measurement(), observation.feature, k, p, options_.fuse.sigma_px,
+                options_.fuse.level_scale));
             observed.emplace_back(observation.frame, points[p]);
             has_free = has_free || !problem.keyframe_fixed[k];
         }

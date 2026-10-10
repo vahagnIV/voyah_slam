@@ -10,6 +10,7 @@ add_library(voyah_slam STATIC
     src/mapping/map_initializer.cpp
     src/loop_closing/common_region.cpp
     src/loop_closing/loop_closer.cpp
+    src/global_ba/global_ba.cpp
     src/slam/slam.cpp
 )
 

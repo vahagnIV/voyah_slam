@@ -5,6 +5,7 @@
 // event header where only one or two are needed.
 
 #include <voyahslam/events/frame_tracked.h>
+#include <voyahslam/events/global_ba_finished.h>
 #include <voyahslam/events/initialization_measurement.h>
 #include <voyahslam/events/loop_detected.h>
 #include <voyahslam/events/map_transaction.h>

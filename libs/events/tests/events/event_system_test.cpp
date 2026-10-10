@@ -388,6 +388,26 @@ TEST(EventSystemTest, LoopDetectedTypeTag) {
     event->Recycle();
 }
 
+TEST(EventSystemTest, RecycledGlobalBAFinishedIsReset) {
+    memory::ObjectPool<GlobalBAFinished, memory::ThreadSafePolicy> pool(1);
+    auto* event = pool.Create();
+    EXPECT_EQ(event->type, EventType::GlobalBAFinished);
+    event->map_epoch = 3;
+    event->frame_poses.emplace_back(map::FrameId{7}, geometry::RigidTransformation::Identity());
+    event->point_positions.emplace_back(map::MapPointId{2}, geometry::TPoint3DF(1, 2, 3));
+    event->priority = true;
+    event->Recycle();
+
+    auto* reused = pool.Create();
+    ASSERT_EQ(reused, event);
+    EXPECT_EQ(reused->type, EventType::GlobalBAFinished);
+    EXPECT_EQ(reused->map_epoch, 0u);
+    EXPECT_TRUE(reused->frame_poses.empty());
+    EXPECT_TRUE(reused->point_positions.empty());
+    EXPECT_FALSE(reused->priority);
+    reused->Recycle();
+}
+
 TEST(EventSystemTest, FrameTrackedTypeTag) {
     memory::ObjectPool<OrbFrameTracked, memory::ThreadSafePolicy> pool(4);
     auto* event = pool.Create();
