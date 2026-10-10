@@ -118,10 +118,13 @@ struct MapTransaction
     // The Atlas. The active map after this transaction: set on every
     // transaction; none after a final loss, until the next new map.
     std::optional<map::MapId> active_map;
-    // Maps dropped after this transaction (a discarded map; later, a map
-    // absorbed by a merge); their ids are never admitted again.
+    // Maps dropped after this transaction (a discarded map, or the map a
+    // merge absorbed); their ids are never admitted again.
     std::vector<map::MapId> removed_maps;
-    // Map merging (not yet produced): map `absorbed_map` merged into `map_id`.
+    // Map merging: map `absorbed_map` merged into `map_id`. A replica first
+    // moves its Frames, observations and points into `map_id` by the id rule
+    // (map::AbsorbedPointIds), then applies the transaction, whose ids are all
+    // `map_id`'s; the absorbed map is also in removed_maps.
     std::optional<map::MapId> absorbed_map;
 
     // Set the number of new / updated points in every column; allocate only

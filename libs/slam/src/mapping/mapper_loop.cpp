@@ -23,24 +23,8 @@
 #include "mapping/mapper_internal.h"
 
 namespace voyahslam::mapping {
-namespace {
-
-geometry::Sim3 ToSim3(const geometry::RigidTransformation& T) {
-    return {1.0, T.rotation(), T.translation()};
-}
-
-// The SE3 pose of a similarity S_cw: [R t/s] (ORB-SLAM3 folds the scale into
-// the translation).
-geometry::RigidTransformation ToPose(const geometry::Sim3& S) {
-    return {S.R, S.t / S.scale};
-}
-
-// Review Focus 4: a finite similarity with a positive scale.
-bool IsValid(const geometry::Sim3& S) {
-    return std::isfinite(S.scale) && S.scale > 0.0 && S.R.allFinite() && S.t.allFinite();
-}
-
-} // namespace
+using detail::ToPose;
+using detail::ToSim3;
 
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::OnLoopDetected(const events::LoopDetected& event) {
@@ -48,8 +32,8 @@ void Mapper<TFeatureExtractor>::OnLoopDetected(const events::LoopDetected& event
     const map::FrameId query = event.query_frame;
     const map::FrameId match = event.match_frame;
     // Review Focus 3: a loop of another map (inactive or removed: the
-    // LoopCloser's replica was behind a final TrackingLost) or across maps
-    // (map merging) is not ours.
+    // LoopCloser's replica was behind a final TrackingLost or a merge) is not
+    // ours. One across maps is a merge and never reaches here (ApplyEvent).
     if (!IsActive(event.query_map_id) || !IsActive(event.match_map_id)) {
         log_->debug("LoopDetected {} -> {} of maps {} / {}: not the active map {}, ignored", query.value,
                     match.value, event.query_map_id.value, event.match_map_id.value,
@@ -62,7 +46,7 @@ void Mapper<TFeatureExtractor>::OnLoopDetected(const events::LoopDetected& event
         log_->debug("LoopDetected {} -> {}: a Frame is no longer in the map, ignored", query.value, match.value);
         return;
     }
-    if (!IsValid(event.S_query_match)) {
+    if (!detail::IsValidSim3(event.S_query_match)) {
         log_->debug("LoopDetected {} -> {}: invalid similarity, ignored", query.value, match.value);
         return;
     }
@@ -118,8 +102,8 @@ void Mapper<TFeatureExtractor>::OnLoopDetected(const events::LoopDetected& event
 }
 
 template <typename TFeatureExtractor>
-std::vector<map::FrameId> Mapper<TFeatureExtractor>::Connected(map::FrameId frame) const {
-    const auto covisible = Active().covisibility.Covisible(frame, std::numeric_limits<size_t>::max());
+std::vector<map::FrameId> Mapper<TFeatureExtractor>::Connected(const MapState& state, map::FrameId frame) const {
+    const auto covisible = state.covisibility.Covisible(frame, std::numeric_limits<size_t>::max());
     std::vector<map::FrameId> connected;
     for (const auto& [other, shared] : covisible) {
         if (shared < options_.loop.min_connection_weight) {
@@ -393,7 +377,7 @@ void Mapper<TFeatureExtractor>::FinishCorrection(events::MapTransaction<TFeature
 // are instantiated here.
 #define INSTANTIATE_MAPPER_LOOP(FE)                                                                       \
     template void Mapper<FE>::OnLoopDetected(const events::LoopDetected&);                                \
-    template std::vector<map::FrameId> Mapper<FE>::Connected(map::FrameId) const;                         \
+    template std::vector<map::FrameId> Mapper<FE>::Connected(const MapState&, map::FrameId) const;        \
     template std::vector<map::FrameId> Mapper<FE>::MatchWindow(map::FrameId) const;                       \
     template bool Mapper<FE>::IsClosedLoop(map::FrameId, map::FrameId) const;                             \
     template Mapper<FE>::WindowCorrection Mapper<FE>::CorrectWindow(const std::vector<map::FrameId>&,     \

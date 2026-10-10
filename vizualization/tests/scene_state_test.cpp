@@ -442,6 +442,36 @@ TEST(SceneStateTest, NewActiveMapShownAlone) {
     EXPECT_EQ(scene.keyframes().size(), 1u);
 }
 
+// A merge (map merging Task 5): map 2's Frames and alive points move into map
+// 1 by the Mapper's id rule (alive old ids ascending take map 1's next ids),
+// then the transaction applies to map 1 under the new ids, map 2 is dropped
+// and map 1 is shown.
+TEST(SceneStateTest, MergeAbsorbsMapByIdRule) {
+    TOrbScene scene;
+    NewMap(scene, 1);
+    AddPoints(scene, 1, 0, {{1, 0, 0}, {2, 0, 0}}, /*frame=*/0);
+    NewMap(scene, 2);
+    AddPoints(scene, 2, 0, kThreePoints, /*frame=*/5);
+    ApplyTransaction(scene, 2, [](TOrbTransaction& event) { event.removed_points = {map::MapPointId{1}}; });
+    ApplyTransaction(scene, 1, [](TOrbTransaction& event) {
+        event.absorbed_map = map::MapId{2};
+        event.removed_maps = {map::MapId{2}};
+        event.ResizeUpdatedPoints(1);
+        event.updated_ids[0] = map::MapPointId{3};  // map 2's old point 2
+        event.updated_positions.col(0) = Eigen::Vector3d(0, 0, 9).cast<precision_t>();
+        event.updated_poses.emplace_back(map::FrameId{5}, MakePose(0, 1, 2, 3));
+    });
+    EXPECT_EQ(scene.map_ids(), std::vector<map::MapId>{map::MapId{1}});
+    EXPECT_EQ(scene.current_map_id().value, 1u);
+    ASSERT_EQ(scene.point_positions().size(), 4u);
+    EXPECT_EQ(scene.num_alive_points(), 4u);
+    EXPECT_TRUE(scene.point_positions()[2].isApprox(kThreePoints[0].cast<precision_t>()));
+    EXPECT_TRUE(scene.point_positions()[3].isApprox(Eigen::Vector3d(0, 0, 9).cast<precision_t>()));
+    ASSERT_EQ(scene.keyframes().size(), 2u);
+    EXPECT_TRUE(scene.keyframes().at(map::FrameId{5}).translation().isApprox(
+        Eigen::Vector3d(1, 2, 3).cast<precision_t>()));
+}
+
 // Without new_map an unknown map is not created, nor its active_map taken.
 TEST(SceneStateTest, UnknownMapIgnored) {
     TOrbScene scene;

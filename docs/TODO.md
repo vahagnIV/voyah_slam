@@ -383,8 +383,17 @@ Spec `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; DESIGN
       edge. ORB-SLAM3 behaves the same and relies on global BA (4c, done
       2026-10-10: DESIGN "Global BA").
 - [ ] **Map merging** (roadmap step 5): detection finds merges in inactive
-      maps (Task 4, 2026-10-10); the Mapper still rejects a `LoopDetected`
-      across maps until the merge (Task 5).
+      maps (Task 4, 2026-10-10) and the Mapper merges them (Task 5,
+      2026-10-11); the Tracker does not follow a merge yet (Task 6), and the
+      integration tests and smoke runs are Task 7.
+- [ ] **Mono merge in the Mapper is untested (step 5, Task 7):** the
+      `MapperMergeTest` scene is stereo; the mono path (free-scale similarity,
+      scale folded by `CorrectWindow`, the essential graph of the rest with
+      free scales, which ORB-SLAM3 skips for mono) is only reached by the
+      `SlamTest.MonoMergesMaps` integration test.
+- [ ] **Merge weld cost (step 5):** `WeldWindows` optimizes every point the
+      two windows observe with up to 50 Frames, not interruptible (ORB passes
+      a stop flag that is never set); measure on corridor1 in Task 7.
 - [ ] **Hypothesis-independent check for merges (step 6):** the normal gate
       is not applied to merges (ruling 2026-10-10: the two maps' worlds are
       related only by the merge hypothesis), so false-merge protection is

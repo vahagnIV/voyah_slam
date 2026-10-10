@@ -218,7 +218,7 @@ stub was deleted on 2026-10-05.
   is outside `MapState`. Inactive maps are **frozen**: no local mapping,
   culling, BA or global BA; a `FrameTracked`, `LoopDetected` or
   `GlobalBAFinished` naming one is "another map's" and ignored or rejected
-  (only a merge will change one, Task 5). Test accessors: `map_ids()`,
+  (only a merge changes one: it absorbs the active map). Test accessors: `map_ids()`,
   `active_map()`, `num_keyframes(MapId)`.
 - **State machine** (`MapperState`, `state()`): `Initializing` -> `Mapping`.
   *Initialization protocol:* while `Tracker` has no map it forwards
@@ -245,7 +245,34 @@ stub was deleted on 2026-10-05.
   2–3; before, replicas cleared on the first event of map n+1). Every other
   transaction names the active map as its `active_map`. A stale
   `TrackingLost` is ignored. `atlas.merge_window` (25, ORB-SLAM3
-  `numTemporalKFs`) is for map merging (Task 5).
+  `numTemporalKFs`) sizes the merge windows.
+- Consumes a **merge** `LoopDetected` (`query_map_id` ≠ `match_map_id`;
+  since 2026-10-11, map merging Task 5, ORB-SLAM3 `MergeLocal`, visual,
+  `mapper_merge.cpp`): the active map M is merged into the inactive map N,
+  which survives with its id and world and becomes active. Rejected when the
+  query map is not active, the match map is not live and inactive, a Frame is
+  no longer in its map, or the Sim3 is invalid; a `LoopDetected` with two map
+  ids is never handled as a loop. Steps: (1) the windows, each in its own map
+  (`MergeWindowOf`: the Frame, its connected Frames up to 25, then up to 5
+  rounds of each member's best 12 while smaller than 25); (7, done first)
+  M is **absorbed** into N by the id rule (`map::AbsorbedPointIds`: M's alive
+  points by old id ascending take N's next ids; Frame records, links,
+  observations, references and counters move, M's recent points and
+  relocalization guard replace N's), N becomes active, so the 4b steps run
+  on one map; (2) `CorrectWindow` with S·T_match; (3) the query becomes a
+  child of the match and M's parent chain to its root is inverted; (4)
+  `FuseLoopPoints` with the pairs (query ids translated) and the merge
+  window's points; (5) the **weld** (`WeldWindows`): `BundleAdjust` of the
+  current window (free) and the merge window (fixed) with all their points,
+  their observations only, outliers removed; (6) `MoveRestOfMap`: the other
+  Frames of M take the similarity (points with their reference Frame), then
+  an essential graph over M's Frames with the welded window fixed
+  (`EssentialGraphProblem::also_fixed`) moves them again; (7) the merge edge
+  as a loop edge; (8) one `MapTransaction` of N: `absorbed_map = M`,
+  `removed_maps = {M}`, `active_map = N`, N's epoch + 1, every Frame of M's
+  pose, the parent changes, the fusions, the loop edge and every point (as a
+  loop correction). The loop edge starts a global BA of N. Logged with its
+  time (about 90 ms for the 18-Frame test scene, Debug -O2).
 - Consumes `FrameTracked` (current map, `Mapping` only): drains to the latest
   per map, decides with `ShouldCreateFrame` whether the measurement becomes a
   Frame, and creates it — tracked observations, stereo close points,
@@ -400,8 +427,14 @@ Rules:
   transaction. Other events (`FrameTracked`, `TrackingLost`, ...) change no
   replica: a final `TrackingLost` is answered by the Mapper's transaction
   that deactivates the map (`removed_maps` too if it is discarded); a kept
-  map stays live, inactive, in every replica. `absorbed_map` (map merging)
-  is asserted unset until Task 5. The Mapper builds map n+1 only after a
+  map stays live, inactive, in every replica. A merge (`absorbed_map` set,
+  since map merging Task 5) first moves the absorbed map's Frames,
+  observations and points into the map it names by the Mapper's id rule
+  (`MapReplica::Absorb`, `map::AbsorbedPointIds`), then applies the
+  transaction, then drops the absorbed map (it is in `removed_maps`).
+  `AtlasReplica::TranslatePoint(absorbed, old)` gives an absorbed point's id
+  in the merged map, after the merge's fusions (nullopt if it was not alive or
+  is gone): the Tracker's references follow it (Task 6). The Mapper builds map n+1 only after a
   final `TrackingLost(n)`, so a newer map never appears while the Tracker
   tracks an older one.
 - **No subscription filtering:** an `Observable` delivers every event to every
@@ -1865,7 +1898,7 @@ returns to a mapped place, detect it and correct the accumulated drift (pose,
 and scale for mono), following ORB-SLAM3's visual-only `LoopClosing`
 (`NewDetectCommonRegions`, `CorrectLoop`) and `Optimizer::OptimizeEssentialGraph`
 for the algorithm, its thresholds (checked against the ORB-SLAM3 source) and
-its order. Global BA is step 4c (see "Global BA"), map merging step 5 (TODO).
+its order. Global BA is step 4c (see "Global BA"), map merging step 5 (the merge itself: "Mapper").
 
 **Status (2026-10-10): implemented, opt-in, off by default.**
 - *What works:* loops on synthetic scenes, and revisits of nearby views. In
@@ -2775,6 +2808,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-10 | (Map merging Task 3, spec sections 1, 5) **The Mapper's Atlas.** Per-map state moves into a private `MapState` held in `std::map<MapId, MapState> maps_` with `std::optional<MapId> active_`; existing code works on `Active()` (a cached pointer to the active map's node, kept with `active_`; `std::map` nodes are stable). On a final loss of the active map: fewer than `MapperOptions::atlas.min_frames_to_keep` (10) Frames → discarded, one transaction `removed_maps = {id}`, no `active_map`; otherwise kept inactive, one transaction with no `active_map`. The next initialization takes the next id. Inactive maps are frozen through the existing "another map" guards (now `IsActive(id)`). `num_keyframes()` / `num_map_points()` (atomics) are the active map's, 0 without one; `current_map_id()` stays the newest map's id. Public Mapper-thread accessors (`covisibility()`, `Reference()`, ...) read an empty map when none is active. | ORB-SLAM3 `Tracking`: `ResetActiveMap` below 10 KeyFrames, `CreateMapInAtlas` otherwise; keeping lost maps is what map merging (Tasks 4–5) merges into. A per-point map lookup would cost a `std::map::find` on hot paths, hence the cached pointer. |
 | 2026-10-10 | (Map merging Task 4, spec section 2) **Merge detection in the LoopCloser.** `DetectNBestCandidates(atlas, query, options)` queries every live map's `FrameDatabase` (one per `MapReplica`, dropped with it on `removed_maps`) and splits the grouped hits into loop candidates (the active map) and merge candidates (inactive maps), best 3 each, the common-words threshold over all maps (ORB `KeyFrameDatabase::DetectNBestCandidates`). `DetectCommonRegion(atlas, query, candidates, options)` verifies either list with the same gates, the match side read from the candidate's map (`CommonRegion::match_map`); `RefineCommonRegion` takes the match map's replica. The LoopCloser keeps a second `PendingRegion` (`pending_merge_`) with its own counters; the loop/merge order follows ORB `NewDetectCommonRegions` and `Run`: a merge confirmed at the same query as a loop is published and the loop dropped. A pending region records its match map's epoch and is dropped when that map's epoch changes or the map is removed (this subsumes the old "active epoch drops the pending region" rule). The single-map `DetectCommonRegion(replica, query, options)` stays for tests. Deviation: the merge's not-found counter resets on a confirmation, as the loop's (ORB does not reset `mnMergeNumNotFound`). | Spec section 2; rulings: one database per live map, merges verified against the inactive map's replica, mono merges free-scale (the loop path already frees it for a mono query), the merge wins over a loop, no looser gates. The not-found reset keeps one rule ("2 failures in a row") for both kinds. |
 | 2026-10-10 | (Map merging Task 4, fix round 1; controller ruling) **The normal-consistency gate is not applied to merges** (candidates, covisible confirmations, later-query refinements); loops keep it unchanged. The disagreement share is still measured and logged. Spec section 2 and Constraints updated. | The gate compares map-point normals in world coordinates; each map's world is its first Frame's camera, so across maps the comparison is meaningless, and the only relation between the two worlds is the merge hypothesis itself (aligning by it makes the gate vacuous). Applied literally it rejects every true merge between worlds turned by more than 60°. Cost: false-merge protection is weaker than for loops; merging stays opt-in (TODO: a hypothesis-independent check). |
+| 2026-10-11 | (Map merging Task 5, spec section 3) **The merge absorbs first.** The Mapper moves M into N by the id rule before the correction steps (ORB-SLAM3 moves the window into the merge map during the correction and the rest after), so `CorrectWindow`, `FuseLoopPoints`, `FinishCorrection` and the tree edits run unchanged on one map; only the windows are built per map (`Connected` / `MergeWindowOf` take a `MapState`). The result is the same: the windows never share a Frame and are built before any fusion. The essential graph of step 6 holds only M's Frames, the welded window fixed (`EssentialGraphProblem::also_fixed`, new): in ORB-SLAM3's merge overload the merge window has no edge to M's other Frames (no common pose to measure from), so fixing it is the same as leaving it out. Deviations: the graph also runs for mono (ORB-SLAM3 only moves mono's rest rigidly; our window start keeps the merge scale, so the edges stay consistent, and the rest follows the weld); the `LoopDetected` pairs are fused as in a loop correction (spec section 3, step 4; ORB `MergeLocal` relies on `SearchAndFuse` alone); N's own recent points are dropped (the frozen map's list is stale). "A correction or merge is running" (spec section 3) has no separate state: the Mapper handles one event at a time, so the in-flight case is a merge or loop queued behind a merge, rejected because it names the removed map (`RejectsWhileCorrecting`). The viewer's `SceneState` (its own replica rule) absorbs too (`MapScene::Absorb`, same header), so the merged map shows both parts. | One code path for loops and merges; the id rule is the only thing replicas must reproduce, and it lives in one header (`map/absorbed_point_ids.h`) used by the Mapper, `AtlasReplica` and the viewer. |
 | 2026-10-11 | (Map merging Task 4, fix round 2) **`DetectNBestCandidates` group scoring counts only filtered hits**: a hit's group score adds its top-10 covisible Frames' scores only for Frames that passed the int(0.8 · max) common-words filter. ORB-SLAM3 adds every word-sharing KeyFrame's `mPlaceRecognitionScore` (set only for filtered ones, so possibly stale from an earlier query). Also: `LoopDetected::matched_points` drops a self-pair (equal ids) only for a loop; a merge's pairs span two maps whose point ids restart per map, so equal ids are two points (`KeepsPairsWithCollidingIds`). | The filtered form is ORB-SLAM2's and what the old `RelocalizationCandidates` path did; it avoids the stale-score dependence. The id filter dropped every true merge pair whose ids collided, which Task 5 fuses from. |
 
 ## 9. Open Questions

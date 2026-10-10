@@ -36,7 +36,8 @@ bool IsFinite(const Sim3& S) { return std::isfinite(S.scale) && S.R.allFinite() 
 bool IsValid(const EssentialGraphProblem& problem) {
     const size_t n = problem.T_cw.size();
     if (n == 0 || problem.frames.size() != n || problem.corrected_S_cw.size() != n || problem.fixed >= n ||
-        problem.iterations <= 0) {
+        problem.iterations <= 0 ||
+        std::any_of(problem.also_fixed.begin(), problem.also_fixed.end(), [n](size_t i) { return i >= n; })) {
         return false;
     }
     for (size_t i = 0; i < n; ++i) {
@@ -106,7 +107,8 @@ EssentialGraphResult OptimizeEssentialGraph(const EssentialGraphProblem& problem
         auto* vertex = new g2o::VertexSim3Expmap();
         vertex->setId(static_cast<int>(i));
         vertex->setEstimate(initial[i]);
-        vertex->setFixed(i == problem.fixed);
+        vertex->setFixed(i == problem.fixed || std::find(problem.also_fixed.begin(), problem.also_fixed.end(), i) !=
+                                                    problem.also_fixed.end());
         vertex->_fix_scale = problem.fix_scale;
         optimizer.addVertex(vertex);
         vertices.push_back(vertex);

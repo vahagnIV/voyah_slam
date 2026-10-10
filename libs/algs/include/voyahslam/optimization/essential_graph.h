@@ -28,6 +28,9 @@ struct EssentialGraphProblem {
     std::vector<std::pair<size_t, size_t>> edges;             ///< Index pairs, non-corrected measurement.
     std::vector<std::pair<size_t, size_t>> loop_connections;  ///< Index pairs, initial-value measurement.
     size_t fixed = 0;        ///< Index of the vertex held constant.
+    /// Further vertices held constant (map merging: the welded window, ORB-SLAM3's
+    /// merge overload of OptimizeEssentialGraph).
+    std::vector<size_t> also_fixed;
     bool fix_scale = false;  ///< Stereo: every vertex keeps its start scale.
     int iterations = 20;     ///< Levenberg-Marquardt iterations.
 };
@@ -39,9 +42,9 @@ struct EssentialGraphResult {
     std::vector<geometry::Sim3> S_cw;
 };
 
-/// Optimizes the graph with identity information on every edge and the fixed vertex held
+/// Optimizes the graph with identity information on every edge and the fixed vertices held
 /// constant. Fails without optimizing on empty or invalid input: mismatched sizes, an index out
-/// of range, a self edge, a non-finite pose, a corrected scale <= 0, iterations <= 0. A graph
+/// of range (also_fixed included), a self edge, a non-finite pose, a corrected scale <= 0, iterations <= 0. A graph
 /// without edges returns the start values.
 [[nodiscard]] EssentialGraphResult OptimizeEssentialGraph(const EssentialGraphProblem& problem);
 

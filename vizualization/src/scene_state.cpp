@@ -2,6 +2,7 @@
 
 #include <voyahslam/events/events.h>
 #include <voyahslam/features/instantiation.h>
+#include <voyahslam/map/absorbed_point_ids.h>
 
 namespace voyahviz {
 
@@ -58,6 +59,13 @@ void SceneState<TFeatureExtractor>::ApplyTransaction(
     }
     if (transaction.new_map) {
         it->second = {};
+    }
+    // A merge: the absorbed map moves in first (it is in removed_maps).
+    if (transaction.absorbed_map && *transaction.absorbed_map != id) {
+        const auto absorbed = maps_.find(*transaction.absorbed_map);
+        if (absorbed != maps_.end()) {
+            it->second.Absorb(std::move(absorbed->second));
+        }
     }
     ApplyParts(transaction, it->second);
     for (const voyahslam::map::MapId removed : transaction.removed_maps) {
@@ -149,6 +157,25 @@ void SceneState<TFeatureExtractor>::MapScene::SetPoint(uint32_t id,
         point_alive[id] = true;
         ++num_alive_points;
     }
+}
+
+template <typename TFeatureExtractor>
+void SceneState<TFeatureExtractor>::MapScene::Absorb(MapScene&& absorbed) {
+    const std::vector<std::optional<voyahslam::map::MapPointId>> new_ids = voyahslam::map::AbsorbedPointIds(
+        static_cast<uint32_t>(absorbed.point_alive.size()),
+        voyahslam::map::MapPointId{static_cast<uint32_t>(point_alive.size())},
+        [&](voyahslam::map::MapPointId point) { return static_cast<bool>(absorbed.point_alive[point.value]); });
+    for (uint32_t p = 0; p < new_ids.size(); ++p) {
+        if (!new_ids[p]) continue;
+        const uint32_t id = new_ids[p]->value;
+        if (id >= point_alive.size()) {
+            point_positions.resize(id + 1, voyahslam::geometry::TPoint3DF::Zero());
+            point_alive.resize(id + 1, false);
+        }
+        SetPoint(id, absorbed.point_positions[p]);
+    }
+    keyframes.merge(absorbed.keyframes);
+    absorbed = {};
 }
 
 template <typename TFeatureExtractor>

@@ -105,6 +105,9 @@ private:
         // Moves point ids[i] to column i of `positions`; unknown ids are skipped.
         void UpdatePositions(const std::vector<voyahslam::map::MapPointId>& ids,
                              const voyahslam::memory::ColumnBuffer<voyahslam::precision_t, 3>& positions);
+        // A merge: `absorbed`'s Frames and alive points move in, by the
+        // Mapper's id rule (voyahslam::map::AbsorbedPointIds).
+        void Absorb(MapScene&& absorbed);
     };
 
     void Count(voyahslam::events::EventType type);

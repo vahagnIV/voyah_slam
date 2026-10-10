@@ -9,6 +9,8 @@
 #include <variant>
 #include <voyahslam/features/measurement.h>
 #include <voyahslam/features/stereo_rig.h>
+#include <voyahslam/geometry/rigid_transformation.h>
+#include <voyahslam/geometry/sim3.h>
 #include <voyahslam/map/frame_id.h>
 #include <voyahslam/map/map_point_id.h>
 #include <voyahslam/optimization/bundle_adjustment.h>
@@ -65,6 +67,22 @@ inline double RigBaseline(const features::StereoRig& rig) {
 // A key of the observation of `point` by `frame`.
 inline uint64_t ObservationKey(map::FrameId frame, map::MapPointId point) {
     return (static_cast<uint64_t>(frame.value) << 32) | point.value;
+}
+
+// A pose as a similarity of scale 1.
+inline geometry::Sim3 ToSim3(const geometry::RigidTransformation& T) {
+    return {1.0, T.rotation(), T.translation()};
+}
+
+// The SE3 pose of a similarity S_cw: [R t/s] (ORB-SLAM3 folds the scale into
+// the translation).
+inline geometry::RigidTransformation ToPose(const geometry::Sim3& S) {
+    return {S.R, S.t / S.scale};
+}
+
+// Review Focus 4 (loop closing): a finite similarity with a positive scale.
+inline bool IsValidSim3(const geometry::Sim3& S) {
+    return std::isfinite(S.scale) && S.scale > 0.0 && S.R.allFinite() && S.t.allFinite();
 }
 
 // Milliseconds elapsed since `start`.

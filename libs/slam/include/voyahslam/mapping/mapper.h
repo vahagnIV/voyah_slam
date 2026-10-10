@@ -141,7 +141,10 @@ enum class MapperState : uint8_t {
 // points are fused into it, the essential graph is optimized, and the query
 // and match Frames get a loop edge; all of it is one MapTransaction at the
 // next correction epoch. A LoopDetected of another map, naming a culled Frame
-// or a loop already closed is ignored. A FrameTracked of an older epoch (the
+// or a loop already closed is ignored. A LoopDetected across two maps is a
+// merge (OnMergeDetected, map-merging spec section 3): the active map is
+// absorbed by the inactive match map, which becomes active, as one
+// MapTransaction. A FrameTracked of an older epoch (the
 // Tracker had not seen the correction or the global-BA merge) creates no Frame; its points are
 // counted. A GlobalBAFinished of the current map at the current epoch is
 // merged (ORB-SLAM3's post-GBA block in LoopClosing::RunGlobalBundleAdjustment,
@@ -227,6 +230,8 @@ public:
     [[nodiscard]] size_t num_global_ba_rejected() const {
         return num_global_ba_rejected_.load(std::memory_order_acquire);
     }
+    // Merges applied (map merging).
+    [[nodiscard]] size_t num_merges() const { return num_merges_.load(std::memory_order_acquire); }
 
     // The current map's observations. Mapper thread (or a test driving
     // ProcessPending synchronously) only.
@@ -337,6 +342,8 @@ private:
     void OnInitializationMeasurement(const events::InitializationMeasurement<TFeatureExtractor>& event);
     void OnFrameTracked(const events::FrameTracked<TFeatureExtractor>& event);
     void OnTrackingLost(const events::TrackingLost& event);
+    // A LoopDetected within one map (ApplyEvent sends one across two maps to
+    // OnMergeDetected).
     void OnLoopDetected(const events::LoopDetected& event);
     // Ignores a result of another map, of an older correction epoch, or
     // without a map; merges the others (MergeGlobalBa).
@@ -351,6 +358,9 @@ private:
     // is a vocabulary; returns it.
     const TKeyFrame& AddKeyFrame(map::FrameId id, const geometry::RigidTransformation& pose,
                                  TSharedMeasurement measurement);
+    // Frame `id` of map `state` with its bag of words; nullptr if it is not in
+    // that map (or was culled).
+    [[nodiscard]] static const KeyFrameRecord* FindRecordIn(const MapState& state, map::FrameId id);
     // The current map's Frame `id` with its bag of words; nullptr if it is not
     // in the map (or was culled).
     [[nodiscard]] const KeyFrameRecord* FindRecord(map::FrameId id) const;
@@ -552,7 +562,9 @@ private:
     // The Frames `frame` is connected to (ORB-SLAM3 UpdateConnections): those
     // sharing at least min_connection_weight points, by shared points, or else
     // its most covisible one.
-    [[nodiscard]] std::vector<map::FrameId> Connected(map::FrameId frame) const;
+    [[nodiscard]] std::vector<map::FrameId> Connected(map::FrameId frame) const { return Connected(Active(), frame); }
+    // The same in map `state`.
+    [[nodiscard]] std::vector<map::FrameId> Connected(const MapState& state, map::FrameId frame) const;
     // `frame` and its top num_covisibles covisible Frames (the LoopCloser's
     // window of a match).
     [[nodiscard]] std::vector<map::FrameId> MatchWindow(map::FrameId frame) const;
@@ -615,6 +627,48 @@ private:
     void MergeGlobalBa(const std::vector<std::pair<map::FrameId, geometry::RigidTransformation>>& frame_poses,
                        const std::vector<std::pair<map::MapPointId, geometry::TPoint3DF>>& point_positions);
 
+    // Map merging (mapper_merge.cpp; map-merging spec section 3, ORB-SLAM3
+    // LoopClosing::MergeLocal, visual). The absorbed map is moved into the
+    // target first (step 7's id rule, as every replica applies it), so the
+    // loop-correction steps then run on one map, the target made active.
+
+    // A LoopDetected of the active map (the query's) with an inactive one: the
+    // active map is merged into the inactive one, which survives and becomes
+    // active, as one MapTransaction (steps 1-8). Rejected (ignored) when the
+    // query map is not the active one, the match map is not an existing
+    // inactive map, the query or match Frame is no longer in its map, or the
+    // similarity is invalid.
+    void OnMergeDetected(const events::LoopDetected& event);
+    // Step 7, done first: moves every Frame (records, graph links), alive point
+    // (position, descriptor, normal, reference, counters) and observation of
+    // `source` into `target`, point old id p taking AbsorbedPointIds' new id,
+    // with the Mapper's bookkeeping (recent points remapped, the relocalization
+    // guard); `source` is left moved-from, for the caller to erase. Returns
+    // the new id per old id.
+    static std::vector<std::optional<map::MapPointId>> AbsorbMap(MapState& source, MapState& target);
+    // Step 1 (ORB-SLAM3 MergeLocal's windows), in map `state`: `frame`, its connected Frames
+    // up to atlas.merge_window (GetBestCovisibilityKeyFrames), then, while
+    // the window is smaller and for at most 5 rounds, each window Frame's
+    // connected Frames up to merge_window / 2. `frame` first.
+    [[nodiscard]] std::vector<map::FrameId> MergeWindowOf(const MapState& state, map::FrameId frame) const;
+    // Step 3: `query` becomes a child of `match` and the parent chain from the
+    // query to its old root is inverted (ORB-SLAM3's ChangeParent walk).
+    void ReRootTree(map::FrameId query, map::FrameId match, events::MapTransaction<TFeatureExtractor>& out_event);
+    // Step 5, the weld (ORB-SLAM3 LocalBundleAdjustment(current, current
+    // window, merge window)): BundleAdjust of the `free` and `fixed` Frames
+    // with every point they observe, through their observations only. Poses
+    // and points are applied; outlier observations are removed once the robust
+    // stage has finished, and their points appended to `out_changed`.
+    void WeldWindows(const std::vector<map::FrameId>& free, const std::vector<map::FrameId>& fixed,
+                     events::MapTransaction<TFeatureExtractor>& out_event, std::vector<map::MapPointId>& out_changed);
+    // Step 6: each Frame of `absorbed_frames` outside the window takes the
+    // merge similarity as CorrectWindow gives it, its points moving with their
+    // reference Frame; then the essential graph of the absorbed Frames (the
+    // window fixed at its welded poses; ORB-SLAM3's merge overload of
+    // OptimizeEssentialGraph) moves them and their points again.
+    void MoveRestOfMap(const WindowCorrection& correction, const std::vector<map::FrameId>& absorbed_frames,
+                       bool fix_scale);
+
     // `frame`'s side of a triangulation, with `has_point` per feature.
     [[nodiscard]] TriangulationView<TFeatureExtractor> ViewOf(const TKeyFrame& frame,
                                                               std::vector<bool> has_point) const;
@@ -652,6 +706,7 @@ private:
     std::atomic<size_t> stale_epoch_skipped_{0};
     std::atomic<size_t> num_global_ba_merges_{0};
     std::atomic<size_t> num_global_ba_rejected_{0};
+    std::atomic<size_t> num_merges_{0};
 
     std::atomic<MapperState> state_{MapperState::Initializing};  // Mapping iff a map is active
     // The newest map's id (0 before the first): the active one while Mapping.

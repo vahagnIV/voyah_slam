@@ -75,6 +75,14 @@ public:
     using TDescriptor = typename TFeatureExtractor::TDescriptor;
 
     void Apply(const events::Event& event);
+    // Map merging (map-merging spec section 3, step 7): moves every Frame of
+    // `absorbed` (its pose, measurement, BoW data, graph links and
+    // observations) and every alive point (position, descriptor, normal,
+    // reference) into this map, old point id p taking new_ids[p]
+    // (map::AbsorbedPointIds over `absorbed`); `absorbed` is left empty. Frame
+    // ids are unique across maps, so the graph links are kept as they are. The
+    // caller then applies the merge transaction to this map.
+    void Absorb(MapReplica&& absorbed, const std::vector<std::optional<map::MapPointId>>& new_ids);
 
     // The map of the transactions applied; 0 before the first.
     [[nodiscard]] map::MapId map_id() const { return map_id_; }
@@ -298,6 +306,45 @@ void MapReplica<TFeatureExtractor>::ApplyTransaction(
     for (const map::FrameId frame : transaction.removed_frames) {
         RemoveFrame(frame);
     }
+}
+
+template <typename TFeatureExtractor>
+void MapReplica<TFeatureExtractor>::Absorb(MapReplica&& absorbed,
+                                           const std::vector<std::optional<map::MapPointId>>& new_ids) {
+    assert(new_ids.size() == absorbed.num_points());
+    size_t end = positions_.size();
+    for (const std::optional<map::MapPointId>& id : new_ids) {
+        if (id) end = std::max(end, static_cast<size_t>(id->value) + 1);
+    }
+    positions_.resize(end, geometry::TPoint3DF::Zero());
+    descriptors_.resize(end, TDescriptor::Zero());
+    normals_.resize(end, geometry::TPoint3DF::Zero());
+    alive_.resize(end, false);
+    references_.resize(end);
+    for (uint32_t p = 0; p < new_ids.size(); ++p) {
+        if (!new_ids[p]) continue;
+        assert(absorbed.IsAlive({p}));
+        const uint32_t id = new_ids[p]->value;
+        positions_[id] = absorbed.positions_[p];
+        descriptors_[id] = absorbed.descriptors_[p];
+        normals_[id] = absorbed.normals_[p];
+        alive_[id] = true;
+        references_[id] = absorbed.references_[p];
+    }
+    for (auto& [id, keyframe] : absorbed.keyframes_) {
+        assert(!keyframes_.contains(id));
+        for (auto& [feature, point] : keyframe.observations) point = *new_ids[point.value];
+        database_.Add(id, keyframe.bow);
+        keyframes_.emplace(id, std::move(keyframe));
+    }
+    // Point by point, in the absorbed map's order (as the Mapper does).
+    for (uint32_t p = 0; p < new_ids.size(); ++p) {
+        if (!new_ids[p]) continue;
+        for (const map::PointObservation& observation : absorbed.covisibility_.Observations({p})) {
+            covisibility_.Add(observation.frame, observation.feature, *new_ids[p]);
+        }
+    }
+    absorbed.Clear();
 }
 
 template <typename TFeatureExtractor>

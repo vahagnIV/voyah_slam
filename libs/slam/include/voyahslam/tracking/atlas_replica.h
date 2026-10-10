@@ -5,9 +5,13 @@
 #include <map>
 #include <optional>
 #include <set>
+#include <unordered_map>
+#include <utility>
 #include <vector>
 #include <voyahslam/events/map_transaction.h>
+#include <voyahslam/map/absorbed_point_ids.h>
 #include <voyahslam/map/map_id.h>
+#include <voyahslam/map/map_point_id.h>
 #include <voyahslam/tracking/map_replica.h>
 
 namespace voyahslam::tracking {
@@ -24,7 +28,12 @@ namespace voyahslam::tracking {
 //   they are never admitted again;
 // - then active_map is taken: the active map comes only from it (none if it
 //   names no live map), never from the newest id.
-// absorbed_map (map merging) must be unset.
+// A merge transaction (absorbed_map set, map merging spec section 3) first
+// moves the absorbed map's Frames, observations and points into map `map_id`
+// by the id rule (map::AbsorbedPointIds, as the Mapper applies it), then
+// applies the transaction to that map; the absorbed map is in removed_maps,
+// so it is dropped after. A merge whose absorbed map is not live absorbs
+// nothing.
 template <typename TFeatureExtractor>
 class AtlasReplica {
 public:
@@ -56,17 +65,33 @@ public:
         return ids;
     }
 
+    // Point `old` of map `absorbed` after the merge that absorbed it: its id in
+    // the map that absorbed it (the id rule), then the point it was fused into
+    // by that merge (replaced_points). nullopt if `absorbed` was not absorbed
+    // by a merge this replica applied, if `old` was not alive then, or if the
+    // point is not alive now (Task 6: the Tracker's references become
+    // unmatched).
+    [[nodiscard]] std::optional<map::MapPointId> TranslatePoint(map::MapId absorbed, map::MapPointId old) const;
+
 private:
+    // A merge applied: the map that absorbed the map, the new id per old id,
+    // and the merge's fusions (loser -> final winner).
+    struct Absorption {
+        map::MapId target;
+        std::vector<std::optional<map::MapPointId>> new_ids;
+        std::unordered_map<uint32_t, map::MapPointId> replaced;
+    };
+
     inline static const TMap kEmpty;
 
     std::map<map::MapId, TMap> maps_;  // node-based: a map's address is stable
     std::set<map::MapId> removed_;
     std::optional<map::MapId> active_map_;
+    std::map<map::MapId, Absorption> absorptions_;  // by absorbed map
 };
 
 template <typename TFeatureExtractor>
 bool AtlasReplica<TFeatureExtractor>::Apply(const events::MapTransaction<TFeatureExtractor>& transaction) {
-    assert(!transaction.absorbed_map.has_value());  // map merging: not yet
     const map::MapId id = transaction.map_id;
     if (id.value == 0 || removed_.contains(id)) {
         return false;
@@ -78,6 +103,21 @@ bool AtlasReplica<TFeatureExtractor>::Apply(const events::MapTransaction<TFeatur
         }
         it = maps_.try_emplace(id).first;
     }
+    if (transaction.absorbed_map && *transaction.absorbed_map != id) {
+        const auto absorbed = maps_.find(*transaction.absorbed_map);
+        if (absorbed != maps_.end()) {
+            TMap& source = absorbed->second;
+            Absorption& absorption = absorptions_[*transaction.absorbed_map];
+            absorption.target = id;
+            absorption.new_ids = map::AbsorbedPointIds(
+                static_cast<uint32_t>(source.num_points()), map::MapPointId{static_cast<uint32_t>(it->second.num_points())},
+                [&](map::MapPointId point) { return source.IsAlive(point); });
+            for (const events::ReplacedPoint& replaced : transaction.replaced_points) {
+                absorption.replaced.emplace(replaced.loser.value, replaced.winner);
+            }
+            it->second.Absorb(std::move(source), absorption.new_ids);
+        }
+    }
     it->second.Apply(transaction);
     for (const map::MapId removed : transaction.removed_maps) {
         maps_.erase(removed);
@@ -88,6 +128,26 @@ bool AtlasReplica<TFeatureExtractor>::Apply(const events::MapTransaction<TFeatur
         active_map_.reset();
     }
     return true;
+}
+
+template <typename TFeatureExtractor>
+std::optional<map::MapPointId> AtlasReplica<TFeatureExtractor>::TranslatePoint(map::MapId absorbed,
+                                                                               map::MapPointId old) const {
+    const auto it = absorptions_.find(absorbed);
+    if (it == absorptions_.end() || old.value >= it->second.new_ids.size() || !it->second.new_ids[old.value]) {
+        return std::nullopt;
+    }
+    const Absorption& absorption = it->second;
+    map::MapPointId point = *absorption.new_ids[old.value];
+    // The merge lists each loser with its final winner.
+    if (const auto replaced = absorption.replaced.find(point.value); replaced != absorption.replaced.end()) {
+        point = replaced->second;
+    }
+    const TMap* target = map(absorption.target);
+    if (target == nullptr || !target->IsAlive(point)) {
+        return std::nullopt;
+    }
+    return point;
 }
 
 } // namespace voyahslam::tracking

@@ -122,9 +122,16 @@ void Mapper<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
         case events::EventType::TrackingLost:
             OnTrackingLost(static_cast<const events::TrackingLost&>(event));
             return;
-        case events::EventType::LoopDetected:
-            OnLoopDetected(static_cast<const events::LoopDetected&>(event));
+        case events::EventType::LoopDetected: {
+            // A LoopDetected across two maps is a merge, never a loop.
+            const auto& loop = static_cast<const events::LoopDetected&>(event);
+            if (loop.query_map_id != loop.match_map_id) {
+                OnMergeDetected(loop);
+            } else {
+                OnLoopDetected(loop);
+            }
             return;
+        }
         case events::EventType::GlobalBAFinished:
             OnGlobalBaFinished(static_cast<const events::GlobalBAFinished&>(event));
             return;
@@ -325,18 +332,23 @@ auto Mapper<TFeatureExtractor>::AddKeyFrame(map::FrameId id,
 }
 
 template <typename TFeatureExtractor>
+auto Mapper<TFeatureExtractor>::FindRecordIn(const MapState& state, map::FrameId id) -> const KeyFrameRecord* {
+    // A map's Frame slots run by id from its first Frame's, which is never
+    // culled; a culled Frame's slot (or a merge's gap) is empty.
+    if (state.keyframes.empty() || id < state.keyframes.front()->frame.id()) {
+        return nullptr;
+    }
+    const size_t index = id.value - state.keyframes.front()->frame.id().value;
+    if (index >= state.keyframes.size() || !state.keyframes[index]) {
+        return nullptr;
+    }
+    assert(state.keyframes[index]->frame.id() == id);
+    return &*state.keyframes[index];
+}
+
+template <typename TFeatureExtractor>
 auto Mapper<TFeatureExtractor>::FindRecord(map::FrameId id) const -> const KeyFrameRecord* {
-    // A map's Frame ids are consecutive from its first Frame's, which is
-    // never culled.
-    if (!active_ || Active().keyframes.empty() || id < FirstKeyFrame().id()) {
-        return nullptr;
-    }
-    const size_t index = id.value - FirstKeyFrame().id().value;
-    if (index >= Active().keyframes.size() || !Active().keyframes[index]) {
-        return nullptr;
-    }
-    assert(Active().keyframes[index]->frame.id() == id);
-    return &*Active().keyframes[index];
+    return active_state_ != nullptr ? FindRecordIn(*active_state_, id) : nullptr;
 }
 
 template <typename TFeatureExtractor>

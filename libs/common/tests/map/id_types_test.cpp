@@ -1,10 +1,13 @@
+#include <voyahslam/map/absorbed_point_ids.h>
 #include <voyahslam/map/frame_id.h>
 #include <voyahslam/map/map_id.h>
 #include <voyahslam/map/map_point_id.h>
 
 #include <gtest/gtest.h>
 
+#include <optional>
 #include <type_traits>
+#include <vector>
 
 namespace voyahslam::map {
 namespace {
@@ -36,6 +39,17 @@ TEST(IdTypesTest, MapIdOrdering) {
 TEST(IdTypeSafetyTest, NotConvertible) {
     static_assert(!std::is_convertible_v<MapPointId, FrameId>);
     static_assert(!std::is_convertible_v<FrameId, MapPointId>);
+}
+
+// Map merging's id rule: the alive old ids, ascending, take first_new, +1, ...
+TEST(AbsorbedPointIdsTest, AliveIdsTakeNextIdsInOrder) {
+    const std::vector<bool> alive = {true, false, true, true, false};
+    const std::vector<std::optional<MapPointId>> new_ids =
+        AbsorbedPointIds(5, MapPointId{40}, [&](MapPointId id) { return static_cast<bool>(alive[id.value]); });
+    const std::vector<std::optional<MapPointId>> expected = {MapPointId{40}, std::nullopt, MapPointId{41},
+                                                             MapPointId{42}, std::nullopt};
+    EXPECT_EQ(new_ids, expected);
+    EXPECT_TRUE(AbsorbedPointIds(0, MapPointId{7}, [](MapPointId) { return true; }).empty());
 }
 
 } // namespace
