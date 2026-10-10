@@ -2153,7 +2153,12 @@ above). `last_frame_.matches` then take their ids in N through
 without one becomes unmatched. While RecentlyLost or Lost there is no last
 frame: relocalization searches N. `FrameTracked` carries N and N's epoch.
 The local map is rebuilt per frame from the replica, so it holds no ids
-across a merge.
+across a merge. A merge landing while the Tracker is **Lost** overtook its
+final `TrackingLost(M)` in the Mapper, which ignores that loss as stale (M is
+removed; had it read the loss first, it would have rejected the merge): the
+Tracker publishes a final `TrackingLost(N)` with the first one's timestamp,
+and the Mapper handles it as any final loss (N kept inactive or discarded,
+the next initialization builds a new map).
 
 **Apps.** `--loop_closing` enables loop closing (`LoopCloserOptions::enabled`;
 it needs `--vocabulary`). Without it the vocabulary serves relocalization and
@@ -2829,6 +2834,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-11 | (Map merging Task 5, fix round 1; review Critical 1) **Merges chain.** A merge target can later be absorbed itself (map 3 into 1, then 1 into 2), so the absorbed map's Frame ids may lie below and above the target's. The Mapper's `MapState` slots Frames by id from `first_slot` (the lowest id it ever held, slots sized over both maps at a merge) and keeps the spanning tree's `root` separately; `RootKeyFrame()` (was `FirstKeyFrame()`) is the never-culled local-BA gauge and Frame-culling exception. The global BA's gauge is the root too (the oldest Frame without a parent), no longer simply the oldest Frame. The replicas (`std::map` by Frame id) and the viewer were already order-independent (`AtlasReplicaTest.MergeAbsorbsInterleavedFrameIds`). | ORB-SLAM3 merges any number of maps; the slot vector's "the source's ids come after the target's" held only for a first merge (`MapperMergeTest.ChainedMergesThreeMaps` aborted on it). The root, not the oldest Frame, is the map's origin after a merge. |
 | 2026-10-11 | (Map merging Task 4, fix round 2) **`DetectNBestCandidates` group scoring counts only filtered hits**: a hit's group score adds its top-10 covisible Frames' scores only for Frames that passed the int(0.8 · max) common-words filter. ORB-SLAM3 adds every word-sharing KeyFrame's `mPlaceRecognitionScore` (set only for filtered ones, so possibly stale from an earlier query). Also: `LoopDetected::matched_points` drops a self-pair (equal ids) only for a loop; a merge's pairs span two maps whose point ids restart per map, so equal ids are two points (`KeepsPairsWithCollidingIds`). | The filtered form is ORB-SLAM2's and what the old `RelocalizationCandidates` path did; it avoids the stale-score dependence. The id filter dropped every true merge pair whose ids collided, which Task 5 fuses from. |
 | 2026-10-11 | (Map merging Task 6, spec section 4) **The Tracker follows a merge instead of adopting N.** A transaction whose `absorbed_map` is the Tracker's active map and whose `active_map` is the target keeps the Tracker's state, velocity and reference Frame, shifts `last_frame_` through the loop-correction anchors (reference Frame, else the Frames observing its matches; taken in M before the transaction, looked up in N after) and translates its matches with `AtlasReplica::TranslatePoint`. Any other change of the active map still resets (`AdoptMap`). | A merge moves the Tracker's own Frames, so the 4b epoch path applies unchanged; a reset would lose tracking at every merge (spec: no tracking loss across a merge). |
+| 2026-10-11 | (Map merging Task 6, fix round 1; controller ruling) **A Lost Tracker re-announces its loss after a merge.** When a merge of its map lands while the Tracker is Lost, it publishes a final `TrackingLost(N)` (timestamp of its last final loss); the Mapper needs no change. Tests: `TrackerMergeTest.LostTrackerReannouncesLossAfterMerge`, `MapperMergeTest.ReannouncedLossAfterMergeDeactivatesTarget`; a merge while Tracking or RecentlyLost publishes no loss. | Without it the race (the merge applied before the stale `TrackingLost(M)`) leaves the Mapper Mapping in N and the Tracker Lost forwarding `InitializationMeasurement`s the Mapper ignores, with nothing to end it. The Tracker-side fix is always correct: it only sees such a merge when the Mapper read its loss after the merge. |
 
 ## 9. Open Questions
 

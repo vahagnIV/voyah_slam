@@ -4963,6 +4963,37 @@ TEST_F(MapperMergeTest, IgnoresFrameTrackedOfAbsorbedMap) {
     EXPECT_EQ(mapper_.num_keyframes(), num_frames + 1);
 }
 
+// A final TrackingLost of the absorbed map that the merge overtook is stale;
+// the Tracker announces it again for the target (tracker.h, map merging), and
+// that one is a final loss as any other: the target is kept inactive and the
+// next initialization builds a new map.
+TEST_F(MapperMergeTest, ReannouncedLossAfterMergeDeactivatesTarget) {
+    BuildMergeScene();
+    ASSERT_FALSE(HasFatalFailure());
+    MergeScene();
+    ASSERT_EQ(mapper_.active_map(), map::MapId{1});
+
+    PublishTrackingLost(2, 20.0);
+    Drain();
+    EXPECT_TRUE(TakeCaptured().empty());
+    EXPECT_EQ(mapper_.state(), MapperState::Mapping);
+    EXPECT_EQ(mapper_.active_map(), map::MapId{1});
+
+    PublishTrackingLost(1, 20.0);
+    Drain();
+    const std::vector<Published> lost = TakeCaptured();
+    ASSERT_EQ(lost.size(), 1u);
+    EXPECT_FALSE(lost[0].active_map.has_value());
+    EXPECT_TRUE(lost[0].removed_maps.empty());  // kept inactive
+    EXPECT_EQ(mapper_.state(), MapperState::Initializing);
+    EXPECT_EQ(mapper_.map_ids(), (std::vector<map::MapId>{map::MapId{1}}));
+
+    InitializeStereo(21.0);
+    ASSERT_FALSE(HasFatalFailure());
+    EXPECT_EQ(mapper_.active_map(), map::MapId{3});
+    EXPECT_EQ(mapper_.map_ids(), (std::vector<map::MapId>{map::MapId{1}, map::MapId{3}}));
+}
+
 // Review Focus 2: a global BA of the absorbed map, or of the target before
 // the merge, is not merged.
 TEST_F(MapperMergeTest, RejectsGlobalBaOfAbsorbedMap) {

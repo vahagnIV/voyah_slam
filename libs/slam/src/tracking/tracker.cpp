@@ -149,6 +149,15 @@ void Tracker<TFeatureExtractor>::FollowMerge(map::MapId absorbed) {
     }
     log_->debug("Map {} merged into map {}: last frame {} matches, {} unmatched", absorbed.value, target.value,
                 CountMatches(last_frame_.matches), unmatched);
+    if (state() == TrackerState::Lost) {
+        // The merge overtook the final TrackingLost of `absorbed` in the
+        // Mapper, which ignores that loss (the map is removed; had it read the
+        // loss first, it would have rejected the merge): the loss is
+        // announced again for the map followed now, or nothing would end it.
+        log_->info("Lost when map {} was merged into map {}: final loss announced again", absorbed.value,
+                   target.value);
+        PublishTrackingLost(final_lost_at_, /*final=*/true);
+    }
 }
 
 template <typename TFeatureExtractor>
@@ -597,6 +606,7 @@ void Tracker<TFeatureExtractor>::PublishTrackingLost(double timestamp, bool fina
     event->priority = false;
     event->timestamp = timestamp;
     event->final = final;
+    if (final) final_lost_at_ = timestamp;
     observable_.Notify(event);
 }
 

@@ -925,6 +925,17 @@ constexpr map::FrameId kTargetFrame{1000};
 // injected maps: each test checks the Tracker's first frame after the merge.
 class TrackerMergeTest : public TrackerLoopTest {
 protected:
+    // Applies the injected transactions: both components, or the Tracker only
+    // (the Mapper has not read what the Tracker published).
+    void Settle() {
+        if (!tracker_only_) {
+            Drain();
+            return;
+        }
+        while (tracker_.ProcessPending()) {
+        }
+    }
+
     // Injects N: a new map that leaves M active.
     void InjectTargetMap(const geometry::RigidTransformation& S) {
         const MapReplica<Extractor>& absorbed = tracker_.replica();
@@ -953,7 +964,7 @@ protected:
         }
         target->added_frames.push_back(std::move(frame));
         injector_.Notify(target);
-        Drain();
+        Settle();
         ASSERT_EQ(tracker_.atlas().map_ids(), (std::vector<map::MapId>{kAbsorbedMap, kTargetMap}));
         ASSERT_EQ(tracker_.atlas().active_map(), kAbsorbedMap);
         ASSERT_EQ(tracker_.current_map_id(), kAbsorbedMap);
@@ -1008,7 +1019,7 @@ protected:
             expected_[old.value] = copy->second;
         }
         injector_.Notify(merge);
-        Drain();
+        Settle();
         ASSERT_EQ(tracker_.atlas().map_ids(), (std::vector<map::MapId>{kTargetMap}));
         ASSERT_EQ(tracker_.atlas().active_map(), kTargetMap);
         ASSERT_EQ(tracker_.replica().map_epoch(), target_epoch + 1);
@@ -1038,6 +1049,7 @@ protected:
         return std::nullopt;
     }
 
+    bool tracker_only_ = false;
     std::unordered_map<uint32_t, map::MapPointId> copies_;  // M id -> its copy in N
     std::vector<std::optional<map::MapPointId>> expected_;  // M id -> N id after the merge
 };
@@ -1051,6 +1063,7 @@ TEST_F(TrackerMergeTest, TracksAcrossMerge) {
     ASSERT_FALSE(HasFatalFailure());
     EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
     EXPECT_EQ(tracker_.current_map_id(), kTargetMap);
+    EXPECT_TRUE(TakeCaptured().empty());  // no loss announced
 
     const auto captured = Feed(sequence.frames[4].measurement);
     ExpectTrackedMetric(captured, sequence.frames[4].T_cw, CorrectedAlignment(sequence, S), 4,
@@ -1144,6 +1157,7 @@ TEST_F(TrackerMergeTest, MergeWhileRecentlyLost) {
     EXPECT_EQ(tracker_.state(), TrackerState::RecentlyLost);
     EXPECT_EQ(tracker_.current_map_id(), kTargetMap);
     EXPECT_TRUE(tracker_.last_matches().empty());
+    EXPECT_TRUE(TakeCaptured().empty());  // no loss announced
 
     const auto captured = Feed(sequence.frames[5].measurement);
     ExpectTrackedMetric(captured, sequence.frames[5].T_cw, CorrectedAlignment(sequence, S), 5,
@@ -1154,6 +1168,44 @@ TEST_F(TrackerMergeTest, MergeWhileRecentlyLost) {
         EXPECT_TRUE(tracker_.replica().IsAlive(point)) << point.value;
     }
     EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
+}
+
+TEST_F(TrackerMergeTest, LostTrackerReannouncesLossAfterMerge) {
+    // The merge of M overtook the Tracker's final TrackingLost(M) in the
+    // Mapper, which then ignores that loss (M is removed): the Tracker, Lost,
+    // announces its final loss again for the map it now follows.
+    const auto sequence = StereoSequence();
+    TrackUpTo(sequence, 3);
+    constexpr double kLostAt = 4 * kFrameInterval;
+    ASSERT_EQ(Feed(test::MakeBinocular(0, kLostAt)).size(), 1u);
+    ASSERT_EQ(tracker_.state(), TrackerState::RecentlyLost);
+    // The Mapper does not read the final loss before the merge.
+    tracker_only_ = true;
+    const double final_at = kLostAt + RelocalizationOptions{}.recently_lost_seconds;
+    tracker_.Track(test::MakeBinocular(0, final_at));
+    Settle();
+    const auto lost = TakeCaptured();
+    ASSERT_EQ(lost.size(), 1u);
+    ASSERT_EQ(lost[0].type, events::EventType::TrackingLost);
+    ASSERT_TRUE(lost[0].final);
+    ASSERT_EQ(lost[0].map_id, kAbsorbedMap);
+    ASSERT_EQ(tracker_.state(), TrackerState::Lost);
+
+    const geometry::RigidTransformation S = WorldMove();
+    InjectTargetMap(S);
+    ASSERT_FALSE(HasFatalFailure());
+    EXPECT_TRUE(TakeCaptured().empty());  // not a merge
+    InjectMerge(S, std::nullopt);
+    ASSERT_FALSE(HasFatalFailure());
+
+    const auto captured = TakeCaptured();
+    ASSERT_EQ(captured.size(), 1u);
+    EXPECT_EQ(captured[0].type, events::EventType::TrackingLost);
+    EXPECT_TRUE(captured[0].final);
+    EXPECT_EQ(captured[0].map_id, kTargetMap);
+    EXPECT_DOUBLE_EQ(captured[0].timestamp, final_at);
+    EXPECT_EQ(tracker_.state(), TrackerState::Lost);
+    EXPECT_EQ(tracker_.current_map_id(), kTargetMap);
 }
 
 } // namespace

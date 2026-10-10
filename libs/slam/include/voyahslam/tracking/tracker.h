@@ -153,7 +153,10 @@ struct TrackerOptions {
 // matches take their ids in N by the merge's id rule and fusions
 // (AtlasReplica::TranslatePoint), and one that has none becomes unmatched.
 // While RecentlyLost or Lost there is no last frame: relocalization searches
-// N. FrameTracked then carries N and N's epoch.
+// N. FrameTracked then carries N and N's epoch. A merge landing while Lost
+// overtook the Tracker's final TrackingLost(M) in the Mapper, which ignores
+// that loss as stale: the Tracker publishes a final TrackingLost(N) (with the
+// first one's timestamp), and the Mapper handles it as any final loss.
 template <typename TFeatureExtractor>
 class Tracker : public events::EventNode {
 public:
@@ -237,6 +240,7 @@ private:
     // applied): the Tracker switches to it, keeping its state, and
     // last_frame_'s points take their ids in it
     // (AtlasReplica::TranslatePoint); a point without one becomes unmatched.
+    // While Lost, the final loss is published again for the new map.
     void FollowMerge(map::MapId absorbed);
     void OnMapTransaction(const events::MapTransaction<TFeatureExtractor>& transaction);
     // A Frame's pose before a loop correction is applied.
@@ -309,6 +313,7 @@ private:
     // The last FrameTracked's reference Frame (the start Frame of a new map).
     std::optional<map::FrameId> reference_frame_id_;
     double recently_lost_since_ = 0.0;  // timestamp of the measurement that failed
+    double final_lost_at_ = 0.0;  // timestamp of the last final TrackingLost
     // Timestamp of the last relocalized measurement in the current map.
     std::optional<double> relocalized_at_;
     size_t tracked_frames_ = 0;  // in the current map
