@@ -2,6 +2,8 @@
 
 #include <memory>
 #include <optional>
+#include <set>
+#include <utility>
 #include <vector>
 #include <voyahslam/events/events.h>
 #include <voyahslam/features/orb_feature_extractor.h>
@@ -177,6 +179,47 @@ TEST(AtlasReplicaTest, KeepsInactiveMaps) {
               (std::vector<map::FrameId>{map::FrameId{0}, map::FrameId{1}, map::FrameId{3}}));
     EXPECT_EQ(atlas.map(map::MapId{2})->keyframe_ids(),
               (std::vector<map::FrameId>{map::FrameId{2}, map::FrameId{4}}));
+}
+
+// Map merging: a chained merge absorbs a map whose Frame ids lie on both
+// sides of the target's (map 1 already absorbed map 3: Frames 0, 1 and 5, 6;
+// map 2 holds 2, 3). The merge into map 2 keeps every Frame and the graph,
+// re-rooted at map 2's root, and drops map 1.
+TEST(AtlasReplicaTest, MergeAbsorbsInterleavedFrameIds) {
+    TAtlas atlas;
+    NewMap(atlas, 2, 2);
+    Apply(atlas, 2, 3, 2, [](TTransaction& event) { event.added_frames.back().parent = map::FrameId{2}; });
+    Apply(atlas, 2, std::nullopt, std::nullopt, [](TTransaction&) {});  // map 2 lost, kept
+    NewMap(atlas, 1, 0);
+    for (const auto& [frame, parent] : std::vector<std::pair<uint32_t, uint32_t>>{{1, 0}, {5, 1}, {6, 5}}) {
+        Apply(atlas, 1, frame, 1,
+              [parent](TTransaction& event) { event.added_frames.back().parent = map::FrameId{parent}; });
+    }
+    Apply(atlas, 1, std::nullopt, 1, [](TTransaction& event) {
+        event.added_loop_edges = {{map::FrameId{0}, map::FrameId{6}}};
+    });
+
+    // The merge: query 5 of map 1 with match 3 of map 2.
+    Apply(atlas, 2, std::nullopt, 2, [](TTransaction& event) {
+        event.absorbed_map = map::MapId{1};
+        event.removed_maps = {map::MapId{1}};
+        event.parent_changes = {{map::FrameId{5}, map::FrameId{3}}, {map::FrameId{1}, map::FrameId{5}},
+                                {map::FrameId{0}, map::FrameId{1}}};
+        event.added_loop_edges = {{map::FrameId{5}, map::FrameId{3}}};
+    });
+    EXPECT_EQ(atlas.map_ids(), std::vector<map::MapId>{map::MapId{2}});
+    EXPECT_EQ(atlas.active_map(), map::MapId{2});
+    const MapReplica<Extractor>& merged = *atlas.active();
+    EXPECT_EQ(merged.keyframe_ids(), (std::vector<map::FrameId>{map::FrameId{0}, map::FrameId{1}, map::FrameId{2},
+                                                                map::FrameId{3}, map::FrameId{5}, map::FrameId{6}}));
+    EXPECT_TRUE(merged.CheckConsistency());
+    EXPECT_FALSE(merged.parent(map::FrameId{2}).has_value());
+    EXPECT_EQ(merged.parent(map::FrameId{0}), map::FrameId{1});
+    EXPECT_EQ(merged.parent(map::FrameId{1}), map::FrameId{5});
+    EXPECT_EQ(merged.parent(map::FrameId{5}), map::FrameId{3});
+    EXPECT_EQ(merged.parent(map::FrameId{6}), map::FrameId{5});
+    EXPECT_EQ(merged.loop_edges(map::FrameId{0}), std::set<map::FrameId>{map::FrameId{6}});
+    EXPECT_EQ(merged.loop_edges(map::FrameId{3}), std::set<map::FrameId>{map::FrameId{5}});
 }
 
 } // namespace

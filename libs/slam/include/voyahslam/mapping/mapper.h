@@ -288,9 +288,15 @@ private:
     // 0 per map.
     struct MapState {
         uint32_t map_epoch = 0;  // the correction epoch
-        // Frames by id from the map's first one; a culled Frame is empty. The
-        // first and the last one are never culled.
+        // Frame slots by id from `first_slot` (the lowest Frame id the map
+        // ever held); a culled Frame, or an id a merge did not bring, is
+        // empty. Map merging interleaves two maps' ids, so the first slot
+        // need not be the root. The root (the spanning tree's, the map's
+        // first Frame or the merge target's root) and the last slot (the
+        // newest Frame) are never culled.
         std::vector<std::optional<KeyFrameRecord>> keyframes;
+        map::FrameId first_slot{};
+        map::FrameId root{};
         map::MapPointStorage<TFeatureExtractor> map_points;
         // Observations (Frame, left feature), indexed per point and per Frame.
         // A binocular Frame's depth and right index of a feature are in its
@@ -372,8 +378,9 @@ private:
     // The FeatureVector of the current map's Frame `id` for SearchByBoW;
     // nullptr without a vocabulary or if the Frame is not in the map.
     [[nodiscard]] const bow::FeatureVector* BowFeaturesOf(map::FrameId id) const;
-    // The current map's first Frame, never culled.
-    [[nodiscard]] const TKeyFrame& FirstKeyFrame() const { return Active().keyframes.front()->frame; }
+    // The current map's root Frame (its first, or after a merge the target's
+    // root), never culled: the gauge of local BA.
+    [[nodiscard]] const TKeyFrame& RootKeyFrame() const { return FindRecord(Active().root)->frame; }
     // The current map's newest Frame, never culled.
     [[nodiscard]] const TKeyFrame& LastKeyFrame() const { return Active().keyframes.back()->frame; }
     // `point`'s observations as ORB-SLAM3 counts them for ref_points: 2 for a
@@ -709,7 +716,9 @@ private:
     std::atomic<size_t> num_merges_{0};
 
     std::atomic<MapperState> state_{MapperState::Initializing};  // Mapping iff a map is active
-    // The newest map's id (0 before the first): the active one while Mapping.
+    // The map last made active (0 before the first): the active one while
+    // Mapping (a merge's target after a merge); after a final loss, the lost
+    // map's until the next new map.
     std::atomic<map::MapId> current_map_id_{map::MapId{0}};
     map::MapId next_map_id_{1};      // never reused
     map::FrameId next_frame_id_{0};  // never reset: frame ids are unique across maps

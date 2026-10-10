@@ -67,6 +67,18 @@ struct MapperTestAccess {
         scratch->Recycle();
         return out_mapper.LoopConnections(correction, match);
     }
+    // Culls Frame `frame` of the current map through Frame culling's path
+    // (RemoveFrame, FinishRefinement) and publishes it as one transaction.
+    template <typename TFeatureExtractor>
+    static void CullFrame(Mapper<TFeatureExtractor>& out_mapper, map::FrameId frame) {
+        auto* event = out_mapper.CreateTransaction();
+        std::vector<map::MapPointId> changed;
+        out_mapper.RemoveFrame(frame, *event, changed);
+        out_mapper.FinishRefinement(std::move(changed), *event);
+        out_mapper.num_keyframes_.fetch_sub(1, std::memory_order_acq_rel);
+        out_mapper.num_map_points_.store(out_mapper.Active().map_points.size(), std::memory_order_release);
+        out_mapper.observable_.Notify(event);
+    }
     // Map merging step 1: the window of `frame` in map `map` (it must be live).
     template <typename TFeatureExtractor>
     static std::vector<map::FrameId> MergeWindowOf(const Mapper<TFeatureExtractor>& mapper, map::MapId map,
@@ -4432,6 +4444,7 @@ protected:
             AddSceneView(LoopSide::Start, StartPose(j), StartPose(j));
             ASSERT_FALSE(HasFatalFailure()) << "S" << j;
         }
+        if (before_map_one_lost_) before_map_one_lost_();
         PublishTrackingLost(1, 0.05 * static_cast<double>(kMapOneFrames) - 0.01);
         Drain();
         const std::vector<Published> lost = TakeCaptured();
@@ -4489,6 +4502,65 @@ protected:
     }
 
     void PublishSceneMerge() { PublishLoop(Query().id, Match().id, MergeS(), MergePairs(), 2, 1); }
+
+    // `query`'s points in `query_map` paired with `match_map`'s points of
+    // `side` for the same scene point.
+    [[nodiscard]] std::vector<std::pair<map::MapPointId, map::MapPointId>> PairsBetween(
+        const SceneFrame& query, const tracking::MapReplica<Extractor>& query_map, LoopSide side,
+        const tracking::MapReplica<Extractor>& match_map) const {
+        const std::vector<std::optional<map::MapPointId>> match_points = SidePoints(side, match_map);
+        std::vector<std::pair<map::MapPointId, map::MapPointId>> pairs;
+        for (const auto& [feature, point] : query_map.keyframe(query.id)->observations) {
+            const Eigen::Index scene = query.scene_of_feature[feature];
+            if (scene >= 0 && match_points[static_cast<size_t>(scene)]) {
+                pairs.emplace_back(point, *match_points[static_cast<size_t>(scene)]);
+            }
+        }
+        return pairs;
+    }
+
+    // A final TrackingLost of `map` that keeps it inactive.
+    void KeepMap(uint32_t map) {
+        PublishTrackingLost(map, 0.05 * static_cast<double>(frames_.size()) - 0.01);
+        Drain();
+        const std::vector<Published> lost = TakeCaptured();
+        ASSERT_EQ(lost.size(), 1u);
+        ASSERT_TRUE(lost[0].removed_maps.empty());
+    }
+
+    // Three maps: map 1 (S0..S9, region A, the true world) and map 2 (ten
+    // views of region B from MiddlePose(0..9), its world that first camera)
+    // are kept inactive; map 3 is the merge scene's map 2 (M0..M3 in region
+    // B, R0..R3 back in region A), active. Frame ids: map 1 0..9, map 2
+    // 10..19, map 3 20..27.
+    void BuildThreeMapScene() {
+        MakeRegions();
+        const geometry::RigidTransformation T_world_b = MiddlePose(0);
+        for (size_t j = 0; j < kMapOneFrames; ++j) {
+            AddSceneView(LoopSide::Start, StartPose(j), StartPose(j));
+            ASSERT_FALSE(HasFatalFailure());
+        }
+        KeepMap(1);
+        ASSERT_FALSE(HasFatalFailure());
+        scene_map_ = map::MapId{2};
+        for (size_t j = 0; j < kMapOneFrames; ++j) {
+            AddSceneView(LoopSide::Middle, MiddlePose(j), MiddlePose(j) * T_world_b.Inverse());
+            ASSERT_FALSE(HasFatalFailure());
+        }
+        KeepMap(2);
+        ASSERT_FALSE(HasFatalFailure());
+        scene_map_ = map::MapId{3};
+        for (size_t j = 0; j < kLoopSideFrames; ++j) {
+            AddSceneView(LoopSide::Middle, MiddlePose(j), MiddlePose(j) * T_world_b.Inverse());
+            ASSERT_FALSE(HasFatalFailure());
+        }
+        for (size_t j = 0; j < kLoopSideFrames; ++j) {
+            AddSceneView(LoopSide::Return, ReturnPose(j), ReturnPose(j) * T_world_b.Inverse());
+            ASSERT_FALSE(HasFatalFailure());
+        }
+        ASSERT_EQ(mapper_.map_ids(), (std::vector<map::MapId>{map::MapId{1}, map::MapId{2}, map::MapId{3}}));
+        ASSERT_EQ(mapper_.active_map(), map::MapId{3});
+    }
 
     // Publishes the scene's merge and returns its one transaction.
     Published MergeScene() {
@@ -4548,6 +4620,7 @@ protected:
     }
 
     size_t extra_views_ = 0;
+    std::function<void()> before_map_one_lost_;  // runs while map 1 is still active
     memory::ObjectPool<events::GlobalBAFinished, memory::ThreadSafePolicy> global_ba_pool_{8};
 };
 
@@ -4808,15 +4881,31 @@ TEST_F(MapperMergeTest, RejectsActiveOrRemovedTarget) {
     EXPECT_EQ(mapper_.map_ids(), std::vector<map::MapId>{map::MapId{1}});
 }
 
-// Rejection: a query or match Frame no longer in its map (as a culled one).
+// Rejection: the query or the match Frame was culled (through the Mapper's
+// Frame culling, RemoveFrame) after the LoopCloser saw it: S2 while map 1 was
+// active (map 1 gets an eleventh view first, so it is still kept), R2 in map
+// 2. A Frame of the other map, or an unknown id, is rejected the same way.
 TEST_F(MapperMergeTest, RejectsCulledFrames) {
+    before_map_one_lost_ = [&] {
+        // An eleventh view, so map 1 keeps 10 Frames after the cull.
+        AddSceneView(LoopSide::Start, StartPose(kMapOneFrames), StartPose(kMapOneFrames));
+        MapperTestAccess::CullFrame(mapper_, frames_[2].id);
+        EXPECT_EQ(TakeCaptured().size(), 1u);
+    };
     BuildMergeScene();
     ASSERT_FALSE(HasFatalFailure());
-    const map::FrameId map_one_frame = frames_[2].id;
-    const map::FrameId map_two_frame = frames_[kMapOneFrames + 1].id;
-    PublishLoop(map_one_frame, Match().id, MergeS(), MergePairs(), 2, 1);  // query not in map 2
-    PublishLoop(Query().id, map_two_frame, MergeS(), MergePairs(), 2, 1);  // match not in map 1
-    PublishLoop(Query().id, map::FrameId{1000}, MergeS(), MergePairs(), 2, 1);
+    const SceneFrame& culled_query = frames_[frames_.size() - 2];  // R2
+    const auto culled_query_pairs = PairsBetween(culled_query, MapTwo(), LoopSide::Start, MapOne());
+    ASSERT_GE(culled_query_pairs.size(), 100u);
+    MapperTestAccess::CullFrame(mapper_, culled_query.id);
+    ASSERT_EQ(TakeCaptured().size(), 1u);
+    ASSERT_EQ(MapOne().keyframe(frames_[2].id), nullptr);
+    ASSERT_EQ(MapTwo().keyframe(culled_query.id), nullptr);
+    const geometry::Sim3 S = ToSim3(culled_query.T_true * frames_[2].T_true.Inverse());
+    PublishLoop(culled_query.id, Match().id, MergeS(), culled_query_pairs, 2, 1);  // query culled
+    PublishLoop(Query().id, frames_[2].id, S, MergePairs(), 2, 1);                  // match culled
+    PublishLoop(frames_[3].id, Match().id, MergeS(), MergePairs(), 2, 1);          // query of map 1
+    PublishLoop(Query().id, map::FrameId{1000}, MergeS(), MergePairs(), 2, 1);    // unknown
     Drain();
     EXPECT_TRUE(TakeCaptured().empty());
     EXPECT_EQ(mapper_.active_map(), map::MapId{2});
@@ -4906,6 +4995,69 @@ TEST_F(MapperMergeTest, IgnoresRepeatOfAppliedMerge) {
     EXPECT_TRUE(TakeCaptured().empty());
     EXPECT_EQ(mapper_.num_merges(), 1u);
     EXPECT_EQ(replica().map_epoch(), 1u);
+}
+
+// Critical 1 (review): merges chain. Map 3 merges into map 1, which becomes
+// active holding Frames 0..9 and 20..27; then map 1 merges into map 2, whose
+// Frame ids (10..19) lie between the absorbed map's. One map remains, with
+// every Frame of the three, equal in the replica and the Mapper.
+TEST_F(MapperMergeTest, ChainedMergesThreeMaps) {
+    BuildThreeMapScene();
+    ASSERT_FALSE(HasFatalFailure());
+    const SceneFrame& query_a = frames_.back();      // R3, map 3
+    const SceneFrame& match_a = frames_[kLoopMatch];  // S1, map 1
+    PublishLoop(query_a.id, match_a.id,
+                geometry::Compose(MergeError(), ToSim3(query_a.T_true * match_a.T_true.Inverse())),
+                PairsBetween(query_a, *atlas_.map(map::MapId{3}), LoopSide::Start, *atlas_.map(map::MapId{1})), 3,
+                1);
+    Drain();
+    std::vector<Published> published = TakeCaptured();
+    ASSERT_EQ(published.size(), 1u);
+    ASSERT_EQ(published[0].absorbed_map, map::MapId{3});
+    ASSERT_EQ(mapper_.active_map(), map::MapId{1});
+
+    const SceneFrame& query_b = frames_[2 * kMapOneFrames + 3];  // map 3's M3, now in map 1
+    const SceneFrame& match_b = frames_[kMapOneFrames + 2];      // map 2's view at MiddlePose(2)
+    ASSERT_EQ(query_b.side, LoopSide::Middle);
+    ASSERT_LT(match_b.id, query_b.id);
+    const auto pairs_b = PairsBetween(query_b, replica(), LoopSide::Middle, *atlas_.map(map::MapId{2}));
+    ASSERT_GE(pairs_b.size(), 100u);
+    PublishLoop(query_b.id, match_b.id, ToSim3(query_b.T_true * match_b.T_true.Inverse()), pairs_b, 1, 2);
+    Drain();
+    published = TakeCaptured();
+    ASSERT_EQ(published.size(), 1u);
+    EXPECT_EQ(published[0].map_id, map::MapId{2});
+    EXPECT_EQ(published[0].absorbed_map, map::MapId{1});
+
+    EXPECT_EQ(mapper_.map_ids(), std::vector<map::MapId>{map::MapId{2}});
+    EXPECT_EQ(mapper_.active_map(), map::MapId{2});
+    EXPECT_EQ(mapper_.current_map_id(), map::MapId{2});
+    EXPECT_EQ(mapper_.num_merges(), 2u);
+    EXPECT_EQ(atlas_.map_ids(), std::vector<map::MapId>{map::MapId{2}});
+    EXPECT_EQ(atlas_.active_map(), map::MapId{2});
+    std::vector<map::FrameId> all;
+    for (const SceneFrame& frame : frames_) all.push_back(frame.id);
+    std::sort(all.begin(), all.end());
+    EXPECT_EQ(replica().keyframe_ids(), all);
+    EXPECT_EQ(mapper_.num_keyframes(), all.size());
+    for (const map::FrameId frame : all) EXPECT_NE(mapper_.KeyFrame(frame), nullptr) << "Frame " << frame.value;
+    ASSERT_TRUE(replica().CheckConsistency());  // CheckGraph included
+    ExpectReplicaConsistent();
+    // One tree, rooted at map 2's root.
+    std::vector<map::FrameId> roots;
+    for (const map::FrameId frame : all) {
+        if (!replica().parent(frame)) roots.push_back(frame);
+    }
+    EXPECT_EQ(roots, std::vector<map::FrameId>{frames_[kMapOneFrames].id});
+    for (const map::FrameId frame : all) {
+        const geometry::RigidTransformation expected = MapperTestAccess::Pose(mapper_, frame);
+        EXPECT_LT((replica().keyframe(frame)->T_cw.translation() - expected.translation()).norm(), 1e-12);
+    }
+    // The merged map keeps mapping: a Frame of map 2 at its epoch is created.
+    PublishReturnFrameTracked(2, replica().map_epoch(), replica().keyframe(frames_.back().id)->observations);
+    Drain();
+    EXPECT_EQ(TakeCaptured().size(), 2u);
+    EXPECT_EQ(mapper_.num_keyframes(), all.size() + 1);
 }
 } // namespace
 } // namespace voyahslam::mapping

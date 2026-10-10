@@ -183,18 +183,26 @@ std::vector<std::optional<map::MapPointId>> Mapper<TFeatureExtractor>::AbsorbMap
         target.num_visible.push_back(source.num_visible[p]);
         target.num_found.push_back(source.num_found[p]);
     }
-    // Frames: the target was inactive before the source map began, so the
-    // source's Frame ids come after the target's; the slots in between stay
-    // empty.
+    // Frames, slotted by id over both maps' ranges: after an earlier merge the
+    // two maps' ids interleave (the source may hold ids below and above the
+    // target's). The target's root stays the root.
     if (!source.keyframes.empty()) {
         assert(!target.keyframes.empty());
-        const map::FrameId first_target = target.keyframes.front()->frame.id();
-        const map::FrameId first_source = source.keyframes.front()->frame.id();
-        assert(first_source.value >= first_target.value + target.keyframes.size());
-        target.keyframes.resize(first_source.value - first_target.value);
-        for (std::optional<KeyFrameRecord>& record : source.keyframes) {
-            target.keyframes.push_back(std::move(record));
+        const map::FrameId first = std::min(target.first_slot, source.first_slot);
+        const size_t end = std::max(target.first_slot.value + target.keyframes.size(),
+                                    source.first_slot.value + source.keyframes.size());
+        std::vector<std::optional<KeyFrameRecord>> slots(end - first.value);
+        for (MapState* state : {&target, &source}) {
+            for (size_t i = 0; i < state->keyframes.size(); ++i) {
+                if (state->keyframes[i]) {
+                    std::optional<KeyFrameRecord>& slot = slots[state->first_slot.value + i - first.value];
+                    assert(!slot);  // Frame ids are unique across maps
+                    slot = std::move(state->keyframes[i]);
+                }
+            }
         }
+        target.keyframes = std::move(slots);
+        target.first_slot = first;
     }
     // Observations, point by point in the source's order (as the replicas do).
     for (uint32_t p = 0; p < new_ids.size(); ++p) {

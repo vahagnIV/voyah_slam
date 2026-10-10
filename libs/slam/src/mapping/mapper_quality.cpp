@@ -371,7 +371,7 @@ void Mapper<TFeatureExtractor>::LocalBundleAdjust(
     }
 
     optimization::BaProblem problem;
-    const map::FrameId first = FirstKeyFrame().id();
+    const map::FrameId first = RootKeyFrame().id();
     problem.keyframe_poses.reserve(frames.size());
     problem.keyframe_fixed.reserve(frames.size());
     problem.keyframe_cameras.reserve(frames.size());
@@ -465,7 +465,7 @@ void Mapper<TFeatureExtractor>::CullFrames(map::FrameId frame,
     // ORB-SLAM3 LocalMapping::KeyFrameCulling, each candidate judged on the
     // map as the earlier ones left it. The first Frame (the tree's root) and
     // Frames with loop edges stay (ORB-SLAM3 KeyFrame::SetBadFlag).
-    const map::FrameId first = FirstKeyFrame().id();
+    const map::FrameId first = RootKeyFrame().id();
     for (const auto& [candidate, shared] :
          Active().covisibility.Covisible(frame, std::numeric_limits<size_t>::max())) {
         if (candidate == first || !FindRecord(candidate)->loop_edges.empty()) {
@@ -517,7 +517,7 @@ void Mapper<TFeatureExtractor>::RemoveFrame(map::FrameId frame,
     const std::vector<map::MapPointId> points = Active().covisibility.Points(frame);
     Active().covisibility.RemoveFrame(frame);
     ReparentChildren(frame, out_event);
-    Active().keyframes[frame.value - FirstKeyFrame().id().value].reset();
+    Active().keyframes[frame.value - Active().first_slot.value].reset();
     out_event.removed_frames.push_back(frame);
     for (const map::MapPointId point : points) {
         if (Active().covisibility.NumObservations(point) < 2) {

@@ -207,6 +207,27 @@ TEST(GlobalBaProblemTest, FixesFirstFrame) {
     EXPECT_TRUE(SamePose(fixed->second, replica.keyframe({0})->T_cw));
 }
 
+// After a merge the absorbed map may hold ids older than the root: the root
+// (the oldest Frame without a parent) is the gauge, not the oldest Frame.
+TEST(GlobalBaProblemTest, FixesTreeRoot) {
+    const Scene scene = MakeScene();
+    TReplica replica;
+    BuildExactMap(replica, scene, /*stereo=*/true);
+    // The chain 0 <- 1 <- 2 <- ...: dropping Frame 1 leaves 2 a root; Frame 0
+    // then hangs from 2, so 2 is the one root and 0 the oldest Frame.
+    ApplyTransaction(replica, [](TTransaction& event) { event.removed_frames = {{1}}; });
+    ApplyTransaction(replica, [](TTransaction& event) { event.parent_changes = {{{0}, {2}}}; });
+    ASSERT_EQ(replica.parent({0}), map::FrameId{2});
+    ASSERT_FALSE(replica.parent({2}).has_value());
+
+    const std::optional<GlobalBaSolution> solution = RunGlobalBa(replica, GlobalBaOptions{}, kNeverStop);
+    ASSERT_TRUE(solution.has_value());
+    EXPECT_EQ(solution->fixed_frame, map::FrameId{2});
+    for (const auto& [id, pose] : solution->frame_poses) {
+        if (id == map::FrameId{2}) EXPECT_TRUE(SamePose(pose, replica.keyframe({2})->T_cw));
+    }
+}
+
 TEST(GlobalBaProblemTest, FixesOldestSurvivingFrame) {
     const Scene scene = MakeScene();
     TReplica replica;

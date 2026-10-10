@@ -318,6 +318,11 @@ template <typename TFeatureExtractor>
 auto Mapper<TFeatureExtractor>::AddKeyFrame(map::FrameId id,
                                             const geometry::RigidTransformation& pose,
                                             TSharedMeasurement measurement) -> const TKeyFrame& {
+    if (Active().keyframes.empty()) {
+        Active().first_slot = Active().root = id;
+    }
+    // New Frames take the next id: the active map holds the newest Frame.
+    assert(id.value == Active().first_slot.value + Active().keyframes.size());
     KeyFrameRecord& record =
         *Active().keyframes.emplace_back(KeyFrameRecord{TKeyFrame(id, pose, std::move(measurement)), {}, {}});
     if (vocabulary_) {
@@ -333,12 +338,12 @@ auto Mapper<TFeatureExtractor>::AddKeyFrame(map::FrameId id,
 
 template <typename TFeatureExtractor>
 auto Mapper<TFeatureExtractor>::FindRecordIn(const MapState& state, map::FrameId id) -> const KeyFrameRecord* {
-    // A map's Frame slots run by id from its first Frame's, which is never
-    // culled; a culled Frame's slot (or a merge's gap) is empty.
-    if (state.keyframes.empty() || id < state.keyframes.front()->frame.id()) {
+    // A map's Frame slots run by id from first_slot; a culled Frame's slot
+    // (or an id a merge did not bring) is empty.
+    if (state.keyframes.empty() || id < state.first_slot) {
         return nullptr;
     }
-    const size_t index = id.value - state.keyframes.front()->frame.id().value;
+    const size_t index = id.value - state.first_slot.value;
     if (index >= state.keyframes.size() || !state.keyframes[index]) {
         return nullptr;
     }
@@ -863,7 +868,7 @@ void Mapper<TFeatureExtractor>::AddInitialMapPoints(
     }
     using TMonocularMeasurement = features::TMonocularMeasurement<TFeatureExtractor>;
     using TBinocularMeasurement = features::TBinocularMeasurement<TFeatureExtractor>;
-    const TKeyFrame& first = FirstKeyFrame();
+    const TKeyFrame& first = RootKeyFrame();
     const auto* binocular = std::get_if<TBinocularMeasurement>(&first.measurement());
     // Monocular: a two-view initialization; binocular: one stereo keyframe.
     assert(Active().keyframes.size() == (binocular ? 1u : 2u));
