@@ -7,6 +7,7 @@
 #include <voyahslam/features/orb_feature_extractor.h>
 #include <voyahslam/features/sift_feature_extractor.h>
 #include <voyahslam/slam/slam.h>
+#include <voyahslam/tracking/atlas_replica.h>
 #include <voyahslam/tracking/map_replica.h>
 
 #include <gtest/gtest.h>
@@ -98,7 +99,7 @@ struct LoopRecord {
 
 // Records the map ids of the protocol events published by the Mapper and the
 // Tracker, and the LoopCloser's loops, read through external observers, and
-// keeps a replica of the Mapper's map.
+// keeps a replica of the Mapper's Atlas.
 class ProtocolRecorder {
 public:
     // Before slam.Start().
@@ -116,7 +117,7 @@ public:
             }
             const auto& transaction =
                 *static_cast<events::MapTransaction<features::OrbFeatureExtractor>*>(event);
-            replica.Apply(*event);
+            atlas.Apply(transaction);
             const uint32_t map = event->map_id.value;
             const bool announced = !map_created.empty() && map_created.back() == map;
             if (transaction.new_map) {
@@ -133,9 +134,9 @@ public:
                 map_epoch = transaction.map_epoch;
                 corrections.push_back(keyframes.size());
                 epoch_from_loop = !transaction.added_loop_edges.empty();
-            } else if (!transaction.new_map && transaction.removed_maps.empty()) {
+            } else if (!transaction.new_map && transaction.active_map) {
                 // A Frame's creation, or its refinement (local BA, culling);
-                // not the Mapper dropping a lost map.
+                // not the Mapper discarding or deactivating a lost map.
                 ++(transaction.added_frames.empty() ? num_refinements : num_creations);
             }
             if (transaction.num_new_points() > 0) {
@@ -191,10 +192,15 @@ public:
     std::vector<StampedPose> keyframes;  // added Frames, in publication order
     std::vector<size_t> transaction_new_points;  // per transaction, in publication order
     std::vector<StampedPose> positions;
-    // The Mapper's latest map, rebuilt from its transactions: one map, which a
-    // new map clears (a dropped map stays until then; an AtlasReplica would
-    // drop it at once).
-    tracking::MapReplica<features::OrbFeatureExtractor> replica;
+    // The Mapper's Atlas, rebuilt from its transactions: every live map, the
+    // inactive ones included.
+    tracking::AtlasReplica<features::OrbFeatureExtractor> atlas;
+    // Map `id` of the Atlas; empty if it is not live.
+    [[nodiscard]] const tracking::MapReplica<features::OrbFeatureExtractor>& live_map(uint32_t id) const {
+        static const tracking::MapReplica<features::OrbFeatureExtractor> kEmpty;
+        const auto* found = atlas.map(map::MapId{id});
+        return found != nullptr ? *found : kEmpty;
+    }
     // The LoopCloser's LoopDetected, copied (not pooled).
     std::vector<LoopRecord> loops;
     // The latest transaction's map epoch; per loop correction or global BA
@@ -904,7 +910,7 @@ TEST(SlamTest, DuplicatesFusedInLongSequence) {
     EXPECT_TRUE(recorder.tracking_lost.empty());
     EXPECT_EQ(recorder.map_created, std::vector<uint32_t>{1});
 
-    const auto& replica = recorder.replica;
+    const auto& replica = recorder.live_map(1);
     ASSERT_TRUE(replica.CheckConsistency());
     std::vector<map::MapPointId> alive;
     for (uint32_t id = 0; id < replica.num_points(); ++id) {
@@ -1008,7 +1014,7 @@ enum class LoopMode { kOpen, kEssentialGraph, kGlobalBa };
 template <typename TSequence>
 double PointsRmsError(const TSequence& sequence, const ProtocolRecorder& recorder, bool monocular,
                       size_t& out_count) {
-    const auto& replica = recorder.replica;
+    const auto& replica = recorder.live_map(1);  // a loop run's one map
     // Per point id: the scene points its observations see, with their counts.
     std::map<uint32_t, std::map<Eigen::Index, size_t>> votes;
     for (const map::FrameId id : replica.keyframe_ids()) {
@@ -1074,7 +1080,7 @@ LoopRun RunLoop(const TSequence& sequence, size_t init_frames, bool monocular,
     for (const StampedPose& keyframe : recorder.keyframes) {
         if (keyframe.map != 1) continue;
         keyframes.push_back(keyframe);
-        if (const auto* frame = recorder.replica.keyframe(keyframe.frame)) {
+        if (const auto* frame = recorder.live_map(1).keyframe(keyframe.frame)) {
             frame_pose[FrameIndexOf(keyframe.timestamp)] = frame->T_cw;
         }
         if (!recorder.loops.empty() && keyframe.frame == recorder.loops.front().query_frame) {

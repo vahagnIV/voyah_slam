@@ -506,10 +506,6 @@ BA" (smoke table there).
 - [ ] **A dropped result is not retried:** when the `GlobalBAFinished` pool
       (2) is exhausted, the map keeps the essential-graph correction until
       the next loop (counted in `num_results_dropped`). ORB-SLAM3 has no pool.
-- [ ] **A lost map's run:** the GlobalBA is not wired to `TrackingLost`; a
-      run on a map the Tracker lost goes on until the next map's first
-      transaction, and the Mapper then rejects its result (not `Mapping`).
-      Wasted work only.
 - [ ] **The snapshot contract is enforced by documentation:**
       `ChangesDuringRunDoNotAffectResult` catches a `RunGlobalBa` that reads
       the replica after its first poll only when the data it reads changed.

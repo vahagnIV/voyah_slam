@@ -19,12 +19,13 @@ namespace voyahslam::mapping {
 
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::OnGlobalBaFinished(const events::GlobalBAFinished& event) {
-    // A result of another map (or with no map, or while the map is lost), or
-    // of another epoch of the map (a later correction came in between:
-    // ORB-SLAM3 mnFullBAIdx), is not merged.
-    if (state() != MapperState::Mapping || event.map_id != current_map_id() || event.map_epoch != map_epoch_) {
-        log_->debug("GlobalBAFinished of map {} at epoch {}: the current map is {} at epoch {}, ignored",
-                    event.map_id.value, event.map_epoch, current_map_id().value, map_epoch_);
+    // A result of another map (inactive or removed, with no map, or while no
+    // map is active), or of another epoch of the map (a later correction came
+    // in between: ORB-SLAM3 mnFullBAIdx), is not merged.
+    if (!IsActive(event.map_id) || event.map_epoch != Active().map_epoch) {
+        log_->debug("GlobalBAFinished of map {} at epoch {}: the active map is {} at epoch {}, ignored",
+                    event.map_id.value, event.map_epoch, active_.value_or(map::MapId{0}).value,
+                    ActiveOrEmpty().map_epoch);
         num_global_ba_rejected_.fetch_add(1, std::memory_order_acq_rel);
         return;
     }
@@ -41,7 +42,7 @@ void Mapper<TFeatureExtractor>::MergeGlobalBa(
     // as at the start of every correction.
     ResetTransactionScratch();
     auto* merged = CreateTransaction();
-    merged->map_epoch = ++map_epoch_;
+    merged->map_epoch = ++Active().map_epoch;
 
     std::unordered_map<uint32_t, const geometry::RigidTransformation*> optimized_poses;
     for (const auto& [frame, T_cw] : frame_poses) {
@@ -52,7 +53,7 @@ void Mapper<TFeatureExtractor>::MergeGlobalBa(
     // and its points.
     std::unordered_map<uint32_t, geometry::RigidTransformation> before;
     std::deque<map::FrameId> queue;
-    for (const std::optional<KeyFrameRecord>& record : keyframes_) {
+    for (const std::optional<KeyFrameRecord>& record : Active().keyframes) {
         if (record && !record->parent) {
             queue.push_back(record->frame.id());
         }
@@ -87,40 +88,40 @@ void Mapper<TFeatureExtractor>::MergeGlobalBa(
     // point created after the snapshot moves with its reference Frame, if
     // that was corrected, X_new = T_ref,new^-1 T_ref,cur X.
     std::vector<map::MapPointId> moved;
-    std::vector<bool> optimized_point(map_points_.num_ids(), false);
+    std::vector<bool> optimized_point(Active().map_points.num_ids(), false);
     for (const auto& [point, X] : point_positions) {
-        if (map_points_.IsValid(point)) {
-            map_points_.Position(point) = X;
+        if (Active().map_points.IsValid(point)) {
+            Active().map_points.Position(point) = X;
             optimized_point[point.value] = true;
             moved.push_back(point);
         }
     }
     const size_t num_optimized_points = moved.size();
-    for (uint32_t p = 0; p < map_points_.num_ids(); ++p) {
+    for (uint32_t p = 0; p < Active().map_points.num_ids(); ++p) {
         const map::MapPointId point{p};
-        if (optimized_point[p] || !map_points_.IsValid(point)) {
+        if (optimized_point[p] || !Active().map_points.IsValid(point)) {
             continue;
         }
-        const map::FrameId reference = references_[p]->keyframe;
+        const map::FrameId reference = Active().references[p]->keyframe;
         const auto reference_before = before.find(reference.value);
         if (reference_before == before.end()) {
             continue;
         }
-        map_points_.Position(point) = FindKeyFrame(reference)->pose().Inverse().Transform(
-            reference_before->second.Transform(geometry::TPoint3DF(map_points_.Position(point))));
+        Active().map_points.Position(point) = FindKeyFrame(reference)->pose().Inverse().Transform(
+            reference_before->second.Transform(geometry::TPoint3DF(Active().map_points.Position(point))));
         moved.push_back(point);
     }
     // The moved points' normals (ORB-SLAM3 UpdateNormalAndDepth), as in a
     // loop correction; their descriptors are unchanged.
     for (const map::MapPointId point : moved) {
         std::vector<geometry::TPoint3DF> centres;
-        for (const map::PointObservation& observation : covisibility_.Observations(point)) {
+        for (const map::PointObservation& observation : Active().covisibility.Observations(point)) {
             centres.push_back(FindKeyFrame(observation.frame)->pose().Inverse().translation());
         }
-        map_points_.Normal(point) = map::MeanViewingDirection(map_points_.Position(point), centres);
+        Active().map_points.Normal(point) = map::MeanViewingDirection(Active().map_points.Position(point), centres);
     }
     WriteUpdatedPoints(moved, *merged);
-    merged->new_points_start_id = map::MapPointId{map_points_.num_ids()};
+    merged->new_points_start_id = map::MapPointId{Active().map_points.num_ids()};
     // No loop edge: the GlobalBA thread starts a run on a transaction that
     // adds one.
     assert(merged->added_loop_edges.empty());
@@ -129,7 +130,8 @@ void Mapper<TFeatureExtractor>::MergeGlobalBa(
         "Global BA merged: {} of {} Frames optimized, {} propagated; {} points optimized, {} propagated; "
         "epoch {}, {:.1f} ms",
         num_optimized_frames, num_keyframes(), merged->updated_poses.size() - num_optimized_frames,
-        num_optimized_points, moved.size() - num_optimized_points, map_epoch_, detail::MillisecondsSince(start));
+        num_optimized_points, moved.size() - num_optimized_points, Active().map_epoch,
+        detail::MillisecondsSince(start));
     observable_.Notify(merged);
 }
 

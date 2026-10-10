@@ -209,7 +209,17 @@ stub was deleted on 2026-10-05.
   points" for the last frame) are Tracker-private and never part of the map.
 
 ### Mapper
-- The authoritative map and the **only** map writer.
+- The authoritative **Atlas** and the **only** map writer (since 2026-10-10,
+  map merging Task 3): maps by id (`maps_`, each a private `MapState` with
+  its Frames, points, covisibility, references, counters, recent points,
+  spanning tree and loop edges, and correction epoch), at most one of them
+  active (`active_`); the code works on `Active()`. Mapper-wide state
+  (options, vocabulary, pools, counters, inbox, thread, next map / Frame id)
+  is outside `MapState`. Inactive maps are **frozen**: no local mapping,
+  culling, BA or global BA; a `FrameTracked`, `LoopDetected` or
+  `GlobalBAFinished` naming one is "another map's" and ignored or rejected
+  (only a merge will change one, Task 5). Test accessors: `map_ids()`,
+  `active_map()`, `num_keyframes(MapId)`.
 - **State machine** (`MapperState`, `state()`): `Initializing` -> `Mapping`.
   *Initialization protocol:* while `Tracker` has no map it forwards
   measurements as `InitializationMeasurement`. In `Initializing` the Mapper
@@ -222,15 +232,20 @@ stub was deleted on 2026-10-05.
   initial Frame and point and `start_frame` (the last initial Frame); the
   Tracker switches to `Tracking` on it. `InitializationMeasurement` is ignored
   while `Mapping`.
-  A final `TrackingLost` for the current map (in `Mapping`) clears keyframes and the
-  map-point and observation storage, resets
-  the initializer and returns to `Initializing`, so the next success starts
-  map n+1 (relocalization / multi-map later). The discard is published as one
+  A final `TrackingLost` for the active map (in `Mapping`) deactivates it,
+  following ORB-SLAM3 `Tracking`: with fewer than
+  `MapperOptions::atlas.min_frames_to_keep` (10) Frames (culled ones
+  excluded) it is **discarded** (`ResetActiveMap`), published as one
   `MapTransaction` of the lost map with `removed_maps = {it}` and no
-  `active_map`: every replica drops the map on it (since 2026-10-10, map
-  merging Task 2; before, replicas cleared on the first event of map n+1).
-  Every transaction names the current map as its `active_map`. A stale
-  `TrackingLost` is ignored.
+  `active_map`; otherwise it is **kept inactive** (`CreateMapInAtlas`),
+  published as one `MapTransaction` of the lost map with no `active_map` and
+  nothing else. Either way the initializer is reset and the Mapper returns to
+  `Initializing`, so the next success starts map n+1 (never a reused id).
+  Every replica follows the transaction (since 2026-10-10, map merging Tasks
+  2–3; before, replicas cleared on the first event of map n+1). Every other
+  transaction names the active map as its `active_map`. A stale
+  `TrackingLost` is ignored. `atlas.merge_window` (25, ORB-SLAM3
+  `numTemporalKFs`) is for map merging (Task 5).
 - Consumes `FrameTracked` (current map, `Mapping` only): drains to the latest
   per map, decides with `ShouldCreateFrame` whether the measurement becomes a
   Frame, and creates it — tracked observations, stereo close points,
@@ -384,7 +399,8 @@ Rules:
   only, never from the newest id. The Mapper sets `active_map` on every
   transaction. Other events (`FrameTracked`, `TrackingLost`, ...) change no
   replica: a final `TrackingLost` is answered by the Mapper's transaction
-  with `removed_maps`. `absorbed_map` (map merging) is asserted unset until
+  that deactivates the map (`removed_maps` too if it is discarded); a kept
+  map stays live, inactive, in every replica. `absorbed_map` (map merging) is asserted unset until
   Task 5. The Mapper builds map n+1 only after a final `TrackingLost(n)`, so
   a newer map never appears while the Tracker tracks an older one.
 - **No subscription filtering:** an `Observable` delivers every event to every
@@ -2723,6 +2739,8 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-10 | Global BA smoke result (corridor1 full, Release, `--vocabulary --loop_closing`, two runs each with and without `--no_global_ba`; "Global BA"): no crash, and no tracking loss caused by a merge (every loss began 0.1–1.0 s after an essential-graph loop correction or long after any merge; the Musts are met). Global BA runs started: mono 4 and 4 (0 and 3 interrupted), completed in 3.4–28.2 s; stereo 4 and 3 (none interrupted), 3.3–85.2 s; merges 3.8–31.7 ms; results 0.56–3.31 MB; nothing dropped or rejected. Peak RSS: stereo 4.23 GB with against 2.28 / 2.33 GB without; mono 2.24 / 2.38 against 1.51 / 1.47 GB. Both mono runs and stereo run 2 with global BA lost map 1 after false-loop corrections (2, 2 and 4 maps) while the runs without kept one map: not separable from run-to-run loop variance with two runs, not tuned. ATE not comparable (map 1 only where it was lost; stereo run 1 SE3 18.68 m from a false loop; without: mono Sim3 0.707 / 0.645 m, stereo SE3 0.836 / 0.768 m). | Spec section 5 has no ATE Must: corridor1's false loops still dominate (step 6). |
 | 2026-10-10 | (Map merging Task 1, spec section 1) A Frame's measurement is **shared and immutable**: `TSharedMeasurement<FE> = std::shared_ptr<const TMeasurement<FE>>` in `FrameTracked`, `NewFrame`, the Mapper's `Frame` and every `ReplicaKeyFrame` (read through `measurement()`). The Tracker creates it once per tracked frame (`AcceptPose`, after stereo matching); the Mapper wraps a new map's initial Frames (from `InitializationMeasurement`, which keeps its by-value copy). Audit: nothing writes to a measurement after creation (the only write, `SetStereoMatches`, runs before tracking). Pooled `FrameTracked` / `MapTransaction` release it in `Reset()`. | Each event and each replica copied about 1 MB per Frame; the Atlas (every replica holding every map) would multiply that. `const` by type makes lock-free sharing safe; ownership by `shared_ptr` keeps the pointer rule (no raw pointers to short-lived data). |
 | 2026-10-10 | (Map merging Task 2, spec section 1) **The replica rule replaces "newest map id wins".** `MapTransaction` gains `active_map` (set on every transaction), `removed_maps` and `absorbed_map` (Task 5; asserted unset). `tracking::AtlasReplica<FE>` holds a `MapReplica` per live map: `new_map` creates a map, other transactions apply to the live map they name, unknown or removed maps are ignored, then `removed_maps` are dropped and remembered (never re-admitted), then `active_map` is taken. `MapReplica` lost its map-id admission and holds one map. The Tracker, LoopCloser and GlobalBA hold an `AtlasReplica` and work on its active map (`replica()` returns it, or an empty map); the viewer's `SceneState` applies the same rule to its own per-map scenes (voyahviz depends only on common and events) and shows the active map. The Mapper's final-loss discard is published as one transaction `removed_maps = {map}`, no `active_map`; a final `TrackingLost` no longer clears the LoopCloser. `AtlasReplica::Apply` returns whether the transaction was admitted (the plan's interface has `void`): the holders act only on admitted transactions of the active map. | ORB-SLAM3's Atlas keeps lost maps and merges them (Tasks 3–5): replicas must hold several maps and learn the active one explicitly, which "newest id wins" cannot express. Behaviour is unchanged while the Mapper still discards a lost map; the visible differences are that replicas (and the viewer) drop the lost map at the loss rather than at the next map, and that a transaction without `active_map` deactivates (test harnesses now set it, as the Mapper does). |
+
+| 2026-10-10 | (Map merging Task 3, spec sections 1, 5) **The Mapper's Atlas.** Per-map state moves into a private `MapState` held in `std::map<MapId, MapState> maps_` with `std::optional<MapId> active_`; existing code works on `Active()` (a cached pointer to the active map's node, kept with `active_`; `std::map` nodes are stable). On a final loss of the active map: fewer than `MapperOptions::atlas.min_frames_to_keep` (10) Frames → discarded, one transaction `removed_maps = {id}`, no `active_map`; otherwise kept inactive, one transaction with no `active_map`. The next initialization takes the next id. Inactive maps are frozen through the existing "another map" guards (now `IsActive(id)`). `num_keyframes()` / `num_map_points()` (atomics) are the active map's, 0 without one; `current_map_id()` stays the newest map's id. Public Mapper-thread accessors (`covisibility()`, `Reference()`, ...) read an empty map when none is active. | ORB-SLAM3 `Tracking`: `ResetActiveMap` below 10 KeyFrames, `CreateMapInAtlas` otherwise; keeping lost maps is what map merging (Tasks 4–5) merges into. A per-point map lookup would cost a `std::map::find` on hot paths, hence the cached pointer. |
 
 ## 9. Open Questions
 

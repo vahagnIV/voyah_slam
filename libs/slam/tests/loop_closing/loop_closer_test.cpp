@@ -265,25 +265,28 @@ public:
     }
 
     // Publishes `frame` (with its parent, the previous Frame) and `points`,
-    // then runs the LoopCloser; returns what it published.
+    // then runs the LoopCloser; returns what it published. The map is map(),
+    // unless `map_id` is given.
     std::vector<Loop> Publish(const SceneFrame& frame, const NewPoints& points = {}, bool new_map = false,
-                              map::MapId map_id = map::MapId{1}) {
+                              std::optional<map::MapId> map_id = std::nullopt) {
         EXPECT_TRUE(Send(frame, points, new_map, map_id));
         return Run();
     }
 
     // Publishes what Publish() does without running the LoopCloser. False
-    // (counted in num_exhausted()) if every transaction is in flight.
+    // (counted in num_exhausted()) if every transaction is in flight. The
+    // active map is the transaction's, unless `active_map` is given (the
+    // Mapper never names another).
     bool Send(const SceneFrame& frame, const NewPoints& points = {}, bool new_map = false,
-              map::MapId map_id = map::MapId{1}) {
+              std::optional<map::MapId> map_id = std::nullopt, std::optional<map::MapId> active_map = std::nullopt) {
         auto* transaction = transaction_pool_.TryCreate();
         if (transaction == nullptr) {
             ++num_exhausted_;
             return false;
         }
-        transaction->map_id = map_id;
+        transaction->map_id = map_id.value_or(map_);
         transaction->map_epoch = map_epoch_;
-        transaction->active_map = map_id;  // as the Mapper: the map it builds
+        transaction->active_map = active_map.value_or(transaction->map_id);  // as the Mapper: the map it builds
         transaction->new_map = new_map;
         if (new_map) transaction->start_frame = frame.id;
         events::NewFrame<Extractor>& added = transaction->added_frames.emplace_back();
@@ -349,6 +352,18 @@ public:
         return Run();
     }
 
+    // Publishes an empty transaction of map `map_id` at `map_epoch` with
+    // `active_map` (none: the Mapper keeping a lost map inactive), then runs
+    // the LoopCloser; returns what it published.
+    std::vector<Loop> PublishEmpty(map::MapId map_id, std::optional<map::MapId> active_map, uint32_t map_epoch = 0) {
+        auto* transaction = transaction_pool_.Create();
+        transaction->map_id = map_id;
+        transaction->map_epoch = map_epoch;
+        transaction->active_map = active_map;
+        mapper_.Notify(transaction);
+        return Run();
+    }
+
     std::vector<Loop> PublishTrackingLost(map::MapId map_id, bool final) {
         auto* lost = lost_pool_.Create();
         lost->map_id = map_id;
@@ -366,6 +381,8 @@ public:
 
     // While held, published events stay in the queue (in flight).
     void set_hold(bool hold) { hold_ = hold; }
+    // The map Publish() and Send() name by default (1).
+    void set_map(map::MapId map_id) { map_ = map_id; }
 
     LoopCloser<Extractor>& loop_closer() { return loop_closer_; }
     [[nodiscard]] size_t num_exhausted() const { return num_exhausted_; }
@@ -394,6 +411,7 @@ public:
     events::Listener listener_ = capture_.GetListener();
     std::optional<map::FrameId> previous_;
     bool hold_ = false;
+    map::MapId map_{1};
     uint32_t map_epoch_ = 0;
     size_t num_exhausted_ = 0;
 };
@@ -945,6 +963,50 @@ TEST(LoopCloserTest, ClearsOnNewMap) {
             EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
         }
     }
+}
+
+// A transaction naming an inactive live map (fed by hand: the Mapper never
+// publishes one) leaves the LoopCloser idle: the map's replica follows it,
+// but no query is detected, and its epoch does not drop the active map's
+// pending region. Map 1 is kept inactive; the scene is map 2.
+TEST(LoopCloserTest, InactiveMapLeavesLoopCloserIdle) {
+    Harness harness(MakeRegionVocabulary());
+    std::mt19937 rng(7);
+    const auto region = MakeRegion(50, Pose(0.0, 0.0, 0.0, 0.0), 0x00, rng);
+    const auto observe = [&](uint32_t id) {
+        return Observe(map::FrameId{id}, Pose(0, 0, 0, 0), Pose(0, 0, 0, 0), region, 0, false, rng);
+    };
+    ASSERT_TRUE(harness.Publish(observe(200), PointsOf(region, 0, Sim3{}, Centre(Pose(0, 0, 0, 0)), rng), true)
+                    .empty());
+    ASSERT_TRUE(harness.PublishEmpty(map::MapId{1}, std::nullopt).empty());  // kept inactive
+    const auto& atlas = harness.loop_closer().atlas();
+    ASSERT_EQ(atlas.map_ids(), std::vector<map::MapId>{map::MapId{1}});
+    ASSERT_FALSE(atlas.active_map().has_value());
+
+    harness.set_map(map::MapId{2});
+    LoopScene scene(1, Revisit::Drifted, MonoDrift(), false);
+    ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
+    for (size_t k = 0; k < 3; ++k) {
+        ASSERT_TRUE(scene.PublishReturn(harness, k).empty());
+    }
+    ASSERT_EQ(harness.loop_closer().num_coincidences(), 2u);
+    const size_t detected = harness.loop_closer().query_stats().detected;
+
+    // Map 1, inactive, gains a Frame and a correction epoch.
+    ASSERT_TRUE(harness.Send(observe(201), {}, false, map::MapId{1}, map::MapId{2}));
+    EXPECT_TRUE(harness.Run().empty());
+    EXPECT_TRUE(harness.PublishEmpty(map::MapId{1}, map::MapId{2}, 5).empty());
+
+    EXPECT_EQ(atlas.map(map::MapId{1})->num_keyframes(), 2u);  // applied to its map
+    EXPECT_EQ(atlas.map(map::MapId{1})->map_epoch(), 5u);
+    EXPECT_EQ(atlas.active_map(), map::MapId{2});
+    EXPECT_EQ(harness.loop_closer().query_stats().detected, detected);
+    EXPECT_EQ(harness.loop_closer().num_coincidences(), 2u);
+    // Map 2's pending region goes on to its loop.
+    const std::vector<Loop> loops = scene.PublishReturn(harness, 3);
+    ASSERT_EQ(loops.size(), 1u);
+    EXPECT_EQ(loops[0].map_id, map::MapId{2});
+    EXPECT_EQ(loops[0].query_frame, LoopScene::ReturnId(3));
 }
 
 // Without a vocabulary the LoopCloser only acknowledges: no replica, no loop.
