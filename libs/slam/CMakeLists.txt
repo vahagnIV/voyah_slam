@@ -7,6 +7,7 @@ add_library(voyah_slam STATIC
     src/mapping/mapper.cpp
     src/mapping/mapper_quality.cpp
     src/mapping/mapper_loop.cpp
+    src/mapping/mapper_global_ba.cpp
     src/mapping/map_initializer.cpp
     src/loop_closing/common_region.cpp
     src/loop_closing/loop_closer.cpp

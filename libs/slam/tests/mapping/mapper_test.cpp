@@ -3136,10 +3136,11 @@ protected:
 
     // Builds the scene: E0 initializes the map, every other view becomes a
     // Frame tracking every point its side has mapped and it sees, except one
-    // scene point in five (rotating), which it maps anew.
-    void BuildScene() {
-        MakeRegions();
-        for (size_t k = 0; k < 3 * kLoopSideFrames; ++k) {
+    // scene point in five (rotating), which it maps anew. Views up to `end`;
+    // a later call goes on from there.
+    void BuildScene(size_t end = 3 * kLoopSideFrames) {
+        if (frames_.empty()) MakeRegions();
+        for (size_t k = frames_.size(); k < end; ++k) {
             const LoopSide side = SideOf(k);
             const size_t j = k % kLoopSideFrames;
             const geometry::RigidTransformation T_true =
@@ -3177,7 +3178,7 @@ protected:
             event->num_inliers = 20;
             tracker_.Notify(event);
             Drain();
-            const std::vector<Published> created = TakeCaptured();
+            const std::vector<Published> created = TakeCaptured(on_scene_published_);
             ASSERT_EQ(created.size(), 2u) << "view " << k;
             frame.id = created[0].frame().frame_id;
             frames_.push_back(std::move(frame));
@@ -3266,6 +3267,8 @@ protected:
 
     std::mt19937 rng_{11};
     map::MapId scene_map_{1};  // the map BuildScene's FrameTracked name
+    // Runs on each transaction of a view after the first (may be empty).
+    std::function<void(const Published&)> on_scene_published_;
     geometry::TPoints3DF points_w_;
     std::vector<test::detail::SyntheticDescriptor> descriptors_;
     std::vector<double> angles_;
@@ -3660,5 +3663,440 @@ TEST_F(MapperLoopTest, IgnoresLoopOfOldMap) {
     EXPECT_EQ(corrected[0].map_epoch, 1u);
 }
 
+// Global BA merge (global-BA spec section 3; ORB-SLAM3's post-GBA block in
+// LoopClosing::RunGlobalBundleAdjustment). The scene is the loop scene; a
+// result is made by hand from the replica at a snapshot (the GlobalBA thread's
+// replica at epoch N): each Frame's pose moved by its own small motion, each
+// alive point shifted by its own offset.
+class MapperGlobalBaTest : public MapperLoopTest {
+protected:
+    explicit MapperGlobalBaTest(MapperOptions options = SceneOptions(/*cull_frames=*/false))
+        : MapperLoopTest(options) {}
+
+    // The scene views made before the snapshot: the start and middle sides;
+    // the return side's 4 views follow it. Without Frame culling, return
+    // Frames 8 <- 10 <- 11 are a chain of 3 new Frames under middle Frame 7.
+    static constexpr size_t kSnapshotViews = 2 * kLoopSideFrames;
+
+    struct Result {
+        map::MapId map_id;
+        uint32_t map_epoch = 0;
+        std::vector<std::pair<map::FrameId, geometry::RigidTransformation>> frame_poses;
+        std::vector<std::pair<map::MapPointId, geometry::TPoint3DF>> point_positions;
+    };
+
+    // Frame `frame`'s motion: a rotation of 0.2 (id + 1) mrad and a
+    // translation of 1 (id + 1) cm, distinct per Frame.
+    static geometry::RigidTransformation Motion(map::FrameId frame) {
+        const double k = 1.0 + static_cast<double>(frame.value);
+        const geometry::TVector3DF axis = geometry::TVector3DF(0.3, 1.0, -0.2).normalized();
+        return {Eigen::AngleAxis<double>(2e-4 * k, axis).toRotationMatrix(),
+                0.01 * k * geometry::TVector3DF(1.0, -0.5, 0.3)};
+    }
+    // Point `point`'s offset: 1..7 mm.
+    static geometry::TPoint3DF Offset(map::MapPointId point) {
+        return 1e-3 * static_cast<double>(1 + point.value % 7) * geometry::TPoint3DF(1.0, 0.5, -1.0);
+    }
+
+    // The result of the replica's map as it stands: every Frame at
+    // Motion * T_cw, every alive point at X + Offset.
+    [[nodiscard]] Result Snapshot() const {
+        Result result{replica_.map_id(), replica_.map_epoch(), {}, {}};
+        for (const map::FrameId frame : replica_.keyframe_ids()) {
+            result.frame_poses.emplace_back(frame, Motion(frame) * replica_.keyframe(frame)->T_cw);
+        }
+        for (uint32_t p = 0; p < replica_.num_points(); ++p) {
+            const map::MapPointId point{p};
+            if (replica_.IsAlive(point)) {
+                result.point_positions.emplace_back(point, replica_.Position(point) + Offset(point));
+            }
+        }
+        return result;
+    }
+
+    void PublishGlobalBa(const Result& result) {
+        auto* event = global_ba_pool_.Create();
+        event->map_id = result.map_id;
+        event->map_epoch = result.map_epoch;
+        event->frame_poses = result.frame_poses;
+        event->point_positions = result.point_positions;
+        event->priority = true;  // as the GlobalBA thread publishes it
+        tracker_.Notify(event);
+    }
+
+    // Publishes `result` and returns what the Mapper published.
+    std::vector<Published> Merge(const Result& result) {
+        PublishGlobalBa(result);
+        Drain();
+        return TakeCaptured();
+    }
+
+    // The Mapper's current Frames and alive points.
+    [[nodiscard]] std::map<uint32_t, geometry::RigidTransformation> MapperPoses() const {
+        std::map<uint32_t, geometry::RigidTransformation> poses;
+        for (const map::FrameId frame : replica_.keyframe_ids()) {
+            poses.emplace(frame.value, MapperTestAccess::Pose(mapper_, frame));
+        }
+        return poses;
+    }
+    [[nodiscard]] std::map<uint32_t, geometry::TPoint3DF> MapperPositions() const {
+        std::map<uint32_t, geometry::TPoint3DF> positions;
+        for (uint32_t p = 0; p < replica_.num_points(); ++p) {
+            if (mapper_.Reference(map::MapPointId{p})) {
+                positions.emplace(p, MapperTestAccess::Position(mapper_, map::MapPointId{p}));
+            }
+        }
+        return positions;
+    }
+
+    // The largest entry of the difference of two poses' [R | t].
+    static double PoseDifference(const geometry::RigidTransformation& a, const geometry::RigidTransformation& b) {
+        return (a.ToMatrix34() - b.ToMatrix34()).cwiseAbs().maxCoeff();
+    }
+
+    // Sync observer of the Mapper: on the first transaction 1 of a new
+    // Frame, publishes `pending_result_` into the Mapper's inbox, as the
+    // GlobalBA thread would while the Mapper is about to run local BA.
+    static void PublishResultOnFrameCreated(void* ctx, events::Event* event) {
+        auto* self = static_cast<MapperGlobalBaTest*>(ctx);
+        if (!self->pending_result_ || event->type != events::EventType::MapTransaction) return;
+        const auto* transaction = static_cast<const TTransaction*>(event);
+        if (transaction->new_map || transaction->added_frames.empty()) return;
+        auto* finished = self->global_ba_pool_.Create();
+        finished->map_id = self->pending_result_->map_id;
+        finished->map_epoch = self->pending_result_->map_epoch;
+        finished->frame_poses = self->pending_result_->frame_poses;
+        finished->point_positions = self->pending_result_->point_positions;
+        finished->priority = true;
+        self->pending_result_.reset();
+        self->global_ba_.Notify(finished);
+    }
+
+    memory::ObjectPool<events::GlobalBAFinished, memory::ThreadSafePolicy> global_ba_pool_{8};
+    events::Observable global_ba_;  // stands in for the GlobalBA thread
+    std::optional<Result> pending_result_;
+};
+
+class MapperGlobalBaCullingTest : public MapperGlobalBaTest {
+protected:
+    MapperGlobalBaCullingTest()
+        : MapperGlobalBaTest(SceneOptions(/*cull_frames=*/true)) {}
+};
+
+TEST_F(MapperGlobalBaTest, AppliesOptimizedPosesAndPoints) {
+    BuildScene();
+    const Result result = Snapshot();
+    const auto start = std::chrono::steady_clock::now();
+    const std::vector<Published> merged = Merge(result);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    RecordProperty("merge_ms", std::to_string(ms));
+    RecordProperty("frames_points", std::to_string(result.frame_poses.size()) + " / " +
+                                        std::to_string(result.point_positions.size()));
+    ASSERT_EQ(merged.size(), 1u);
+    EXPECT_EQ(mapper_.num_global_ba_merges(), 1u);
+    EXPECT_EQ(mapper_.num_global_ba_rejected(), 0u);
+    // Every Frame and every point, in the Mapper and in the replica.
+    EXPECT_EQ(merged[0].updated_poses.size(), result.frame_poses.size());
+    EXPECT_EQ(merged[0].updated_ids.size(), result.point_positions.size());
+    for (const auto& [frame, T_cw] : result.frame_poses) {
+        EXPECT_LT(PoseDifference(MapperTestAccess::Pose(mapper_, frame), T_cw), 1e-12) << "Frame " << frame.value;
+        EXPECT_LT(PoseDifference(replica_.keyframe(frame)->T_cw, T_cw), 1e-12) << "Frame " << frame.value;
+    }
+    for (const auto& [point, X] : result.point_positions) {
+        EXPECT_LT((MapperTestAccess::Position(mapper_, point) - X).norm(), 1e-12) << "point " << point.value;
+        EXPECT_LT((replica_.Position(point) - X).norm(), 1e-12) << "point " << point.value;
+    }
+    ExpectReplicaConsistent();
+}
+
+TEST_F(MapperGlobalBaTest, PropagatesToNewFramesThroughTree) {
+    // Frames created after the snapshot are not in the result: each keeps its
+    // pose relative to its parent, which was corrected first.
+    BuildScene(kSnapshotViews);
+    const Result result = Snapshot();
+    BuildScene();
+    std::vector<map::FrameId> added;
+    for (size_t k = kSnapshotViews; k < frames_.size(); ++k) added.push_back(frames_[k].id);
+    ASSERT_EQ(added.size(), kLoopSideFrames);
+    const auto is_added = [&](map::FrameId frame) {
+        return std::find(added.begin(), added.end(), frame) != added.end();
+    };
+    // The longest chain of new Frames under a Frame of the result.
+    size_t chain = 0;
+    for (const map::FrameId frame : added) {
+        size_t depth = 0;
+        for (std::optional<map::FrameId> f = frame; f && is_added(*f); f = mapper_.Parent(*f)) ++depth;
+        chain = std::max(chain, depth);
+    }
+    EXPECT_EQ(chain, 3u);
+    const std::map<uint32_t, geometry::RigidTransformation> before = MapperPoses();
+
+    ASSERT_EQ(Merge(result).size(), 1u);
+    for (const map::FrameId frame : added) {
+        const map::FrameId parent = *mapper_.Parent(frame);
+        const geometry::RigidTransformation relative_before =
+            before.at(frame.value) * before.at(parent.value).Inverse();
+        const geometry::RigidTransformation relative_after =
+            MapperTestAccess::Pose(mapper_, frame) * MapperTestAccess::Pose(mapper_, parent).Inverse();
+        EXPECT_LT(PoseDifference(relative_after, relative_before), 1e-9) << "Frame " << frame.value;
+        EXPECT_GT(PoseDifference(MapperTestAccess::Pose(mapper_, frame), before.at(frame.value)), 1e-3)
+            << "Frame " << frame.value;
+        EXPECT_LT(PoseDifference(replica_.keyframe(frame)->T_cw, MapperTestAccess::Pose(mapper_, frame)), 1e-12);
+    }
+    for (const auto& [frame, T_cw] : result.frame_poses) {
+        EXPECT_LT(PoseDifference(MapperTestAccess::Pose(mapper_, frame), T_cw), 1e-12) << "Frame " << frame.value;
+    }
+    ExpectReplicaConsistent();
+}
+
+TEST_F(MapperGlobalBaCullingTest, FollowsReparentedChain) {
+    // Review Focus 1: after the snapshot, return Frame 10 is culled and its
+    // child re-parented. The child, not in the result, follows its new parent.
+    BuildScene(kSnapshotViews);
+    const Result result = Snapshot();
+    std::map<uint32_t, map::FrameId> reparented;  // child -> new parent, after the snapshot
+    std::vector<map::FrameId> culled;
+    on_scene_published_ = [&](const Published& published) {
+        for (const auto& [child, parent] : published.parent_changes) reparented[child.value] = parent;
+        culled.insert(culled.end(), published.removed_frames.begin(), published.removed_frames.end());
+    };
+    BuildScene();
+    const auto in_result = [&](uint32_t frame) {
+        return std::any_of(result.frame_poses.begin(), result.frame_poses.end(),
+                           [&](const auto& posed) { return posed.first.value == frame; });
+    };
+    std::vector<map::FrameId> followers;  // re-parented, alive, not in the result
+    for (const auto& [child, parent] : reparented) {
+        if (replica_.keyframe(map::FrameId{child}) != nullptr && !in_result(child)) {
+            followers.push_back(map::FrameId{child});
+        }
+    }
+    RecordProperty("culled_followers", std::to_string(culled.size()) + " / " + std::to_string(followers.size()));
+    ASSERT_FALSE(followers.empty());
+    const std::map<uint32_t, geometry::RigidTransformation> before = MapperPoses();
+
+    ASSERT_EQ(Merge(result).size(), 1u);
+    for (const map::FrameId frame : followers) {
+        const map::FrameId parent = *mapper_.Parent(frame);
+        EXPECT_EQ(parent, reparented.at(frame.value));
+        const geometry::RigidTransformation relative_before =
+            before.at(frame.value) * before.at(parent.value).Inverse();
+        const geometry::RigidTransformation relative_after =
+            MapperTestAccess::Pose(mapper_, frame) * MapperTestAccess::Pose(mapper_, parent).Inverse();
+        EXPECT_LT(PoseDifference(relative_after, relative_before), 1e-9) << "Frame " << frame.value;
+        EXPECT_GT(PoseDifference(MapperTestAccess::Pose(mapper_, frame), before.at(frame.value)), 1e-3)
+            << "Frame " << frame.value;
+    }
+    ExpectReplicaConsistent();
+}
+
+TEST_F(MapperGlobalBaTest, NewPointFollowsNewReferenceFrame) {
+    // Review Focus 2: a point created after the snapshot moves with its
+    // reference Frame, itself created after the snapshot and corrected
+    // through the tree: in that Frame's camera it stays where it was.
+    BuildScene(kSnapshotViews);
+    const Result result = Snapshot();
+    const uint32_t first_new = replica_.num_points();
+    BuildScene();
+    const std::map<uint32_t, geometry::RigidTransformation> poses_before = MapperPoses();
+    const std::map<uint32_t, geometry::TPoint3DF> positions_before = MapperPositions();
+
+    ASSERT_EQ(Merge(result).size(), 1u);
+    size_t num_new = 0;
+    for (const auto& [p, X_before] : positions_before) {
+        if (p < first_new) continue;
+        const map::MapPointId point{p};
+        const map::FrameId reference = mapper_.Reference(point)->keyframe;
+        ASSERT_GE(reference.value, frames_[kSnapshotViews].id.value) << "point " << p;
+        const geometry::TPoint3DF X = MapperTestAccess::Position(mapper_, point);
+        const geometry::TPoint3DF camera_before = poses_before.at(reference.value).Transform(X_before);
+        const geometry::TPoint3DF camera_after = MapperTestAccess::Pose(mapper_, reference).Transform(X);
+        EXPECT_LT((camera_after - camera_before).norm(), 1e-9) << "point " << p;
+        EXPECT_GT((X - X_before).norm(), 1e-3) << "point " << p;
+        EXPECT_LT((replica_.Position(point) - X).norm(), 1e-12) << "point " << p;
+        ++num_new;
+    }
+    RecordProperty("new_points", std::to_string(num_new));
+    EXPECT_GE(num_new, 100u);
+    ExpectReplicaConsistent();
+}
+
+TEST_F(MapperGlobalBaCullingTest, SkipsCulledAndFused) {
+    // After the snapshot (the start side and 3 middle views), middle Frame 5
+    // is culled and points are culled or merged away: the result names them,
+    // the merge transaction does not.
+    BuildScene(kSnapshotViews - 1);
+    const Result result = Snapshot();
+    BuildScene();
+    std::set<uint32_t> culled, removed;
+    for (const auto& [frame, T_cw] : result.frame_poses) {
+        if (replica_.keyframe(frame) == nullptr) culled.insert(frame.value);
+    }
+    for (const auto& [point, X] : result.point_positions) {
+        if (!replica_.IsAlive(point)) removed.insert(point.value);
+    }
+    RecordProperty("culled_removed", std::to_string(culled.size()) + " / " + std::to_string(removed.size()));
+    ASSERT_FALSE(culled.empty());
+    ASSERT_FALSE(removed.empty());
+
+    const std::vector<Published> merged = Merge(result);
+    ASSERT_EQ(merged.size(), 1u);
+    EXPECT_FALSE(merged[0].updated_poses.empty());
+    EXPECT_FALSE(merged[0].updated_ids.empty());
+    for (const auto& [frame, T_cw] : merged[0].updated_poses) {
+        EXPECT_FALSE(culled.contains(frame.value)) << "Frame " << frame.value;
+    }
+    for (const map::MapPointId point : merged[0].updated_ids) {
+        EXPECT_FALSE(removed.contains(point.value)) << "point " << point.value;
+    }
+    for (const uint32_t p : removed) EXPECT_FALSE(replica_.IsAlive(map::MapPointId{p})) << "point " << p;
+    ExpectReplicaConsistent();
+}
+
+TEST_F(MapperGlobalBaTest, PublishesOneTransactionAtNextEpoch) {
+    // After a loop correction (epoch 1), a result of epoch 1 is merged at
+    // epoch 2: exactly one transaction, without loop edges, so the GlobalBA
+    // thread starts no new run on it.
+    BuildScene();
+    CorrectSceneLoop();
+    ASSERT_EQ(replica_.map_epoch(), 1u);
+    const Result result = Snapshot();
+    ASSERT_EQ(result.map_epoch, 1u);
+    const std::vector<Published> merged = Merge(result);
+    ASSERT_EQ(merged.size(), 1u);
+    const Published& transaction = merged[0];
+    EXPECT_EQ(transaction.type, events::EventType::MapTransaction);
+    EXPECT_EQ(transaction.map_id, map::MapId{1});
+    EXPECT_EQ(transaction.map_epoch, 2u);
+    EXPECT_TRUE(transaction.added_loop_edges.empty());
+    EXPECT_FALSE(transaction.new_map);
+    EXPECT_TRUE(transaction.frames.empty());
+    EXPECT_EQ(transaction.count, 0u);
+    EXPECT_TRUE(transaction.removed_points.empty());
+    EXPECT_TRUE(transaction.removed_frames.empty());
+    EXPECT_TRUE(transaction.parent_changes.empty());
+    EXPECT_TRUE(transaction.replaced_points.empty());
+    EXPECT_EQ(replica_.map_epoch(), 2u);
+    // The replica applied it consistently (TakeCaptured checks CheckConsistency,
+    // the graph included), with the Mapper's poses.
+    ExpectReplicaConsistent();
+    for (const map::FrameId frame : replica_.keyframe_ids()) {
+        EXPECT_EQ(replica_.keyframe(frame)->T_cw.ToMatrix34(), MapperTestAccess::Pose(mapper_, frame).ToMatrix34())
+            << "Frame " << frame.value;
+    }
+    // The Mapper is at epoch 2: a FrameTracked of epoch 1 creates no Frame.
+    std::vector<Eigen::Index> scene_of_feature;
+    auto* event = frame_tracked_pool_.Create();
+    event->map_id = map::MapId{1};
+    event->timestamp = 10.0;
+    event->pose = replica_.keyframe(Query().id)->T_cw;
+    event->measurement = View(Query().T_true, 10.0, scene_of_feature);
+    event->reference_frame_id = Query().id;
+    event->num_inliers = 20;
+    event->map_epoch = 1;
+    tracker_.Notify(event);
+    Drain();
+    EXPECT_TRUE(TakeCaptured().empty());
+    EXPECT_EQ(mapper_.stale_epoch_skipped(), 1u);
+}
+
+TEST_F(MapperGlobalBaTest, ResultInterruptsLocalBa) {
+    // GlobalBAFinished is urgent, like LoopDetected: arriving once a new
+    // Frame's transaction 1 is out, it stops that Frame's local BA, then is
+    // merged, the new Frame following its parent.
+    BuildScene(kSnapshotViews);
+    pending_result_ = Snapshot();
+    global_ba_.ConnectAsync(mapper_.inbox());
+    mapper_.AddSyncObserver(&MapperGlobalBaTest::PublishResultOnFrameCreated, this);
+    std::vector<Eigen::Index> scene_of_feature;
+    auto* event = frame_tracked_pool_.Create();
+    event->map_id = map::MapId{1};
+    event->timestamp = 10.0;
+    // Start Frame E1's view again, tracking the start side's points: local
+    // BA has work, with E0 fixed.
+    event->pose = replica_.keyframe(Match().id)->T_cw;
+    event->measurement = View(Match().T_true, 10.0, scene_of_feature);
+    const std::vector<std::optional<map::MapPointId>> mapped = SidePoints(LoopSide::Start);
+    for (size_t f = 0; f < scene_of_feature.size(); ++f) {
+        const Eigen::Index scene = scene_of_feature[f];
+        if (scene >= 0 && mapped[static_cast<size_t>(scene)]) {
+            event->observed_features.push_back(static_cast<uint32_t>(f));
+            event->observed_points.push_back(*mapped[static_cast<size_t>(scene)]);
+        }
+    }
+    event->reference_frame_id = Match().id;
+    event->num_matches = static_cast<uint32_t>(event->observed_points.size());
+    event->num_inliers = 20;
+    tracker_.Notify(event);
+    Drain();
+    ASSERT_FALSE(pending_result_.has_value());
+    const LocalBaSummary& ba = mapper_.last_local_ba();
+    ASSERT_TRUE(ba.ran);
+    EXPECT_TRUE(ba.interrupted);
+    EXPECT_EQ(mapper_.inbox().pending_priority(), 0u);
+    const std::vector<Published> published = TakeCaptured();
+    ASSERT_EQ(published.size(), 3u);  // the new Frame's two transactions, the merge
+    const map::FrameId added = published[0].frame().frame_id;
+    EXPECT_EQ(published[2].map_epoch, 1u);
+    EXPECT_EQ(mapper_.num_global_ba_merges(), 1u);
+    EXPECT_NE(std::find_if(published[2].updated_poses.begin(), published[2].updated_poses.end(),
+                           [&](const auto& posed) { return posed.first == added; }),
+              published[2].updated_poses.end());
+    ExpectReplicaConsistent();
+}
+
+TEST_F(MapperGlobalBaTest, RejectsStaleEpoch) {
+    // A result of epoch 0 arrives after a loop correction (epoch 1): ignored.
+    // The same map's result of epoch 1 is merged.
+    BuildScene();
+    const Result stale = Snapshot();
+    CorrectSceneLoop();
+    const std::map<uint32_t, geometry::RigidTransformation> poses = MapperPoses();
+    const std::map<uint32_t, geometry::TPoint3DF> positions = MapperPositions();
+    EXPECT_TRUE(Merge(stale).empty());
+    EXPECT_EQ(mapper_.num_global_ba_rejected(), 1u);
+    EXPECT_EQ(mapper_.num_global_ba_merges(), 0u);
+    EXPECT_EQ(MapperPoses().size(), poses.size());
+    for (const auto& [frame, T_cw] : MapperPoses()) {
+        EXPECT_EQ(T_cw.ToMatrix34(), poses.at(frame).ToMatrix34()) << "Frame " << frame;
+    }
+    EXPECT_EQ(MapperPositions(), positions);
+    EXPECT_EQ(replica_.map_epoch(), 1u);
+
+    EXPECT_EQ(Merge(Snapshot()).size(), 1u);
+    EXPECT_EQ(mapper_.num_global_ba_merges(), 1u);
+}
+
+TEST_F(MapperGlobalBaTest, RejectsOldMap) {
+    // Review Focus 3: a result of map 1 arrives once map 1 is gone, first
+    // with no map, then with map 2 at the same epoch 0 (its point ids
+    // overlap map 1's): ignored. Map 2's result is merged.
+    InitializeStereo(0.0);
+    const Result old_map = Snapshot();
+    ASSERT_EQ(old_map.map_id, map::MapId{1});
+    PublishTrackingLost(1, 0.5);
+    Drain();
+    ASSERT_EQ(mapper_.state(), MapperState::Initializing);
+    EXPECT_TRUE(Merge(old_map).empty());
+    EXPECT_EQ(mapper_.num_global_ba_rejected(), 1u);
+
+    scene_map_ = map::MapId{2};
+    BuildScene();
+    ASSERT_EQ(mapper_.current_map_id(), map::MapId{2});
+    const std::map<uint32_t, geometry::RigidTransformation> poses = MapperPoses();
+    const std::map<uint32_t, geometry::TPoint3DF> positions = MapperPositions();
+    EXPECT_TRUE(Merge(old_map).empty());
+    EXPECT_EQ(mapper_.num_global_ba_rejected(), 2u);
+    EXPECT_EQ(mapper_.num_global_ba_merges(), 0u);
+    for (const auto& [frame, T_cw] : MapperPoses()) {
+        EXPECT_EQ(T_cw.ToMatrix34(), poses.at(frame).ToMatrix34()) << "Frame " << frame;
+    }
+    EXPECT_EQ(MapperPositions(), positions);
+
+    const std::vector<Published> merged = Merge(Snapshot());
+    ASSERT_EQ(merged.size(), 1u);
+    EXPECT_EQ(merged[0].map_id, map::MapId{2});
+    EXPECT_EQ(mapper_.num_global_ba_merges(), 1u);
+}
 } // namespace
 } // namespace voyahslam::mapping
