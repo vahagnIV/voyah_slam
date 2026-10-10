@@ -78,30 +78,34 @@ keyframes of different types share the map is still open (Open Question 17).
 ```
                FrameTracked                     LoopDetected
  Tracker ───────────────────────────► Mapper ◄────────────── LoopCloser
-    ▲                                   │                        ▲
-    │      map diff events              │   map diff events      │
-    └───────────────────────────────────┴────────────────────────┘
-                                        │
+    ▲                                 ▲ │                        ▲
+    │      map diff events            │ │   map diff events      │
+    └─────────────────────────────────┼─┼────────────────────────┤
+                                      │ │                        ▼
+                     GlobalBAFinished └─┼──────────────── GlobalBA (with loop closing)
                                         ▼   map diffs, FrameTracked (from Tracker)
                                    Visualizer (MapViewer)
 ```
 
 ### Slam (orchestrator) and EventNode
 
-`slam::Slam<TFeatureExtractor>` (`slam/slam.h`) owns the three components and
+`slam::Slam<TFeatureExtractor>` (`slam/slam.h`) owns the three components,
+plus the GlobalBA when loop closing is in effect (see "Global BA"), and
 wires them asynchronously in its constructor:
 
 | Publisher | → Async observers |
 |---|---|
 | Tracker | Mapper |
-| Mapper | Tracker, LoopCloser |
+| Mapper | Tracker, LoopCloser, GlobalBA |
 | LoopCloser | Mapper |
+| GlobalBA | Mapper |
 
-`Start()` starts consumers before producers (Mapper, LoopCloser, Tracker);
-`Stop()` stops producers first (Tracker, LoopCloser, Mapper); the destructor
-calls `Stop()`. `Slam` is neither copyable nor movable — components hold
+`Start()` starts consumers before producers (Mapper, GlobalBA, LoopCloser,
+Tracker); `Stop()` stops producers first (Tracker, LoopCloser, GlobalBA,
+Mapper); the destructor calls `Stop()`. `Slam` is neither copyable nor movable — components hold
 pointers to each other's inboxes. Extra observers (visualizer, logging) attach
-via `slam.tracker()/mapper()/loop_closer().AddObserver(...)` before `Start()`.
+via `slam.tracker()/mapper()/loop_closer()/global_ba()->AddObserver(...)`
+before `Start()` (`global_ba()` is null without a GlobalBA).
 
 Every component derives from `events::EventNode` (`events/event_node.h`, no
 virtuals): an `Observable` it publishes through, one `AsyncObserver` inbox it
@@ -114,6 +118,7 @@ defined in `libs/slam/src/` with `INSTANTIATE_CLASS` (ORB + SIFT).
 | `tracking::Tracker<FE>` | `tracking/tracker.h` | `Start()`, `Stop()`, `Track(TMonocularMeasurement)`, `Track(TBinocularMeasurement)`, `ProcessPending()`, `state()`, `current_map_id()`, `pending_measurements()` |
 | `mapping::Mapper<FE>` | `mapping/mapper.h` | `Mapper(MapperOptions)`, `Start()`, `Stop()`, `ProcessPending()`, `state()`, `current_map_id()` |
 | `loop_closing::LoopCloser<FE>` | `loop_closing/loop_closer.h` | `LoopCloser(LoopCloserOptions, vocabulary)`, `Start()`, `Stop()`, `ProcessPending()` (applies every transaction to its replica, queues the new Frames as queries, detects one; with loop closing off or no vocabulary only acknowledges), `replica()`, `num_coincidences()`, `last_stats()`, `num_dropped_loops()`, `query_stats()` — see "Loop Closing" |
+| `global_ba::GlobalBundleAdjuster<FE>` | `global_ba/global_bundle_adjuster.h` | `GlobalBundleAdjuster(GlobalBaOptions)`, `Start()`, `Stop()` (interrupts a running BA), `ProcessPending()` (applies every transaction, runs one pending global BA), `replica()`, `num_runs_started()`, `num_runs_interrupted()`, `num_results_dropped()`; test-only `stop_requested()`, `set_run_hook()`, `set_poll_hook()`, `set_publish_hook()` — see "Global BA" |
 
 Each component owns a `events::WorkerThread` (`events/worker_thread.h`) bound to
 the `events::WakeSignal` of its `EventNode` (`events/wake_signal.h`) and a
@@ -245,6 +250,14 @@ stub was deleted on 2026-10-05.
 - Publishes `LoopDetected` (query and match Frames and maps, the Sim3
   `S_query_match`, the matched point pairs). Never modifies the map.
 
+### GlobalBA
+- Created by `Slam` only with loop closing in effect. Owns a replica fed by
+  the Mapper's transactions from the start; a transaction that adds a loop
+  edge triggers ORB-SLAM3's global BA of a snapshot of the replica
+  (see "Global BA").
+- Publishes `GlobalBAFinished` (plain data); the Mapper merges it. Never
+  modifies the map.
+
 ### Visualizer (MapViewer)
 - `voyahviz::MapViewer` (see "Visualization Library") subscribes to Tracker
   and Mapper events through one inbox and builds a render-only `SceneState`
@@ -292,6 +305,7 @@ The distortion models now live in `geometry/distortion_models/` (moved from
 | `FrameTracked<FE>` | Tracker → Mapper, viewer | every tracked measurement: timestamp, pose (`T_cw` after `OptimizePose`), measurement copy (binocular: stereo-matched), inlier pairs `observed_features[i]` -> `observed_points[i]`, `visible_points` (local points passing the projection gate, matched ones included), `reference_frame_id` (optional), `local_frames`, `stage` (the source of the initial pose the local-map step refined: `MotionModel` / `ZeroMotion` / `ReferenceFrame` / `Relocalization`; 2026-10-08, ruling C), `num_matches`, `num_inliers`, `urgent` (mirrored in `Event::priority`), `map_epoch` (the Tracker replica's epoch; since 2026-10-09 the Mapper drops a `FrameTracked` of an older epoch, after counting its visible/found) |
 | `MapTransaction<FE>` | Mapper → all | **every Mapper change, as one atomic transaction** (since 2026-10-07; replaces `KeyFrameCreated`, `MapCreated`, `MapPointsUpdated`, `MapPointsRemoved`, `KeyFramePoseUpdated`). Parts, each possibly empty: `new_map` + `start_frame`; added Frames (id, `T_cw`, measurement, own observations, and since 2026-10-08 the Frame's `bow::BowVector bow` and `bow::FeatureVector features`, empty without a vocabulary); new points (`new_points_start_id`, contiguous ids, positions / normals / descriptors); `added_observations` (frame, feature, point, depth and right index, -1 when absent); updated points (ids, positions, normals, descriptors); `replaced_points` (loser, winner); `removed_points`; `updated_poses`; `removed_observations`; `removed_frames`; since 2026-10-09 (loop closing) the map graph and epoch: `NewFrame::parent` (spanning tree), `parent_changes` (frame, new parent), `added_loop_edges` (frame, frame) and `map_epoch` (+1 per loop correction; 0 for a new map). A loop correction is one more transaction carrying every corrected pose and point. Pooled (256 in the Mapper): a transaction is recycled once every consumer has acknowledged it, so consumers apply on receipt (the LoopCloser too, since 2026-10-10) and never hold one for long work. Apply order and contract: see "Map Quality" |
 | `LoopDetected` | LoopCloser → Mapper | `query_map_id`, `match_map_id` (equal for now), `query_frame`, `match_frame`, `S_query_match` (`geometry::Sim3`, x_query = S · x_match in camera coordinates, ORB Scm; scale 1 for stereo), `matched_points` ((query point, match point) pairs). `priority` (interrupts a running local BA) unless a loop was already published at the LoopCloser replica's epoch. Pool of 16, published with `TryCreate`. See "Loop Closing" |
+| `GlobalBAFinished` | GlobalBA → Mapper | `map_id`, `map_epoch` (N, the correction epoch optimized), `frame_poses` ((FrameId, T_cw) of every Frame of the run), `point_positions` ((MapPointId, world position) of every point of the run): plain data only. `priority` (interrupts a running local BA). Pool of `GlobalBaOptions::max_events_in_flight` (2), published with `TryCreate` (exhausted: the result is dropped and counted). The Mapper merges it as one `MapTransaction` at N + 1, or rejects it (another map or epoch). About 1.2 MB for a corridor1 map of 600 Frames and 38k points. See "Global BA" |
 | `InitializationMeasurement<FE>` | Tracker → Mapper (+ other Tracker observers) | `features::TMeasurement<FE>` (`map_id` 0) |
 | `TrackingLost` | Tracker → all | timestamp, `final` (`map_id` = the lost map). Since 2026-10-08: `final = false` on entering `RecentlyLost` (the Mapper ignores it and keeps the map), `final = true` on entering `Lost` (only this one clears the Mapper's map) |
 
@@ -1799,7 +1813,7 @@ returns to a mapped place, detect it and correct the accumulated drift (pose,
 and scale for mono), following ORB-SLAM3's visual-only `LoopClosing`
 (`NewDetectCommonRegions`, `CorrectLoop`) and `Optimizer::OptimizeEssentialGraph`
 for the algorithm, its thresholds (checked against the ORB-SLAM3 source) and
-its order. Global BA is step 4c, map merging step 5 (TODO).
+its order. Global BA is step 4c (see "Global BA"), map merging step 5 (TODO).
 
 **Status (2026-10-10): implemented, opt-in, off by default.**
 - *What works:* loops on synthetic scenes, and revisits of nearby views. In
@@ -1822,7 +1836,7 @@ its order. Global BA is step 4c, map merging step 5 (TODO).
 | LoopClosing detects and corrects, pausing LocalMapping | The LoopCloser only detects, on its own replica; the Mapper corrects and does no local mapping meanwhile |
 | Shared map objects corrected in place, under locks | One `MapTransaction` at a new map epoch, applied by every replica |
 | The Tracker reads the corrected map | The Tracker applies the transaction and shifts its `last_frame_` |
-| Global BA in a thread after the correction | Step 4c |
+| Global BA in a thread after the correction | Step 4c, done 2026-10-10: see "Global BA" |
 
 **Map graph.**
 - **Spanning tree** (ORB-SLAM3 `UpdateConnections`, `SetBadFlag`): each Frame
@@ -2152,6 +2166,217 @@ How to read the table:
     local BA after it started at 3.9–5.1·10⁸, and map 1 was lost 13–22
     frames after the correction.
 
+## Global BA (roadmap step 4c)
+
+Spec: `docs/superpowers/specs/2026-10-10-global-ba-design.md`; plan
+`docs/superpowers/plans/2026-10-10-global-ba.md`. Goal: after each loop
+correction, refine every Frame and point of the map with ORB-SLAM3's global
+BA (`LoopClosing::RunGlobalBundleAdjustment`,
+`Optimizer::GlobalBundleAdjustemnt(map, 10, &stop, loop_kf, bRobust = false)`)
+in its own thread, without blocking local mapping, and merge the result into a
+map that kept changing meanwhile.
+
+**Status (2026-10-10): implemented.** It exists only with loop closing, which
+is opt-in (off by default), and is on by default with it; `--no_global_ba`
+turns it off. On the synthetic loops it lowers the map points' RMS error
+against truth to 0.41–0.48× the essential graph's in stereo and 0.87–0.92× in
+mono. On corridor1 the smoke runs had no crash and no tracking loss caused by
+a merge (table below), but a run takes up to 85 s on a full stereo map and
+raises the peak memory by up to 1.9 GB; three of the four runs with it lost
+map 1 after a false-loop correction (the four without kept one map), and
+the ATE is still dominated by the same-heading false loops (step 6).
+
+| ORB-SLAM3 | Ours |
+|---|---|
+| The GBA thread reads the shared map under locks | `GlobalBundleAdjuster` owns a `MapReplica`, fed by the Mapper's transactions from the start of the run (like the LoopCloser); no late joining |
+| `CorrectLoop` launches the thread, aborting a running one (`mbStopGBA`, `mnFullBAIdx`) | A transaction that adds a loop edge (the correction at epoch N) triggers a run; a newer correction or a new map arriving during a run interrupts it |
+| Results parked in `mTcwGBA` / `mPosGBA` of the shared objects | One `GlobalBAFinished` event with plain data: `map_id`, `map_epoch` N, `frame_poses` (FrameId, T_cw), `point_positions` (MapPointId, position) |
+| Local mapping stopped and the map locked for the merge | The merge is one Mapper handler call (the Mapper is the only writer) and one `MapTransaction` at epoch N + 1 |
+
+**The component** (`global_ba/global_bundle_adjuster.h`):
+- An `EventNode` with its own thread, replica and a pool of
+  `GlobalBaOptions::max_events_in_flight` (2) `GlobalBAFinished`, published
+  with `TryCreate` and `priority` (the Mapper's running local BA stops for the
+  merge). An exhausted pool drops the result (`num_results_dropped`, logged)
+  and is not retried: the map keeps the essential-graph correction until the
+  next loop.
+- **Trigger:** an applied transaction of the current map with
+  `added_loop_edges`. There is no request event. After the inbox is drained,
+  one run per `ProcessPending()`.
+- **Snapshot contract** (`RunGlobalBa`, `global_ba/global_ba.h`): it builds a
+  self-contained problem (every Frame, every alive point with an
+  observation, all observations, mono and stereo) **before its first
+  `should_stop` poll** and never reads the replica again. The replica may
+  therefore change during the run; the result is the snapshot at epoch N and
+  carries the run's captured `(map_id, N)`.
+- **Apply-on-poll rule:** each `should_stop` poll drains the inbox; every
+  transaction is first judged for interruption against the run's
+  `(map_id, N)`, then applied to the replica, and so released. Why: the
+  Mapper's transaction pool (256) aborts when exhausted, and a run on a large
+  map lasts seconds at about 2 transactions per KeyFrame (the LoopCloser's
+  apply-on-receipt rule, for the same reason). `should_stop` is sticky: once
+  it returns true it stops polling.
+- **Interruption:** `Stop()`, or a drained transaction that is a newer
+  correction (a larger `map_epoch` with a loop edge) or a new map (`new_map`
+  or a newer map id). An interrupted run publishes nothing. A newer
+  correction starts a new run next; a new map clears the replica and drops
+  the run. A run stopped by `Stop()` is not resumed after a restart.
+- **Optimization** (`RunGlobalBa`): `optimization::BundleAdjust` as one plain
+  stage of `GlobalBaOptions::iterations` (10), no robust kernel and no
+  outlier removal (ORB `bRobust = false`), raw-pixel residuals through
+  `geometry::Camera`, σ = `sigma_px · level_scale^level` (the
+  `MapperOptions::fuse` defaults, ruling: a third σ source, TODO). Gauge:
+  the map's first Frame, or the oldest surviving one, is fixed. Mono poses
+  are SE3: the scale is the one the correction left.
+- **Test-only seams:** `stop_requested()` (an atomic read, any thread: a
+  test's run hook can see that `Stop()` has set the flag, which a test flag
+  set before `Stop()` cannot do without racing), `set_run_hook()` (called
+  before each run) and `set_poll_hook()` (called at each `should_stop` poll,
+  before the inbox check; used to inject transactions mid-run). The hooks are
+  set while the worker is stopped.
+
+**The merge** (`Mapper::MergeGlobalBa`, ORB-SLAM3's post-GBA block):
+- **Rejected** (counted in `num_global_ba_rejected`, nothing published) unless
+  the Mapper is `Mapping`, the map is the current one and `map_epoch` equals
+  the Mapper's current epoch (another correction in between: ORB
+  `mnFullBAIdx`).
+- **Frames:** a breadth-first walk of the spanning tree from the root,
+  parents first. A Frame of the result takes its pose; a Frame created after
+  N takes `T_cur · T_parent,cur⁻¹ · T_parent,new`, so the correction chains
+  down the tree; culled Frames are skipped.
+- **Points:** an alive point of the result takes its position (fused or
+  culled ones are skipped); a point created after N moves rigidly with its
+  reference Frame, unless that Frame was not corrected. Moved points get
+  their normals recomputed (unlike ORB's GBA block; as our loop correction).
+  Reference distances are not refreshed (TODO).
+- **Publish:** one `MapTransaction` at `map_epoch + 1` with every changed
+  pose and position, never with a loop edge (so it never triggers another
+  run). The Tracker follows through the step 4b epoch path. Local BA work
+  done since N on optimized Frames is overwritten, as in ORB-SLAM3. The merge
+  takes the result as plain vectors, so map merging (step 5) can reuse the
+  propagation.
+
+**Epoch and the LoopCloser (deviation from ORB-SLAM3).** A global-BA merge
+raises the map epoch (N + 1), and `LoopCloser::ApplyEvent` treats any higher
+epoch as a correction, so a merge also drops the LoopCloser's pending region
+(a partly confirmed loop restarts). ORB-SLAM3 does not reset it. Kept because
+the pending `S_last_world` is in pre-merge coordinates.
+
+**Wiring and options.** `Slam(..., LoopCloserOptions, GlobalBaOptions)` holds
+a `std::optional<GlobalBundleAdjuster>`, created only with loop closing in
+effect (a vocabulary and `LoopCloserOptions::enabled`) and
+`GlobalBaOptions::enabled` (default true); `global_ba()` is null otherwise.
+Mapper → GlobalBA → Mapper. Start: Mapper, GlobalBA, LoopCloser, Tracker;
+Stop in reverse. With loop closing off nothing is created, so behaviour is
+exactly as before. The apps print "Global BA: on/off" from `global_ba()` and
+take `--no_global_ba`.
+
+**Tests.**
+- `GlobalBaProblemTest` (6): the problem covers every Frame and observed
+  point; the first, or oldest surviving, Frame is fixed; a perturbed map is
+  recovered; interrupted and empty runs return nothing.
+- `GlobalBundleAdjusterTest` (11): the loop-edge trigger, interruption by a
+  newer correction (also between LM iterations) and not by an ordinary
+  transaction, new map and newer map id, old maps ignored, `Stop()`, a full
+  result pool, transactions released at each poll (a pool of 4 survives more
+  polls than its size), changes during a run not affecting the result
+  (bitwise equal to an undisturbed run).
+- `MapperGlobalBa*` (9): optimized Frames and points, propagation down the
+  tree (chains, re-parented chains), new points following their reference
+  Frame, culled and fused objects skipped, one transaction at N + 1, a result
+  interrupting local BA, stale-epoch and old-map rejection.
+- `SlamTest.{Mono,Stereo}GlobalBaRefinesLoop` (seeds 1–3, lock-step; the
+  harness waits for each correction's merge before the next frame, and fails
+  fast with the counts if a result is rejected or not merged within 60 s):
+  essential graph alone vs followed by global BA, both runs with one map, no
+  loss and tracked to the end. **Stereo** bars: points RMS ≤ 0.8×, end error
+  ≤ 1.0×; measured 0.41 / 0.48 / 0.44 and 0.76 / 0.67 / 0.18. **Mono** bars,
+  revised after measurement (controller ruling; the 0.8× was an unmeasured
+  guess): points RMS ≤ 0.95× per seed and ≤ 0.92× on average, end error
+  ≤ 1.05× per seed; measured 0.89 / 0.87 / 0.92 (mean 0.89) and 0.58 / 0.35
+  / 1.005. The mono RMS is dominated by low-parallax points of a 15–16 Frame
+  map and global BA has converged (10 and 100 iterations agree).
+  `SlamTest.GlobalBaCreatedOnlyWithLoopClosing` checks when the object
+  exists; `*ClosesLoop` checks that a whole run without it merges nothing.
+- **ThreadSanitizer** (2026-10-10, scratch tree `-fsanitize=thread -O1 -g`,
+  under `setarch -R`): `voyah_slam_tests` 208 and, after the wiring, 217
+  clean; `voyah_integration_tests` 18 with 0 warnings (the global-BA tests
+  included; the mono test then failed only on its old bar).
+
+**Smoke** (2026-10-10). Setup:
+- corridor1 1024, the full sequence of 5990 frames;
+- Release, ORB 1500, `--vocabulary ORBvoc.bin --loop_closing`, `--rate=0`;
+- debug logs, headless, the runs one after another;
+- two runs each with global BA (the default) and with `--no_global_ba`.
+
+How to read the table:
+- **RL / Lost** counts the Tracker's `Tracking -> RecentlyLost` and
+  `RecentlyLost -> Lost` transitions.
+- **GBA runs** are started / interrupted. No result was dropped or rejected
+  in any run.
+- **GBA s** are the completed runs, as (Frames, points) and seconds.
+- **Merge ms** is the Mapper's merge; the result event is the payload of the
+  pose and position vectors.
+- **RSS** is the peak resident set (`/usr/bin/time -v`).
+- **ATE** is by `tools/ate.py` (mono Sim3, stereo SE3) on the largest map,
+  shown as matched poses / poses. Mocap covers the room at the start and at
+  the end; a run whose map 1 was lost mid-run is measured on the start room
+  only (415–536 matched poses), so its ATE is **not comparable** with a
+  one-map run (917–1038).
+
+| Run | Maps | Loops corrected | RL / Lost | GBA runs | GBA (Frames, points): s | Merge ms | Result MB | RSS GB | Wall | ATE |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Mono, global BA, 1 | **2** | 4 | 4 / 1 | 4 / 0 | (461, 29.9k) 3.4; (592, 38.4k) 11.9; (1229, 78.2k) 28.2; map 2 (290, 17.4k) 4.2 | 6.7, 10.1, 17.8, 3.8 | 0.96, 1.23, 2.51, 0.56 | 2.24 | 9:59 | Sim3 0.034 m (415 / 4277, map 1) |
+| Mono, essential graph, 1 | 1 | 5 | 2 / 0 | – | – | – | – | 1.51 | 9:29 | Sim3 0.707 m (917 / 5834) |
+| Mono, global BA, 2 | **2** | 4 | 5 / 1 | 4 / **3** (after 15.1, 35.5, 16.7 s) | (899, 57.0k) 21.2 | 14.4 | 1.83 | 2.38 | 9:42 | Sim3 0.034 m (415 / 4516, map 1) |
+| Mono, essential graph, 2 | 1 | 6 | 4 / 0 | – | – | – | – | 1.47 | 9:33 | Sim3 0.645 m (917 / 5812) |
+| Stereo, global BA, 1 | 1 | 4 | 3 / 0 | 4 / 0 | (546, 36.2k) 5.0; (1160, 75.6k) 18.0; (1465, 91.9k) **82.5**; (1654, 103.1k) **85.2** | 13.0, 20.7, 30.1, 31.7 | 1.16, 2.42, 2.95, 3.31 | **4.23** | 19:37 | SE3 **18.68 m** (1038 / 5949) |
+| Stereo, essential graph, 1 | 1 | 10 | 4 / 0 | – | – | – | – | 2.28 | 18:46 | SE3 0.836 m (1038 / 5770) |
+| Stereo, global BA, 2 | **4** | 3 | 5 / 3 | 3 / 0 | (545, 36.1k) 4.8; (581, 37.7k) 12.4; map 4 (356, 22.8k) 3.3 | 10.5, 9.8, 7.7 | 1.15, 1.21, 0.73 | 1.56 | 18:32 | SE3 0.036 m (536 / 2220, map 1) |
+| Stereo, essential graph, 2 | 1 | 4 | 3 / 0 | – | – | – | – | 2.33 | 18:49 | SE3 0.768 m (1038 / 5943) |
+
+- **Musts met.** No run crashed (all exit 0), and **no tracking loss was
+  caused by a merge**:
+  - After every one of the 12 merges the Tracker followed the new epoch
+    ("last frame follows Frame …") and kept tracking. The nearest loss after
+    a merge (stereo 1, 2.8 s later) came 0.8 s after the *next* loop
+    correction, with the frames between merge and correction tracked at
+    284–392 inliers.
+  - Every loss that started a new map began 0.1–1.0 s after an
+    essential-graph correction (mono: 1504→1474 at scale 0.439, 1587→1371;
+    stereo 2: 763→151) or minutes after any merge (stereo 2, maps 2–3, which
+    never had a merge). Two merges landed while the Tracker was already
+    `RecentlyLost` (mono 1, stereo 2); relocalization failed before and after
+    them alike, and `Lost` came from the 5 s timeout.
+- **More maps with global BA, not explained.** Both mono runs with global BA
+  lost map 1, and so did stereo run 2 (4 maps), while the four
+  essential-graph-only runs kept one map. Each loss follows a
+  (mostly false, same-heading) loop correction, and which loops are detected
+  differs from run to run (thread timing; the essential-graph runs corrected
+  4–10 loops), so two runs per mode cannot separate the effect of global BA
+  from that variance. Not tuned; a hypothesis to check with step 6: global
+  BA makes the map consistent with a false loop's fused points, so the next
+  false correction leaves the Tracker fewer inliers.
+- **ATE:** no comparison is possible this round. Where global BA kept one map
+  (stereo 1), a false loop (1463→674 or 1895→1036, Frame ids 800 apart) left
+  SE3 18.68 m, as in the 2026-10-09 loop-closing smoke (18.16 m). The
+  essential-graph runs: mono 0.707 / 0.645 m, stereo 0.836 / 0.768 m. Same-
+  heading look-alikes still dominate (step 6).
+- **Global BA is long on corridor1:** 3.3–28.2 s completed in mono and up to
+  85.2 s in stereo (1654 Frames, 103k points), at 10 iterations; mono run 2
+  had 3 of 4 runs interrupted by the next correction after 15–35 s. An
+  interruption lands at the next LM iteration, up to about 6 s later on the
+  largest mono map. TODO: an iteration or size cap.
+- **Merge** 3.8–31.7 ms, growing with the map; the result event 0.56–3.31 MB
+  (about 32 bytes per point; the points dominate).
+- **Memory:** global BA raises the peak RSS from 2.28 / 2.33 to 4.23 GB in
+  stereo (one map, 1758 Frames) and from 1.51 / 1.47 to 2.24 / 2.38 GB in
+  mono: its replica (another full copy of the map with measurements) plus
+  the g2o problem of a full BA. TODO "Memory".
+- Mono run 1 with global BA overlapped Debug builds and tests during its
+  first 7 minutes, so its first three GBA times may be inflated; the other
+  seven runs ran alone.
+
 ## 7. Coding Conventions
 
 **Naming (Google C++ style):**
@@ -2442,6 +2667,20 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-10 | **User decision:** loop closing is **opt-in and off by default**. `LoopCloserOptions::enabled` defaults to false, so a `Slam` with a vocabulary detects no loops unless it is enabled; relocalization and BoW triangulation keep using the vocabulary. The apps' `--no_loop_closing` is replaced by an opt-in `--loop_closing`. The branch merges as "implemented, opt-in". | Fix-round-1 smoke (corridor1, with the normal gate): every run keeps one map, but each corrects at least one same-heading look-alike (7–30 m apart), and the ATE with loop closing is worse than without (mono Sim3 0.679 / 0.669 m against 0.341 / 0.500 m; stereo SE3 1.295 / 18.16 m against 0.098 / 0.138 m). On synthetic loops it works (end error 0.04–0.15 of the error without). Next: look-alike rejection as the first item of roadmap step 6 (TUM-VI tuning). |
 | 2026-10-10 | (Final-review fix wave, controller ruling on I1) The LoopCloser applies every `MapTransaction` on receipt (releasing it) and queues only the new Frames' ids; `ProcessPending()` detects one query per call; beyond `LoopCloserOptions::max_query_backlog` (8) the oldest queries are dropped, counted and logged. The Mapper never drops transactions and gets no back-pressure. A transaction raising the map epoch drops the pending region. A `LoopDetected` has priority unless a loop was already published at the replica's current epoch. | A lagging detector held the Mapper's pooled transactions (256) and `Create()` aborts on exhaustion; dropping queries only costs detections. One query per call makes `Stop()` prompt. A repeat found before its correction arrives would stop a local BA only for the Mapper to drop it. |
 | 2026-10-10 | The g2o recipe's version is `20241228.1` (upstream tag + recipe revision), bumped whenever the recipe changes what it builds. | `types_sim3` was added without a version change, so a cache holding the old package resolved and then lacked the component. |
+| 2026-10-10 | Global BA merge (roadmap step 4c, spec `2026-10-10-global-ba-design.md` section 3; `Mapper::MergeGlobalBa`): a `GlobalBAFinished` is merged only in `Mapping` state, of the current map and at the current epoch (else counted in `num_global_ba_rejected`). ORB-SLAM3's post-GBA block: a breadth-first walk of the spanning tree from its root, parents first; a Frame of the result takes its pose, another with a corrected parent `T_cur T_parent,cur^-1 T_parent,new`; an alive point of the result takes its position, another moves with its corrected reference Frame (`T_ref,new^-1 T_ref,cur X`). Unlike ORB-SLAM3's GBA block, the moved points' normals are recomputed, as in a loop correction. One `MapTransaction` at `map_epoch + 1`, never with a loop edge. | One more transaction every thread applies; the epoch makes the Tracker follow, and with no loop edge GlobalBA does not start another run on it. Normals follow the moved poses so the viewing-angle gates stay right. |
+| 2026-10-10 | Global BA wiring (spec `2026-10-10-global-ba-design.md` section 4): `Slam` takes `GlobalBaOptions` after `LoopCloserOptions` and holds the `GlobalBundleAdjuster` as a `std::optional`, created only when `LoopCloserOptions::enabled && GlobalBaOptions::enabled` (since Task 5 also a vocabulary: row below; `global_ba()` is null otherwise). Wired Mapper → GlobalBA and GlobalBA → Mapper; started after the Mapper and before the LoopCloser and Tracker, stopped in reverse. The apps take `--no_global_ba`. | With loop closing off (the default) nothing is created, so behaviour is unchanged; the flag compares the essential graph alone with it followed by global BA. |
+| 2026-10-10 | Global BA integration bars per mode (spec `2026-10-10-global-ba-design.md` section 5, controller ruling): stereo keeps points RMS ≤ 0.8× the essential-graph-only run and end error ≤ 1.0×. Mono, revised after measurement, is points RMS ≤ 0.95× per seed and ≤ 0.92× on average over seeds 1-3, and end error ≤ 1.05× per seed. Measured mono points ratios were 0.89 / 0.87 / 0.92 and end-error ratios 0.58 / 0.35 / 1.005. Stereo measured 0.41 / 0.48 / 0.44 and 0.76 / 0.67 / 0.18. | The 0.8× bar was an unmeasured guess. The mono RMS is dominated by low-parallax points of a sparse map, and global BA has converged (10 and 100 iterations give the same result), so for mono the bar is "no worse, and better on average". |
+| 2026-10-10 | **User decision:** the GlobalBA (roadmap step 4c, "Global BA") owns a replica fed by the Mapper's transactions **from the start of the run**; there is no late joining. A component either exists from the start or not at all. | A component starting mid-run would need a full-map snapshot to build its replica (serialization of the whole map); deferred (TODO). |
+| 2026-10-10 | **User decision:** components stay pluggable later through gRPC: GlobalBA talks to the Mapper only through events of plain data (`GlobalBAFinished`: ids, poses, positions; no pointers into map objects), like the LoopCloser. | An out-of-process transport needs only serialization, not a redesign (TODO). |
+| 2026-10-10 | (Global BA pre-flight ruling) `GlobalBaOptions` keeps its own `sigma_px` / `level_scale` with the `MapperOptions::fuse` defaults. | GlobalBA does not depend on `MapperOptions`; the cost is a third σ source to keep in sync (TODO "Two σ sources"). |
+| 2026-10-10 | (Global BA Task 1 ruling) Gauge: the oldest surviving Frame (index 0 of `keyframe_ids()`) is fixed even if it has no observations, in which case nothing is fixed in practice, as in ORB-SLAM3. | The Mapper culls point-less Frames, so the oldest Frame observes points; the cost is a free gauge in a pathological map. |
+| 2026-10-10 | (Global BA Task 1 ruling) The per-observation BA helpers (`BaStereoOf`, `BaObservationOf`) moved to `mapping::detail` (`mapper_internal.h`), shared by local and global BA. | No duplicated observation building; the cost is that `global_ba.cpp` includes a Mapper-private header. |
+| 2026-10-10 | (Global BA Task 2 rulings) First: `should_stop` popped waiting transactions into an owned backlog (moodycamel cannot peek), keeping their order. Superseded the same day by **apply-on-poll**: each poll drains the inbox, judges every transaction for interruption against the run's `(map_id, epoch)`, then applies it to the replica and so releases it. **Snapshot contract:** `RunGlobalBa` builds a self-contained problem before its first poll and never reads the replica again; the result carries the run's captured `(map_id, epoch)`. Spec section 1 amended. | Holding pooled transactions for a run (seconds on a large map, about 2 transactions per KeyFrame) exhausts the Mapper's pool of 256, which aborts (review: about 128 KeyFrames of Mapper output during a run). The cost: the replica is ahead of the result, which the merge handles through the epoch and the tree propagation. |
+| 2026-10-10 | (Global BA Task 2) Test-only seams on `GlobalBundleAdjuster`: `stop_requested()` (an atomic read, any thread), `set_run_hook()` and `set_poll_hook()` (called on the GlobalBA thread before each run and at each `should_stop` poll; set while the worker is stopped). | `StopInterruptsRunningBa` must see that `Stop()` set the flag (a test flag set before `Stop()` races with a BA finishing its 10 iterations); the poll hook injects transactions mid-run deterministically. |
+| 2026-10-10 | (Global BA Task 3 rulings) The merge recomputes the moved points' normals (ORB-SLAM3's GBA block does not), as our loop correction does; and a `GlobalBAFinished` is also rejected when the Mapper is not `Mapping` (a lost map with the same id and epoch), as `OnLoopDetected` does. | Consistency with step 4b; the normals follow the moved poses so the viewing-angle gates stay right. No cost beyond a little compute. |
+| 2026-10-10 | (Global BA final review, M4) A global-BA merge raises the map epoch, so it also drops the LoopCloser's pending region (deviation from ORB-SLAM3, which does not reset it). Also: `Publish` is skipped if `Stop()` was requested after the run's last poll, and the destructor requests a stop before joining. | The pending region's `S_last_world` is in pre-merge coordinates; the cost is that a partly confirmed loop restarts after each merge. A stopped adjuster publishes nothing, as its header says. |
+| 2026-10-10 | (Global BA Task 5, review minor) `Slam` creates the GlobalBA only with loop closing **in effect**: a vocabulary as well as `LoopCloserOptions::enabled` and `GlobalBaOptions::enabled`. The apps print "Global BA: on/off" from `slam.global_ba()`. Spec section 4 amended (there is no `SlamOptions`: `GlobalBaOptions` is a constructor parameter). | Without a vocabulary the LoopCloser never detects a loop, so a GlobalBA thread would only idle while the app printed "off"; now the printout and the object agree by construction. |
+| 2026-10-10 | Global BA smoke result (corridor1 full, Release, `--vocabulary --loop_closing`, two runs each with and without `--no_global_ba`; "Global BA"): no crash, and no tracking loss caused by a merge (every loss began 0.1–1.0 s after an essential-graph loop correction or long after any merge; the Musts are met). Global BA runs started: mono 4 and 4 (0 and 3 interrupted), completed in 3.4–28.2 s; stereo 4 and 3 (none interrupted), 3.3–85.2 s; merges 3.8–31.7 ms; results 0.56–3.31 MB; nothing dropped or rejected. Peak RSS: stereo 4.23 GB with against 2.28 / 2.33 GB without; mono 2.24 / 2.38 against 1.51 / 1.47 GB. Both mono runs and stereo run 2 with global BA lost map 1 after false-loop corrections (2, 2 and 4 maps) while the runs without kept one map: not separable from run-to-run loop variance with two runs, not tuned. ATE not comparable (map 1 only where it was lost; stereo run 1 SE3 18.68 m from a false loop; without: mono Sim3 0.707 / 0.645 m, stereo SE3 0.836 / 0.768 m). | Spec section 5 has no ATE Must: corridor1's false loops still dominate (step 6). |
 
 ## 9. Open Questions
 
@@ -2460,8 +2699,13 @@ branch → review → merge to `master`. Update this document at the end.
    to know (no ORB-SLAM3 `AcceptKeyFrames()`). The Mapper decides on Frames,
    drains `FrameTracked` to the latest per map and uses the skipped count as
    its backlog (backlog 0 = idle, `c1b`); see "Keyframes and Map Growth".
-5. **Global BA after loop closure:** runs inside the Mapper (blocks local mapping)
-   or in a Mapper-owned worker whose result the Mapper applies and publishes?
+5. ~~Global BA after loop closure~~ — answered 2026-10-10 (step 4c): neither
+   inside the Mapper nor in a Mapper-owned worker, but in its own component
+   (`GlobalBundleAdjuster`) with its own replica, fed by the Mapper's
+   transactions from the start. It publishes plain-data `GlobalBAFinished`,
+   which the Mapper (the only writer) merges as one `MapTransaction` at a new
+   epoch, propagating to Frames and points created meanwhile; local mapping
+   never waits. See "Global BA".
 6. ~~`LoopDetected` payload~~ — answered 2026-10-09: both map ids, both
    Frames, `S_query_match` and the matched point pairs; see §6 and "Loop
    Closing".
@@ -2663,6 +2907,15 @@ branch → review → merge to `master`. Update this document at the end.
   Closing"). The synthetic loop tests pass; the corridor1 smoke Musts are
   missed (same-heading look-alikes, roadmap step 6).
 
+- Global BA, roadmap step 4c (branch `feat/global-ba`, merge pending):
+  `RunGlobalBa` (ORB-SLAM3 `GlobalBundleAdjustemnt`, `bRobust = false`),
+  `GlobalBAFinished`, the `GlobalBundleAdjuster` thread with its own replica
+  (loop-edge trigger, apply-on-poll, interruption), the Mapper merge (tree
+  propagation, epoch + 1), `Slam` wiring and `--no_global_ba` (see "Global
+  BA"). Synthetic loops: points RMS 0.41–0.48× (stereo), 0.87–0.92× (mono)
+  of the essential graph's; corridor1 smoke Musts met, with long runs and
+  more memory (TODO).
+
 **Required follow-up:**
 - Decide `MapPointStorage` growth / compaction (Open Question 2); ids are
   append-only since 2026-10-05.
@@ -2673,10 +2926,11 @@ branch → review → merge to `master`. Update this document at the end.
   rounding). Building OpenCV from source to link against
   (in progress, user).
 - Tracker measurement policy (19).
-- Roadmap (`docs/ROADMAP.md`): global BA in its own thread (step 4c); relocalization into other maps
-  comes with map merging (step 5).
+- Roadmap (`docs/ROADMAP.md`): relocalization into other maps comes with
+  map merging (step 5).
 - Event pool lifetime (Open Question 25).
-- Test suite (2026-10-10): 649 tests (633 `unit`, 15 `integration`, 1
-  `vocabulary`); `check` about 5.5 s, `check_all` 17–25 s, set by
+- Test suite (2026-10-10, after global BA): 679 tests (660 `unit`, 18
+  `integration`, 1 `vocabulary`); `check_all` about 18 s, set by
   `SlamTest.MonoClosesLoop` (14–25 s: its lock-step runs are bursty, so the
-  time follows the CPU's frequency scaling).
+  time follows the CPU's frequency scaling) and the two
+  `*GlobalBaRefinesLoop` tests (about 16–17 s each, run in parallel).

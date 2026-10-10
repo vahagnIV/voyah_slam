@@ -106,7 +106,7 @@ struct MapTransaction
     std::vector<std::pair<map::FrameId, map::FrameId>> parent_changes;
     std::vector<std::pair<map::FrameId, map::FrameId>> added_loop_edges;
     // The map's correction epoch: 0 for a new map, incremented by every loop
-    // correction.
+    // correction and every global-BA merge.
     uint32_t map_epoch = 0;
 
     // Set the number of new / updated points in every column; allocate only

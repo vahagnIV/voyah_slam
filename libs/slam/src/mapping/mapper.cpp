@@ -125,6 +125,9 @@ void Mapper<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
         case events::EventType::LoopDetected:
             OnLoopDetected(static_cast<const events::LoopDetected&>(event));
             return;
+        case events::EventType::GlobalBAFinished:
+            OnGlobalBaFinished(static_cast<const events::GlobalBAFinished&>(event));
+            return;
         default:
             return;
     }

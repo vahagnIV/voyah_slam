@@ -11,12 +11,15 @@
 
 #include <gtest/gtest.h>
 
+#include <Eigen/Geometry>
+
 #include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <iterator>
+#include <map>
 #include <memory>
 #include <optional>
 #include <string>
@@ -129,6 +132,7 @@ public:
             if (transaction.map_epoch > map_epoch) {
                 map_epoch = transaction.map_epoch;
                 corrections.push_back(keyframes.size());
+                epoch_from_loop = !transaction.added_loop_edges.empty();
             } else if (!transaction.new_map) {
                 // A Frame's creation, or its refinement (local BA, culling).
                 ++(transaction.added_frames.empty() ? num_refinements : num_creations);
@@ -190,10 +194,14 @@ public:
     tracking::MapReplica<features::OrbFeatureExtractor> replica;
     // The LoopCloser's LoopDetected, copied (not pooled).
     std::vector<LoopRecord> loops;
-    // The latest transaction's map epoch; per loop correction (a transaction
-    // with a new epoch), the number of Frames added before it.
+    // The latest transaction's map epoch; per loop correction or global BA
+    // merge (a transaction with a new epoch), the number of Frames added
+    // before it.
     uint32_t map_epoch = 0;
     std::vector<size_t> corrections;
+    // Whether the latest epoch is a loop correction's (it adds a loop edge),
+    // not a global BA merge's.
+    bool epoch_from_loop = false;
     // Transactions creating a Frame, and refining around one.
     size_t num_creations = 0;
     size_t num_refinements = 0;
@@ -498,6 +506,14 @@ struct RunCounts {
     size_t tracked_before = 0;  // FrameTracked before the frames to track were fed
     size_t num_keyframes = 0;   // the Mapper's
     size_t num_map_points = 0;  // the Mapper's
+    bool has_global_ba = false;  // Slam::global_ba() is not null
+    // The GlobalBundleAdjuster's, if any.
+    size_t global_ba_runs_started = 0;
+    size_t global_ba_runs_interrupted = 0;
+    size_t global_ba_results_dropped = 0;
+    // The Mapper's GlobalBAFinished, merged and rejected.
+    size_t global_ba_merges = 0;
+    size_t global_ba_rejected = 0;
 };
 
 // Frames [begin, end] of a run arrive as measurements without features (a
@@ -523,13 +539,15 @@ struct RunSetup {
     std::shared_ptr<const OrbSlam::TMapper::TVocabulary> vocabulary;
     std::optional<Blackout> blackout;
     loop_closing::LoopCloserOptions loop_closer_options;
+    global_ba::GlobalBaOptions global_ba_options;
     // Each frame to track is fed once the previous one is tracked, the Mapper
     // has handled every FrameTracked so far and has refined around every Frame
     // it created (a Mapper that keeps up, as at camera rate). The Tracker and
     // the Mapper then no longer depend on thread timing; the LoopCloser is not
     // gated, so when its LoopDetected reaches the Mapper still does (in
-    // practice runs agree to four digits). Otherwise all at once, as fast as
-    // the Tracker goes.
+    // practice runs agree to four digits). With global BA, a loop correction's
+    // run is also awaited (merged) before the next frame, as a GlobalBA that
+    // keeps up. Otherwise all at once, as fast as the Tracker goes.
     bool lock_step = false;
 };
 
@@ -543,7 +561,8 @@ void RunSequence(const TSequence& sequence, size_t init_frames,
                  const mapping::MapperOptions& mapper_options, ProtocolRecorder& out_recorder,
                  RunCounts& out_counts, const RunSetup& setup = {}) {
     // Lifetimes as in EndToEndInitializeTrackLoseReinitialize.
-    OrbSlam slam(mapper_options, setup.tracker_options, setup.vocabulary, setup.loop_closer_options);
+    OrbSlam slam(mapper_options, setup.tracker_options, setup.vocabulary, setup.loop_closer_options,
+                 setup.global_ba_options);
     out_recorder.Attach(slam);
     struct StopAndDrain {
         OrbSlam& slam;
@@ -568,6 +587,29 @@ void RunSequence(const TSequence& sequence, size_t init_frames,
     const auto mapper_handled = [&] {
         return mapper.num_frame_evaluations() + mapper.backlog_skipped() + mapper.stale_epoch_skipped();
     };
+    // With global BA: until the latest loop correction's run is merged (a
+    // merge raises the epoch again), at most 60 s. A rejected result (the
+    // Mapper's count grows) or a timeout (e.g. a dropped result) ends the
+    // wait for that correction for good: it fails the test with the counts
+    // after the Slam stopped, rather than waiting 60 s per later frame.
+    std::optional<size_t> given_up_correction;  // its index in out_recorder.corrections
+    std::string given_up_reason;
+    const auto await_global_ba = [&] {
+        if (slam.global_ba() == nullptr || !out_recorder.epoch_from_loop) return;
+        const size_t correction = out_recorder.corrections.size() - 1;
+        if (given_up_correction == correction) return;
+        const size_t rejected_before = slam.mapper().num_global_ba_rejected();
+        const bool ended = out_recorder.WaitFor(
+            [&] {
+                return !out_recorder.epoch_from_loop || slam.mapper().num_global_ba_rejected() > rejected_before;
+            },
+            std::chrono::seconds(60));
+        // Still this correction's epoch: not merged.
+        if (out_recorder.epoch_from_loop && out_recorder.corrections.size() - 1 == correction) {
+            given_up_correction = correction;
+            given_up_reason = ended ? "a result was rejected" : "no merge within 60 s";
+        }
+    };
     for (size_t i = init_frames; i < sequence.frames.size(); ++i) {
         const auto& blackout = setup.blackout;
         if (blackout && i >= blackout->begin && i <= blackout->end) {
@@ -587,6 +629,7 @@ void RunSequence(const TSequence& sequence, size_t init_frames,
                 return mapper_handled() >= out_recorder.positions.size() &&
                        out_recorder.num_refinements >= out_recorder.num_creations;
             }));
+            await_global_ba();
         }
     }
     const size_t last = sequence.frames.size() - 1;
@@ -598,10 +641,27 @@ void RunSequence(const TSequence& sequence, size_t init_frames,
                     FrameIndexOf(out_recorder.positions.back().timestamp) == last);
         },
         std::chrono::seconds(120)));
+    // A correction after the last frame's gate.
+    await_global_ba();
     slam.Stop();
     out_recorder.Poll();
     out_counts.num_keyframes = slam.mapper().num_keyframes();
     out_counts.num_map_points = slam.mapper().num_map_points();
+    out_counts.global_ba_merges = slam.mapper().num_global_ba_merges();
+    out_counts.global_ba_rejected = slam.mapper().num_global_ba_rejected();
+    if (const auto* global_ba = slam.global_ba()) {
+        out_counts.has_global_ba = true;
+        out_counts.global_ba_runs_started = global_ba->num_runs_started();
+        out_counts.global_ba_runs_interrupted = global_ba->num_runs_interrupted();
+        out_counts.global_ba_results_dropped = global_ba->num_results_dropped();
+    }
+    if (given_up_correction) {
+        ADD_FAILURE() << "Global BA of loop correction " << *given_up_correction + 1 << " not merged: "
+                      << given_up_reason << " (runs started " << out_counts.global_ba_runs_started
+                      << ", interrupted " << out_counts.global_ba_runs_interrupted << ", results dropped "
+                      << out_counts.global_ba_results_dropped << "; merged " << out_counts.global_ba_merges
+                      << ", rejected " << out_counts.global_ba_rejected << ")";
+    }
 }
 
 // Runs RunSequence and expects map 1 only, no TrackingLost, more than the
@@ -852,25 +912,83 @@ struct LoopRun {
     size_t loop_frame = 0;   // the first loop's query Frame, as a frame index
     double loop_scale = 1.0;  // its Sim3 scale
     bool tracked_to_end = false;
+    // RMS distance of the final map's points to their true positions, in
+    // true units (PointsRmsError), and the number of points it covers.
+    double points_rms = 0.0;
+    size_t num_rms_points = 0;
+    RunCounts counts;
 };
+
+// How a loop run closes loops: not at all (the default options), by the
+// essential graph only (global BA disabled), or by the essential graph and
+// then global BA (the default GlobalBaOptions).
+enum class LoopMode { kOpen, kEssentialGraph, kGlobalBa };
+
+// The RMS distance, in true units, of the replica's alive points to their
+// true positions, after the transform that best aligns the two sets (Umeyama,
+// least squares): a similarity for a monocular map, rigid for a stereo one.
+// A point's true position is that of the scene point most of its observations
+// see; a point whose observations mostly see extras is skipped. Sets
+// `out_count` to the number of points used.
+template <typename TSequence>
+double PointsRmsError(const TSequence& sequence, const ProtocolRecorder& recorder, bool monocular,
+                      size_t& out_count) {
+    const auto& replica = recorder.replica;
+    // Per point id: the scene points its observations see, with their counts.
+    std::map<uint32_t, std::map<Eigen::Index, size_t>> votes;
+    for (const map::FrameId id : replica.keyframe_ids()) {
+        const auto* frame = replica.keyframe(id);
+        const double timestamp = std::visit([](const auto& m) { return m.timestamp(); }, frame->measurement);
+        const auto& point_of_feature = sequence.frames.at(FrameIndexOf(timestamp)).point_of_feature;
+        for (const auto& [feature, point] : frame->observations) {
+            if (replica.IsAlive(point)) ++votes[point.value][point_of_feature.at(feature)];
+        }
+    }
+    std::vector<std::pair<geometry::TPoint3DF, geometry::TPoint3DF>> pairs;  // (estimated, true)
+    for (const auto& [point, counts] : votes) {
+        const auto best = std::max_element(counts.begin(), counts.end(),
+                                           [](const auto& a, const auto& b) { return a.second < b.second; });
+        if (best->first < 0) continue;
+        pairs.emplace_back(replica.Position(map::MapPointId{point}), sequence.points_w.col(best->first));
+    }
+    out_count = pairs.size();
+    if (pairs.size() < 3) return 0.0;
+    Eigen::Matrix3Xd estimated(3, static_cast<Eigen::Index>(pairs.size()));
+    Eigen::Matrix3Xd truth(3, static_cast<Eigen::Index>(pairs.size()));
+    for (size_t i = 0; i < pairs.size(); ++i) {
+        estimated.col(static_cast<Eigen::Index>(i)) = pairs[i].first;
+        truth.col(static_cast<Eigen::Index>(i)) = pairs[i].second;
+    }
+    const Eigen::Matrix4d T_truth_estimated = Eigen::umeyama(estimated, truth, /*with_scaling=*/monocular);
+    const Eigen::Matrix3Xd aligned =
+        (T_truth_estimated.topLeftCorner<3, 3>() * estimated).colwise() + T_truth_estimated.topRightCorner<3, 1>();
+    return std::sqrt((aligned - truth).colwise().squaredNorm().mean());
+}
 
 constexpr size_t kEndFrames = 20;
 constexpr size_t kScaleSpan = 15;
 
 template <typename TSequence>
 LoopRun RunLoop(const TSequence& sequence, size_t init_frames, bool monocular,
-                const mapping::MapperOptions& mapper_options, bool loop_closing) {
+                const mapping::MapperOptions& mapper_options, LoopMode mode) {
     std::vector<geometry::RigidTransformation> truth;
     for (const auto& frame : sequence.frames) truth.push_back(frame.T_cw);
     // Without loop closing: the default options, which leave it off (opt-in)
-    // although the run has a vocabulary.
+    // although the run has a vocabulary, and global BA with it.
     loop_closing::LoopCloserOptions loop_closer_options;
-    if (loop_closing) loop_closer_options.enabled = true;
+    global_ba::GlobalBaOptions global_ba_options;
+    if (mode != LoopMode::kOpen) loop_closer_options.enabled = true;
+    if (mode == LoopMode::kEssentialGraph) global_ba_options.enabled = false;
     ProtocolRecorder recorder;
     RunCounts counts;
     RunSequence(sequence, init_frames, mapper_options, recorder, counts,
-                {.vocabulary = PlaceVocabulary(), .loop_closer_options = loop_closer_options, .lock_step = true});
+                {.vocabulary = PlaceVocabulary(),
+                 .loop_closer_options = loop_closer_options,
+                 .global_ba_options = global_ba_options,
+                 .lock_step = true});
     LoopRun run;
+    run.counts = counts;
+    run.points_rms = PointsRmsError(sequence, recorder, monocular, run.num_rms_points);
     run.num_loops = recorder.loops.size();
     run.num_corrections = recorder.corrections.size();
     run.num_lost = recorder.tracking_lost.size();
@@ -944,7 +1062,8 @@ LoopRun RunLoop(const TSequence& sequence, size_t init_frames, bool monocular,
 }
 
 // Runs `sequence` (a LoopOptions loop) without loop closing (the default
-// options: it is opt-in) and with it enabled, and expects: without, no
+// options: it is opt-in) and with it enabled, by the essential graph only
+// (global BA disabled), and expects: without, no
 // LoopDetected and tracking to the end; with, the loop detected
 // on the return to the first lap's view and corrected, one map, no tracking
 // loss across the correction (the Tracker follows a real Mapper correction),
@@ -957,13 +1076,18 @@ struct LoopRuns {
 template <typename TSequence>
 LoopRuns ExpectClosesLoop(const TSequence& sequence, uint32_t seed, size_t init_frames, bool monocular,
                           const mapping::MapperOptions& mapper_options) {
-    const LoopRun open = RunLoop(sequence, init_frames, monocular, mapper_options, /*loop_closing=*/false);
+    const LoopRun open = RunLoop(sequence, init_frames, monocular, mapper_options, LoopMode::kOpen);
     if (::testing::Test::HasFatalFailure()) return {};
-    const LoopRun closed = RunLoop(sequence, init_frames, monocular, mapper_options, /*loop_closing=*/true);
+    const LoopRun closed = RunLoop(sequence, init_frames, monocular, mapper_options, LoopMode::kEssentialGraph);
     if (::testing::Test::HasFatalFailure()) return {};
 
     EXPECT_EQ(open.num_loops, 0u);
     EXPECT_EQ(open.num_corrections, 0u);
+    // No global BA without loop closing (its default options), nor when disabled.
+    EXPECT_FALSE(open.counts.has_global_ba);
+    EXPECT_FALSE(closed.counts.has_global_ba);
+    EXPECT_EQ(open.counts.global_ba_merges + open.counts.global_ba_rejected, 0u);
+    EXPECT_EQ(closed.counts.global_ba_merges + closed.counts.global_ba_rejected, 0u);
     EXPECT_EQ(open.num_maps, 1u);
     EXPECT_EQ(open.num_lost, 0u);
     EXPECT_TRUE(open.tracked_to_end);
@@ -1039,6 +1163,135 @@ TEST(SlamTest, StereoClosesLoop) {
     mapping::MapperOptions mapper_options;
     mapper_options.initializer.stereo_min_features = 150;
     ExpectClosesLoop(sequence, options.trajectory.seed, /*init_frames=*/1, /*monocular=*/false, mapper_options);
+}
+
+// The GlobalBundleAdjuster exists only with loop closing in effect (a
+// vocabulary and LoopCloserOptions::enabled) and global BA enabled: not by
+// default (loop closing off), not with global BA disabled, not without a
+// vocabulary (no loop can be detected). That no GlobalBAFinished reaches the
+// Mapper over a whole run without one is checked by ExpectClosesLoop.
+TEST(SlamTest, GlobalBaCreatedOnlyWithLoopClosing) {
+    OrbSlam by_default;
+    EXPECT_EQ(by_default.global_ba(), nullptr);
+    OrbSlam global_ba_disabled({}, {}, PlaceVocabulary(), loop_closing::LoopCloserOptions{.enabled = true},
+                               global_ba::GlobalBaOptions{.enabled = false});
+    EXPECT_EQ(global_ba_disabled.global_ba(), nullptr);
+    OrbSlam no_vocabulary({}, {}, nullptr, loop_closing::LoopCloserOptions{.enabled = true});
+    EXPECT_EQ(no_vocabulary.global_ba(), nullptr);
+    OrbSlam loop_closing_on({}, {}, PlaceVocabulary(), loop_closing::LoopCloserOptions{.enabled = true});
+    EXPECT_NE(loop_closing_on.global_ba(), nullptr);
+    // Wired and started like the other components.
+    loop_closing_on.Start();
+    loop_closing_on.Stop();
+}
+
+// Runs `sequence` (a LoopOptions loop) with loop closing by the essential
+// graph only and with global BA after each correction, and expects global BA
+// to start and be merged, one map and no tracking loss across the merge, the
+// map points' RMS error against truth at most `max_points_ratio` times the
+// essential graph's and the end error at most `max_end_ratio` times its
+// (spec section 5). Records the numbers under `seed`; returns the points RMS
+// ratio (global BA over essential graph), 0 if a run failed fatally.
+template <typename TSequence>
+double ExpectGlobalBaRefinesLoop(const TSequence& sequence, uint32_t seed, size_t init_frames, bool monocular,
+                                 const mapping::MapperOptions& mapper_options, double max_points_ratio,
+                                 double max_end_ratio) {
+    const LoopRun essential = RunLoop(sequence, init_frames, monocular, mapper_options, LoopMode::kEssentialGraph);
+    if (::testing::Test::HasFatalFailure()) return 0.0;
+    const LoopRun refined = RunLoop(sequence, init_frames, monocular, mapper_options, LoopMode::kGlobalBa);
+    if (::testing::Test::HasFatalFailure()) return 0.0;
+
+    EXPECT_FALSE(essential.counts.has_global_ba);
+    EXPECT_GE(essential.num_corrections, 1u);
+    // A sound baseline: a second map or a loss would inflate its errors.
+    EXPECT_EQ(essential.num_maps, 1u);
+    EXPECT_EQ(essential.num_lost, 0u);
+    EXPECT_TRUE(essential.tracked_to_end);
+    EXPECT_TRUE(refined.counts.has_global_ba);
+    EXPECT_GE(refined.num_loops, 1u);
+    EXPECT_GE(refined.counts.global_ba_runs_started, 1u);
+    EXPECT_GE(refined.counts.global_ba_merges, 1u);
+    EXPECT_EQ(refined.num_maps, 1u);
+    EXPECT_EQ(refined.num_lost, 0u);
+    EXPECT_TRUE(refined.tracked_to_end);
+    // Both errors are measured.
+    EXPECT_GE(essential.num_end_pairs, kEndFrames / 2);
+    EXPECT_GE(refined.num_end_pairs, kEndFrames / 2);
+    EXPECT_GE(essential.num_rms_points, 100u);
+    EXPECT_GE(refined.num_rms_points, 100u);
+    EXPECT_GT(essential.points_rms, 0.0);
+    EXPECT_LE(refined.points_rms, max_points_ratio * essential.points_rms);
+    EXPECT_LE(refined.end_error, max_end_ratio * essential.end_error);
+
+    const std::string prefix = "seed_" + std::to_string(seed) + "_";
+    const auto record = [&](const std::string& key, const auto& value) {
+        ::testing::Test::RecordProperty(prefix + key, std::to_string(value));
+    };
+    record("points_rms_essential_m", essential.points_rms);
+    record("points_rms_global_ba_m", refined.points_rms);
+    record("end_error_essential_m", essential.end_error);
+    record("end_error_global_ba_m", refined.end_error);
+    record("num_rms_points_essential", essential.num_rms_points);
+    record("num_rms_points_global_ba", refined.num_rms_points);
+    record("loops_global_ba", refined.num_loops);
+    record("global_ba_runs_started", refined.counts.global_ba_runs_started);
+    record("global_ba_runs_interrupted", refined.counts.global_ba_runs_interrupted);
+    record("global_ba_results_dropped", refined.counts.global_ba_results_dropped);
+    record("global_ba_merges", refined.counts.global_ba_merges);
+    record("global_ba_rejected", refined.counts.global_ba_rejected);
+    return essential.points_rms > 0.0 ? refined.points_rms / essential.points_rms : 0.0;
+}
+
+// Seeds 1-3 of MonoClosesLoop's loop. Mono bars (spec section 5, revised
+// after measurement): points RMS <= 0.95x the essential graph's per seed and
+// <= 0.92x on average, end error <= 1.05x per seed. The RMS is dominated by
+// low-parallax points of a 15-16 Frame map and global BA has converged (10
+// and 100 iterations give the same result).
+//
+// Measured (2026-10-10; points RMS essential graph / global BA, end error
+// essential graph / global BA): seed 1 0.0734 / 0.0652 m (0.89x), 0.0101 /
+// 0.0058 m; seed 2 0.0770 / 0.0673 m (0.87x), 0.0157 / 0.0055 m; seed 3
+// 0.0789 / 0.0727 m (0.92x), 0.00601 / 0.00604 m (1.005x). Mean points ratio
+// 0.894.
+TEST(SlamTest, MonoGlobalBaRefinesLoop) {
+    mapping::MapperOptions mapper_options;
+    mapper_options.initializer.reconstruction.min_parallax_deg = 4.0;  // as MonoClosesLoop
+    constexpr uint32_t kNumSeeds = 3;
+    double ratio_sum = 0.0;
+    for (uint32_t seed = 1; seed <= kNumSeeds; ++seed) {
+        SCOPED_TRACE("seed " + std::to_string(seed));
+        test::SyntheticSequenceOptions options = LoopOptions();
+        options.seed = seed;
+        ratio_sum += ExpectGlobalBaRefinesLoop(test::MakeSyntheticSequence(options), seed, /*init_frames=*/30,
+                                               /*monocular=*/true, mapper_options, /*max_points_ratio=*/0.95,
+                                               /*max_end_ratio=*/1.05);
+        if (HasFatalFailure()) return;
+    }
+    const double mean_ratio = ratio_sum / kNumSeeds;
+    RecordProperty("mean_points_rms_ratio", std::to_string(mean_ratio));
+    EXPECT_LE(mean_ratio, 0.92);
+}
+
+// Seeds 1-3 of StereoClosesLoop's loop. Stereo bars (spec section 5): points
+// RMS <= 0.8x the essential graph's, end error no worse. Measured
+// (2026-10-10; points RMS essential graph / global BA, end error essential
+// graph / global BA): seed 1 0.0705 / 0.0290 m (0.41x), 0.0023 / 0.0018 m;
+// seed 2 0.0713 / 0.0339 m (0.48x), 0.0043 / 0.0029 m; seed 3 0.0782 /
+// 0.0341 m (0.44x), 0.0115 / 0.0021 m.
+TEST(SlamTest, StereoGlobalBaRefinesLoop) {
+    mapping::MapperOptions mapper_options;
+    mapper_options.initializer.stereo_min_features = 150;  // as StereoClosesLoop
+    for (uint32_t seed = 1; seed <= 3; ++seed) {
+        SCOPED_TRACE("seed " + std::to_string(seed));
+        test::SyntheticStereoSequenceOptions options;
+        options.trajectory = LoopOptions();
+        options.trajectory.num_points = 700;
+        options.trajectory.seed = seed;
+        ExpectGlobalBaRefinesLoop(test::MakeSyntheticStereoSequence(options), seed, /*init_frames=*/1,
+                                  /*monocular=*/false, mapper_options, /*max_points_ratio=*/0.8,
+                                  /*max_end_ratio=*/1.0);
+        if (HasFatalFailure()) return;
+    }
 }
 
 } // namespace

@@ -8,7 +8,8 @@ keyframes and map growth (sub-project 2, merged b93fcf4), restructure
 (step 0, merged 7426697), map quality (step 1, merged 9da7081), own DBoW2
 (step 2, merged 6fb863a), relocalization (step 3, merged 6afacc7), loop
 detection and correction (step 4a+4b: implemented (opt-in, off by default),
-merged 2026-10-10; corridor1 Musts missed → step 6).
+merged 2026-10-10; corridor1 Musts missed → step 6), global BA (step 4c,
+done 2026-10-10 on branch `feat/global-ba`).
 
 ## 0. Restructure (done 2026-10-07)
 
@@ -171,11 +172,35 @@ item of step 6.
 
 Spec: `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; see
 DESIGN "Loop Closing" and the 2026-10-09 / 2026-10-10 decisions-log entries. Out of scope
-and in TODO: global BA (4c), map merging (step 5), scale without IMU.
+and in TODO: map merging (step 5), scale without IMU; global BA is 4c below.
 
-### 4c. Global BA
+### 4c. Global BA (done 2026-10-10, branch `feat/global-ba`)
 
-In its own thread after a correction (local BA stays in the Mapper; TODO).
+**Result:** ORB-SLAM3's global BA (10 iterations, no robust kernel) runs
+after each loop correction in its own component, `GlobalBundleAdjuster`, on
+its own replica fed from the start (user decision: no late joining; pluggable
+later through gRPC). A newer correction or a new map interrupts a run; the
+Mapper merges the plain-data `GlobalBAFinished` as one transaction at a new
+epoch, propagating through the spanning tree to Frames and points created
+during the run. It exists only with loop closing (opt-in) and is on by
+default with it; `--no_global_ba` turns it off.
+
+Synthetic loops (integration, seeds 1–3): the map points' RMS error against
+truth is 0.41–0.48× the essential graph's in stereo and 0.87–0.92× in mono
+(mono bar revised after measurement), with no tracking loss.
+
+Smoke on corridor1 (full, Release, `--vocabulary --loop_closing`, two runs
+each with and without `--no_global_ba`): no crash and no tracking loss
+caused by a merge (Musts met). Runs take 3–28 s in mono and up to 85 s in
+stereo, merges 4–32 ms, results 0.6–3.3 MB; peak RSS 4.23 GB in stereo
+against 2.3 GB without. Three of the four runs with global BA lost map 1
+after a false-loop correction, against none without (two runs per mode:
+not separable from loop variance); the ATE is not comparable this round and
+false loops still dominate (step 6). Open items in TODO "Global BA": an
+iteration or size cap, memory, late joining, serialization.
+
+Spec: `docs/superpowers/specs/2026-10-10-global-ba-design.md`; see DESIGN
+"Global BA".
 
 ## 5. Map merging (multi-map Atlas)
 

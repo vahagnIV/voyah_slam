@@ -50,6 +50,9 @@ struct Options {
     // Loop closing (opt-in; needs the vocabulary, which serves relocalization
     // either way).
     bool loop_closing = false;
+    // Global BA after each loop correction (on with loop closing; the flag
+    // compares the essential graph alone with it followed by global BA).
+    bool global_ba = true;
     // Frames fed as measurements without features, at their own timestamps
     // (a simulated camera blackout); empty: none.
     std::optional<FrameRange> drop_frames;
@@ -75,12 +78,12 @@ inline std::optional<FrameRange> ParseFrameRange(const std::string& text) {
 
 // Usage: <program> <dataset_root> [--rate=R] [--max-frames=N] [--show] [--viewer]
 //                  [--trajectory_out <file>] [--vocabulary <file.bin>] [--loop_closing]
-//                  [--drop_frames a:b]
+//                  [--no_global_ba] [--drop_frames a:b]
 inline Options ParseOptions(int argc, char** argv) {
     auto usage = [argv]() {
         std::cerr << "Usage: " << argv[0] << " <dataset_root> [--rate=R] [--max-frames=N] [--show] [--viewer]"
                   << " [--trajectory_out <file>] [--vocabulary <file.bin>] [--loop_closing]"
-                  << " [--drop_frames a:b]\n"
+                  << " [--no_global_ba] [--drop_frames a:b]\n"
                   << "  --rate=R                  playback speed (1 = real time, 0 = as fast as possible)\n"
                   << "  --max-frames=N            stop after N frames\n"
                   << "  --show                    show frames with keypoints (q / Esc to quit)\n"
@@ -88,6 +91,7 @@ inline Options ParseOptions(int argc, char** argv) {
                   << "  --trajectory_out <file>   write tracked poses (TUM format, camera-to-world)\n"
                   << "  --vocabulary <file.bin>   bag-of-words vocabulary (binary, see convert_vocabulary)\n"
                   << "  --loop_closing            enable loop closing (needs --vocabulary; off by default)\n"
+                  << "  --no_global_ba            no global BA after a loop correction (essential graph only)\n"
                   << "  --drop_frames a:b         feed frames a..b (inclusive, 0-based) without features\n";
         std::exit(EXIT_FAILURE);
     };
@@ -112,6 +116,8 @@ inline Options ParseOptions(int argc, char** argv) {
             options.vocabulary = arg.substr(13);
         } else if (arg == "--loop_closing") {
             options.loop_closing = true;
+        } else if (arg == "--no_global_ba") {
+            options.global_ba = false;
         } else if (arg == "--drop_frames" || arg.rfind("--drop_frames=", 0) == 0) {
             if (arg == "--drop_frames" && i + 1 >= argc) usage();
             options.drop_frames = ParseFrameRange(arg == "--drop_frames" ? argv[++i] : arg.substr(14));

@@ -129,7 +129,7 @@ struct TrackerOptions {
 // observations into the last frame's matches, so the next motion-model search
 // uses the Mapper's new points at once. Then the last frame's matches follow
 // the transaction's replaced points (loser -> winner) and drop its removed
-// points. A loop correction (a transaction raising the map epoch) moves the
+// points. A loop correction or a global-BA merge (a transaction raising the map epoch) moves the
 // world under the last frame: while Tracking, the last frame keeps its pose
 // relative to its reference Frame, T_last <- T_last * T_ref_old^-1 *
 // T_ref_new (loop-closing spec section 3), or, if the reference Frame is gone,

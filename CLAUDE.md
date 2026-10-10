@@ -26,8 +26,8 @@ lower layer cannot include an upper one (DESIGN §7 "Library layout").
 
 Build and test (`cmake` from the CLion bundle or any CMake >= 3.23):
 - Debug: `cmake --build cmake-build-debug/build/Debug -j8`
-- Fast loop (633 unit tests, 4.5 s plus the build): `cmake --build cmake-build-debug/build/Debug --target check`
-- Every test (end of a task, before a merge; about 16 s): `cmake --build cmake-build-debug/build/Debug --target check_all`
-  (649 tests, labels `unit` + `integration`). Both run in the Debug tree with `VOYAHSLAM_OPTIMIZE_TESTS=ON`
+- Fast loop (661 unit tests, about 5 s plus the build): `cmake --build cmake-build-debug/build/Debug --target check`
+- Every test (end of a task, before a merge; about 20 s): `cmake --build cmake-build-debug/build/Debug --target check_all`
+  (680 tests, labels `unit` + `integration`). Both run in the Debug tree with `VOYAHSLAM_OPTIMIZE_TESTS=ON`
   (default: `-O2 -g`, asserts on); turn it off to step through code in a debugger.
 - Release: `cmake --build build/build/Release -j8` (apps in `examples/full_slam/`).

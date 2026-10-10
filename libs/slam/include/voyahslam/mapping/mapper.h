@@ -15,6 +15,7 @@
 #include <voyahslam/events/event_node.h>
 #include <voyahslam/events/event_types.h>
 #include <voyahslam/events/frame_tracked.h>
+#include <voyahslam/events/global_ba_finished.h>
 #include <voyahslam/events/initialization_measurement.h>
 #include <voyahslam/events/loop_detected.h>
 #include <voyahslam/events/map_transaction.h>
@@ -120,9 +121,14 @@ enum class MapperState : uint8_t {
 // and match Frames get a loop edge; all of it is one MapTransaction at the
 // next correction epoch. A LoopDetected of another map, naming a culled Frame
 // or a loop already closed is ignored. A FrameTracked of an older epoch (the
-// Tracker had not seen the correction) creates no Frame; its points are
-// counted. Runs on its own thread; each ProcessPending() pass drains the
-// inbox.
+// Tracker had not seen the correction or the global-BA merge) creates no Frame; its points are
+// counted. A GlobalBAFinished of the current map at the current epoch is
+// merged (ORB-SLAM3's post-GBA block in LoopClosing::RunGlobalBundleAdjustment,
+// global-BA spec section 3): the optimized Frames and points take their
+// results, the rest follow through the spanning tree, all of it one
+// MapTransaction at the next correction epoch without loop edges; one of
+// another map or epoch is ignored. Runs on its own thread; each
+// ProcessPending() pass drains the inbox.
 //
 // The map graph (loop-closing spec section 1), published in the
 // transactions: each Frame but the map's first has a parent in a spanning
@@ -191,6 +197,14 @@ public:
     [[nodiscard]] size_t stale_epoch_skipped() const {
         return stale_epoch_skipped_.load(std::memory_order_acquire);
     }
+    // GlobalBAFinished events merged, and ignored because they were of
+    // another map or another correction epoch, or came with no map.
+    [[nodiscard]] size_t num_global_ba_merges() const {
+        return num_global_ba_merges_.load(std::memory_order_acquire);
+    }
+    [[nodiscard]] size_t num_global_ba_rejected() const {
+        return num_global_ba_rejected_.load(std::memory_order_acquire);
+    }
 
     // The current map's observations. Mapper thread (or a test driving
     // ProcessPending synchronously) only.
@@ -253,6 +267,9 @@ private:
     void OnFrameTracked(const events::FrameTracked<TFeatureExtractor>& event);
     void OnTrackingLost(const events::TrackingLost& event);
     void OnLoopDetected(const events::LoopDetected& event);
+    // Ignores a result of another map, of an older correction epoch, or
+    // without a map; merges the others (MergeGlobalBa).
+    void OnGlobalBaFinished(const events::GlobalBAFinished& event);
     void SetState(MapperState state);
     // Empties the current map (Frames, points, observations).
     void ClearMap();
@@ -511,6 +528,20 @@ private:
     // and written to `out_event`.
     void FinishCorrection(events::MapTransaction<TFeatureExtractor>& out_event);
 
+    // Global BA merge (mapper_global_ba.cpp; global-BA spec section 3).
+
+    // ORB-SLAM3's post-GBA block: walking the spanning tree from its root,
+    // parents first, a Frame in `frame_poses` (T_cw) takes its optimized
+    // pose, another with a corrected parent keeps its pose relative to it,
+    // T_new = T_cur T_parent,cur^-1 T_parent,new. An alive point in
+    // `point_positions` takes its optimized position; another moves with its
+    // reference Frame, if that was corrected, X_new = T_ref,new^-1 T_ref,cur X.
+    // Culled Frames and removed points are skipped. Published as one
+    // MapTransaction at the next correction epoch, with no loop edge. Map
+    // merging (step 5) reuses it.
+    void MergeGlobalBa(const std::vector<std::pair<map::FrameId, geometry::RigidTransformation>>& frame_poses,
+                       const std::vector<std::pair<map::MapPointId, geometry::TPoint3DF>>& point_positions);
+
     // `frame`'s side of a triangulation, with `has_point` per feature.
     [[nodiscard]] TriangulationView<TFeatureExtractor> ViewOf(const TKeyFrame& frame,
                                                               std::vector<bool> has_point) const;
@@ -549,6 +580,8 @@ private:
     std::atomic<size_t> num_frame_evaluations_{0};
     std::atomic<size_t> backlog_skipped_{0};
     std::atomic<size_t> stale_epoch_skipped_{0};
+    std::atomic<size_t> num_global_ba_merges_{0};
+    std::atomic<size_t> num_global_ba_rejected_{0};
 
     std::atomic<MapperState> state_{MapperState::Initializing};
     std::atomic<map::MapId> current_map_id_{map::MapId{0}};
