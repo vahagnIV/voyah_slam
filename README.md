@@ -50,8 +50,8 @@ CMake finds them as `OpenCV 5` (`/usr/local/lib/cmake/opencv5`) and `Pangolin 0.
 ## One-time: package g2o with Conan
 
 g2o 20241228 is vendored in `third_party/g2o/src/` and packaged by a local recipe as
-`g2o/20241228@voyah/stable`. It must be in your local Conan cache before the project's
-`conan install`, otherwise Conan fails with `ERROR: Package 'g2o/20241228@voyah/stable' not resolved: Unable to find 'g2o/20241228@voyah/stable' in remotes.`
+`g2o/20241228.1@voyah/stable` (upstream tag 20241228, recipe revision `.1`). It must be in your local Conan cache before the project's
+`conan install`, otherwise Conan fails with `ERROR: Package 'g2o/20241228.1@voyah/stable' not resolved: Unable to find 'g2o/20241228.1@voyah/stable' in remotes.`
 Create both build types (about two minutes each):
 
 ```
@@ -61,6 +61,11 @@ conan create third_party/g2o --build=missing -s build_type=Release
 
 See `third_party/README.md` for details (license, options, updating).
 
+**Loop closing (2026-10-09) added the `types_sim3` component** to the recipe,
+whose version became `20241228.1` (2026-10-10). A machine with only the old
+`g2o/20241228` package gets the "not resolved" error above: run both
+`conan create` commands, then the project's `conan install` for each build type.
+
 ## Build and test
 
 Debug (tree `cmake-build-debug/build/Debug`):
@@ -69,8 +74,8 @@ Debug (tree `cmake-build-debug/build/Debug`):
 conan install . --output-folder=cmake-build-debug --build=missing -s build_type=Debug
 cmake --preset conan-debug
 cmake --build cmake-build-debug/build/Debug -j"$(nproc)"
-cmake --build cmake-build-debug/build/Debug --target check       # unit tests (521, ~2 s)
-cmake --build cmake-build-debug/build/Debug --target check_all   # every test (533, ~2.6 s)
+cmake --build cmake-build-debug/build/Debug --target check       # unit tests (633, ~5.5 s)
+cmake --build cmake-build-debug/build/Debug --target check_all   # every test (649, 17-25 s)
 ```
 
 `check` runs `ctest -L unit`, `check_all` runs every label (`unit`, `integration`, `vocabulary`); both build the
@@ -110,6 +115,10 @@ build/build/Release/examples/full_slam/binocular_full_slam <dataset_root> [optio
   <file> <dataset_root>/mav0/mocap0/data.csv` reports the ATE against the mocap
 - `--vocabulary <file.bin>`: bag-of-words vocabulary in our binary format (see below); without it
   the Mapper matches by brute force when triangulating, which is much slower
+- `--loop_closing`: enable loop closing (needs `--vocabulary`). Off by default: it works on
+  synthetic loops and nearby revisits, but on TUM-VI corridor1 same-heading look-alikes make the
+  ATE worse (see `docs/DESIGN.md` "Loop Closing"; tuning is roadmap step 6)
+- `--drop_frames a:b`: feed frames a..b (inclusive, 0-based) without features (a simulated blackout)
 
 ### Vocabulary (ORB-SLAM3's `ORBvoc.txt`)
 

@@ -15,6 +15,7 @@ add_library(voyah_algs STATIC
     src/features/sift_feature_extractor.cpp
     src/geometry/geometry.cpp
     src/geometry/pnp.cpp
+    src/geometry/sim3_solver.cpp
     src/geometry/two_view_decomposition.cpp
     src/geometry/two_view_reconstruction.cpp
     src/io/read_image.cpp
@@ -22,7 +23,9 @@ add_library(voyah_algs STATIC
     src/mapping/keyframe_decision.cpp
     src/mapping/map_quality.cpp
     src/optimization/bundle_adjustment.cpp
+    src/optimization/essential_graph.cpp
     src/optimization/pose_optimization.cpp
+    src/optimization/sim3_optimization.cpp
 )
 
 voyah_optimize_target(voyah_algs)
@@ -38,7 +41,7 @@ target_link_libraries(voyah_algs
     PRIVATE opencv_core
     PRIVATE opencv_imgproc
     PRIVATE opencv_features
-    PRIVATE g2o::core g2o::stuff g2o::types_sba g2o::types_slam3d g2o::solver_eigen
+    PRIVATE g2o::core g2o::stuff g2o::types_sba g2o::types_sim3 g2o::types_slam3d g2o::solver_eigen
 )
 
 add_subdirectory(tests)

@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <limits>
 #include <optional>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -98,9 +99,17 @@ void Mapper<TFeatureExtractor>::Fuse(const TKeyFrame& keyframe,
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::FuseInto(const TKeyFrame& frame,
                                          const std::vector<map::MapPointId>& points,
-                                         events::MapTransaction<TFeatureExtractor>& out_event) {
+                                         events::MapTransaction<TFeatureExtractor>& out_event, bool loop) {
     if (points.empty()) {
         return;
+    }
+    // ORB-SLAM3 ORBmatcher::Fuse with a Sim3: radius th x scale factor, no
+    // reprojection chi2, the left image only.
+    features::FuseOptions options = options_.fuse;
+    if (loop) {
+        options.radius_factor = options_.loop.fuse_radius;
+        options.chi2_mono = std::numeric_limits<double>::infinity();
+        options.chi2_stereo = std::numeric_limits<double>::infinity();
     }
     std::vector<features::FuseCandidatePoint<TFeatureExtractor>> candidates;
     candidates.reserve(points.size());
@@ -110,7 +119,8 @@ void Mapper<TFeatureExtractor>::FuseInto(const TKeyFrame& frame,
                               map_points_.Descriptor(point), *references_[point.value]});
     }
     std::optional<features::StereoView> stereo;
-    if (const auto* binocular = detail::BinocularOf<TFeatureExtractor>(frame.measurement())) {
+    const auto* binocular = loop ? nullptr : detail::BinocularOf<TFeatureExtractor>(frame.measurement());
+    if (binocular != nullptr) {
         stereo = features::StereoView{&binocular->right().distorted_points(),
                                       &binocular->right_indices(),
                                       {binocular->right().camera(), binocular->rig().T_rl}};
@@ -118,7 +128,7 @@ void Mapper<TFeatureExtractor>::FuseInto(const TKeyFrame& frame,
     std::vector<std::optional<map::MapPointId>> feature_points = FeaturePoints(frame);
     const std::vector<features::FuseDecision> decisions = features::FuseMatches<TFeatureExtractor>(
         detail::LeftOf<TFeatureExtractor>(frame.measurement()), frame.pose(), stereo, feature_points,
-        candidates, options_.fuse);
+        candidates, options);
 
     for (const features::FuseDecision& decision : decisions) {
         // A point merged away or removed since the candidates were taken is
@@ -138,7 +148,10 @@ void Mapper<TFeatureExtractor>::FuseInto(const TKeyFrame& frame,
                 existing.reset();
             }
         }
-        if (existing) {
+        if (existing && loop) {
+            Replace(*existing, point, out_event);
+            existing = point;
+        } else if (existing) {
             existing = Merge(point, *existing, out_event);
         } else {
             AddObservation(frame, decision.feature, point, out_event);
@@ -157,7 +170,14 @@ map::MapPointId Mapper<TFeatureExtractor>::Merge(map::MapPointId a, map::MapPoin
     const bool a_wins = weight_a > weight_b || (weight_a == weight_b && a < b);
     const map::MapPointId winner = a_wins ? a : b;
     const map::MapPointId loser = a_wins ? b : a;
+    Replace(loser, winner, out_event);
+    return winner;
+}
 
+template <typename TFeatureExtractor>
+void Mapper<TFeatureExtractor>::Replace(map::MapPointId loser, map::MapPointId winner,
+                                        events::MapTransaction<TFeatureExtractor>& out_event) {
+    assert(loser != winner);
     // A copy: the loop changes the loser's observations.
     const std::vector<map::PointObservation> observations = covisibility_.Observations(loser);
     for (const map::PointObservation& observation : observations) {
@@ -176,7 +196,6 @@ map::MapPointId Mapper<TFeatureExtractor>::Merge(map::MapPointId a, map::MapPoin
     replaced_[loser.value] = winner;
     losers_.push_back(loser);
     touched_.push_back(winner);
-    return winner;
 }
 
 template <typename TFeatureExtractor>
@@ -212,34 +231,7 @@ std::vector<std::optional<map::MapPointId>> Mapper<TFeatureExtractor>::FeaturePo
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::FinishTransaction(
     map::MapPointId first_new, events::MapTransaction<TFeatureExtractor>& out_event) {
-    // An observation record is kept, with its point resolved to the final
-    // winner, iff that point is alive and observed through the record's
-    // feature; once per (Frame, point).
-    std::unordered_set<uint64_t> kept;
-    const auto keep = [&](map::FrameId frame, uint32_t feature, map::MapPointId& point) {
-        point = Resolve(point);
-        return map_points_.IsValid(point) && FeatureOf(frame, point) == feature &&
-               kept.insert(detail::ObservationKey(frame, point)).second;
-    };
-    events::NewFrame<TFeatureExtractor>& part = out_event.added_frames.back();
-    size_t count = 0;
-    for (size_t i = 0; i < part.observed_points.size(); ++i) {
-        map::MapPointId point = part.observed_points[i];
-        if (keep(part.id, part.observed_features[i], point)) {
-            part.observed_features[count] = part.observed_features[i];
-            part.observed_points[count] = point;
-            ++count;
-        }
-    }
-    part.observed_features.resize(count);
-    part.observed_points.resize(count);
-    std::erase_if(out_event.added_observations, [&](events::TransactionObservation& added) {
-        return !keep(added.frame, added.feature, added.point);
-    });
-
-    for (const map::MapPointId loser : losers_) {
-        out_event.replaced_points.push_back({loser, Resolve(loser)});
-    }
+    ResolveObservationRecords(out_event);
 
     // The points whose observations changed, once each, alive.
     std::vector<map::MapPointId> updated;
@@ -253,14 +245,7 @@ void Mapper<TFeatureExtractor>::FinishTransaction(
             }
         }
     }
-    out_event.ResizeUpdatedPoints(static_cast<uint32_t>(updated.size()));
-    for (size_t i = 0; i < updated.size(); ++i) {
-        const auto col = static_cast<Eigen::Index>(i);
-        out_event.updated_ids[i] = updated[i];
-        out_event.updated_positions.col(col) = map_points_.Position(updated[i]);
-        out_event.updated_normals.col(col) = map_points_.Normal(updated[i]);
-        out_event.updated_descriptors.col(col) = map_points_.Descriptor(updated[i]);
-    }
+    WriteUpdatedPoints(updated, out_event);
 
     // Every new id, merged away or not: the range is contiguous.
     const uint32_t num_new = map_points_.num_ids() - first_new.value;
@@ -274,11 +259,56 @@ void Mapper<TFeatureExtractor>::FinishTransaction(
 }
 
 template <typename TFeatureExtractor>
+void Mapper<TFeatureExtractor>::ResolveObservationRecords(
+    events::MapTransaction<TFeatureExtractor>& out_event) {
+    // An observation record is kept, with its point resolved to the final
+    // winner, iff that point is alive and observed through the record's
+    // feature; once per (Frame, point).
+    std::unordered_set<uint64_t> kept;
+    const auto keep = [&](map::FrameId frame, uint32_t feature, map::MapPointId& point) {
+        point = Resolve(point);
+        return map_points_.IsValid(point) && FeatureOf(frame, point) == feature &&
+               kept.insert(detail::ObservationKey(frame, point)).second;
+    };
+    for (events::NewFrame<TFeatureExtractor>& part : out_event.added_frames) {
+        size_t count = 0;
+        for (size_t i = 0; i < part.observed_points.size(); ++i) {
+            map::MapPointId point = part.observed_points[i];
+            if (keep(part.id, part.observed_features[i], point)) {
+                part.observed_features[count] = part.observed_features[i];
+                part.observed_points[count] = point;
+                ++count;
+            }
+        }
+        part.observed_features.resize(count);
+        part.observed_points.resize(count);
+    }
+    std::erase_if(out_event.added_observations, [&](events::TransactionObservation& added) {
+        return !keep(added.frame, added.feature, added.point);
+    });
+
+    for (const map::MapPointId loser : losers_) {
+        out_event.replaced_points.push_back({loser, Resolve(loser)});
+    }
+}
+
+template <typename TFeatureExtractor>
+void Mapper<TFeatureExtractor>::WriteUpdatedPoints(
+    const std::vector<map::MapPointId>& points, events::MapTransaction<TFeatureExtractor>& out_event) const {
+    out_event.ResizeUpdatedPoints(static_cast<uint32_t>(points.size()));
+    for (size_t i = 0; i < points.size(); ++i) {
+        const auto col = static_cast<Eigen::Index>(i);
+        out_event.updated_ids[i] = points[i];
+        out_event.updated_positions.col(col) = map_points_.Position(points[i]);
+        out_event.updated_normals.col(col) = map_points_.Normal(points[i]);
+        out_event.updated_descriptors.col(col) = map_points_.Descriptor(points[i]);
+    }
+}
+
+template <typename TFeatureExtractor>
 auto Mapper<TFeatureExtractor>::RefineAroundFrame(map::FrameId frame) -> Refinement {
     using Clock = std::chrono::steady_clock;
-    auto* refined = transaction_pool_.Create();
-    refined->map_id = current_map_id();
-    refined->priority = false;
+    auto* refined = CreateTransaction();
     Refinement refinement;
     // Points moved by BA or that lost an observation, with repeats.
     std::vector<map::MapPointId> changed;
@@ -446,11 +476,12 @@ void Mapper<TFeatureExtractor>::CullFrames(map::FrameId frame,
                                            events::MapTransaction<TFeatureExtractor>& out_event,
                                            std::vector<map::MapPointId>& out_changed) {
     // ORB-SLAM3 LocalMapping::KeyFrameCulling, each candidate judged on the
-    // map as the earlier ones left it.
+    // map as the earlier ones left it. The first Frame (the tree's root) and
+    // Frames with loop edges stay (ORB-SLAM3 KeyFrame::SetBadFlag).
     const map::FrameId first = FirstKeyFrame().id();
     for (const auto& [candidate, shared] :
          covisibility_.Covisible(frame, std::numeric_limits<size_t>::max())) {
-        if (candidate == first) {
+        if (candidate == first || !FindRecord(candidate)->loop_edges.empty()) {
             continue;
         }
         const TKeyFrame& keyframe = *FindKeyFrame(candidate);
@@ -498,6 +529,7 @@ void Mapper<TFeatureExtractor>::RemoveFrame(map::FrameId frame,
                                             std::vector<map::MapPointId>& out_changed) {
     const std::vector<map::MapPointId> points = covisibility_.Points(frame);
     covisibility_.RemoveFrame(frame);
+    ReparentChildren(frame, out_event);
     keyframes_[frame.value - FirstKeyFrame().id().value].reset();
     out_event.removed_frames.push_back(frame);
     for (const map::MapPointId point : points) {
@@ -507,6 +539,47 @@ void Mapper<TFeatureExtractor>::RemoveFrame(map::FrameId frame,
             out_changed.push_back(point);
         }
     }
+}
+
+template <typename TFeatureExtractor>
+void Mapper<TFeatureExtractor>::ReparentChildren(
+    map::FrameId frame, events::MapTransaction<TFeatureExtractor>& out_event) {
+    KeyFrameRecord& culled = *FindRecord(frame);
+    assert(culled.parent.has_value() && culled.loop_edges.empty());
+    const map::FrameId parent = *culled.parent;
+    std::set<map::FrameId> children = std::move(culled.children);
+    culled.children.clear();
+    std::set<map::FrameId> candidates = {parent};
+    // Each round attaches the (child, candidate) pair sharing the most points,
+    // the lower child id and then the lower candidate id on a tie.
+    while (!children.empty()) {
+        std::optional<std::pair<map::FrameId, map::FrameId>> best;
+        uint32_t best_shared = 0;
+        for (const map::FrameId child : children) {
+            // By shared points descending, then by id.
+            for (const auto& [other, shared] :
+                 covisibility_.Covisible(child, std::numeric_limits<size_t>::max())) {
+                if (shared <= best_shared) {
+                    break;
+                }
+                if (candidates.contains(other)) {
+                    best = {child, other};
+                    best_shared = shared;
+                    break;
+                }
+            }
+        }
+        if (!best) {
+            break;
+        }
+        ChangeParent(best->first, best->second, out_event);
+        candidates.insert(best->first);
+        children.erase(best->first);
+    }
+    for (const map::FrameId child : children) {
+        ChangeParent(child, parent, out_event);
+    }
+    FindRecord(parent)->children.erase(frame);
 }
 
 template <typename TFeatureExtractor>
@@ -534,14 +607,7 @@ void Mapper<TFeatureExtractor>::FinishRefinement(
         }
         UpdatePointStatistics(point);
     }
-    out_event.ResizeUpdatedPoints(static_cast<uint32_t>(changed.size()));
-    for (size_t i = 0; i < changed.size(); ++i) {
-        const auto col = static_cast<Eigen::Index>(i);
-        out_event.updated_ids[i] = changed[i];
-        out_event.updated_positions.col(col) = map_points_.Position(changed[i]);
-        out_event.updated_normals.col(col) = map_points_.Normal(changed[i]);
-        out_event.updated_descriptors.col(col) = map_points_.Descriptor(changed[i]);
-    }
+    WriteUpdatedPoints(changed, out_event);
 }
 
 // Mapper is explicitly instantiated in mapper.cpp; the members defined here
@@ -551,14 +617,18 @@ void Mapper<TFeatureExtractor>::FinishRefinement(
     template std::vector<map::FrameId> Mapper<FE>::FusionTargets(const TKeyFrame&) const;         \
     template void Mapper<FE>::Fuse(const TKeyFrame&, events::MapTransaction<FE>&);                \
     template void Mapper<FE>::FuseInto(const TKeyFrame&, const std::vector<map::MapPointId>&,     \
-                                       events::MapTransaction<FE>&);                              \
+                                       events::MapTransaction<FE>&, bool);                        \
     template map::MapPointId Mapper<FE>::Merge(map::MapPointId, map::MapPointId,                  \
                                                events::MapTransaction<FE>&);                      \
+    template void Mapper<FE>::Replace(map::MapPointId, map::MapPointId, events::MapTransaction<FE>&); \
     template map::MapPointId Mapper<FE>::Resolve(map::MapPointId) const;                          \
     template std::optional<uint32_t> Mapper<FE>::FeatureOf(map::FrameId, map::MapPointId) const;  \
     template std::vector<std::optional<map::MapPointId>> Mapper<FE>::FeaturePoints(               \
         const TKeyFrame&) const;                                                                  \
     template void Mapper<FE>::FinishTransaction(map::MapPointId, events::MapTransaction<FE>&);     \
+    template void Mapper<FE>::ResolveObservationRecords(events::MapTransaction<FE>&);             \
+    template void Mapper<FE>::WriteUpdatedPoints(const std::vector<map::MapPointId>&,             \
+                                                 events::MapTransaction<FE>&) const;              \
     template Mapper<FE>::Refinement Mapper<FE>::RefineAroundFrame(map::FrameId);                  \
     template void Mapper<FE>::LocalBundleAdjust(map::FrameId, events::MapTransaction<FE>&,         \
                                                 std::vector<map::MapPointId>&);                    \
@@ -566,6 +636,7 @@ void Mapper<TFeatureExtractor>::FinishRefinement(
                                          std::vector<map::MapPointId>&);                           \
     template void Mapper<FE>::RemoveFrame(map::FrameId, events::MapTransaction<FE>&,               \
                                           std::vector<map::MapPointId>&);                          \
+    template void Mapper<FE>::ReparentChildren(map::FrameId, events::MapTransaction<FE>&);         \
     template void Mapper<FE>::FinishRefinement(std::vector<map::MapPointId>,                       \
                                                events::MapTransaction<FE>&);
 

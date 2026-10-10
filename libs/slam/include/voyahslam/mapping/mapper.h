@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <memory>
 #include <optional>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -15,11 +16,13 @@
 #include <voyahslam/events/event_types.h>
 #include <voyahslam/events/frame_tracked.h>
 #include <voyahslam/events/initialization_measurement.h>
+#include <voyahslam/events/loop_detected.h>
 #include <voyahslam/events/map_transaction.h>
 #include <voyahslam/events/tracking_lost.h>
 #include <voyahslam/events/worker_thread.h>
 #include <voyahslam/features/fuse_matcher.h>
 #include <voyahslam/features/measurement.h>
+#include <voyahslam/geometry/sim3.h>
 #include <voyahslam/logging/logger.h>
 #include <voyahslam/map/covisibility_index.h>
 #include <voyahslam/map/frame.h>
@@ -35,6 +38,27 @@
 
 namespace voyahslam::mapping {
 
+// Loop correction (loop-closing spec sections 3, 4). Values from ORB-SLAM3's
+// LoopClosing::CorrectLoop and Optimizer::OptimizeEssentialGraph.
+struct LoopCorrectionOptions {
+    // KeyFrame::UpdateConnections (th 15): a Frame is connected to the Frames
+    // sharing at least this many points with it, or else to its most
+    // covisible one. The window is the query and its connected Frames; a
+    // window Frame's connected Frames before the fusion are not loop
+    // connections.
+    size_t min_connection_weight = 15;
+    // nNumCovisibles: the loop points are those of the match Frame and of its
+    // top `num_covisibles` covisible Frames (the LoopCloser's window).
+    size_t num_covisibles = 10;
+    // SearchAndFuse (Fuse th 4): window radius fuse_radius * level_scale^level px.
+    double fuse_radius = 4.0;
+    // Essential graph (minFeat 100): covisibility edges and loop connections
+    // need this many shared points (a loop connection of the query with the
+    // match Frame is kept regardless).
+    size_t min_essential_weight = 100;
+    int essential_iterations = 20;  // Levenberg-Marquardt iterations
+};
+
 struct MapperOptions {
     MapInitializerOptions initializer;
     KeyFrameOptions keyframe;            // when a tracked measurement becomes a Frame
@@ -45,6 +69,7 @@ struct MapperOptions {
     double min_baseline_depth_ratio = 0.01;  // mono: skip a neighbour below baseline / depth
     MapQualityOptions map_quality;       // fusion targets, recent-point culling, ...
     features::FuseOptions fuse;          // the fusion match gate
+    LoopCorrectionOptions loop;          // LoopDetected
 };
 
 // What the local BA of the last created Frame did (spec section 5).
@@ -61,6 +86,9 @@ struct LocalBaSummary {
     size_t num_observations = 0;
     size_t num_outliers = 0;   // observations removed as outliers
 };
+
+// Test access to the Mapper's private graph edits (defined by the tests).
+struct MapperTestAccess;
 
 enum class MapperState : uint8_t {
     Initializing,  // no map: builds one from the Tracker's InitializationMeasurements
@@ -85,8 +113,24 @@ enum class MapperState : uint8_t {
 // than relocalization_guard_min_frames Frames, no Frame is created from a
 // FrameTracked within relocalization_guard_seconds of the latest relocalized
 // one (stage Relocalization), that one included.
-// LoopDetected is not consumed yet. Runs on its own thread; each
-// ProcessPending() pass drains the inbox.
+// A LoopDetected of the current map is corrected in place of new-Frame work
+// (ORB-SLAM3 LoopClosing::CorrectLoop, loop-closing spec section 3): the
+// query's window is moved by the loop similarity with its points, the loop
+// points are fused into it, the essential graph is optimized, and the query
+// and match Frames get a loop edge; all of it is one MapTransaction at the
+// next correction epoch. A LoopDetected of another map, naming a culled Frame
+// or a loop already closed is ignored. A FrameTracked of an older epoch (the
+// Tracker had not seen the correction) creates no Frame; its points are
+// counted. Runs on its own thread; each ProcessPending() pass drains the
+// inbox.
+//
+// The map graph (loop-closing spec section 1), published in the
+// transactions: each Frame but the map's first has a parent in a spanning
+// tree, the Frame sharing the most points with it once transaction 1's
+// fusion is done (ORB-SLAM3 UpdateConnections). A culled Frame's children are
+// re-parented as in ORB-SLAM3's KeyFrame::SetBadFlag. Frames with loop edges
+// are never culled. Every transaction carries the map's correction epoch,
+// 0 for a new map.
 //
 // With a vocabulary (immutable, so it may be shared read-only), every
 // Frame, the initial ones included, keeps the BowVector and FeatureVector of
@@ -131,7 +175,8 @@ public:
     [[nodiscard]] size_t num_map_points() const {
         return num_map_points_.load(std::memory_order_acquire);
     }
-    // FrameTracked events evaluated by the Frame creation rule (not skipped).
+    // FrameTracked events evaluated by the Frame creation rule (not skipped),
+    // each counted once the Frame it created, if any, is published and refined.
     [[nodiscard]] size_t num_frame_evaluations() const {
         return num_frame_evaluations_.load(std::memory_order_acquire);
     }
@@ -140,6 +185,11 @@ public:
     // drained batch.
     [[nodiscard]] size_t backlog_skipped() const {
         return backlog_skipped_.load(std::memory_order_acquire);
+    }
+    // FrameTracked events of the current map skipped, in total, because they
+    // were tracked before a loop correction (an older map epoch).
+    [[nodiscard]] size_t stale_epoch_skipped() const {
+        return stale_epoch_skipped_.load(std::memory_order_acquire);
     }
 
     // The current map's observations. Mapper thread (or a test driving
@@ -157,14 +207,23 @@ public:
     // The BowVector of the current map's Frame `frame`; nullptr without a
     // vocabulary or if the Frame is not in the map. Same thread rule.
     [[nodiscard]] const bow::BowVector* BowVectorOf(map::FrameId frame) const;
+    // The current map's Frame `frame`: its parent in the spanning tree and its
+    // loop partners; none / empty if it is not in the map. Same thread rule.
+    [[nodiscard]] std::optional<map::FrameId> Parent(map::FrameId frame) const;
+    [[nodiscard]] std::set<map::FrameId> LoopEdges(map::FrameId frame) const;
 
 private:
+    friend struct MapperTestAccess;
+
     // A Frame of the current map with its bag of words (empty without a
-    // vocabulary).
+    // vocabulary) and its links in the map graph.
     struct KeyFrameRecord {
         TKeyFrame frame;
         bow::BowVector bow;
         bow::FeatureVector features;
+        std::optional<map::FrameId> parent;  // none for the map's first Frame
+        std::set<map::FrameId> children;
+        std::set<map::FrameId> loop_edges;
     };
 
     // A point created with Frame `created`, culled or graduated by
@@ -193,6 +252,7 @@ private:
     void OnInitializationMeasurement(const events::InitializationMeasurement<TFeatureExtractor>& event);
     void OnFrameTracked(const events::FrameTracked<TFeatureExtractor>& event);
     void OnTrackingLost(const events::TrackingLost& event);
+    void OnLoopDetected(const events::LoopDetected& event);
     void SetState(MapperState state);
     // Empties the current map (Frames, points, observations).
     void ClearMap();
@@ -204,6 +264,7 @@ private:
     // The current map's Frame `id` with its bag of words; nullptr if it is not
     // in the map (or was culled).
     [[nodiscard]] const KeyFrameRecord* FindRecord(map::FrameId id) const;
+    [[nodiscard]] KeyFrameRecord* FindRecord(map::FrameId id);
     // The current map's Frame `id`; nullptr if it is not in the map (or was
     // culled).
     [[nodiscard]] const TKeyFrame* FindKeyFrame(map::FrameId id) const;
@@ -219,6 +280,30 @@ private:
     // stereo-matched one (right index >= 0), 1 otherwise. Unlike
     // CovisibilityIndex::NumObservations, which counts Frames.
     [[nodiscard]] size_t WeightedObservations(map::MapPointId point) const;
+    // Clears the scratch state of the transaction being built (added
+    // observation keys, merges, touched points): the start of transaction 1
+    // and of a loop correction.
+    void ResetTransactionScratch();
+    // A pooled transaction of the current map at the current epoch.
+    [[nodiscard]] events::MapTransaction<TFeatureExtractor>* CreateTransaction();
+    // Gives Frame `frame`, the newest one, its parent: the Frame sharing the
+    // most points with it, the lower id on a tie; without shared points, the
+    // previous newest Frame (ORB-SLAM3 leaves it without one). Returns it.
+    map::FrameId ConnectToParent(map::FrameId frame);
+    // Makes `parent` the parent of `frame` and lists the change in
+    // `out_event`.
+    void ChangeParent(map::FrameId frame, map::FrameId parent,
+                      events::MapTransaction<TFeatureExtractor>& out_event);
+    // Adds the loop edge between Frames `a` and `b` and lists it in
+    // `out_event`.
+    void AddLoopEdge(map::FrameId a, map::FrameId b,
+                     events::MapTransaction<TFeatureExtractor>& out_event);
+    // Before Frame `frame` is culled, its observations already gone: each
+    // child goes to the candidate sharing the most points with it, the
+    // candidates being `frame`'s parent and the children re-parented so far;
+    // a child sharing none goes to `frame`'s parent (ORB-SLAM3
+    // KeyFrame::SetBadFlag).
+    void ReparentChildren(map::FrameId frame, events::MapTransaction<TFeatureExtractor>& out_event);
     // The inputs to ShouldCreateFrame for `event` (spec section 3.2).
     [[nodiscard]] KeyFrameSignals MeasureSignals(
         const events::FrameTracked<TFeatureExtractor>& event) const;
@@ -283,15 +368,22 @@ private:
     // Frames: unique, without `keyframe`.
     [[nodiscard]] std::vector<map::FrameId> FusionTargets(const TKeyFrame& keyframe) const;
     // Matches `points` (unique, alive) in `frame` with FuseMatches and
-    // applies the decisions.
+    // applies the decisions: duplicates are merged. With `loop` (ORB-SLAM3's
+    // Fuse with a Sim3), the window is fuse_radius wide, there is no chi2 nor
+    // right-image gate, and the projected point replaces the one it matches.
     void FuseInto(const TKeyFrame& frame, const std::vector<map::MapPointId>& points,
-                  events::MapTransaction<TFeatureExtractor>& out_event);
+                  events::MapTransaction<TFeatureExtractor>& out_event, bool loop = false);
     // Merges duplicates `a` and `b`: the one with more weighted observations
     // (the lower id on a tie) wins and takes the loser's observations and
     // counters, except in Frames that already observe it; the loser is
     // removed. Returns the winner.
     map::MapPointId Merge(map::MapPointId a, map::MapPointId b,
                           events::MapTransaction<TFeatureExtractor>& out_event);
+    // `winner` takes `loser`'s observations and counters, except in Frames
+    // that already observe it; `loser` is removed (ORB-SLAM3
+    // MapPoint::Replace).
+    void Replace(map::MapPointId loser, map::MapPointId winner,
+                 events::MapTransaction<TFeatureExtractor>& out_event);
     // `point`, or the point it was finally merged into in this transaction.
     [[nodiscard]] map::MapPointId Resolve(map::MapPointId point) const;
     // The (left) feature through which `frame` observes `point`; nullopt if
@@ -306,6 +398,12 @@ private:
     // and updated points. `first_new` is the first new point id.
     void FinishTransaction(map::MapPointId first_new,
                            events::MapTransaction<TFeatureExtractor>& out_event);
+    // The first part of FinishTransaction: the observation records (of the
+    // new Frame, if any, and the added ones) and the merges.
+    void ResolveObservationRecords(events::MapTransaction<TFeatureExtractor>& out_event);
+    // Writes `points` to `out_event`'s updated points.
+    void WriteUpdatedPoints(const std::vector<map::MapPointId>& points,
+                            events::MapTransaction<TFeatureExtractor>& out_event) const;
 
     // Transaction 2 of the new Frame `frame` (spec section 1, steps 4-5):
     // local BA, then Frame culling, published as one MapTransaction even if
@@ -329,12 +427,13 @@ private:
                            std::vector<map::MapPointId>& out_changed);
     // Frame culling (spec section 4.2): removes each covisible Frame of
     // `frame` that IsRedundantFrame judges redundant, never the map's first
-    // Frame. The points that lost an observation are appended to
-    // `out_changed`.
+    // Frame nor one with a loop edge. The points that lost an observation are
+    // appended to `out_changed`.
     void CullFrames(map::FrameId frame, events::MapTransaction<TFeatureExtractor>& out_event,
                     std::vector<map::MapPointId>& out_changed);
-    // Drops the Frame and its observations; a point left with fewer than 2
-    // observations is removed, the others are appended to `out_changed`.
+    // Drops the Frame and its observations, re-parenting its children; a
+    // point left with fewer than 2 observations is removed, the others are
+    // appended to `out_changed`.
     void RemoveFrame(map::FrameId frame, events::MapTransaction<TFeatureExtractor>& out_event,
                      std::vector<map::MapPointId>& out_changed);
     // After transaction 2's removals: each changed point still alive whose
@@ -344,6 +443,73 @@ private:
     // points.
     void FinishRefinement(std::vector<map::MapPointId> changed,
                           events::MapTransaction<TFeatureExtractor>& out_event);
+
+    // Loop correction (mapper_loop.cpp; loop-closing spec section 3). Steps
+    // 2-6 take a window and a similarity, so map merging can reuse them.
+
+    // A window moved by CorrectWindow, per Frame (the query first): its
+    // corrected S_cw, its pose before the correction and its connected Frames
+    // before the loop fusion; per moved point, the window Frame whose
+    // correction moved it (ORB-SLAM3 mnCorrectedReference).
+    struct WindowCorrection {
+        std::vector<map::FrameId> frames;
+        std::vector<geometry::Sim3> corrected;
+        std::vector<geometry::RigidTransformation> non_corrected;
+        std::vector<std::vector<map::FrameId>> previous_connected;
+        std::unordered_map<uint32_t, map::FrameId> corrected_reference;
+    };
+
+    // The Frames `frame` is connected to (ORB-SLAM3 UpdateConnections): those
+    // sharing at least min_connection_weight points, by shared points, or else
+    // its most covisible one.
+    [[nodiscard]] std::vector<map::FrameId> Connected(map::FrameId frame) const;
+    // `frame` and its top num_covisibles covisible Frames (the LoopCloser's
+    // window of a match).
+    [[nodiscard]] std::vector<map::FrameId> MatchWindow(map::FrameId frame) const;
+    // Review Focus 2: the loop of `query` with `match` is already closed:
+    // a Frame of the match's window is covisible with the query (ORB-SLAM3
+    // never detects such a candidate), or a loop edge links the query's window
+    // to the match's.
+    [[nodiscard]] bool IsClosedLoop(map::FrameId query, map::FrameId match) const;
+    // Steps 2-3 (CorrectLoop), the start of every correction: resets the
+    // transaction scratch state (ResetTransactionScratch) that FuseLoopPoints
+    // and FinishCorrection build on, so the steps must run in order on one
+    // transaction. `window`'s first Frame takes S_query_world,
+    // every other one keeps its pose relative to it; the poses take the
+    // corrected similarities with the scale folded into the translation, and
+    // each point the window observes moves with its first observing window
+    // Frame, X' = S_corrected^-1 S_old X. The caller publishes the poses and
+    // points.
+    WindowCorrection CorrectWindow(const std::vector<map::FrameId>& window,
+                                   const geometry::Sim3& S_query_world);
+    // Step 4: each (query point, match point) pair of `matched_points` that the
+    // query still observes is replaced by its match point, then `loop_points`
+    // are fused into every window Frame at its corrected pose (ORB-SLAM3
+    // SearchAndFuse): a free feature observes the loop point, an observed one
+    // has its point replaced by the loop point.
+    void FuseLoopPoints(const WindowCorrection& correction,
+                        const std::vector<std::pair<map::MapPointId, map::MapPointId>>& matched_points,
+                        const std::vector<map::MapPointId>& loop_points,
+                        events::MapTransaction<TFeatureExtractor>& out_event);
+    // Step 5 (CorrectLoop LoopConnections): per window Frame, its covisible
+    // Frames now, at any weight (ORB-SLAM3 GetConnectedKeyFrames), minus its
+    // connected Frames before the fusion and the window; a pair with fewer than
+    // min_essential_weight shared points is dropped, but the query's with
+    // `match`. As (window Frame, other Frame) pairs.
+    [[nodiscard]] std::vector<std::pair<map::FrameId, map::FrameId>> LoopConnections(
+        const WindowCorrection& correction, map::FrameId match) const;
+    // Steps 5-6: each window Frame's new connections beyond the window are the
+    // loop connections; the essential graph (OptimizeEssentialGraph) of every
+    // Frame, `match` fixed and every scale fixed if `fix_scale`, gives every
+    // Frame its pose and every point moves with its reference Frame (its
+    // window Frame if CorrectWindow moved it). Every pose goes into
+    // `out_event`.
+    void OptimizeGraph(const WindowCorrection& correction, map::FrameId match, bool fix_scale,
+                       events::MapTransaction<TFeatureExtractor>& out_event);
+    // Step 8: the observation records resolved, the merges listed, every
+    // alive point's normal (and the touched points' descriptors) recomputed
+    // and written to `out_event`.
+    void FinishCorrection(events::MapTransaction<TFeatureExtractor>& out_event);
 
     // `frame`'s side of a triangulation, with `has_point` per feature.
     [[nodiscard]] TriangulationView<TFeatureExtractor> ViewOf(const TKeyFrame& frame,
@@ -382,11 +548,13 @@ private:
     std::optional<double> relocalized_at_;
     std::atomic<size_t> num_frame_evaluations_{0};
     std::atomic<size_t> backlog_skipped_{0};
+    std::atomic<size_t> stale_epoch_skipped_{0};
 
     std::atomic<MapperState> state_{MapperState::Initializing};
     std::atomic<map::MapId> current_map_id_{map::MapId{0}};
     map::MapId next_map_id_{1};
     map::FrameId next_frame_id_{0};  // never reset: frame ids are unique across maps
+    uint32_t map_epoch_ = 0;         // the current map's correction epoch
     // The current map's Frames by id from its first one; a culled Frame is
     // empty. The first and the last one are never culled.
     std::vector<std::optional<KeyFrameRecord>> keyframes_;

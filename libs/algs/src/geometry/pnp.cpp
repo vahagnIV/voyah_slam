@@ -9,6 +9,8 @@
 
 #include <Eigen/Dense>
 
+#include "geometry/ransac_support.h"
+
 namespace voyahslam::geometry {
 
 namespace {
@@ -106,10 +108,7 @@ bool IsValidPose(const TMatrix33F& R, const TVector3DF& t) {
 // Raw-pixel χ² of world point X under T_cw; +inf when it is not in front of the camera.
 double PixelChi2(const Camera& camera, const RigidTransformation& T_cw, const TPoint3DF& X, const TPoint2DF& pixel,
                  double inv_sigma2) {
-    const TPoint3DF Xc = T_cw.Transform(X);
-    if (!(Xc.z() > 0.0)) return std::numeric_limits<double>::infinity();
-    const double chi2 = (camera.Project(Xc) - pixel).squaredNorm() * inv_sigma2;
-    return std::isnan(chi2) ? std::numeric_limits<double>::infinity() : chi2;
+    return detail::ReprojectionChi2(camera, T_cw.Transform(X), pixel, inv_sigma2);
 }
 
 }  // namespace
@@ -297,12 +296,7 @@ PnpResult SolvePnPRansac(const Camera& camera, const std::vector<TPoint3DF>& wor
             best_T_cw = *hypothesis;
             best_inliers = num_inliers;
             best_chi2 = total_chi2;
-            // log(1 - conf) / log(1 - w³). w = 1 gives 0 (stop); a w³ that rounds 1 - w³ to 1
-            // gives +inf, and NaN fails the comparison: both keep the cap.
-            const double w = static_cast<double>(best_inliers) / static_cast<double>(n);
-            const double needed = std::ceil(std::log(1.0 - options.confidence) / std::log1p(-w * w * w));
-            required = needed < static_cast<double>(options.max_iterations) ? static_cast<int>(std::max(needed, 0.0))
-                                                                             : options.max_iterations;
+            required = detail::AdaptiveIterations(best_inliers, n, 3, options.confidence, options.max_iterations);
         }
     }
 

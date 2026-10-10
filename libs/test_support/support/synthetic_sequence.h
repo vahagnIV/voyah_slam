@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <numbers>
 #include <random>
 #include <utility>
@@ -33,6 +34,15 @@ struct SyntheticSequenceOptions {
     /// Points on the walls (height 4 m) of a 10 m room centred on the path
     /// instead of a frontal slab at min_depth..max_depth.
     bool surround_scene = false;
+    /// > 0: a loop. The camera centre moves on a circle of this radius about
+    /// the room's centre, looking outward (its yaw, from turn_deg, sets where
+    /// on the circle it is); the room is centred on the circle. With
+    /// turn_deg > 360 the last frames revisit the first ones' view.
+    double loop_radius = 0.0;
+    /// Byte 0 of a point's descriptor is kSyntheticWordCodes[s], s its
+    /// sector (of 8, by azimuth about the room's centre), and byte 1 a random
+    /// one of those codes: a bag of words of the codes tells places apart.
+    bool place_words = false;
     double min_depth = 4.0, max_depth = 8.0;
     double pixel_noise = 0.5;      ///< Gaussian sigma, px.
     int bit_flips = 3;             ///< Descriptor bits flipped per point per frame.
@@ -64,6 +74,10 @@ inline geometry::TMatrix33F SyntheticIntrinsics() {
     return K;
 }
 
+/// Descriptor byte values pairwise >= 4 bits apart (see
+/// SyntheticSequenceOptions::place_words).
+inline constexpr uint8_t kSyntheticWordCodes[] = {0x00, 0xFF, 0x0F, 0xF0, 0x33, 0xCC, 0x55, 0xAA};
+
 namespace detail {
 
 constexpr double kSyntheticImageSize = 512.0;
@@ -88,10 +102,19 @@ inline SyntheticDescriptor FlipBits(SyntheticDescriptor descriptor, int count, s
     return descriptor;
 }
 
-/// A random point on the walls of a 10 m x 10 m room, 4 m high, centred on the
-/// path (x in [0, (num_frames - 1) * step], y = z = 0). Points stand up to 1 m
-/// off their wall (shelves, furniture): a single plane makes two-view
-/// initialization ambiguous.
+/// The room's centre: the middle of the straight path (x in
+/// [0, (num_frames - 1) * step], y = z = 0), or the loop's centre, from which
+/// frame 0 at the origin looks along +z.
+inline geometry::TVector3DF RoomCentre(const SyntheticSequenceOptions& options) {
+    if (options.loop_radius > 0.0) {
+        return {0.0, 0.0, -options.loop_radius};
+    }
+    return {0.5 * static_cast<double>(options.num_frames - 1) * options.step, 0.0, 0.0};
+}
+
+/// A random point on the walls of a 10 m x 10 m room, 4 m high, about
+/// RoomCentre(). Points stand up to 1 m off their wall (shelves, furniture): a
+/// single plane makes two-view initialization ambiguous.
 inline geometry::TVector3DF RoomWallPoint(const SyntheticSequenceOptions& options,
                                           std::mt19937& rng) {
     constexpr double kHalfSize = 5.0, kHalfHeight = 2.0, kMaxRelief = 1.0;
@@ -99,19 +122,37 @@ inline geometry::TVector3DF RoomWallPoint(const SyntheticSequenceOptions& option
     std::uniform_real_distribution<double> along(-kHalfSize, kHalfSize);
     std::uniform_real_distribution<double> height(-kHalfHeight, kHalfHeight);
     std::uniform_real_distribution<double> relief(0.0, kMaxRelief);
-    const double centre_x = 0.5 * static_cast<double>(options.num_frames - 1) * options.step;
+    const geometry::TVector3DF centre = RoomCentre(options);
     const int w = wall(rng);
     const double t = along(rng), y = height(rng);
     const double inset = kHalfSize - relief(rng);
     switch (w) {
-        case 0: return {centre_x + t, y, inset};
-        case 1: return {centre_x + t, y, -inset};
-        case 2: return {centre_x + inset, y, t};
-        default: return {centre_x - inset, y, t};
+        case 0: return centre + geometry::TVector3DF(t, y, inset);
+        case 1: return centre + geometry::TVector3DF(t, y, -inset);
+        case 2: return centre + geometry::TVector3DF(inset, y, t);
+        default: return centre + geometry::TVector3DF(-inset, y, t);
     }
 }
 
-/// Frame `k`'s true pose: centre at +x k * step, yaw about the camera y axis.
+/// A scene point's descriptor: random, with bytes 0 and 1 set as
+/// SyntheticSequenceOptions::place_words describes when it is set.
+inline SyntheticDescriptor PointDescriptor(const SyntheticSequenceOptions& options,
+                                           const geometry::TVector3DF& X, std::mt19937& rng) {
+    SyntheticDescriptor descriptor = RandomDescriptor(rng);
+    if (options.place_words) {
+        constexpr size_t kNumCodes = std::size(kSyntheticWordCodes);
+        const geometry::TVector3DF d = X - RoomCentre(options);
+        const double turn = std::atan2(d.x(), d.z()) / (2.0 * std::numbers::pi);  // (-1/2, 1/2]
+        const auto sector = static_cast<size_t>(std::floor((turn + 1.0) * kNumCodes)) % kNumCodes;
+        std::uniform_int_distribution<size_t> code(0, kNumCodes - 1);
+        descriptor[0] = kSyntheticWordCodes[sector];
+        descriptor[1] = kSyntheticWordCodes[code(rng)];
+    }
+    return descriptor;
+}
+
+/// Frame `k`'s true pose: yaw about the camera y axis; centre at +x k * step,
+/// or on the loop's circle behind the camera.
 inline geometry::RigidTransformation SyntheticPose(const SyntheticSequenceOptions& options,
                                                    size_t k) {
     const double index = static_cast<double>(k);
@@ -122,7 +163,11 @@ inline geometry::RigidTransformation SyntheticPose(const SyntheticSequenceOption
             : index * (options.yaw_step_deg * std::numbers::pi / 180.0);
     const geometry::TMatrix33F R_cw =
         Eigen::AngleAxis<double>(yaw, geometry::TVector3DF::UnitY()).toRotationMatrix();
-    const geometry::TVector3DF centre(index * options.step, 0.0, 0.0);
+    const geometry::TVector3DF centre =
+        options.loop_radius > 0.0
+            ? geometry::TVector3DF(RoomCentre(options) +
+                                   options.loop_radius * R_cw.transpose() * geometry::TVector3DF::UnitZ())
+            : geometry::TVector3DF(index * options.step, 0.0, 0.0);
     return {R_cw, -R_cw * centre};
 }
 
@@ -151,7 +196,7 @@ inline SyntheticSequence MakeSyntheticSequence(const SyntheticSequenceOptions& o
             const geometry::TVector3DF ray(pixel(rng), pixel(rng), 1.0);
             sequence.points_w.col(i) = depth(rng) * (K_inverse * ray);
         }
-        base_descriptors.push_back(detail::RandomDescriptor(rng));
+        base_descriptors.push_back(detail::PointDescriptor(options, sequence.points_w.col(i), rng));
         base_angles.push_back(angle(rng));
     }
 
@@ -429,7 +474,7 @@ inline SyntheticStereoSequence MakeSyntheticStereoSequence(
             const geometry::TVector3DF ray(pixel(rng), pixel(rng), 1.0);
             sequence.points_w.col(i) = depth(rng) * (K_inverse * ray);
         }
-        base_descriptors.push_back(detail::RandomDescriptor(rng));
+        base_descriptors.push_back(detail::PointDescriptor(traj, sequence.points_w.col(i), rng));
         base_angles.push_back(angle(rng));
     }
 

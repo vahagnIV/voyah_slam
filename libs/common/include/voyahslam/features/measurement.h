@@ -21,6 +21,16 @@ template <typename TFeatureExtractor>
 using TMeasurement =
     std::variant<TMonocularMeasurement<TFeatureExtractor>, TBinocularMeasurement<TFeatureExtractor>>;
 
+// The image matched against the map: the left one of a binocular measurement,
+// the measurement itself for a monocular one.
+template <typename TFeatureExtractor>
+const TMonocularMeasurement<TFeatureExtractor>& LeftOf(const TMeasurement<TFeatureExtractor>& measurement) {
+    if (const auto* binocular = std::get_if<TBinocularMeasurement<TFeatureExtractor>>(&measurement)) {
+        return binocular->left();
+    }
+    return std::get<TMonocularMeasurement<TFeatureExtractor>>(measurement);
+}
+
 } // namespace voyahslam::features
 
 #endif // VOYAHSLAM_FEATURES_MEASUREMENT_H

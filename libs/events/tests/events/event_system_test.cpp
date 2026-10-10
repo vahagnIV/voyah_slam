@@ -156,6 +156,7 @@ void FillEveryPart(OrbMapTransaction& out_event) {
     frame.id = map::FrameId{4};
     frame.observed_features.push_back(4);
     frame.observed_points.push_back(map::MapPointId{5});
+    frame.parent = map::FrameId{3};
     out_event.new_points_start_id = map::MapPointId{9};
     out_event.ResizeNewPoints(500);
     out_event.added_observations.push_back({map::FrameId{1}, 2, map::MapPointId{3}});
@@ -165,6 +166,9 @@ void FillEveryPart(OrbMapTransaction& out_event) {
     out_event.removed_points.push_back(map::MapPointId{8});
     out_event.updated_poses.emplace_back(map::FrameId{1}, geometry::RigidTransformation::Identity());
     out_event.removed_frames.push_back(map::FrameId{2});
+    out_event.parent_changes.emplace_back(map::FrameId{4}, map::FrameId{1});
+    out_event.added_loop_edges.emplace_back(map::FrameId{4}, map::FrameId{1});
+    out_event.map_epoch = 3;
 }
 
 TEST(EventSystemTest, RecycledMapTransactionIsResetAndReusesItsBuffers) {
@@ -199,6 +203,9 @@ TEST(EventSystemTest, RecycledMapTransactionIsResetAndReusesItsBuffers) {
     EXPECT_TRUE(reused->removed_points.empty());
     EXPECT_TRUE(reused->updated_poses.empty());
     EXPECT_TRUE(reused->removed_frames.empty());
+    EXPECT_TRUE(reused->parent_changes.empty());
+    EXPECT_TRUE(reused->added_loop_edges.empty());
+    EXPECT_EQ(reused->map_epoch, 0u);
     reused->ResizeNewPoints(300);
     EXPECT_EQ(reused->new_positions.matrix().data(), positions);
     EXPECT_EQ(reused->new_descriptors.matrix().data(), descriptors);
@@ -222,6 +229,8 @@ TEST(EventSystemTest, RecycledMapTransactionKeepsCapacity) {
     EXPECT_GE(e->removed_points.capacity(), 1u);
     EXPECT_GE(e->updated_poses.capacity(), 1u);
     EXPECT_GE(e->removed_frames.capacity(), 1u);
+    EXPECT_GE(e->parent_changes.capacity(), 1u);
+    EXPECT_GE(e->added_loop_edges.capacity(), 1u);
     e->Recycle();
 }
 
@@ -339,6 +348,7 @@ TEST(EventSystemTest, RecycledFrameTrackedIsReset) {
     event->stage = TrackingStage::ReferenceFrame;
     event->num_matches = 7;
     event->num_inliers = 2;
+    event->map_epoch = 5;
     event->Recycle();
 
     auto* reused = pool.Create();
@@ -352,6 +362,7 @@ TEST(EventSystemTest, RecycledFrameTrackedIsReset) {
     EXPECT_EQ(reused->stage, TrackingStage::MotionModel);
     EXPECT_EQ(reused->num_matches, 0u);
     EXPECT_EQ(reused->num_inliers, 0u);
+    EXPECT_EQ(reused->map_epoch, 0u);
     reused->Recycle();
 }
 

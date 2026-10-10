@@ -12,16 +12,7 @@
 // Helpers shared by the Mapper's translation units.
 namespace voyahslam::mapping::detail {
 
-// The left image of a measurement (the image itself for a monocular one).
-template <typename TFeatureExtractor>
-const features::TMonocularMeasurement<TFeatureExtractor>& LeftOf(
-    const features::TMeasurement<TFeatureExtractor>& measurement) {
-    if (const auto* binocular =
-            std::get_if<features::TBinocularMeasurement<TFeatureExtractor>>(&measurement)) {
-        return binocular->left();
-    }
-    return std::get<features::TMonocularMeasurement<TFeatureExtractor>>(measurement);
-}
+using features::LeftOf;
 
 // The binocular measurement, nullptr for a monocular one.
 template <typename TFeatureExtractor>

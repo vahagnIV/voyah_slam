@@ -5,7 +5,7 @@
 - Upstream: https://github.com/RainerKuemmerle/g2o
 - Tag: `20241228_git`, commit `eec325a1da1273e87bc97887d49e70570f28570c`
 - Vendored pristine in `third_party/g2o/src/` (no local edits; keep it that way).
-- Conan package: `g2o/20241228@voyah/stable` (recipe: `third_party/g2o/conanfile.py`, which sets `user`/`channel`, so a plain `conan create` yields this reference).
+- Conan package: `g2o/20241228.1@voyah/stable` (upstream tag 20241228, recipe revision `.1`; bump the suffix whenever the recipe changes what it builds, so existing Conan caches miss the old package instead of silently using it) (recipe: `third_party/g2o/conanfile.py`, which sets `user`/`channel`, so a plain `conan create` yields this reference).
 
 ### License
 

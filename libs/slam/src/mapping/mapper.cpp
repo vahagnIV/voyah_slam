@@ -3,8 +3,10 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <optional>
+#include <set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -120,8 +122,11 @@ void Mapper<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
         case events::EventType::TrackingLost:
             OnTrackingLost(static_cast<const events::TrackingLost&>(event));
             return;
+        case events::EventType::LoopDetected:
+            OnLoopDetected(static_cast<const events::LoopDetected&>(event));
+            return;
         default:
-            return;  // LoopDetected: handled later
+            return;
     }
 }
 
@@ -177,6 +182,10 @@ void Mapper<TFeatureExtractor>::OnInitializationMeasurement(
     num_found_.clear();
     recent_points_.clear();
     AddInitialMapPoints(initial->map_points);
+    for (size_t k = 1; k < keyframes_.size(); ++k) {
+        ConnectToParent(keyframes_[k]->frame.id());
+    }
+    map_epoch_ = 0;
     num_keyframes_.store(keyframes_.size(), std::memory_order_release);
     num_map_points_.store(map_points_.size(), std::memory_order_release);
     current_map_id_.store(next_map_id_, std::memory_order_release);
@@ -213,6 +222,7 @@ void Mapper<TFeatureExtractor>::ClearMap() {
     recent_points_.clear();
     backlog_ = 0;
     relocalized_at_.reset();
+    map_epoch_ = 0;
     num_keyframes_.store(0, std::memory_order_release);
     num_map_points_.store(0, std::memory_order_release);
 }
@@ -224,10 +234,17 @@ void Mapper<TFeatureExtractor>::OnFrameTracked(
         return;  // no map yet, or an older map's
     }
     CountTrackedPoints(event);
+    if (event.map_epoch < map_epoch_) {
+        // Tracked against the map before a loop correction: its pose and
+        // observations are of the uncorrected map (loop-closing spec section 3).
+        log_->debug("FrameTracked t={:.3f}: epoch {} before the map's {} -> no Frame", event.timestamp,
+                    event.map_epoch, map_epoch_);
+        stale_epoch_skipped_.fetch_add(1, std::memory_order_acq_rel);
+        return;
+    }
     const KeyFrameSignals signals = MeasureSignals(event);
     const bool guarded = InRelocalizationGuard(event);
     const bool create = !guarded && ShouldCreateFrame(signals, options_.keyframe);
-    num_frame_evaluations_.fetch_add(1, std::memory_order_acq_rel);
     if (guarded) {
         log_->debug("FrameTracked t={:.3f}: {:.3f} s after the relocalization at t={:.3f} -> no Frame",
                     event.timestamp, event.timestamp - *relocalized_at_, *relocalized_at_);
@@ -242,6 +259,8 @@ void Mapper<TFeatureExtractor>::OnFrameTracked(
     if (create) {
         CreateFrame(event);
     }
+    // Counted once the Frame it created, if any, is published and refined.
+    num_frame_evaluations_.fetch_add(1, std::memory_order_acq_rel);
 }
 
 template <typename TFeatureExtractor>
@@ -286,6 +305,11 @@ auto Mapper<TFeatureExtractor>::FindRecord(map::FrameId id) const -> const KeyFr
 }
 
 template <typename TFeatureExtractor>
+auto Mapper<TFeatureExtractor>::FindRecord(map::FrameId id) -> KeyFrameRecord* {
+    return const_cast<KeyFrameRecord*>(std::as_const(*this).FindRecord(id));
+}
+
+template <typename TFeatureExtractor>
 auto Mapper<TFeatureExtractor>::FindKeyFrame(map::FrameId id) const -> const TKeyFrame* {
     const KeyFrameRecord* record = FindRecord(id);
     return record != nullptr ? &record->frame : nullptr;
@@ -311,6 +335,71 @@ template <typename TFeatureExtractor>
 const bow::BowVector* Mapper<TFeatureExtractor>::BowVectorOf(map::FrameId frame) const {
     const KeyFrameRecord* record = vocabulary_ ? FindRecord(frame) : nullptr;
     return record != nullptr ? &record->bow : nullptr;
+}
+
+template <typename TFeatureExtractor>
+std::optional<map::FrameId> Mapper<TFeatureExtractor>::Parent(map::FrameId frame) const {
+    const KeyFrameRecord* record = FindRecord(frame);
+    return record != nullptr ? record->parent : std::nullopt;
+}
+
+template <typename TFeatureExtractor>
+std::set<map::FrameId> Mapper<TFeatureExtractor>::LoopEdges(map::FrameId frame) const {
+    const KeyFrameRecord* record = FindRecord(frame);
+    return record != nullptr ? record->loop_edges : std::set<map::FrameId>{};
+}
+
+template <typename TFeatureExtractor>
+auto Mapper<TFeatureExtractor>::CreateTransaction() -> events::MapTransaction<TFeatureExtractor>* {
+    auto* transaction = transaction_pool_.Create();
+    transaction->map_id = current_map_id();
+    transaction->priority = false;
+    transaction->map_epoch = map_epoch_;
+    return transaction;
+}
+
+template <typename TFeatureExtractor>
+map::FrameId Mapper<TFeatureExtractor>::ConnectToParent(map::FrameId frame) {
+    KeyFrameRecord& record = *FindRecord(frame);
+    assert(&record == &*keyframes_.back() && keyframes_.size() > 1);
+    // Sorted by shared points descending, then by id.
+    const auto covisible = covisibility_.Covisible(frame, 1);
+    map::FrameId parent{};
+    if (!covisible.empty()) {
+        parent = covisible.front().first;
+    } else {
+        // The previous newest Frame is never culled before this one exists.
+        const auto previous = std::find_if(std::next(keyframes_.rbegin()), keyframes_.rend(),
+                                           [](const auto& other) { return other.has_value(); });
+        assert(previous != keyframes_.rend());
+        parent = (*previous)->frame.id();
+    }
+    record.parent = parent;
+    FindRecord(parent)->children.insert(frame);
+    return parent;
+}
+
+template <typename TFeatureExtractor>
+void Mapper<TFeatureExtractor>::ChangeParent(map::FrameId frame, map::FrameId parent,
+                                             events::MapTransaction<TFeatureExtractor>& out_event) {
+    KeyFrameRecord& record = *FindRecord(frame);
+    if (record.parent) {
+        FindRecord(*record.parent)->children.erase(frame);
+    }
+    record.parent = parent;
+    FindRecord(parent)->children.insert(frame);
+    out_event.parent_changes.emplace_back(frame, parent);
+}
+
+template <typename TFeatureExtractor>
+void Mapper<TFeatureExtractor>::AddLoopEdge(map::FrameId a, map::FrameId b,
+                                            events::MapTransaction<TFeatureExtractor>& out_event) {
+    KeyFrameRecord* record_a = FindRecord(a);
+    KeyFrameRecord* record_b = FindRecord(b);
+    assert(record_a != nullptr && record_b != nullptr && a != b);
+    record_a->loop_edges.insert(b);
+    record_b->loop_edges.insert(a);
+    out_event.added_loop_edges.emplace_back(a, b);
 }
 
 template <typename TFeatureExtractor>
@@ -381,13 +470,8 @@ KeyFrameSignals Mapper<TFeatureExtractor>::MeasureSignals(
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureExtractor>& event) {
     auto start = Clock::now();
-    auto* created = transaction_pool_.Create();
-    created->map_id = current_map_id();
-    created->priority = false;
-    added_keys_.clear();
-    replaced_.clear();
-    losers_.clear();
-    touched_.clear();
+    auto* created = CreateTransaction();
+    ResetTransactionScratch();
 
     // The Frame and its tracked observations (ORB-SLAM3 ProcessNewKeyFrame).
     // The Tracker's replica may be behind or the pairs malformed: a point
@@ -452,6 +536,8 @@ void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureE
     start = Clock::now();
     Fuse(keyframe, *created);
     FinishTransaction(first_new, *created);
+    // The parent shares the most points with the Frame, fused ones included.
+    created->added_frames.front().parent = ConnectToParent(id);
     const double fuse_ms = MillisecondsSince(start);
     num_keyframes_.fetch_add(1, std::memory_order_acq_rel);
     num_map_points_.store(map_points_.size(), std::memory_order_release);
@@ -470,6 +556,14 @@ void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureE
         ba.num_points, ba.iterations, ba.interrupted ? "yes" : "no", ba.stage_reached,
         ba.num_outliers, refinement.cull_ms, refinement.num_culled_frames,
         refinement.num_removed_points);
+}
+
+template <typename TFeatureExtractor>
+void Mapper<TFeatureExtractor>::ResetTransactionScratch() {
+    added_keys_.clear();
+    replaced_.clear();
+    losers_.clear();
+    touched_.clear();
 }
 
 template <typename TFeatureExtractor>
@@ -758,9 +852,10 @@ events::NewFrame<TFeatureExtractor>& Mapper<TFeatureExtractor>::AddFramePart(
     part.id = keyframe.id();
     part.T_cw = keyframe.pose();
     part.measurement = keyframe.measurement();
+    const KeyFrameRecord* record = FindRecord(keyframe.id());
+    assert(record != nullptr);
+    part.parent = record->parent;
     if (vocabulary_) {
-        const KeyFrameRecord* record = FindRecord(keyframe.id());
-        assert(record != nullptr);
         part.bow = record->bow;
         part.features = record->features;
     }
@@ -769,9 +864,7 @@ events::NewFrame<TFeatureExtractor>& Mapper<TFeatureExtractor>::AddFramePart(
 
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::PublishNewMap() {
-    auto* event = transaction_pool_.Create();
-    event->map_id = current_map_id();
-    event->priority = false;
+    auto* event = CreateTransaction();
     event->new_map = true;
     event->start_frame = LastKeyFrame().id();
     for (const std::optional<KeyFrameRecord>& record : keyframes_) {

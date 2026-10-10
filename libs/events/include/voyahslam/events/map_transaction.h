@@ -52,14 +52,20 @@ struct NewFrame {
     // that has a vocabulary, empty otherwise.
     bow::BowVector bow;
     bow::FeatureVector features;
+    // Its parent in the map's spanning tree: the Frame sharing the most points
+    // with it at creation; none for the map's first Frame.
+    std::optional<map::FrameId> parent;
 };
 
 // Everything one Mapper step changes in map `map_id`: the only event the
 // Mapper publishes. Every part may be empty. A consumer applies the parts in
-// this order (spec section 2): new map, add Frames, add points, add
-// observations (the new Frames' own, then added_observations), update points,
-// update poses, remove observations, remove points (removed_points and the
-// losers of replaced_points), remove Frames (with their observations).
+// this order (spec section 2): new map, add Frames (with their parents), add
+// loop edges, add points, add observations (the new Frames' own, then
+// added_observations), update points, update poses, remove observations,
+// remove points (removed_points and the losers of replaced_points), change
+// parents, remove Frames (with their observations and loop edges). Parents
+// and loop edges therefore only name Frames that exist when they are applied:
+// a culled Frame's children are re-parented before it goes.
 template <typename TFeatureExtractor>
 struct MapTransaction
     : Event
@@ -95,6 +101,13 @@ struct MapTransaction
     std::vector<map::MapPointId> removed_points;
     std::vector<std::pair<map::FrameId, geometry::RigidTransformation>> updated_poses;  // T_cw
     std::vector<map::FrameId> removed_frames;
+    // The map graph: (frame, new parent) pairs, applied in order, and (frame,
+    // frame) loop edges (undirected).
+    std::vector<std::pair<map::FrameId, map::FrameId>> parent_changes;
+    std::vector<std::pair<map::FrameId, map::FrameId>> added_loop_edges;
+    // The map's correction epoch: 0 for a new map, incremented by every loop
+    // correction.
+    uint32_t map_epoch = 0;
 
     // Set the number of new / updated points in every column; allocate only
     // beyond capacity.
@@ -127,6 +140,9 @@ struct MapTransaction
         removed_points.clear();
         updated_poses.clear();
         removed_frames.clear();
+        parent_changes.clear();
+        added_loop_edges.clear();
+        map_epoch = 0;
     }
 
     MapTransaction()

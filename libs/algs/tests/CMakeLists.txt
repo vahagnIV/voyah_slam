@@ -16,6 +16,7 @@ voyah_add_test_binary(voyah_algs_tests
         features/stereo_matcher_test.cpp
         geometry/geometry_test.cpp
         geometry/pnp_test.cpp
+        geometry/sim3_solver_test.cpp
         geometry/two_view_decomposition_test.cpp
         geometry/two_view_reconstruction_test.cpp
         images/bilinear_interpolation_tests.cpp
@@ -27,7 +28,9 @@ voyah_add_test_binary(voyah_algs_tests
         mapping/map_quality_test.cpp
         mapping/triangulation_test.cpp
         optimization/bundle_adjustment_test.cpp
+        optimization/essential_graph_test.cpp
         optimization/pose_optimization_test.cpp
+        optimization/sim3_optimization_test.cpp
         optimization/projection_test.cpp
         support/synthetic_sequence_test.cpp
     LIBS

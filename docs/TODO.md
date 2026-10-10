@@ -213,7 +213,6 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
       (unreachable today); handle before multi-map / relocalization.
 - [ ] Mono translation accuracy at default init (about 10 % at 1 deg parallax,
       decision T): tuning.
-- [ ] LoopCloser logic (its `ProcessPending()` only acknowledges events).
 
 ## Keyframes and map growth (sub-project 2, 2026-10-06)
 
@@ -353,6 +352,154 @@ Spec `docs/superpowers/specs/2026-10-07-bow-design.md`; DESIGN "Bag of Words"
     are asserted only indirectly; `MapperBowRun` is a hand-driven gtest
     fixture subclass.
 
+## Loop closing (roadmap step 4a+4b, 2026-10-09)
+
+Spec `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; DESIGN
+"Loop Closing" (smoke table there).
+
+- [ ] **Loop closing is opt-in and off by default** (user decision
+      2026-10-10) until the same-heading look-alikes are rejected: see "TUM-VI
+      tuning (roadmap step 6)" below.
+- [ ] **The normal gate blocks true loops once the map is rotated.** It
+      compares normals in map coordinates. After a same-heading false loop
+      is corrected, the two ends of the map are rotated against each other,
+      and the gate then rejects the true return: stereo run 1 of the
+      2026-10-09 smoke rejected 178 return candidates 0.1–1.0 m apart at
+      0.54–1.00, and mono run 1 rejected 70. Before such a correction it
+      rejected no true loop in any run. Large mono rotation drift would do
+      the same. Comparing the normals through the hypothesized Sim3
+      measures something else, so this is not a fix in itself; decide
+      together with the same-heading item above.
+- [ ] **Re-run ThreadSanitizer after every loop-closing change.** Last run
+      2026-10-10, after the final-review fix wave (query backlog):
+      `voyah_slam_tests` (191) and `voyah_integration_tests` (15) clean.
+- [ ] **Mono scale after corrections:** mono loops carry extreme scales after
+      wrong corrections (0.314–1.774 in the 2026-10-09 smoke). Revisit once
+      wrong loops are rejected.
+- [ ] **Single loop connection:** in corridor maps most corrections had only
+      the query–match loop connection (other new links share < 100 points,
+      ORB's `minFeat`), so the essential graph pulls the loop through one
+      edge. ORB-SLAM3 behaves the same and relies on global BA (4c).
+- [ ] **Global BA** (roadmap step 4c): ORB-SLAM3 runs a full BA in its own
+      thread after every loop correction; we stop at the essential graph, so
+      points keep the essential graph's (pose-only) correction and the loop's
+      residual stays until local BA reaches it.
+- [ ] **Map merging** (roadmap step 5): `LoopDetected` carries both map ids
+      and the correction steps take a window and a Sim3, but detection
+      searches only the current map and the Mapper rejects a loop across
+      maps.
+- [ ] **Scale without IMU:** mono scale is corrected only at a loop (the
+      essential graph spreads the loop's Sim3 scale over the graph, start
+      included); between loops it drifts freely, and nothing makes the map
+      metric. Visual-inertial (ORB-SLAM3's IMU initialization) is out of
+      scope so far.
+- [ ] **Point reference distances after a mono scale correction:** points
+      moved by the correction keep their old min / max invariance distances
+      (ORB-SLAM3 `UpdateNormalAndDepth` recomputes them), so scale-gated
+      projections reject them until they are re-observed (Task 6 ruling).
+- [ ] **The LoopCloser is not wired to `TrackingLost`** in `Slam` (it handles
+      a final one if wired); a lost map's late loops are rejected by the
+      Mapper's map-id check instead, after wasted detection work (Task 5
+      ruling). Duplicate loops are not suppressed in the LoopCloser either;
+      the Mapper ignores them. Since 2026-10-10 a repeat (a loop published
+      at an epoch that already had one) has no priority, so it no longer
+      stops a running local BA; a genuinely new loop found before the
+      previous correction arrives (or after the Mapper rejected the previous
+      one) also waits for the BA.
+- [ ] **Dropped loop queries** (2026-10-10, final-review I1): beyond
+      `max_query_backlog` (8) the oldest waiting queries are dropped, so a
+      long-lagging LoopCloser misses detections (counted in
+      `QueryStats::dropped`, logged once per backlog episode, summarised by
+      `Stop()`). Per-query detection on the synthetic loop scenes: 4.5–9.3 ms
+      mean, 26 ms max (Debug tree, `-O2`); corridor1 Release (2026-10-10):
+      mono 55 / 133 ms (mean / max, under load), stereo 43.5 / 96.5 ms,
+      none dropped. Keep reading `Stop()`'s line in the smoke runs.
+- [ ] **ORB's match-window widening for sparse maps** (fewer than 10
+      covisible Frames, `DetectAndReffineSim3FromLastKF`) is skipped: slightly
+      fewer confirmations on sparse maps (Task 5 ruling).
+- [ ] **Essential-graph weighting:** edges are identity-weighted Sim3s; in the
+      Task 6 ring test the middle Frames' rotation error grew from 2.0° to
+      3.2° under the correction. Revisit (weights by shared points, or
+      ORB-SLAM3's information) if corridor or other loops show it.
+- [ ] **Spanning-tree deviations from ORB-SLAM3** (Task 1 ruling B): a new
+      Frame sharing no points takes the previous newest Frame as parent (ORB
+      leaves none); re-parenting on a cull uses live shared-point counts with
+      lower-id ties (ORB: cached weights >= 15).
+- [ ] **Graph checks:** `CheckGraph` checks no acyclicity or single root; the
+      replica's `SetParent` has no cycle guard; the initial-map
+      `ConnectToParent` asserts the Frame is `keyframes_.back()` (true for at
+      most two initial Frames).
+- [ ] **`SearchBySim3Projection` / `SearchPointsBySim3` descriptors:** they use
+      the observing feature's descriptor and level, not the map point's
+      distinctive descriptor (the interface has none); lower projection
+      counts than ORB-SLAM3 are possible (Task 3 ruling).
+- [ ] **Matched pairs drop features without points** (`LoopDetected`
+      `matched_points`): fewer pairs to fuse than ORB-SLAM3 (Task 5 M6).
+- [ ] **Mono Tracker after a scale correction:** `last_frame_` follows its
+      reference Frame, but its relative translation and the velocity stay in
+      the old scale for one frame (Task 7 ruling).
+- [ ] **The replica applies `map_epoch` unconditionally:** a stale epoch-0
+      transaction after a correction would regress it; guard with max.
+- [ ] **Deferred test gaps:** `LoopDetected` interrupting a running local BA
+      (and a same-batch drain not stopping an earlier BA); the essential-graph
+      failure path (publishes the rigid correction and the epoch);
+      `IsValid` rejections and a newer map id without `new_map` in the
+      LoopCloser; `CorrectionWhileRecentlyLost` passes without the Task 7
+      code (pins behaviour only); `AnchorsBeforeCorrection` has no null
+      check; `SolveSim3Ransac` does not guard a non-positive or infinite
+      sigma; the `OptimizeSim3` finite-difference test uses a hand-written
+      `exp(δ)∘S`, its FixScale test starts only at scale 1;
+      `SearchBySim3Projection`'s depth-range and behind-camera gates are
+      untested, and its radius is pinned only at level 0 and in x;
+      `OptimizeSim3`'s `RejectsOutliers` uses only gross outliers;
+      `SolveSim3Ransac`'s mirror-degenerate scenes peak at 11 of 20 inliers
+      (Task 2); `OptimizeEssentialGraph` has no fix-scale-off test with a
+      non-unit corrected loop connection, its end-to-start bar is easy (the
+      RMS and step ratio carry it), and its 8 tests take about 2.4 s in
+      Debug; the covisible-confirmation path of the normal gate has no test
+      of its own (the candidate and refinement paths do).
+- [ ] **`friend struct MapperTestAccess`** (`mapper.h`, Task 1): the first
+      friend test seam in the codebase, carried to Task 6 and still there;
+      replace it with the real `LoopDetected` path in the tests that use it.
+- [ ] **`SlamTest.MonoClosesLoop` costs 14–25 s** (three seeds, each with and
+      without loop closing, lock-step): the longest test in `check_all`.
+      Natural mono drift is a random walk, so the scale part needs a seed
+      range; a scene with a systematic mono scale drift would allow one seed.
+
+## TUM-VI tuning (roadmap step 6)
+
+- [ ] **First: reject same-heading look-alikes in loop closing.** On
+      corridor1, a regular corridor pattern repeats 7–30 m apart with the
+      same heading. Examples:
+      - frames 2215–2236 against 692–807 (14.9 m apart);
+      - 3210→792 (22 m);
+      - 4666→4029 (22 m);
+      - 5017→2950 (30 m).
+
+      The pairs' normals agree, so the normal gate passes them. ORB-SLAM3's
+      visual gates pass them as well: the false-loop diagnosis,
+      `.superpowers/sdd/2026-10-09-loop-closing/false-loop-diagnosis.md`,
+      found this inherent to those gates, not a fidelity bug. In the
+      fix-round-1 smoke, every loop-closing run corrected at least one. The
+      next local BA then started at 10⁷–10⁸ with 25–60 % outliers, and the
+      ATE was worse than without loop closing (mono 0.679 / 0.669 m against
+      0.341 / 0.500 m; stereo 1.295 / 18.16 m against 0.098 / 0.138 m).
+      This is why loop closing is opt-in (2026-10-10).
+
+      Candidate fixes, to compare on corridor1 and decide with the user:
+      1. **A drift-bound gate:** reject a loop whose query and match region
+         lie farther apart in the map than the drift could explain since the
+         match, for example a bound per metre travelled. It is safe in
+         stereo while drift ≪ 15 m; mono needs a scale-aware bound.
+      2. **Verify before publishing:** check the reprojection error of the
+         fused points after the essential graph, or the next local BA's
+         initial cost, and drop a correction that breaks the map. This was
+         rejected for the first round, on 2026-10-09.
+      3. **Both together.**
+
+      The normal gate's map-frame weakness (see "Loop closing") disappears
+      once no false correction gets through, so retest the gate after the fix.
+
 ## Relocalization (roadmap step 3, 2026-10-08)
 
 Spec `docs/superpowers/specs/2026-10-07-relocalization-design.md`; DESIGN
@@ -406,7 +553,8 @@ Spec `docs/superpowers/specs/2026-10-07-relocalization-design.md`; DESIGN
       about 1 run in 20 (0.036–0.058 m), before and after ruling J alike
       (3 / 60 and 4 / 60); it passes alone and in `check_all`. The threaded
       Mapper's pace changes the map. Widen the bound or make the run
-      deterministic.
+      deterministic (`RunSetup::lock_step`, used by the loop tests, takes
+      the Tracker and Mapper of a run out of thread timing).
 - [ ] **Post-relocalization guard window** (ruling J) is 1 s of measurement
       timestamps and the map-size condition a fixed 20 Frames; ORB-SLAM3
       uses `mMaxFrames` = fps frames for both. Derive both from the frame
@@ -462,6 +610,23 @@ Quality" (smoke table there).
       without bound; compact or switch to a map when it matters.
 - [ ] **Make `AsyncObserver::queue()` private:** popping from it bypasses the
       priority counter (only `TryPop` / `Listener` decrement it).
+- [ ] **Pre-existing flaky integration tests** (final review of
+      `feat/loop-closing`, 2026-10-10; neither enables loop closing). Each
+      was run 100 times (4 parallel processes × `--gtest_repeat=25`, both
+      trees' runs concurrently, 16 processes) on master (d182865) and on the
+      branch (ebdd88b):
+  - `SlamTest.DuplicatesFusedInLongSequence`: master 2 / 100, branch
+    2 / 100. Failures: a `TrackingLost` during the run (`tracking_lost`
+    not empty, and once the alive-point count no longer matching), or one
+    1 mm duplicate left. Thread timing (no `lock_step`).
+  - `SlamTest.MonoRelocalizesAfterBlackout`: master 3 / 100 (2 hangs),
+    branch 4 / 100 (2 hangs). Either a second non-final loss
+    (`tracking_lost` {1, 1}), or a 120 s hang: the Tracker stays
+    `RecentlyLost` at the end of the input, so neither a final
+    `TrackingLost` nor the last frame is published and the harness wait
+    (`slam_test.cpp`, after the frame loop) times out. Make the harness end
+    on "input done and the Tracker idle", and the run deterministic
+    (`RunSetup::lock_step`).
 - [ ] `SlamTest.DuplicatesFusedInLongSequence`: with pixel noise the
       duplicates fusion leaves lie centimetres apart, so its 1 mm check only
       catches exact copies (without noise the synthetic run creates no

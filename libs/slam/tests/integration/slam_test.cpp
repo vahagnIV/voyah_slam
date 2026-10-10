@@ -16,6 +16,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <memory>
 #include <optional>
 #include <string>
@@ -41,6 +42,7 @@ struct StampedPose {
     geometry::RigidTransformation pose;
     double timestamp;
     events::TrackingStage stage = events::TrackingStage::MotionModel;  // FrameTracked
+    map::FrameId frame{};  // an added Frame's id
 };
 
 TEST(SlamTest, WiresComponentsAsynchronously) {
@@ -81,15 +83,26 @@ TEST(SlamTest, TrackEnqueuesMonocularAndBinocularMeasurements) {
     EXPECT_EQ(slam.tracker().pending_measurements(), 3u);
 }
 
+// A LoopDetected's content.
+struct LoopRecord {
+    map::FrameId query_frame;
+    map::FrameId match_frame;
+    geometry::Sim3 S_query_match;
+
+    explicit LoopRecord(const events::LoopDetected& loop)
+        : query_frame(loop.query_frame), match_frame(loop.match_frame), S_query_match(loop.S_query_match) {}
+};
+
 // Records the map ids of the protocol events published by the Mapper and the
-// Tracker, read through external observers, and keeps a replica of the
-// Mapper's map.
+// Tracker, and the LoopCloser's loops, read through external observers, and
+// keeps a replica of the Mapper's map.
 class ProtocolRecorder {
 public:
     // Before slam.Start().
     void Attach(OrbSlam& slam) {
         slam.mapper().AddObserver(mapper_events_);
         slam.tracker().AddObserver(tracker_events_);
+        slam.loop_closer().AddObserver(loop_closer_events_);
     }
 
     // Reads every pending event; call only from the test thread.
@@ -109,9 +122,17 @@ public:
             for (const auto& frame : transaction.added_frames) {
                 keyframes.push_back({map, frame.T_cw,
                                      std::visit([](const auto& m) { return m.timestamp(); },
-                                                frame.measurement)});
+                                                frame.measurement),
+                                     events::TrackingStage::MotionModel, frame.id});
             }
             transaction_new_points.push_back(transaction.num_new_points());
+            if (transaction.map_epoch > map_epoch) {
+                map_epoch = transaction.map_epoch;
+                corrections.push_back(keyframes.size());
+            } else if (!transaction.new_map) {
+                // A Frame's creation, or its refinement (local BA, culling).
+                ++(transaction.added_frames.empty() ? num_refinements : num_creations);
+            }
             if (transaction.num_new_points() > 0) {
                 new_points.push_back(map);
                 // Map points not after the transaction that announces their map.
@@ -128,6 +149,11 @@ public:
             } else if (event->type == events::EventType::TrackingLost) {
                 tracking_lost.push_back(event->map_id.value);
                 tracking_lost_final.push_back(static_cast<const events::TrackingLost*>(event)->final);
+            }
+        }
+        while (events::Event* event = loop_closer_listener_.GetNextEvent()) {
+            if (event->type == events::EventType::LoopDetected) {
+                loops.emplace_back(*static_cast<const events::LoopDetected*>(event));
             }
         }
     }
@@ -162,14 +188,25 @@ public:
     std::vector<StampedPose> positions;
     // The Mapper's current map, rebuilt from its transactions.
     tracking::MapReplica<features::OrbFeatureExtractor> replica;
+    // The LoopCloser's LoopDetected, copied (not pooled).
+    std::vector<LoopRecord> loops;
+    // The latest transaction's map epoch; per loop correction (a transaction
+    // with a new epoch), the number of Frames added before it.
+    uint32_t map_epoch = 0;
+    std::vector<size_t> corrections;
+    // Transactions creating a Frame, and refining around one.
+    size_t num_creations = 0;
+    size_t num_refinements = 0;
 
 private:
     // Listeners after their observers: destroyed first, releasing the
     // event they hold.
     events::AsyncObserver mapper_events_;
     events::AsyncObserver tracker_events_;
+    events::AsyncObserver loop_closer_events_;
     events::Listener mapper_listener_ = mapper_events_.GetListener();
     events::Listener tracker_listener_ = tracker_events_.GetListener();
+    events::Listener loop_closer_listener_ = loop_closer_events_.GetListener();
 };
 
 TEST(SlamTest, ForwardsTrackerOptions) {
@@ -480,19 +517,33 @@ features::TBinocularMeasurement<features::OrbFeatureExtractor> EmptyMeasurement(
     return test::MakeBinocular(0, timestamp);
 }
 
+// How RunSequence sets up and feeds a run, beyond the Mapper's options.
+struct RunSetup {
+    tracking::TrackerOptions tracker_options;
+    std::shared_ptr<const OrbSlam::TMapper::TVocabulary> vocabulary;
+    std::optional<Blackout> blackout;
+    loop_closing::LoopCloserOptions loop_closer_options;
+    // Each frame to track is fed once the previous one is tracked, the Mapper
+    // has handled every FrameTracked so far and has refined around every Frame
+    // it created (a Mapper that keeps up, as at camera rate). The Tracker and
+    // the Mapper then no longer depend on thread timing; the LoopCloser is not
+    // gated, so when its LoopDetected reaches the Mapper still does (in
+    // practice runs agree to four digits). Otherwise all at once, as fast as
+    // the Tracker goes.
+    bool lock_step = false;
+};
+
 // Feeds a sequence to a new Slam: the first `init_frames` frames build the
 // map, then every later frame is fed once it tracks (the frames of
-// `blackout`, if any, without features). Returns when the last frame is
+// `setup.blackout`, if any, without features). Returns when the last frame is
 // tracked or tracking is lost for good (TrackingLost with `final`), with the
 // Slam stopped and `out_recorder` drained.
 template <typename TSequence>
 void RunSequence(const TSequence& sequence, size_t init_frames,
                  const mapping::MapperOptions& mapper_options, ProtocolRecorder& out_recorder,
-                 RunCounts& out_counts, const tracking::TrackerOptions& tracker_options = {},
-                 std::shared_ptr<const OrbSlam::TMapper::TVocabulary> vocabulary = nullptr,
-                 std::optional<Blackout> blackout = std::nullopt) {
+                 RunCounts& out_counts, const RunSetup& setup = {}) {
     // Lifetimes as in EndToEndInitializeTrackLoseReinitialize.
-    OrbSlam slam(mapper_options, tracker_options, std::move(vocabulary));
+    OrbSlam slam(mapper_options, setup.tracker_options, setup.vocabulary, setup.loop_closer_options);
     out_recorder.Attach(slam);
     struct StopAndDrain {
         OrbSlam& slam;
@@ -513,11 +564,29 @@ void RunSequence(const TSequence& sequence, size_t init_frames,
         [&] { return slam.tracker().state() == tracking::TrackerState::Tracking; },
         std::chrono::seconds(120)));
     out_counts.tracked_before = out_recorder.positions.size();
+    const auto& mapper = slam.mapper();
+    const auto mapper_handled = [&] {
+        return mapper.num_frame_evaluations() + mapper.backlog_skipped() + mapper.stale_epoch_skipped();
+    };
     for (size_t i = init_frames; i < sequence.frames.size(); ++i) {
+        const auto& blackout = setup.blackout;
         if (blackout && i >= blackout->begin && i <= blackout->end) {
             slam.tracker().Track(EmptyMeasurement(sequence, sequence.frames[i].measurement.timestamp()));
         } else {
             slam.tracker().Track(sequence.frames[i].measurement);
+        }
+        if (setup.lock_step) {
+            // A frame that fails to track publishes nothing: then go on after 2 s.
+            static_cast<void>(out_recorder.WaitFor(
+                [&] {
+                    return !out_recorder.positions.empty() &&
+                           FrameIndexOf(out_recorder.positions.back().timestamp) == i;
+                },
+                std::chrono::seconds(2)));
+            ASSERT_TRUE(out_recorder.WaitFor([&] {
+                return mapper_handled() >= out_recorder.positions.size() &&
+                       out_recorder.num_refinements >= out_recorder.num_creations;
+            }));
         }
     }
     const size_t last = sequence.frames.size() - 1;
@@ -630,8 +699,8 @@ void ExpectRelocalizesAfterBlackout(const TSequence& sequence, size_t init_frame
 
     ProtocolRecorder recorder;
     RunCounts counts;
-    RunSequence(sequence, init_frames, mapper_options, recorder, counts, tracker_options,
-                RootVocabulary(), blackout);
+    RunSequence(sequence, init_frames, mapper_options, recorder, counts,
+                {.tracker_options = tracker_options, .vocabulary = RootVocabulary(), .blackout = blackout});
     if (::testing::Test::HasFatalFailure()) return;
 
     EXPECT_EQ(recorder.map_created, std::vector<uint32_t>{1});
@@ -723,6 +792,253 @@ TEST(SlamTest, DuplicatesFusedInLongSequence) {
         }
     }
     EXPECT_EQ(duplicates, 0u) << "of " << alive.size() << " points";
+}
+
+// 64 words, one per (byte 0, byte 1) pair of test::kSyntheticWordCodes, so a
+// place_words scene's places differ in their BoW vectors (as the LoopCloser
+// tests' MakeRegionVocabulary). Declared with L = 5, so levels_up 4 files
+// every feature under its word and SearchByBoW compares only features of one
+// word.
+std::shared_ptr<const OrbSlam::TMapper::TVocabulary> PlaceVocabulary() {
+    using TVocabulary = OrbSlam::TMapper::TVocabulary;
+    using TDescriptors = features::OrbFeatureExtractor::TDescriptors;
+    constexpr size_t kNumCodes = std::size(test::kSyntheticWordCodes);
+    constexpr size_t kNumWords = kNumCodes * kNumCodes;
+    TDescriptors descriptors = TDescriptors::Zero(features::OrbFeatureExtractor::DescriptorSize,
+                                                  static_cast<Eigen::Index>(1 + kNumWords));
+    std::vector<double> weights(1 + kNumWords, 1.0);
+    weights[0] = 0.0;
+    for (size_t word = 0; word < kNumWords; ++word) {
+        descriptors(0, static_cast<Eigen::Index>(1 + word)) = test::kSyntheticWordCodes[word / kNumCodes];
+        descriptors(1, static_cast<Eigen::Index>(1 + word)) = test::kSyntheticWordCodes[word % kNumCodes];
+    }
+    return std::make_shared<const TVocabulary>(TVocabulary::FromTree(
+        static_cast<int>(kNumWords), 5, std::vector<bow::NodeId>(1 + kNumWords, 0), std::move(descriptors),
+        std::move(weights)));
+}
+
+// A loop in the room: the camera circles 1.5 m about its centre looking
+// outward, 1.5 deg per frame, turning 450 deg: frame k + kLapFrames repeats
+// frame k's true pose, so the last 90 deg revisit the first lap's view.
+constexpr size_t kLapFrames = 240;
+test::SyntheticSequenceOptions LoopOptions() {
+    test::SyntheticSequenceOptions options;
+    options.surround_scene = true;
+    options.loop_radius = 1.5;
+    options.place_words = true;
+    options.turn_deg = 450.0;
+    options.num_frames = 301;
+    options.num_points = 1000;
+    return options;
+}
+
+// What a loop run measured.
+struct LoopRun {
+    // Mean over the last kEndFrames tracked frames of the camera-centre error,
+    // in true units, relative to the first-lap Frame nearest to the same true
+    // pose, as the final map holds it: the drift between where the camera
+    // ends and the map of where it started.
+    double end_error = 0.0;
+    size_t num_end_pairs = 0;  // end frames with a first-lap reference: end_error's count
+    // Mean over those frames of the map's scale there (the distance moved
+    // over kScaleSpan frames, per true metre) over its scale at the
+    // reference: the scale drift between the start and the end of the run,
+    // 1 if none.
+    double end_scale_ratio = 1.0;
+    size_t num_loops = 0;    // LoopDetected
+    size_t num_corrections = 0;
+    size_t num_lost = 0;     // TrackingLost
+    size_t num_maps = 0;     // maps created
+    size_t loop_frame = 0;   // the first loop's query Frame, as a frame index
+    double loop_scale = 1.0;  // its Sim3 scale
+    bool tracked_to_end = false;
+};
+
+constexpr size_t kEndFrames = 20;
+constexpr size_t kScaleSpan = 15;
+
+template <typename TSequence>
+LoopRun RunLoop(const TSequence& sequence, size_t init_frames, bool monocular,
+                const mapping::MapperOptions& mapper_options, bool loop_closing) {
+    std::vector<geometry::RigidTransformation> truth;
+    for (const auto& frame : sequence.frames) truth.push_back(frame.T_cw);
+    // Without loop closing: the default options, which leave it off (opt-in)
+    // although the run has a vocabulary.
+    loop_closing::LoopCloserOptions loop_closer_options;
+    if (loop_closing) loop_closer_options.enabled = true;
+    ProtocolRecorder recorder;
+    RunCounts counts;
+    RunSequence(sequence, init_frames, mapper_options, recorder, counts,
+                {.vocabulary = PlaceVocabulary(), .loop_closer_options = loop_closer_options, .lock_step = true});
+    LoopRun run;
+    run.num_loops = recorder.loops.size();
+    run.num_corrections = recorder.corrections.size();
+    run.num_lost = recorder.tracking_lost.size();
+    run.num_maps = recorder.map_created.size();
+    // The final map's Frames by frame index.
+    std::vector<std::optional<geometry::RigidTransformation>> frame_pose(sequence.frames.size());
+    std::vector<StampedPose> keyframes;
+    for (const StampedPose& keyframe : recorder.keyframes) {
+        if (keyframe.map != 1) continue;
+        keyframes.push_back(keyframe);
+        if (const auto* frame = recorder.replica.keyframe(keyframe.frame)) {
+            frame_pose[FrameIndexOf(keyframe.timestamp)] = frame->T_cw;
+        }
+        if (!recorder.loops.empty() && keyframe.frame == recorder.loops.front().query_frame) {
+            run.loop_frame = FrameIndexOf(keyframe.timestamp);
+            run.loop_scale = recorder.loops.front().S_query_match.scale;
+        }
+    }
+    if (keyframes.empty() || recorder.positions.empty()) return run;
+    const size_t first = FrameIndexOf(keyframes[0].timestamp);
+    const size_t last = sequence.frames.size() - 1;
+    run.tracked_to_end = FrameIndexOf(recorder.positions.back().timestamp) == last;
+    // True positions with the first Frame's camera as the world.
+    const geometry::RigidTransformation T_first_w = truth[first];
+    const auto true_centre = [&](size_t k) { return test::MapAlignment::Centre(truth[k] * T_first_w.Inverse()); };
+    // The first-lap Frame nearest to frame `target`.
+    const auto nearest_frame = [&](size_t target) {
+        std::optional<size_t> nearest;
+        const auto distance = [target](size_t j) { return j > target ? j - target : target - j; };
+        for (size_t j = 0; j < kLapFrames / 2; ++j) {
+            if (frame_pose[j] && (!nearest || distance(j) < distance(*nearest))) nearest = j;
+        }
+        return nearest;
+    };
+    // The latest tracked centre per frame index, map 1.
+    std::vector<std::optional<geometry::TVector3DF>> tracked(sequence.frames.size());
+    for (const StampedPose& position : recorder.positions) {
+        if (position.map == 1) tracked[FrameIndexOf(position.timestamp)] = test::MapAlignment::Centre(position.pose);
+    }
+    double sum = 0.0, ratio_sum = 0.0;
+    size_t n = 0, num_ratios = 0;
+    for (const StampedPose& position : recorder.positions) {
+        const size_t k = FrameIndexOf(position.timestamp);
+        if (position.map != 1 || k + kEndFrames <= last) continue;
+        // The first-lap Frame nearest to frame k's true pose (frame k -
+        // kLapFrames), and one about kScaleSpan frames before it: their
+        // distance gives the final map's scale there (mono: a loop
+        // correction rescales the start too).
+        const std::optional<size_t> reference = nearest_frame(k - kLapFrames);
+        const std::optional<size_t> other = nearest_frame(k - kLapFrames - kScaleSpan);
+        if (!reference || !other || *reference == *other) continue;
+        const geometry::TVector3DF reference_centre = test::MapAlignment::Centre(*frame_pose[*reference]);
+        const double scale =
+            monocular ? (reference_centre - test::MapAlignment::Centre(*frame_pose[*other])).norm() /
+                            (true_centre(*reference) - true_centre(*other)).norm()
+                      : 1.0;
+        const geometry::TVector3DF estimated = (test::MapAlignment::Centre(position.pose) - reference_centre) / scale;
+        sum += (estimated - (true_centre(k) - true_centre(*reference))).norm();
+        ++n;
+        if (tracked[k - kScaleSpan]) {
+            const double end_scale = (test::MapAlignment::Centre(position.pose) - *tracked[k - kScaleSpan]).norm() /
+                                     (true_centre(k) - true_centre(k - kScaleSpan)).norm();
+            ratio_sum += end_scale / scale;
+            ++num_ratios;
+        }
+    }
+    run.end_error = n > 0 ? sum / static_cast<double>(n) : 0.0;
+    run.num_end_pairs = n;
+    run.end_scale_ratio = num_ratios > 0 ? ratio_sum / static_cast<double>(num_ratios) : 1.0;
+    return run;
+}
+
+// Runs `sequence` (a LoopOptions loop) without loop closing (the default
+// options: it is opt-in) and with it enabled, and expects: without, no
+// LoopDetected and tracking to the end; with, the loop detected
+// on the return to the first lap's view and corrected, one map, no tracking
+// loss across the correction (the Tracker follows a real Mapper correction),
+// and an end error, measured, at most a third of the run without. Records
+// the numbers under `seed`, the sequence's; returns both runs.
+struct LoopRuns {
+    LoopRun open;    // without loop closing
+    LoopRun closed;  // with it
+};
+template <typename TSequence>
+LoopRuns ExpectClosesLoop(const TSequence& sequence, uint32_t seed, size_t init_frames, bool monocular,
+                          const mapping::MapperOptions& mapper_options) {
+    const LoopRun open = RunLoop(sequence, init_frames, monocular, mapper_options, /*loop_closing=*/false);
+    if (::testing::Test::HasFatalFailure()) return {};
+    const LoopRun closed = RunLoop(sequence, init_frames, monocular, mapper_options, /*loop_closing=*/true);
+    if (::testing::Test::HasFatalFailure()) return {};
+
+    EXPECT_EQ(open.num_loops, 0u);
+    EXPECT_EQ(open.num_corrections, 0u);
+    EXPECT_EQ(open.num_maps, 1u);
+    EXPECT_EQ(open.num_lost, 0u);
+    EXPECT_TRUE(open.tracked_to_end);
+
+    EXPECT_GE(closed.num_loops, 1u);
+    EXPECT_GE(closed.num_corrections, 1u);
+    EXPECT_GE(closed.loop_frame, kLapFrames - 30);  // on the return
+    EXPECT_EQ(closed.num_maps, 1u);
+    EXPECT_EQ(closed.num_lost, 0u);
+    EXPECT_TRUE(closed.tracked_to_end);
+    // Both errors are measured (end frames with a first-lap reference).
+    EXPECT_GE(open.num_end_pairs, kEndFrames / 2);
+    EXPECT_GE(closed.num_end_pairs, kEndFrames / 2);
+    EXPECT_GT(open.end_error, 0.0);
+    EXPECT_GT(closed.end_error, 0.0);
+    EXPECT_LE(closed.end_error, open.end_error / 3.0);
+    if (!monocular) {
+        EXPECT_DOUBLE_EQ(closed.loop_scale, 1.0);
+    }
+    const std::string prefix = "seed_" + std::to_string(seed) + "_";
+    ::testing::Test::RecordProperty(prefix + "end_error_without_m", std::to_string(open.end_error));
+    ::testing::Test::RecordProperty(prefix + "end_error_with_m", std::to_string(closed.end_error));
+    ::testing::Test::RecordProperty(prefix + "loop_frame", static_cast<int>(closed.loop_frame));
+    ::testing::Test::RecordProperty(prefix + "loop_scale", std::to_string(closed.loop_scale));
+    ::testing::Test::RecordProperty(prefix + "end_scale_ratio_without", std::to_string(open.end_scale_ratio));
+    ::testing::Test::RecordProperty(prefix + "end_scale_ratio_with", std::to_string(closed.end_scale_ratio));
+    return {open, closed};
+}
+
+// Seeds 1-3 of the loop. Mono drift is a random walk whose scale part varies
+// by scene, so the scale correction is expected over the range: some seed
+// drifts in scale by more than 2 % between the start and the end of the run
+// (end_scale_ratio, against truth) without loop closing, and with it every
+// such drift is cut to at most a third.
+//
+// Measured (2026-10-09, three runs each, identical to 4 digits; end error
+// without / with loop closing, end-of-run scale drift without / with): seed 1
+// 0.0676 / 0.0101 m, 5.5 / 0.4 % (loop at frame 236); seed 2 0.1139 / 0.0157
+// m, 0.7 / 1.4 % (235); seed 3 0.1429 / 0.0060 m, 4.6 / 0.5 % (225). One run
+// each of seeds 4-5: 0.0876 / 0.0154 and 0.1447 / 0.0044 m.
+TEST(SlamTest, MonoClosesLoop) {
+    // As in MonoMapGrowsWhileLeavingInitialView: a well-conditioned initial map.
+    mapping::MapperOptions mapper_options;
+    mapper_options.initializer.reconstruction.min_parallax_deg = 4.0;
+    constexpr double kScaleDrift = 0.02;  // log scale
+    double max_scale_drift = 0.0;
+    for (uint32_t seed = 1; seed <= 3; ++seed) {
+        SCOPED_TRACE("seed " + std::to_string(seed));
+        test::SyntheticSequenceOptions options = LoopOptions();
+        options.seed = seed;
+        const LoopRuns runs = ExpectClosesLoop(test::MakeSyntheticSequence(options), seed, /*init_frames=*/30,
+                                               /*monocular=*/true, mapper_options);
+        if (HasFatalFailure()) return;
+        const double drift_without = std::abs(std::log(runs.open.end_scale_ratio));
+        const double drift_with = std::abs(std::log(runs.closed.end_scale_ratio));
+        max_scale_drift = std::max(max_scale_drift, drift_without);
+        if (drift_without > kScaleDrift) {
+            EXPECT_LE(drift_with, drift_without / 3.0);
+        }
+    }
+    EXPECT_GT(max_scale_drift, kScaleDrift);
+}
+
+// Measured (2026-10-09, end error without / with loop closing, three runs):
+// 0.0157 / 0.0023 m each, loop at frame 264. Seeds 2-5 (margin check, one
+// run each): 0.0252 / 0.0043, 0.0457 / 0.0115, 0.0186 / 0.0033, 0.0146 /
+// 0.0019 m (ratio at most 0.25).
+TEST(SlamTest, StereoClosesLoop) {
+    test::SyntheticStereoSequenceOptions options;
+    options.trajectory = LoopOptions();
+    options.trajectory.num_points = 700;  // as StereoMapGrowsWhileLeavingInitialView
+    const test::SyntheticStereoSequence sequence = test::MakeSyntheticStereoSequence(options);
+    mapping::MapperOptions mapper_options;
+    mapper_options.initializer.stereo_min_features = 150;
+    ExpectClosesLoop(sequence, options.trajectory.seed, /*init_frames=*/1, /*monocular=*/false, mapper_options);
 }
 
 } // namespace

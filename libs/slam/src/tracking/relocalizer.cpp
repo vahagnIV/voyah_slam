@@ -15,17 +15,7 @@
 namespace voyahslam::tracking {
 namespace {
 
-// The monocular measurement matched against the map: the left image of a
-// binocular one.
-template <typename TFeatureExtractor>
-const features::TMonocularMeasurement<TFeatureExtractor>& LeftOf(
-    const features::TMeasurement<TFeatureExtractor>& measurement) {
-    if (const auto* binocular =
-            std::get_if<features::TBinocularMeasurement<TFeatureExtractor>>(&measurement)) {
-        return binocular->left();
-    }
-    return std::get<features::TMonocularMeasurement<TFeatureExtractor>>(measurement);
-}
+using features::LeftOf;
 
 bool IsFinite(const geometry::RigidTransformation& T) {
     return T.rotation().allFinite() && T.translation().allFinite();
