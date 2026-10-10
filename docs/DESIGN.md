@@ -400,9 +400,10 @@ Rules:
   transaction. Other events (`FrameTracked`, `TrackingLost`, ...) change no
   replica: a final `TrackingLost` is answered by the Mapper's transaction
   that deactivates the map (`removed_maps` too if it is discarded); a kept
-  map stays live, inactive, in every replica. `absorbed_map` (map merging) is asserted unset until
-  Task 5. The Mapper builds map n+1 only after a final `TrackingLost(n)`, so
-  a newer map never appears while the Tracker tracks an older one.
+  map stays live, inactive, in every replica. `absorbed_map` (map merging)
+  is asserted unset until Task 5. The Mapper builds map n+1 only after a
+  final `TrackingLost(n)`, so a newer map never appears while the Tracker
+  tracks an older one.
 - **No subscription filtering:** an `Observable` delivers every event to every
   connected observer (the viewer also receives `InitializationMeasurement` and
   just counts it). A future serializing observer chooses what to send.

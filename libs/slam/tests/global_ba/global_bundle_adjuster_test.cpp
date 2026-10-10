@@ -388,9 +388,14 @@ TEST(GlobalBundleAdjusterTest, InactiveMapLeavesGlobalBaIdle) {
     EXPECT_EQ(atlas.map(kMap)->map_epoch(), 5u);  // applied to its map
     EXPECT_EQ(harness.global_ba().replica().map_epoch(), 0u);
 
-    // Nor does one arriving while the active map's run polls.
+    // Nor does one arriving while the active map's run polls (sent once: a
+    // GlobalBA that ran on it would otherwise loop).
     harness.SendCorrection(map::MapId{2}, 1);
-    harness.global_ba().set_run_hook([&] { harness.SendCorrectionOf(kMap, map::MapId{2}, 9); });
+    bool sent = false;
+    harness.global_ba().set_run_hook([&] {
+        if (!sent) harness.SendCorrectionOf(kMap, map::MapId{2}, 9);
+        sent = true;
+    });
     const std::vector<Result> results = harness.Run();
     harness.global_ba().set_run_hook({});
     ASSERT_EQ(results.size(), 1u);
@@ -399,6 +404,30 @@ TEST(GlobalBundleAdjusterTest, InactiveMapLeavesGlobalBaIdle) {
     EXPECT_EQ(harness.global_ba().num_runs_started(), 1u);
     EXPECT_EQ(harness.global_ba().num_runs_interrupted(), 0u);
     EXPECT_EQ(atlas.map(kMap)->map_epoch(), 9u);
+}
+
+// The Mapper keeping a lost map inactive (no active map, not removed) drops
+// the pending run, whether it comes before the run (in the same drain) or
+// while it runs; the map stays live.
+TEST(GlobalBundleAdjusterTest, DeactivatedMapDropsRun) {
+    for (const bool during_run : {false, true}) {
+        SCOPED_TRACE(during_run ? "during the run" : "before the run");
+        Harness harness;
+        harness.SendMap(kMap);
+        harness.SendCorrection(kMap, 1);
+        if (during_run) {
+            harness.global_ba().set_run_hook([&] { harness.SendDeactivation(kMap); });
+        } else {
+            harness.SendDeactivation(kMap);
+        }
+        EXPECT_TRUE(harness.Run().empty());
+        harness.global_ba().set_run_hook({});
+
+        EXPECT_EQ(harness.global_ba().num_runs_started(), during_run ? 1u : 0u);
+        EXPECT_EQ(harness.global_ba().num_runs_interrupted(), during_run ? 1u : 0u);
+        EXPECT_FALSE(harness.global_ba().atlas().active_map().has_value());
+        EXPECT_EQ(harness.global_ba().atlas().map_ids(), std::vector<map::MapId>{kMap});
+    }
 }
 
 // Events of a removed map (and of map 0) neither start nor interrupt a run.

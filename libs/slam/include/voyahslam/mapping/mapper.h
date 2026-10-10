@@ -130,8 +130,9 @@ enum class MapperState : uint8_t {
 // discarded (ResetActiveMap), published as one transaction with removed_maps
 // = {the map} and no active map; otherwise it is kept inactive
 // (CreateMapInAtlas), published as one transaction with no active map. The
-// next new map takes the next id. A non-final one (the Tracker is recently lost) is ignored. In a map with more
-// than relocalization_guard_min_frames Frames, no Frame is created from a
+// next new map takes the next id. A non-final TrackingLost (the Tracker is
+// recently lost) is ignored. In a map with more than
+// relocalization_guard_min_frames Frames, no Frame is created from a
 // FrameTracked within relocalization_guard_seconds of the latest relocalized
 // one (stage Relocalization), that one included.
 // A LoopDetected of the current map is corrected in place of new-Frame work
