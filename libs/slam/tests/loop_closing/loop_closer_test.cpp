@@ -11,6 +11,8 @@
 #include <voyahslam/memory/object_pool.h>
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -19,6 +21,7 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <thread>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -231,6 +234,7 @@ struct Loop {
     map::FrameId match_frame;
     Sim3 S;
     std::vector<std::pair<map::MapPointId, map::MapPointId>> matched_points;
+    bool priority = false;
 };
 
 // The default options with loop closing enabled (it is opt-in).
@@ -244,8 +248,10 @@ LoopCloserOptions EnabledOptions() {
 // enabled unless `options` says otherwise.
 class Harness {
 public:
-    explicit Harness(std::shared_ptr<const TVocabulary> vocabulary, LoopCloserOptions options = EnabledOptions())
-        : loop_closer_(options, std::move(vocabulary)) {
+    // `pool_size`: the MapTransactions this harness can have in flight.
+    explicit Harness(std::shared_ptr<const TVocabulary> vocabulary, LoopCloserOptions options = EnabledOptions(),
+                     size_t pool_size = 4)
+        : transaction_pool_(pool_size), loop_closer_(options, std::move(vocabulary)) {
         mapper_.ConnectAsync(loop_closer_.inbox());
         tracker_.ConnectAsync(loop_closer_.inbox());
         loop_closer_.AddObserver(capture_);
@@ -262,8 +268,21 @@ public:
     // then runs the LoopCloser; returns what it published.
     std::vector<Loop> Publish(const SceneFrame& frame, const NewPoints& points = {}, bool new_map = false,
                               map::MapId map_id = map::MapId{1}) {
-        auto* transaction = transaction_pool_.Create();
+        EXPECT_TRUE(Send(frame, points, new_map, map_id));
+        return Run();
+    }
+
+    // Publishes what Publish() does without running the LoopCloser. False
+    // (counted in num_exhausted()) if every transaction is in flight.
+    bool Send(const SceneFrame& frame, const NewPoints& points = {}, bool new_map = false,
+              map::MapId map_id = map::MapId{1}) {
+        auto* transaction = transaction_pool_.TryCreate();
+        if (transaction == nullptr) {
+            ++num_exhausted_;
+            return false;
+        }
         transaction->map_id = map_id;
+        transaction->map_epoch = map_epoch_;
         transaction->new_map = new_map;
         if (new_map) transaction->start_frame = frame.id;
         events::NewFrame<Extractor>& added = transaction->added_frames.emplace_back();
@@ -291,6 +310,28 @@ public:
         }
         previous_ = frame.id;
         mapper_.Notify(transaction);
+        return true;
+    }
+
+    // Publishes a transaction of map 1 culling Frame `frame` (a leaf of the
+    // spanning tree) without running the LoopCloser.
+    void SendCull(map::FrameId frame) {
+        auto* transaction = transaction_pool_.Create();
+        transaction->map_id = map::MapId{1};
+        transaction->map_epoch = map_epoch_;
+        transaction->removed_frames.push_back(frame);
+        mapper_.Notify(transaction);
+    }
+
+    // Publishes an empty transaction of map 1 at `map_epoch` (a loop
+    // correction's epoch; later transactions carry it too), then runs the
+    // LoopCloser; returns what it published.
+    std::vector<Loop> PublishEpoch(uint32_t map_epoch) {
+        map_epoch_ = map_epoch;
+        auto* transaction = transaction_pool_.Create();
+        transaction->map_id = map::MapId{1};
+        transaction->map_epoch = map_epoch;
+        mapper_.Notify(transaction);
         return Run();
     }
 
@@ -313,6 +354,7 @@ public:
     void set_hold(bool hold) { hold_ = hold; }
 
     LoopCloser<Extractor>& loop_closer() { return loop_closer_; }
+    [[nodiscard]] size_t num_exhausted() const { return num_exhausted_; }
 
     // Takes (and acknowledges) everything published.
     std::vector<Loop> Take() {
@@ -321,7 +363,7 @@ public:
             if (event->type != events::EventType::LoopDetected) continue;
             const auto& loop = *static_cast<events::LoopDetected*>(event);
             loops.push_back({loop.map_id, loop.query_map_id, loop.match_map_id, loop.query_frame,
-                             loop.match_frame, loop.S_query_match, loop.matched_points});
+                             loop.match_frame, loop.S_query_match, loop.matched_points, loop.priority});
         }
         return loops;
     }
@@ -338,6 +380,8 @@ public:
     events::Listener listener_ = capture_.GetListener();
     std::optional<map::FrameId> previous_;
     bool hold_ = false;
+    uint32_t map_epoch_ = 0;
+    size_t num_exhausted_ = 0;
 };
 
 // How the camera comes back to region A.
@@ -554,8 +598,15 @@ void ExpectLoopAtThirdConfirmation(uint32_t seed, const Sim3& drift, bool binocu
     }
 
     const std::vector<Loop> loops = scene.PublishReturn(harness, 3);
+    const QueryStats& queries = loop_closer.query_stats();
+    ::testing::Test::RecordProperty(
+        "seed" + std::to_string(seed) + (binocular ? "_stereo" : "_mono") + "_detection_ms",
+        std::to_string(queries.detected) + " queries, mean " +
+            std::to_string(1e3 * queries.total_seconds / static_cast<double>(std::max<size_t>(queries.detected, 1))) +
+            " max " + std::to_string(1e3 * queries.max_seconds));
     ASSERT_EQ(loops.size(), 1u);
     const Loop& loop = loops[0];
+    EXPECT_TRUE(loop.priority);  // the first of its region
     EXPECT_EQ(loop.map_id, map::MapId{1});
     EXPECT_EQ(loop.query_map_id, map::MapId{1});
     EXPECT_EQ(loop.match_map_id, map::MapId{1});
@@ -679,6 +730,147 @@ TEST(LoopCloserTest, DropsLoopWhileEventsAreInFlight) {
     const std::vector<Loop> loops = harness.Take();
     ASSERT_EQ(loops.size(), 1u);
     EXPECT_EQ(loops[0].query_frame, LoopScene::ReturnId(3));
+}
+
+// A loop found again before its correction reaches the LoopCloser's replica
+// (the same epoch) is still published, for the Mapper to drop, but without
+// priority: it does not stop a running local BA. After a correction (a new
+// epoch) a loop is urgent again.
+TEST(LoopCloserTest, RepeatedLoopIsNotUrgent) {
+    Harness harness(MakeRegionVocabulary());
+    LoopScene scene(1, Revisit::Drifted, MonoDrift(), false);
+    ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
+    for (size_t k = 0; k < 3; ++k) {
+        ASSERT_TRUE(scene.PublishReturn(harness, k).empty());
+    }
+    std::vector<Loop> loops = scene.PublishReturn(harness, 3);
+    ASSERT_EQ(loops.size(), 1u);
+    EXPECT_TRUE(loops[0].priority);
+    // L4 finds the region again with 3 covisible confirmations.
+    loops = scene.PublishReturn(harness, 4);
+    ASSERT_EQ(loops.size(), 1u);
+    EXPECT_FALSE(loops[0].priority);
+
+    EXPECT_TRUE(harness.PublishEpoch(1).empty());
+    loops = scene.PublishReturn(harness, 5);
+    ASSERT_EQ(loops.size(), 1u);
+    EXPECT_TRUE(loops[0].priority);
+}
+
+// M1: a pending region's Sim3 is in pre-correction coordinates, so a
+// transaction raising the map epoch drops it; one at the same epoch keeps it.
+TEST(LoopCloserTest, CorrectionDropsPendingRegion) {
+    Harness harness(MakeRegionVocabulary());
+    LoopScene scene(1, Revisit::Drifted, MonoDrift(), false);
+    ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
+    ASSERT_TRUE(scene.PublishReturn(harness, 0).empty());
+    ASSERT_TRUE(scene.PublishReturn(harness, 1).empty());
+    ASSERT_EQ(harness.loop_closer().num_coincidences(), 1u);
+    EXPECT_TRUE(harness.PublishEpoch(0).empty());
+    EXPECT_EQ(harness.loop_closer().num_coincidences(), 1u);
+    EXPECT_TRUE(harness.PublishEpoch(1).empty());
+    EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
+    EXPECT_EQ(harness.loop_closer().replica().map_epoch(), 1u);
+}
+
+// Frames of one place, each a query (min_map_frames 1): Frame 0 adds the
+// place's points.
+class QueryFeed {
+public:
+    explicit QueryFeed(Harness& harness) : harness_(harness), region_(MakeRegion(50, T_, 0x00, rng_)) {}
+
+    bool Send() {
+        const map::FrameId id{next_++};
+        const NewPoints points = id.value == 0 ? PointsOf(region_, 0, Sim3{}, Centre(T_), rng_) : NewPoints{};
+        return harness_.Send(Observe(id, T_, T_, region_, 0, false, rng_), points, id.value == 0);
+    }
+    [[nodiscard]] uint32_t num_sent() const { return next_; }
+
+private:
+    Harness& harness_;
+    std::mt19937 rng_{1};
+    RigidTransformation T_ = Pose(0.0, 0.0, 0.0, 0.0);
+    std::vector<ScenePoint> region_;
+    uint32_t next_ = 0;
+};
+
+LoopCloserOptions EveryFrameAQuery() {
+    LoopCloserOptions options = EnabledOptions();
+    options.min_map_frames = 1;
+    return options;
+}
+
+// I1: a slow detector holds no MapTransaction. While each query is detected
+// the Mapper publishes two more Frames, so detection falls further behind
+// with every query; the transactions are applied (and released) on receipt
+// and only their Frame ids wait, the oldest beyond max_query_backlog dropped.
+// Before, each transaction was held until its Frames were detected and the
+// Mapper's pool ran out.
+TEST(LoopCloserTest, SlowDetectorHoldsNoTransaction) {
+    constexpr uint32_t kFrames = 200;
+    LoopCloserOptions options = EveryFrameAQuery();
+    options.max_query_backlog = 4;
+    size_t detected = 0;
+    Harness harness(MakeRegionVocabulary(), options, /*pool_size=*/8);
+    QueryFeed feed(harness);
+    ASSERT_TRUE(feed.Send());
+    harness.loop_closer().set_query_hook([&](map::FrameId) {
+        ++detected;
+        for (int i = 0; i < 2 && feed.num_sent() < kFrames; ++i) {
+            feed.Send();
+        }
+    });
+    harness.Run();
+    harness.loop_closer().set_query_hook({});
+
+    EXPECT_EQ(harness.num_exhausted(), 0u);
+    EXPECT_EQ(feed.num_sent(), kFrames);
+    EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), kFrames);
+    const QueryStats& queries = harness.loop_closer().query_stats();
+    EXPECT_EQ(queries.detected, detected);
+    EXPECT_GT(queries.dropped, kFrames / 4);
+    EXPECT_EQ(queries.detected + queries.dropped, kFrames);
+}
+
+// A queued query whose Frame is culled before its detection is skipped.
+TEST(LoopCloserTest, CulledQueryIsSkipped) {
+    std::vector<map::FrameId> detected;
+    Harness harness(MakeRegionVocabulary(), EveryFrameAQuery());
+    harness.loop_closer().set_query_hook([&](map::FrameId query) { detected.push_back(query); });
+    QueryFeed feed(harness);
+    ASSERT_TRUE(feed.Send());
+    ASSERT_TRUE(feed.Send());
+    harness.SendCull(map::FrameId{1});
+    EXPECT_TRUE(harness.Run().empty());
+    harness.loop_closer().set_query_hook({});
+
+    EXPECT_EQ(detected, std::vector<map::FrameId>{map::FrameId{0}});
+    EXPECT_EQ(harness.loop_closer().replica().keyframe(map::FrameId{1}), nullptr);
+    EXPECT_EQ(harness.loop_closer().query_stats().detected, 1u);
+}
+
+// M3: Stop() returns after the query being detected, not after the backlog.
+TEST(LoopCloserTest, StopDoesNotWaitForBacklog) {
+    constexpr uint32_t kFrames = 8;
+    std::atomic<size_t> detected{0};
+    LoopCloserOptions options = EveryFrameAQuery();
+    options.max_query_backlog = kFrames;
+    Harness harness(MakeRegionVocabulary(), options, /*pool_size=*/kFrames);
+    QueryFeed feed(harness);
+    for (uint32_t i = 0; i < kFrames; ++i) {
+        ASSERT_TRUE(feed.Send());
+    }
+    harness.loop_closer().set_query_hook([&](map::FrameId) {
+        detected.fetch_add(1);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    });
+    harness.loop_closer().Start();
+    while (detected.load() == 0) {
+        std::this_thread::yield();
+    }
+    harness.loop_closer().Stop();
+    EXPECT_LE(detected.load(), 2u);
+    harness.loop_closer().set_query_hook({});
 }
 
 // A place that looks like region A (the same descriptors) with another 3-D
@@ -875,6 +1067,7 @@ TEST(LoopCloserOptionsTest, OrbSlam3Defaults) {
     EXPECT_EQ(options.refine_min_projection, 100u);
     EXPECT_EQ(options.required_coincidences, 3u);
     EXPECT_EQ(options.max_unconfirmed_queries, 2u);
+    EXPECT_EQ(options.max_query_backlog, 8u);  // ours: ORB-SLAM3's queue is unbounded
     EXPECT_EQ(options.ransac_iterations, 300);
     EXPECT_DOUBLE_EQ(options.ransac_confidence, 0.99);
     EXPECT_DOUBLE_EQ(options.ransac_chi2, 9.21);

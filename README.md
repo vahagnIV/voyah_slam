@@ -50,8 +50,8 @@ CMake finds them as `OpenCV 5` (`/usr/local/lib/cmake/opencv5`) and `Pangolin 0.
 ## One-time: package g2o with Conan
 
 g2o 20241228 is vendored in `third_party/g2o/src/` and packaged by a local recipe as
-`g2o/20241228@voyah/stable`. It must be in your local Conan cache before the project's
-`conan install`, otherwise Conan fails with `ERROR: Package 'g2o/20241228@voyah/stable' not resolved: Unable to find 'g2o/20241228@voyah/stable' in remotes.`
+`g2o/20241228.1@voyah/stable` (upstream tag 20241228, recipe revision `.1`). It must be in your local Conan cache before the project's
+`conan install`, otherwise Conan fails with `ERROR: Package 'g2o/20241228.1@voyah/stable' not resolved: Unable to find 'g2o/20241228.1@voyah/stable' in remotes.`
 Create both build types (about two minutes each):
 
 ```
@@ -61,9 +61,10 @@ conan create third_party/g2o --build=missing -s build_type=Release
 
 See `third_party/README.md` for details (license, options, updating).
 
-**Loop closing (2026-10-09) added the `types_sim3` component** to the recipe.
-A machine that created the package before must re-run both `conan create`
-commands above, then the project's `conan install` for each build type.
+**Loop closing (2026-10-09) added the `types_sim3` component** to the recipe,
+whose version became `20241228.1` (2026-10-10). A machine with only the old
+`g2o/20241228` package gets the "not resolved" error above: run both
+`conan create` commands, then the project's `conan install` for each build type.
 
 ## Build and test
 
@@ -73,8 +74,8 @@ Debug (tree `cmake-build-debug/build/Debug`):
 conan install . --output-folder=cmake-build-debug --build=missing -s build_type=Debug
 cmake --preset conan-debug
 cmake --build cmake-build-debug/build/Debug -j"$(nproc)"
-cmake --build cmake-build-debug/build/Debug --target check       # unit tests (628, ~5.5 s)
-cmake --build cmake-build-debug/build/Debug --target check_all   # every test (644, 17-25 s)
+cmake --build cmake-build-debug/build/Debug --target check       # unit tests (633, ~5.5 s)
+cmake --build cmake-build-debug/build/Debug --target check_all   # every test (649, 17-25 s)
 ```
 
 `check` runs `ctest -L unit`, `check_all` runs every label (`unit`, `integration`, `vocabulary`); both build the

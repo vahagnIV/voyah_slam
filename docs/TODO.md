@@ -213,7 +213,6 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
       (unreachable today); handle before multi-map / relocalization.
 - [ ] Mono translation accuracy at default init (about 10 % at 1 deg parallax,
       decision T): tuning.
-- [ ] LoopCloser logic (its `ProcessPending()` only acknowledges events).
 
 ## Keyframes and map growth (sub-project 2, 2026-10-06)
 
@@ -372,8 +371,8 @@ Spec `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; DESIGN
       measures something else, so this is not a fix in itself; decide
       together with the same-heading item above.
 - [ ] **Re-run ThreadSanitizer after every loop-closing change.** Last run
-      2026-10-10, after the normal gate and the opt-in default:
-      `voyah_slam_tests` (186) and `voyah_integration_tests` (15) clean.
+      2026-10-10, after the final-review fix wave (query backlog):
+      `voyah_slam_tests` (191) and `voyah_integration_tests` (15) clean.
 - [ ] **Mono scale after corrections:** mono loops carry extreme scales after
       wrong corrections (0.314–1.774 in the 2026-10-09 smoke). Revisit once
       wrong loops are rejected.
@@ -402,7 +401,19 @@ Spec `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; DESIGN
       a final one if wired); a lost map's late loops are rejected by the
       Mapper's map-id check instead, after wasted detection work (Task 5
       ruling). Duplicate loops are not suppressed in the LoopCloser either;
-      the Mapper ignores them.
+      the Mapper ignores them. Since 2026-10-10 a repeat (a loop published
+      at an epoch that already had one) has no priority, so it no longer
+      stops a running local BA; a genuinely new loop found before the
+      previous correction arrives (or after the Mapper rejected the previous
+      one) also waits for the BA.
+- [ ] **Dropped loop queries** (2026-10-10, final-review I1): beyond
+      `max_query_backlog` (8) the oldest waiting queries are dropped, so a
+      long-lagging LoopCloser misses detections (counted in
+      `QueryStats::dropped`, logged once per backlog episode, summarised by
+      `Stop()`). Per-query detection on the synthetic loop scenes: 4.5–9.3 ms
+      mean, 26 ms max (Debug tree, `-O2`); corridor1 Release (2026-10-10):
+      mono 55 / 133 ms (mean / max, under load), stereo 43.5 / 96.5 ms,
+      none dropped. Keep reading `Stop()`'s line in the smoke runs.
 - [ ] **ORB's match-window widening for sparse maps** (fewer than 10
       covisible Frames, `DetectAndReffineSim3FromLastKF`) is skipped: slightly
       fewer confirmations on sparse maps (Task 5 ruling).
@@ -599,6 +610,23 @@ Quality" (smoke table there).
       without bound; compact or switch to a map when it matters.
 - [ ] **Make `AsyncObserver::queue()` private:** popping from it bypasses the
       priority counter (only `TryPop` / `Listener` decrement it).
+- [ ] **Pre-existing flaky integration tests** (final review of
+      `feat/loop-closing`, 2026-10-10; neither enables loop closing). Each
+      was run 100 times (4 parallel processes × `--gtest_repeat=25`, both
+      trees' runs concurrently, 16 processes) on master (d182865) and on the
+      branch (ebdd88b):
+  - `SlamTest.DuplicatesFusedInLongSequence`: master 2 / 100, branch
+    2 / 100. Failures: a `TrackingLost` during the run (`tracking_lost`
+    not empty, and once the alive-point count no longer matching), or one
+    1 mm duplicate left. Thread timing (no `lock_step`).
+  - `SlamTest.MonoRelocalizesAfterBlackout`: master 3 / 100 (2 hangs),
+    branch 4 / 100 (2 hangs). Either a second non-final loss
+    (`tracking_lost` {1, 1}), or a 120 s hang: the Tracker stays
+    `RecentlyLost` at the end of the input, so neither a final
+    `TrackingLost` nor the last frame is published and the harness wait
+    (`slam_test.cpp`, after the frame loop) times out. Make the harness end
+    on "input done and the Tracker idle", and the run deterministic
+    (`RunSetup::lock_step`).
 - [ ] `SlamTest.DuplicatesFusedInLongSequence`: with pixel noise the
       duplicates fusion leaves lie centimetres apart, so its 1 mm check only
       catches exact copies (without noise the synthetic run creates no

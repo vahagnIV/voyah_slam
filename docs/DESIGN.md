@@ -113,7 +113,7 @@ defined in `libs/slam/src/` with `INSTANTIATE_CLASS` (ORB + SIFT).
 |---|---|---|
 | `tracking::Tracker<FE>` | `tracking/tracker.h` | `Start()`, `Stop()`, `Track(TMonocularMeasurement)`, `Track(TBinocularMeasurement)`, `ProcessPending()`, `state()`, `current_map_id()`, `pending_measurements()` |
 | `mapping::Mapper<FE>` | `mapping/mapper.h` | `Mapper(MapperOptions)`, `Start()`, `Stop()`, `ProcessPending()`, `state()`, `current_map_id()` |
-| `loop_closing::LoopCloser<FE>` | `loop_closing/loop_closer.h` | `Start()`, `Stop()`, `ProcessPending()` (drains and acknowledges only) |
+| `loop_closing::LoopCloser<FE>` | `loop_closing/loop_closer.h` | `LoopCloser(LoopCloserOptions, vocabulary)`, `Start()`, `Stop()`, `ProcessPending()` (applies every transaction to its replica, queues the new Frames as queries, detects one; with loop closing off or no vocabulary only acknowledges), `replica()`, `num_coincidences()`, `last_stats()`, `num_dropped_loops()`, `query_stats()` — see "Loop Closing" |
 
 Each component owns a `events::WorkerThread` (`events/worker_thread.h`) bound to
 the `events::WakeSignal` of its `EventNode` (`events/wake_signal.h`) and a
@@ -289,9 +289,9 @@ The distortion models now live in `geometry/distortion_models/` (moved from
 
 | Event | Producer → Consumer | Payload |
 |---|---|---|
-| `FrameTracked<FE>` | Tracker → Mapper, viewer | every tracked measurement: timestamp, pose (`T_cw` after `OptimizePose`), measurement copy (binocular: stereo-matched), inlier pairs `observed_features[i]` -> `observed_points[i]`, `visible_points` (local points passing the projection gate, matched ones included), `reference_frame_id` (optional), `local_frames`, `stage` (the source of the initial pose the local-map step refined: `MotionModel` / `ZeroMotion` / `ReferenceFrame` / `Relocalization`; 2026-10-08, ruling C), `num_matches`, `num_inliers`, `urgent` (mirrored in `Event::priority`) |
-| `MapTransaction<FE>` | Mapper → all | **every Mapper change, as one atomic transaction** (since 2026-10-07; replaces `KeyFrameCreated`, `MapCreated`, `MapPointsUpdated`, `MapPointsRemoved`, `KeyFramePoseUpdated`). Parts, each possibly empty: `new_map` + `start_frame`; added Frames (id, `T_cw`, measurement, own observations, and since 2026-10-08 the Frame's `bow::BowVector bow` and `bow::FeatureVector features`, empty without a vocabulary); new points (`new_points_start_id`, contiguous ids, positions / normals / descriptors); `added_observations` (frame, feature, point, depth and right index, -1 when absent); updated points (ids, positions, normals, descriptors); `replaced_points` (loser, winner); `removed_points`; `updated_poses`; `removed_observations`; `removed_frames`. Apply order and contract: see "Map Quality" |
-| `LoopDetected` | LoopCloser → Mapper | query/match frames + verification data (TBD) |
+| `FrameTracked<FE>` | Tracker → Mapper, viewer | every tracked measurement: timestamp, pose (`T_cw` after `OptimizePose`), measurement copy (binocular: stereo-matched), inlier pairs `observed_features[i]` -> `observed_points[i]`, `visible_points` (local points passing the projection gate, matched ones included), `reference_frame_id` (optional), `local_frames`, `stage` (the source of the initial pose the local-map step refined: `MotionModel` / `ZeroMotion` / `ReferenceFrame` / `Relocalization`; 2026-10-08, ruling C), `num_matches`, `num_inliers`, `urgent` (mirrored in `Event::priority`), `map_epoch` (the Tracker replica's epoch; since 2026-10-09 the Mapper drops a `FrameTracked` of an older epoch, after counting its visible/found) |
+| `MapTransaction<FE>` | Mapper → all | **every Mapper change, as one atomic transaction** (since 2026-10-07; replaces `KeyFrameCreated`, `MapCreated`, `MapPointsUpdated`, `MapPointsRemoved`, `KeyFramePoseUpdated`). Parts, each possibly empty: `new_map` + `start_frame`; added Frames (id, `T_cw`, measurement, own observations, and since 2026-10-08 the Frame's `bow::BowVector bow` and `bow::FeatureVector features`, empty without a vocabulary); new points (`new_points_start_id`, contiguous ids, positions / normals / descriptors); `added_observations` (frame, feature, point, depth and right index, -1 when absent); updated points (ids, positions, normals, descriptors); `replaced_points` (loser, winner); `removed_points`; `updated_poses`; `removed_observations`; `removed_frames`; since 2026-10-09 (loop closing) the map graph and epoch: `NewFrame::parent` (spanning tree), `parent_changes` (frame, new parent), `added_loop_edges` (frame, frame) and `map_epoch` (+1 per loop correction; 0 for a new map). A loop correction is one more transaction carrying every corrected pose and point. Pooled (256 in the Mapper): a transaction is recycled once every consumer has acknowledged it, so consumers apply on receipt (the LoopCloser too, since 2026-10-10) and never hold one for long work. Apply order and contract: see "Map Quality" |
+| `LoopDetected` | LoopCloser → Mapper | `query_map_id`, `match_map_id` (equal for now), `query_frame`, `match_frame`, `S_query_match` (`geometry::Sim3`, x_query = S · x_match in camera coordinates, ORB Scm; scale 1 for stereo), `matched_points` ((query point, match point) pairs). `priority` (interrupts a running local BA) unless a loop was already published at the LoopCloser replica's epoch. Pool of 16, published with `TryCreate`. See "Loop Closing" |
 | `InitializationMeasurement<FE>` | Tracker → Mapper (+ other Tracker observers) | `features::TMeasurement<FE>` (`map_id` 0) |
 | `TrackingLost` | Tracker → all | timestamp, `final` (`map_id` = the lost map). Since 2026-10-08: `final = false` on entering `RecentlyLost` (the Mapper ignores it and keeps the map), `final = true` on entering `Lost` (only this one clears the Mapper's map) |
 
@@ -833,8 +833,8 @@ count. Invalid input gives `success == false` without optimizing.
 
 **Vendored g2o.** `third_party/g2o/src/` is pristine upstream (tag
 `20241228_git`, commit `eec325a1`); the local Conan recipe
-`third_party/g2o/conanfile.py` (reference `g2o/20241228@voyah/stable`, user/channel
-set in the recipe) builds only the BSD-2-Clause core (`stuff`, `core`,
+`third_party/g2o/conanfile.py` (reference `g2o/20241228.1@voyah/stable` since
+2026-10-10, recipe revision `.1` for `types_sim3`; user/channel set in the recipe) builds only the BSD-2-Clause core (`stuff`, `core`,
 `types_slam3d`, `types_sba`, `solver_eigen`) and exposes them as components
 (`g2o::core`, ...). The one-time `conan create` is part of the README build steps.
 Details: `third_party/README.md`.
@@ -1839,7 +1839,7 @@ its order. Global BA is step 4c, map merging step 5 (TODO).
 - **`MapTransaction`** carries `parent` per `NewFrame`, `parent_changes`
   (frame, new parent), `added_loop_edges` (frame, frame) and `map_epoch`
   (`uint32_t`, +1 per loop correction); every replica stores them
-  (`MapReplica::Parent`, `LoopEdges`, `map_epoch`). **`FrameTracked`**
+  (`MapReplica::parent()`, `children()`, `loop_edges()`, `map_epoch()`). **`FrameTracked`**
   carries the epoch of the Tracker's replica.
 
 **Similarity transforms.** `geometry::Sim3` (scale, R, t; `Inverse`,
@@ -1864,9 +1864,10 @@ S_cw folds its scale into the translation as `[R, t/s]` (ORB-SLAM3).
   th · 1.2^level, scale-invariance and viewing-angle gates. Both compare the
   observing feature's descriptor and level, not a map point's distinctive
   descriptor (the interface has none; TODO).
-- The g2o Conan package gained the `types_sim3` component: other machines
-  re-run `conan create third_party/g2o` for Debug and Release, then
-  `conan install` (README).
+- The g2o Conan package gained the `types_sim3` component, and its version
+  became `20241228.1` (2026-10-10) so that a stale cache fails to resolve
+  instead of silently lacking it: other machines re-run `conan create
+  third_party/g2o` for Debug and Release, then `conan install` (README).
 
 **Detection (LoopCloser).** The LoopCloser keeps its own `MapReplica` (with
 its `FrameDatabase` and covisibility) fed by the Mapper's transactions, and
@@ -1876,6 +1877,25 @@ unless `LoopCloserOptions::enabled` is set (default false; the apps'
 events and everything else behaves as before (the Tracker and the Mapper
 still use the vocabulary). Every Frame of
 `added_frames` is a query once the map has `min_map_frames` (12) Frames.
+- **Queries wait, transactions do not (2026-10-10, final-review I1).** Each
+  `ProcessPending()` first drains the inbox, applying every transaction to
+  the replica (which releases the pooled event) and queueing its new Frames'
+  ids, then detects the oldest query only. Before, a transaction was held
+  until its Frames were detected, so a lagging LoopCloser could exhaust the
+  Mapper's 256 transactions and abort it. Beyond `max_query_backlog` (8;
+  ORB-SLAM3's queue is unbounded) the oldest queries are dropped, counted
+  (`QueryStats::dropped`) and logged once per backlog episode. The Mapper
+  never drops transactions and gets no back-pressure. A query culled while
+  queued is skipped, and detection runs on the replica as it is then (later
+  Frames, a correction already applied). One query per call also keeps
+  `Stop()` prompt: it waits for the query in progress, not the backlog.
+  `Stop()` logs the per-query detection time; on the synthetic loop scenes
+  (Debug tree, `-O2`) it is 4.5–9.3 ms mean, 26 ms max; on corridor1
+  (Release, `--rate=1`, 2026-10-10) mono 55 ms mean / 133 ms max over 1793
+  queries (run beside three other apps and TSan), stereo 43.5 ms / 96.5 ms
+  over 2258 queries, no query dropped in either.
+- **A correction drops the pending region**: a transaction raising the map
+  epoch resets it, since its Sim3 is in the old coordinates.
 - **Candidates** (`DetectNBestCandidates`): `FrameDatabase::Query` hits
   minus the query's covisible Frames, kept above int(0.8 · max) common
   words, grouped over the top 10 covisible Frames; the best 3.
@@ -1923,7 +1943,9 @@ still use the vocabulary). Every Frame of
     true return: in the fix-round-1 smoke it rejected 70–188 true-return
     candidates per run, 0.1–1.0 m apart. Large mono rotation drift would do
     the same (TODO).
-- **`LoopDetected`** (priority: it interrupts the Mapper's local BA):
+- **`LoopDetected`** (priority: it interrupts the Mapper's local BA, unless a
+  loop was already published at the replica's current epoch — a repeat found
+  before its correction arrived, which the Mapper drops anyway; 2026-10-10):
   `query_map_id`, `match_map_id` (equal for now), `query_frame`,
   `match_frame`, `S_query_match` (scale 1 for stereo) and the matched
   `(query point, match point)` pairs (features without points are dropped:
@@ -1944,8 +1966,9 @@ loop edge). Otherwise:
 2. **Window poses:** the query's corrected Sim3 is `S_query_match` composed
    with the match Frame's pose; every window Frame keeps its Sim3 relative
    to the query.
-3. **Points:** each point the window observes moves with its reference
-   Frame, X' = S_new⁻¹ · S_old · X; for mono the scale folds into each
+3. **Points:** each point the window observes moves with the first window
+   Frame observing it (ORB `mnCorrectedReference`; the essential-graph pass
+   then follows that Frame), X' = S_new⁻¹ · S_old · X; for mono the scale folds into each
    Frame's translation. Reference distances are not rescaled (ORB
    `UpdateNormalAndDepth`; TODO).
 4. **Loop fusion:** the pairs replace the query side's points with the
@@ -2231,7 +2254,7 @@ vizualization/              voyahviz (+ voyahviz_tests)
 - **g2o is a local Conan package:** vendored in `third_party/g2o/` and built with
   `conan create third_party/g2o --build=missing -s build_type=Debug|Release` once per
   machine, before the project's `conan install` (`conanfile.txt` requires
-  `g2o/20241228@voyah/stable`). Step-by-step build instructions: `README.md`
+  `g2o/20241228.1@voyah/stable`). Step-by-step build instructions: `README.md`
   (checked on a fresh `CONAN_HOME` on 2026-10-05).
 - Debug: `cmake --build cmake-build-debug/build/Debug -j8`.
 - **Tests:** `cmake --build cmake-build-debug/build/Debug --target check`
@@ -2417,6 +2440,8 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-09 | **User decision:** the LoopCloser adds a normal-consistency gate that ORB-SLAM3 does not have. A candidate (after step 5), a covisible confirmation, or a later query's refinement is rejected when more than `LoopCloserOptions::max_normal_disagreement` (0.5) of its final matched pairs (own map point, matched map point) have normals more than 60° apart. Pairs with an undefined normal are skipped. Not addressed: same-heading look-alikes (14.9 m translational repeats, normals consistent), and verifying a correction before publishing it (rejected option); both in TODO. | The diagnosis measured 0.96–1.00 of the pairs disagreeing on opposite-facing false loops, against 0.00–0.05 on true loops: a wide margin on both sides of 0.5. A deliberate deviation from ORB-SLAM3. |
 | 2026-10-09 | Loop-closing smoke result (corridor1 full, Release, `--vocabulary`, two runs each with and without `--no_loop_closing`; "Loop Closing"). Before the normal gate (e529d07): every loop-closing run corrected an opposite-facing false loop that broke the map (mono ATE Sim3 0.652 m against 0.316 m without, and 2 maps in run 2; stereo 4 maps in both runs against 1 map at SE3 0.077 m). With the gate (fix round 1): every opposite-facing false loop was rejected (0.84–1.00) and every run keeps one map, but each run corrected a same-heading false loop 7–30 m apart, after which, in three of the four runs, the gate also rejected the true returns: mono 0.679 / 0.669 m against 0.341 / 0.500 m, stereo 1.295 / 18.16 m against 0.098 / 0.138 m. The Musts are **missed**; nothing was tuned. | The cause is established by the diagnosis (inherent in ORB-SLAM3's visual gates) and by the smoke: same-heading look-alikes are the remaining false loops, left for a user decision (TODO). |
 | 2026-10-10 | **User decision:** loop closing is **opt-in and off by default**. `LoopCloserOptions::enabled` defaults to false, so a `Slam` with a vocabulary detects no loops unless it is enabled; relocalization and BoW triangulation keep using the vocabulary. The apps' `--no_loop_closing` is replaced by an opt-in `--loop_closing`. The branch merges as "implemented, opt-in". | Fix-round-1 smoke (corridor1, with the normal gate): every run keeps one map, but each corrects at least one same-heading look-alike (7–30 m apart), and the ATE with loop closing is worse than without (mono Sim3 0.679 / 0.669 m against 0.341 / 0.500 m; stereo SE3 1.295 / 18.16 m against 0.098 / 0.138 m). On synthetic loops it works (end error 0.04–0.15 of the error without). Next: look-alike rejection as the first item of roadmap step 6 (TUM-VI tuning). |
+| 2026-10-10 | (Final-review fix wave, controller ruling on I1) The LoopCloser applies every `MapTransaction` on receipt (releasing it) and queues only the new Frames' ids; `ProcessPending()` detects one query per call; beyond `LoopCloserOptions::max_query_backlog` (8) the oldest queries are dropped, counted and logged. The Mapper never drops transactions and gets no back-pressure. A transaction raising the map epoch drops the pending region. A `LoopDetected` has priority unless a loop was already published at the replica's current epoch. | A lagging detector held the Mapper's pooled transactions (256) and `Create()` aborts on exhaustion; dropping queries only costs detections. One query per call makes `Stop()` prompt. A repeat found before its correction arrives would stop a local BA only for the Mapper to drop it. |
+| 2026-10-10 | The g2o recipe's version is `20241228.1` (upstream tag + recipe revision), bumped whenever the recipe changes what it builds. | `types_sim3` was added without a version change, so a cache holding the old package resolved and then lacked the component. |
 
 ## 9. Open Questions
 
@@ -2428,20 +2453,26 @@ branch → review → merge to `master`. Update this document at the end.
    precision). Options: accept it; chunked storage that frees fully-dead chunks;
    or an id→slot indirection with compaction (must then be identical across replicas
    or be per-replica).
-3. **Large diffs:** a loop closure corrects many points/keyframes at once — one
-   huge `MapPointsUpdated` or chunked events?
+3. ~~Large diffs~~ — answered 2026-10-09 (loop closing): a correction is one
+   `MapTransaction` with every corrected pose and point, applied atomically
+   by every replica; see "Loop Closing" and the decisions log.
 4. ~~Mapper back-pressure~~ — resolved 2026-10-06: the Tracker no longer needs
    to know (no ORB-SLAM3 `AcceptKeyFrames()`). The Mapper decides on Frames,
    drains `FrameTracked` to the latest per map and uses the skipped count as
    its backlog (backlog 0 = idle, `c1b`); see "Keyframes and Map Growth".
 5. **Global BA after loop closure:** runs inside the Mapper (blocks local mapping)
    or in a Mapper-owned worker whose result the Mapper applies and publishes?
-6. **`LoopDetected` payload:** just frame ids, or also matches / Sim3 estimate from
-   geometric verification?
-7. **Map-level versioning:** do events need a map version number so consumers can
-   tell which Mapper state a request was computed against?
-8. Covisibility graph / spanning tree / essential graph representation (needed for
-   local BA and loop closure) — not designed yet.
+6. ~~`LoopDetected` payload~~ — answered 2026-10-09: both map ids, both
+   Frames, `S_query_match` and the matched point pairs; see §6 and "Loop
+   Closing".
+7. ~~Map-level versioning~~ — answered 2026-10-09: a per-map `map_epoch`,
+   raised by each loop correction, carried by `MapTransaction` and
+   `FrameTracked`; the Mapper drops a `FrameTracked` of an older epoch, the
+   Tracker shifts on a newer one; see "Loop Closing".
+8. ~~Covisibility graph / spanning tree / essential graph~~ — answered
+   2026-10-09: covisibility from shared points (since step 2), a spanning tree
+   (`parent`, `children`) and loop edges kept by every replica, the essential
+   graph built from them for the correction; see "Loop Closing", "Map graph".
 9. Keyframe culling and how `Frame` removal propagates (`KeyFrameRemoved` event?).
 10. IMU / multi-map (Atlas) support — out of scope for now.
 15. ~~Tracker threading~~ — decided 2026-10-02: own thread, two queues (§4).
@@ -2621,8 +2652,9 @@ branch → review → merge to `master`. Update this document at the end.
   same map, `--drop_frames` (see "Relocalization and Reference-Frame
   Tracking").
 
-- Loop detection and correction, roadmap step 4a+4b (branch
-  `feat/loop-closing`, merge pending): spanning tree, loop edges and map
+- Loop detection and correction, roadmap step 4a+4b: implemented (opt-in,
+  off by default), merged 2026-10-10; corridor1 Musts missed → step 6.
+  Spanning tree, loop edges and map
   epoch; `geometry::Sim3`, `SolveSim3Ransac`, `OptimizeSim3`,
   `OptimizeEssentialGraph` (g2o `types_sim3`); LoopCloser replica and ORB-SLAM3
   common-region detection; Mapper correction as one transaction; Tracker
@@ -2641,11 +2673,10 @@ branch → review → merge to `master`. Update this document at the end.
   rounding). Building OpenCV from source to link against
   (in progress, user).
 - Tracker measurement policy (19).
-- Roadmap (`docs/ROADMAP.md`): the loop-closing smoke (see "Loop Closing"),
-  then global BA in its own thread (step 4c); relocalization into other maps
+- Roadmap (`docs/ROADMAP.md`): global BA in its own thread (step 4c); relocalization into other maps
   comes with map merging (step 5).
 - Event pool lifetime (Open Question 25).
-- Test suite (2026-10-10): 644 tests (628 `unit`, 15 `integration`, 1
+- Test suite (2026-10-10): 649 tests (633 `unit`, 15 `integration`, 1
   `vocabulary`); `check` about 5.5 s, `check_all` 17–25 s, set by
   `SlamTest.MonoClosesLoop` (14–25 s: its lock-step runs are bursty, so the
   time follows the CPU's frequency scaling).

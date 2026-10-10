@@ -59,6 +59,12 @@ struct LoopCloserOptions {
     // (mnLoopNumNotFound).
     size_t required_coincidences = 3;
     size_t max_unconfirmed_queries = 2;
+    // Queries (Frame ids) waiting for detection; beyond it the oldest are
+    // dropped. Not ORB-SLAM3, whose keyframe queue is unbounded: the
+    // LoopCloser applies each MapTransaction on receipt so that a slow
+    // detector never holds the Mapper's pooled events, and only the queries
+    // wait.
+    size_t max_query_backlog = 8;
     // SolveSim3Ransac (Sim3Solver::SetRansacParameters, th2 9.21).
     int ransac_iterations = 300;
     double ransac_confidence = 0.99;

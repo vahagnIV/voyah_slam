@@ -6,10 +6,9 @@ execution; nothing is merged without an explicit "merge and push".
 Done: tracking (sub-project 1), camera model (raw-pixel residuals),
 keyframes and map growth (sub-project 2, merged b93fcf4), restructure
 (step 0, merged 7426697), map quality (step 1, merged 9da7081), own DBoW2
-(step 2, merged 6fb863a), relocalization (step 3, merged 6afacc7).
-Implemented, not done: loop detection and correction (step 4a+4b, branch
-`feat/loop-closing`): implemented (opt-in, off by default); corridor1 Musts
-missed → step 6.
+(step 2, merged 6fb863a), relocalization (step 3, merged 6afacc7), loop
+detection and correction (step 4a+4b: implemented (opt-in, off by default),
+merged 2026-10-10; corridor1 Musts missed → step 6).
 
 ## 0. Restructure (done 2026-10-07)
 
@@ -138,7 +137,7 @@ Plus reference-Frame tracking. Fixes the stereo loss in fast rotation
 
 ## 4. Loop closing
 
-### 4a+4b. Detection and correction: implemented (opt-in, off by default); corridor1 Musts missed → step 6
+### 4a+4b. Detection and correction: implemented (opt-in, off by default), merged 2026-10-10; corridor1 Musts missed → step 6
 
 **Result:** the LoopCloser detects on its own replica, ORB-SLAM3
 `NewDetectCommonRegions` with its source thresholds (BoW candidates, Sim3

@@ -7,7 +7,9 @@ from conan.tools.files import copy
 
 class G2oConan(ConanFile):
     name = "g2o"
-    version = "20241228"
+    # Upstream tag 20241228, recipe revision .1 (types_sim3 added 2026-10-09):
+    # bump the suffix whenever the recipe changes what it builds.
+    version = "20241228.1"
     user = "voyah"
     channel = "stable"
     package_type = "library"

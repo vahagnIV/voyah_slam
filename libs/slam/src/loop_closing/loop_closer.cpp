@@ -1,3 +1,5 @@
+#include <algorithm>
+#include <chrono>
 #include <optional>
 #include <utility>
 #include <voyahslam/features/instantiation.h>
@@ -25,11 +27,21 @@ void LoopCloser<TFeatureExtractor>::Start() {
 
 template <typename TFeatureExtractor>
 void LoopCloser<TFeatureExtractor>::Stop() {
+    const bool was_running = worker_.running();
     worker_.Stop();
+    if (was_running && query_stats_.detected > 0) {  // once per run
+        log_->info("Loop detection: {} queries, {:.1f} ms mean, {:.1f} ms max; {} queries and {} loops dropped",
+                   query_stats_.detected,
+                   1e3 * query_stats_.total_seconds / static_cast<double>(query_stats_.detected),
+                   1e3 * query_stats_.max_seconds, query_stats_.dropped, num_dropped_loops_);
+    }
 }
 
 template <typename TFeatureExtractor>
 bool LoopCloser<TFeatureExtractor>::ProcessPending() {
+    // Every event is applied on receipt and so released at once: however far
+    // detection lags, it holds none of the Mapper's pooled transactions. Only
+    // the queries (Frame ids) wait.
     bool processed = false;
     while (const events::Event* event = inbox_listener_.GetNextEvent()) {
         processed = true;  // acknowledged by the next GetNextEvent()
@@ -37,7 +49,26 @@ bool LoopCloser<TFeatureExtractor>::ProcessPending() {
             ApplyEvent(*event);
         }
     }
-    return processed;
+    if (queries_.size() > options_.max_query_backlog) {
+        const size_t dropped = queries_.size() - options_.max_query_backlog;
+        if (!dropping_queries_) {  // once until the backlog empties
+            log_->warn("Loop detection behind: queries beyond {} dropped, from Frame {} ({} so far)",
+                       options_.max_query_backlog, queries_.front().value, query_stats_.dropped + dropped);
+        }
+        dropping_queries_ = true;
+        queries_.erase(queries_.begin(), queries_.begin() + static_cast<std::ptrdiff_t>(dropped));
+        query_stats_.dropped += dropped;
+    }
+    if (queries_.empty()) {
+        dropping_queries_ = false;
+        return processed;
+    }
+    // One query per call: the inbox is drained again before the next, and
+    // Stop() waits for this one only.
+    const map::FrameId query = queries_.front();
+    queries_.pop_front();
+    DetectQuery(query);
+    return true;
 }
 
 template <typename TFeatureExtractor>
@@ -60,11 +91,14 @@ void LoopCloser<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
     }
     if (transaction.new_map || event.map_id > replica_.map_id()) {
         pending_.reset();  // the replica clears itself too
+        queries_.clear();
+    } else if (transaction.map_epoch > replica_.map_epoch()) {
+        pending_.reset();  // a loop correction: its Sim3 is in the old coordinates
     }
     replica_.Apply(event);
     for (const events::NewFrame<TFeatureExtractor>& added : transaction.added_frames) {
         if (replica_.keyframe(added.id) != nullptr) {
-            DetectLoop(added.id);
+            queries_.push_back(added.id);
         }
     }
 }
@@ -73,14 +107,29 @@ template <typename TFeatureExtractor>
 void LoopCloser<TFeatureExtractor>::ClearMap(map::MapId lost_map) {
     replica_ = {};
     pending_.reset();
+    queries_.clear();
     lost_map_ = lost_map;
 }
 
 template <typename TFeatureExtractor>
-void LoopCloser<TFeatureExtractor>::DetectLoop(map::FrameId query) {
-    if (replica_.num_keyframes() < options_.min_map_frames) {
+void LoopCloser<TFeatureExtractor>::DetectQuery(map::FrameId query) {
+    // A query culled while it waited is skipped; so is one of a small map.
+    if (replica_.keyframe(query) == nullptr || replica_.num_keyframes() < options_.min_map_frames) {
         return;
     }
+    if (query_hook_) {
+        query_hook_(query);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    DetectLoop(query);
+    const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    ++query_stats_.detected;
+    query_stats_.total_seconds += seconds;
+    query_stats_.max_seconds = std::max(query_stats_.max_seconds, seconds);
+}
+
+template <typename TFeatureExtractor>
+void LoopCloser<TFeatureExtractor>::DetectLoop(map::FrameId query) {
     // A pending region is first checked against this query, from the last
     // confirming query's Sim3 moved by their relative pose.
     if (pending_ && pending_->num_coincidences > 0) {
@@ -168,8 +217,13 @@ void LoopCloser<TFeatureExtractor>::PublishLoop(map::FrameId query, const Pendin
     event->query_frame = query;
     event->match_frame = region.match_frame;
     event->S_query_match = S_query_match;
-    // Urgent: the Mapper's running local BA stops for the correction.
-    event->priority = true;
+    // Urgent: the Mapper's running local BA stops for the correction. A loop
+    // found again before that correction reaches this replica (no new epoch
+    // since the last loop published) is a repeat the Mapper drops: it waits
+    // for the local BA.
+    const std::pair<map::MapId, uint32_t> epoch{replica_.map_id(), replica_.map_epoch()};
+    event->priority = last_loop_epoch_ != epoch;
+    last_loop_epoch_ = epoch;
     const PointMatches query_points = PointsOf(replica_, *query_keyframe);
     for (size_t i = 0; i < region.matches.size() && i < query_points.size(); ++i) {
         if (region.matches[i] && query_points[i] && *region.matches[i] != *query_points[i]) {
