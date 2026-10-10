@@ -167,6 +167,19 @@ inline const char* StateName(mapping::MapperState state) {
     return "?";
 }
 
+// The Mapper's Atlas after the run: its live maps with their Frames, the
+// active one, and the merges applied. Call only once the Mapper has stopped
+// (its Atlas accessors are Mapper-thread only).
+template <typename TFeatureExtractor>
+void PrintAtlas(const mapping::Mapper<TFeatureExtractor>& mapper, std::ostream& out) {
+    out << "atlas:";
+    for (const map::MapId id : mapper.map_ids()) {
+        out << " map " << id.value << " (" << mapper.num_keyframes(id) << " Frames"
+            << (mapper.active_map() == id ? ", active" : "") << ")";
+    }
+    out << "; merges: " << mapper.num_merges() << "\n";
+}
+
 // Writes every tracked frame's pose as one TUM line (`timestamp tx ty tz qx qy
 // qz qw`, camera-to-world). A `# map <id>` line starts each map's section, so
 // a re-initialization starts a new one. Reads the Tracker's events through its

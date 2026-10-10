@@ -15,6 +15,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
+#include <variant>
 #include <vector>
 #include <voyahslam/features/instantiation.h>
 #include <voyahslam/geometry/sim3.h>
@@ -125,7 +126,9 @@ void Mapper<TFeatureExtractor>::OnMergeDetected(const events::LoopDetected& even
     FuseLoopPoints(correction, matched_points, merge_points, *merged);
     // 5. The weld: the current window free, the merge window fixed.
     std::vector<map::MapPointId> changed;
+    const auto weld_start = std::chrono::steady_clock::now();
     WeldWindows(current_window, merge_window, *merged, changed);
+    const double weld_ms = detail::MillisecondsSince(weld_start);
     // 6. The rest of the absorbed map.
     MoveRestOfMap(correction, absorbed_frames, fix_scale);
     // 7. The merge edge, kept as a loop edge (it starts a global BA of the
@@ -154,13 +157,19 @@ void Mapper<TFeatureExtractor>::OnMergeDetected(const events::LoopDetected& even
     num_keyframes_.store(num_keyframes(target_id), std::memory_order_release);
     num_map_points_.store(Active().map_points.size(), std::memory_order_release);
     num_merges_.fetch_add(1, std::memory_order_acq_rel);
+    const auto timestamp_of = [this](map::FrameId frame) {
+        return std::visit([](const auto& measurement) { return measurement.timestamp(); },
+                          FindKeyFrame(frame)->measurement());
+    };
     log_->info(
-        "Map {} merged into map {}: Frame {} with Frame {} (scale {:.3f}, fixed scale {}), windows {} / {} Frames, "
-        "{} pairs, {} points fused, {} + {} -> {} Frames, {} + {} -> {} points, epoch {}, {:.1f} ms",
-        absorbed_id.value, target_id.value, query.value, match.value, event.S_query_match.scale, fix_scale,
-        current_window.size(), merge_window.size(), matched_points.size(), losers_.size(), num_target_frames,
-        absorbed_frames.size(), num_keyframes_.load(std::memory_order_relaxed), num_target_points,
-        num_absorbed_points, Active().map_points.size(), Active().map_epoch, detail::MillisecondsSince(start));
+        "Map {} merged into map {}: Frame {} (t={:.3f}) with Frame {} (t={:.3f}) (scale {:.3f}, fixed scale {}), "
+        "windows {} / {} Frames, {} pairs, {} points fused, {} + {} -> {} Frames, {} + {} -> {} points, epoch {}, "
+        "{:.1f} ms (weld {:.1f} ms)",
+        absorbed_id.value, target_id.value, query.value, timestamp_of(query), match.value, timestamp_of(match),
+        event.S_query_match.scale, fix_scale, current_window.size(), merge_window.size(), matched_points.size(),
+        losers_.size(), num_target_frames, absorbed_frames.size(), num_keyframes_.load(std::memory_order_relaxed),
+        num_target_points, num_absorbed_points, Active().map_points.size(), Active().map_epoch,
+        detail::MillisecondsSince(start), weld_ms);
     observable_.Notify(merged);
 }
 

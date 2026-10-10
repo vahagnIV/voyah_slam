@@ -88,6 +88,7 @@ bool Tracker<TFeatureExtractor>::ProcessPending() {
     if (measurements_.try_dequeue(measurement)) {
         processed = true;
         ProcessMeasurement(measurement);
+        num_processed_.fetch_add(1, std::memory_order_acq_rel);
     }
     return processed;
 }
@@ -116,6 +117,11 @@ void Tracker<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
         FollowMerge(*previous);
     } else if (active && active != previous) {
         AdoptMap(*active);
+    } else if (merge) {
+        // A merge of the active map that leaves no map active (the Mapper
+        // never sends one): nothing is followed; the last frame's ids are M's,
+        // which is gone, so nothing tracked against it is kept.
+        AdoptMap(transaction.map_id);
     }
     if (active != transaction.map_id) {
         return;  // not the active map's

@@ -197,6 +197,9 @@ public:
 
     // Approximate number of measurements waiting to be tracked.
     [[nodiscard]] size_t pending_measurements() const { return measurements_.size_approx(); }
+    // Measurements processed (tracked, lost or forwarded to the Mapper), in
+    // total; each counted after whatever it published.
+    [[nodiscard]] size_t num_processed() const { return num_processed_.load(std::memory_order_acquire); }
 
     // Tracker-thread state, for tests that drive ProcessPending()
     // synchronously: never read while the worker runs.
@@ -230,8 +233,13 @@ private:
         std::optional<map::FrameId> reference_frame_id;
     };
 
-    // Applies a transaction to the Atlas (the replica rule); a change of the
-    // active map adopts the new one.
+    // Applies a transaction to the Atlas (the replica rule). A merge of the
+    // active map into the map it makes active is followed (FollowMerge); any
+    // other change of the active map adopts the new one (AdoptMap), and a
+    // merge of the active map that leaves none active resets as AdoptMap of
+    // the target. A merge that does not absorb the active map leaves the
+    // Tracker alone; one into the active map is a correction of it (its
+    // epoch rises; the active map's Frames and points keep their ids).
     void ApplyEvent(const events::Event& event);
     // The active map became `map_id`: nothing tracked against the previous
     // one carries over.
@@ -305,6 +313,7 @@ private:
 
     std::atomic<TrackerState> state_{TrackerState::WaitingForMap};
     std::atomic<map::MapId> current_map_id_{map::MapId{0}};
+    std::atomic<size_t> num_processed_{0};
 
     // Tracker-thread state.
     AtlasReplica<TFeatureExtractor> atlas_;

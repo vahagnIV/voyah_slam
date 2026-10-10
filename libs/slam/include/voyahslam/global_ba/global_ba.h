@@ -41,8 +41,9 @@ struct GlobalBaSolution {
 // Bundle-adjusts every Frame of `replica` and every alive point with at
 // least one observation, with all their observations (mono and stereo), in
 // one plain stage of options.iterations: no robust kernel, no outlier
-// removal, residuals in raw pixels. Gauge: the oldest Frame (the map's first,
-// or the oldest surviving if it was culled) is fixed; mono poses are SE3, with
+// removal, residuals in raw pixels. Gauge: the spanning tree's root (the
+// oldest Frame without a parent; after a merge it need not be the oldest
+// Frame), else the oldest surviving Frame, is fixed; mono poses are SE3, with
 // no scale variable. `should_stop` is polled before the first iteration and
 // after every iteration. nullopt if interrupted, on a map without Frames,
 // points or observations, or on a non-finite result. Reads the replica only,

@@ -115,6 +115,7 @@ void Mapper<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
         case events::EventType::InitializationMeasurement:
             OnInitializationMeasurement(
                 static_cast<const events::InitializationMeasurement<TFeatureExtractor>&>(event));
+            num_initialization_measurements_.fetch_add(1, std::memory_order_acq_rel);
             return;
         case events::EventType::FrameTracked:
             OnFrameTracked(static_cast<const events::FrameTracked<TFeatureExtractor>&>(event));
@@ -143,6 +144,7 @@ void Mapper<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::SkipFrameTracked(const events::Event& event) {
     if (!IsActive(event.map_id)) {
+        other_map_skipped_.fetch_add(1, std::memory_order_acq_rel);
         return;  // would not have been evaluated anyway
     }
     ++backlog_;
@@ -273,7 +275,9 @@ template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::OnFrameTracked(
     const events::FrameTracked<TFeatureExtractor>& event) {
     if (!IsActive(event.map_id)) {
-        return;  // no map yet, or another (inactive or removed) map's
+        // No map yet, or another (inactive or removed) map's.
+        other_map_skipped_.fetch_add(1, std::memory_order_acq_rel);
+        return;
     }
     CountTrackedPoints(event);
     if (event.map_epoch < Active().map_epoch) {

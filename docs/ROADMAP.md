@@ -9,7 +9,8 @@ keyframes and map growth (sub-project 2, merged b93fcf4), restructure
 (step 2, merged 6fb863a), relocalization (step 3, merged 6afacc7), loop
 detection and correction (step 4a+4b: implemented (opt-in, off by default),
 merged 2026-10-10; corridor1 Musts missed → step 6), global BA (step 4c,
-merged 9245f92).
+merged 9245f92), map merging (step 5, branch `feat/map-merging`, done
+2026-10-11).
 
 ## 0. Restructure (done 2026-10-07)
 
@@ -202,10 +203,29 @@ iteration or size cap, memory, late joining, serialization.
 Spec: `docs/superpowers/specs/2026-10-10-global-ba-design.md`; see DESIGN
 "Global BA".
 
-## 5. Map merging (multi-map Atlas)
+## 5. Map merging (multi-map Atlas) (done 2026-10-11, branch `feat/map-merging`)
 
-Needs its own design discussion: it conflicts with today's rule that a newer
-map clears and adopts (old maps must be kept).
+**Result:** ORB-SLAM3's Atlas (scope A). A lost map with at least 10 Frames
+is kept inactive; the LoopCloser detects revisits of inactive maps (merge
+candidates beside loop candidates, the same gates except the normal gate,
+mono free-scale); the Mapper merges the active map into the inactive one
+(`MergeLocal`, visual: windows, absorb by the id rule, window correction,
+re-rooted tree, seam fusion, weld, essential graph of the rest, merge edge)
+as one transaction; the target keeps its id and world. Every replica (Tracker,
+LoopCloser, GlobalBA, viewer) mirrors the whole Atlas under the replica rule
+(replacing "newest id wins"), with each Frame's measurement shared read-only;
+the Tracker follows a merge without a reset. Opt-in with loop closing.
+
+Synthetic loops with a blackout (integration, seeds 1–3, mono and stereo):
+one map at the end holding both parts, no tracking loss across the merge,
+whole-run error 0.63–1.31× (mono) and 0.90–1.40× (stereo) the run without
+the blackout (bar 1.5×; thin margins, TODO). Shared measurements cut the
+stereo corridor1 peak RSS from 1.7 GB to about 1.2 GB. Corridor1 merge smoke:
+DESIGN "Loop Closing" (map merging smoke). Open items in TODO "Map merging
+follow-ups": relocalization into inactive maps, the viewer's inactive maps,
+separate merge edges.
+
+Spec: `docs/superpowers/specs/2026-10-10-map-merging-design.md`.
 
 ## 6. TUM-VI tuning
 

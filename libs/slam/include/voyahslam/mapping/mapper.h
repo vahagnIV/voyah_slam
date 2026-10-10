@@ -222,6 +222,18 @@ public:
     [[nodiscard]] size_t stale_epoch_skipped() const {
         return stale_epoch_skipped_.load(std::memory_order_acquire);
     }
+    // InitializationMeasurement events handled (tried, or ignored while a map
+    // is active), in total; each counted after the map it created, if any, is
+    // published.
+    [[nodiscard]] size_t num_initialization_measurements() const {
+        return num_initialization_measurements_.load(std::memory_order_acquire);
+    }
+    // FrameTracked events skipped, in total, because their map was not the
+    // active one: tracked in a map that a merge absorbed, or that was lost,
+    // while the event was in flight.
+    [[nodiscard]] size_t other_map_skipped() const {
+        return other_map_skipped_.load(std::memory_order_acquire);
+    }
     // GlobalBAFinished events merged, and ignored because they were of
     // another map or another correction epoch, or came with no map.
     [[nodiscard]] size_t num_global_ba_merges() const {
@@ -711,6 +723,8 @@ private:
     std::atomic<size_t> num_frame_evaluations_{0};
     std::atomic<size_t> backlog_skipped_{0};
     std::atomic<size_t> stale_epoch_skipped_{0};
+    std::atomic<size_t> other_map_skipped_{0};
+    std::atomic<size_t> num_initialization_measurements_{0};
     std::atomic<size_t> num_global_ba_merges_{0};
     std::atomic<size_t> num_global_ba_rejected_{0};
     std::atomic<size_t> num_merges_{0};

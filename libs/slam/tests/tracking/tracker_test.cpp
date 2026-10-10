@@ -972,8 +972,10 @@ protected:
     }
 
     // Injects the merge of M into N; `removed` (an M id) is removed by it.
-    // Fills expected_: per M id, its id in N (nullopt if gone).
-    void InjectMerge(const geometry::RigidTransformation& S, std::optional<map::MapPointId> removed) {
+    // Fills expected_: per M id, its id in N (nullopt if gone). `active` is
+    // the transaction's active_map: N, as the Mapper sends it.
+    void InjectMerge(const geometry::RigidTransformation& S, std::optional<map::MapPointId> removed,
+                     std::optional<map::MapId> active = kTargetMap) {
         const MapReplica<Extractor>& absorbed = *tracker_.atlas().map(kAbsorbedMap);
         const MapReplica<Extractor>& target = *tracker_.atlas().map(kTargetMap);
         const uint32_t target_epoch = target.map_epoch();
@@ -984,7 +986,7 @@ protected:
         merge->map_id = kTargetMap;
         merge->absorbed_map = kAbsorbedMap;
         merge->removed_maps.push_back(kAbsorbedMap);
-        merge->active_map = kTargetMap;
+        merge->active_map = active;
         merge->map_epoch = target_epoch + 1;
         for (const map::FrameId id : absorbed.keyframe_ids()) {
             merge->updated_poses.emplace_back(id, absorbed.keyframe(id)->T_cw * S.Inverse());
@@ -1021,9 +1023,9 @@ protected:
         injector_.Notify(merge);
         Settle();
         ASSERT_EQ(tracker_.atlas().map_ids(), (std::vector<map::MapId>{kTargetMap}));
-        ASSERT_EQ(tracker_.atlas().active_map(), kTargetMap);
-        ASSERT_EQ(tracker_.replica().map_epoch(), target_epoch + 1);
-        ASSERT_TRUE(tracker_.replica().CheckConsistency());
+        ASSERT_EQ(tracker_.atlas().active_map(), active);
+        ASSERT_EQ(tracker_.atlas().map(kTargetMap)->map_epoch(), target_epoch + 1);
+        ASSERT_TRUE(tracker_.atlas().map(kTargetMap)->CheckConsistency());
     }
 
     // Tracks frames 0..last in M, injects N and merges M into it.
@@ -1206,6 +1208,84 @@ TEST_F(TrackerMergeTest, LostTrackerReannouncesLossAfterMerge) {
     EXPECT_DOUBLE_EQ(captured[0].timestamp, final_at);
     EXPECT_EQ(tracker_.state(), TrackerState::Lost);
     EXPECT_EQ(tracker_.current_map_id(), kTargetMap);
+}
+
+TEST_F(TrackerMergeTest, MergeLeavingNoActiveMapResets) {
+    // A merge of M whose active_map is not N (here none; the Mapper never
+    // sends this shape): nothing is followed, and nothing tracked against M
+    // is kept: the last frame's M ids would index into N.
+    const auto sequence = StereoSequence();
+    TrackUpTo(sequence, 3);
+    ASSERT_FALSE(tracker_.last_matches().empty());
+    const geometry::RigidTransformation S = WorldMove();
+    InjectTargetMap(S);
+    ASSERT_FALSE(HasFatalFailure());
+    InjectMerge(S, std::nullopt, /*active=*/std::nullopt);
+    ASSERT_FALSE(HasFatalFailure());
+    EXPECT_TRUE(tracker_.last_matches().empty());
+    EXPECT_NE(tracker_.current_map_id(), kAbsorbedMap);  // M is gone
+    EXPECT_TRUE(TakeCaptured().empty());
+}
+
+TEST_F(TrackerMergeTest, MergeOfAnotherMapLeavesTrackerAlone) {
+    // The inactive N is absorbed into the active M (the reverse direction,
+    // which the Tracker does not follow: M stays active and keeps its ids and
+    // world). The Tracker keeps its state, map and last frame, and tracks the
+    // next frame by the motion model in M's world, as before.
+    const auto sequence = StereoSequence();
+    TrackUpTo(sequence, 3);
+    const std::vector<int64_t> before = tracker_.last_matches();
+    ASSERT_FALSE(before.empty());
+    const geometry::RigidTransformation S = WorldMove();
+    InjectTargetMap(S);
+    ASSERT_FALSE(HasFatalFailure());
+
+    const MapReplica<Extractor>& active = *tracker_.atlas().map(kAbsorbedMap);
+    const MapReplica<Extractor>& absorbed = *tracker_.atlas().map(kTargetMap);
+    const uint32_t active_epoch = active.map_epoch();
+    const auto new_ids = map::AbsorbedPointIds(
+        static_cast<uint32_t>(absorbed.num_points()), map::MapPointId{static_cast<uint32_t>(active.num_points())},
+        [&](map::MapPointId point) { return absorbed.IsAlive(point); });
+    auto* merge = transaction_pool_.Create();
+    merge->map_id = kAbsorbedMap;
+    merge->absorbed_map = kTargetMap;
+    merge->removed_maps.push_back(kTargetMap);
+    merge->active_map = kAbsorbedMap;
+    merge->map_epoch = active_epoch + 1;
+    // N's world into M's (p_M = S^-1 p_N); M's own Frames and points stay.
+    for (const map::FrameId id : absorbed.keyframe_ids()) {
+        merge->updated_poses.emplace_back(id, absorbed.keyframe(id)->T_cw * S);
+    }
+    std::vector<map::MapPointId> alive;
+    for (uint32_t p = 0; p < absorbed.num_points(); ++p) {
+        if (absorbed.IsAlive(map::MapPointId{p})) alive.push_back(map::MapPointId{p});
+    }
+    merge->ResizeUpdatedPoints(static_cast<uint32_t>(alive.size()));
+    const geometry::RigidTransformation S_inverse = S.Inverse();
+    for (size_t i = 0; i < alive.size(); ++i) {
+        const auto col = static_cast<Eigen::Index>(i);
+        merge->updated_ids[i] = *new_ids[alive[i].value];
+        merge->updated_positions.col(col) = S_inverse.Transform(absorbed.Position(alive[i]));
+        merge->updated_normals.col(col) = S_inverse.rotation() * absorbed.Normal(alive[i]);
+        merge->updated_descriptors.col(col) = absorbed.Descriptor(alive[i]);
+    }
+    injector_.Notify(merge);
+    Settle();
+    ASSERT_EQ(tracker_.atlas().map_ids(), (std::vector<map::MapId>{kAbsorbedMap}));
+    ASSERT_EQ(tracker_.atlas().active_map(), kAbsorbedMap);
+    ASSERT_NE(tracker_.replica().keyframe(kTargetFrame), nullptr);
+    ASSERT_TRUE(tracker_.replica().CheckConsistency());
+
+    EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
+    EXPECT_EQ(tracker_.current_map_id(), kAbsorbedMap);
+    EXPECT_EQ(tracker_.last_matches(), before);
+    EXPECT_TRUE(TakeCaptured().empty());
+    const auto captured = Feed(sequence.frames[4].measurement);
+    ExpectTrackedMetric(captured, sequence.frames[4].T_cw,
+                        CorrectedAlignment(sequence, geometry::RigidTransformation::Identity()), 4,
+                        events::TrackingStage::MotionModel);
+    EXPECT_EQ(captured[0].map_id, kAbsorbedMap);
+    EXPECT_EQ(captured[0].map_epoch, active_epoch + 1);
 }
 
 } // namespace

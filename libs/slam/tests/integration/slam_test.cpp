@@ -92,9 +92,21 @@ struct LoopRecord {
     map::FrameId query_frame;
     map::FrameId match_frame;
     geometry::Sim3 S_query_match;
+    uint32_t query_map;
+    uint32_t match_map;  // != query_map: a merge
 
     explicit LoopRecord(const events::LoopDetected& loop)
-        : query_frame(loop.query_frame), match_frame(loop.match_frame), S_query_match(loop.S_query_match) {}
+        : query_frame(loop.query_frame),
+          match_frame(loop.match_frame),
+          S_query_match(loop.S_query_match),
+          query_map(loop.query_map_id.value),
+          match_map(loop.match_map_id.value) {}
+};
+
+// A merge transaction's maps: `absorbed` merged into `target`.
+struct MergeRecord {
+    uint32_t target;
+    uint32_t absorbed;
 };
 
 // Records the map ids of the protocol events published by the Mapper and the
@@ -119,6 +131,9 @@ public:
                 *static_cast<events::MapTransaction<features::OrbFeatureExtractor>*>(event);
             atlas.Apply(transaction);
             const uint32_t map = event->map_id.value;
+            if (transaction.absorbed_map) {
+                merges.push_back({map, transaction.absorbed_map->value});
+            }
             const bool announced = !map_created.empty() && map_created.back() == map;
             if (transaction.new_map) {
                 map_created.push_back(map);
@@ -152,9 +167,13 @@ public:
                 frame_tracked.push_back(event->map_id.value);
                 positions.push_back(
                     {event->map_id.value, tracked.pose, tracked.timestamp, tracked.stage});
+            } else if (event->type == events::EventType::InitializationMeasurement) {
+                ++initialization_measurements;
             } else if (event->type == events::EventType::TrackingLost) {
+                const auto& lost = *static_cast<const events::TrackingLost*>(event);
                 tracking_lost.push_back(event->map_id.value);
-                tracking_lost_final.push_back(static_cast<const events::TrackingLost*>(event)->final);
+                tracking_lost_final.push_back(lost.final);
+                tracking_lost_at.push_back(lost.timestamp);
             }
         }
         while (events::Event* event = loop_closer_listener_.GetNextEvent()) {
@@ -189,6 +208,9 @@ public:
     std::vector<uint32_t> frame_tracked;
     std::vector<uint32_t> tracking_lost;
     std::vector<bool> tracking_lost_final;  // per TrackingLost
+    std::vector<double> tracking_lost_at;   // per TrackingLost: its timestamp
+    std::vector<MergeRecord> merges;        // the Mapper's merge transactions
+    size_t initialization_measurements = 0;  // forwarded by the Tracker
     std::vector<StampedPose> keyframes;  // added Frames, in publication order
     std::vector<size_t> transaction_new_points;  // per transaction, in publication order
     std::vector<StampedPose> positions;
@@ -523,6 +545,10 @@ struct RunCounts {
     // The Mapper's GlobalBAFinished, merged and rejected.
     size_t global_ba_merges = 0;
     size_t global_ba_rejected = 0;
+    // The Mapper's merges, and FrameTracked it skipped as not of the active
+    // map (in flight across a merge or a loss).
+    size_t merges = 0;
+    size_t other_map_skipped = 0;
 };
 
 // Frames [begin, end] of a run arrive as measurements without features (a
@@ -549,9 +575,11 @@ struct RunSetup {
     std::optional<Blackout> blackout;
     loop_closing::LoopCloserOptions loop_closer_options;
     global_ba::GlobalBaOptions global_ba_options;
-    // Each frame to track is fed once the previous one is tracked, the Mapper
-    // has handled every FrameTracked so far and has refined around every Frame
-    // it created (a Mapper that keeps up, as at camera rate). The Tracker and
+    // Each frame to track is fed once the Tracker has processed the previous
+    // one (tracked it, lost it, or forwarded it for a new map), the Mapper has
+    // handled every FrameTracked and InitializationMeasurement so far and has
+    // refined around every Frame it created (a Mapper that keeps up, as at
+    // camera rate). The Tracker and
     // the Mapper then no longer depend on thread timing; the LoopCloser is not
     // gated, so when its LoopDetected reaches the Mapper still does (in
     // practice runs agree to four digits). With global BA, a loop correction's
@@ -594,7 +622,8 @@ void RunSequence(const TSequence& sequence, size_t init_frames,
     out_counts.tracked_before = out_recorder.positions.size();
     const auto& mapper = slam.mapper();
     const auto mapper_handled = [&] {
-        return mapper.num_frame_evaluations() + mapper.backlog_skipped() + mapper.stale_epoch_skipped();
+        return mapper.num_frame_evaluations() + mapper.backlog_skipped() + mapper.stale_epoch_skipped() +
+               mapper.other_map_skipped();
     };
     // With global BA: until the latest loop correction's run is merged (a
     // merge raises the epoch again), at most 60 s. A rejected result (the
@@ -627,15 +656,13 @@ void RunSequence(const TSequence& sequence, size_t init_frames,
             slam.tracker().Track(sequence.frames[i].measurement);
         }
         if (setup.lock_step) {
-            // A frame that fails to track publishes nothing: then go on after 2 s.
-            static_cast<void>(out_recorder.WaitFor(
-                [&] {
-                    return !out_recorder.positions.empty() &&
-                           FrameIndexOf(out_recorder.positions.back().timestamp) == i;
-                },
-                std::chrono::seconds(2)));
+            // Until the Tracker has processed the frame (tracked, lost, or
+            // forwarded for a new map), then what it published is read.
+            ASSERT_TRUE(out_recorder.WaitFor([&] { return slam.tracker().num_processed() >= i + 1; }));
+            out_recorder.Poll();
             ASSERT_TRUE(out_recorder.WaitFor([&] {
                 return mapper_handled() >= out_recorder.positions.size() &&
+                       mapper.num_initialization_measurements() >= out_recorder.initialization_measurements &&
                        out_recorder.num_refinements >= out_recorder.num_creations;
             }));
             await_global_ba();
@@ -658,6 +685,8 @@ void RunSequence(const TSequence& sequence, size_t init_frames,
     out_counts.num_map_points = slam.mapper().num_map_points();
     out_counts.global_ba_merges = slam.mapper().num_global_ba_merges();
     out_counts.global_ba_rejected = slam.mapper().num_global_ba_rejected();
+    out_counts.merges = slam.mapper().num_merges();
+    out_counts.other_map_skipped = slam.mapper().other_map_skipped();
     if (const auto* global_ba = slam.global_ba()) {
         out_counts.has_global_ba = true;
         out_counts.global_ba_runs_started = global_ba->num_runs_started();
@@ -1371,6 +1400,283 @@ TEST(SlamTest, StereoGlobalBaRefinesLoop) {
         ExpectGlobalBaRefinesLoop(test::MakeSyntheticStereoSequence(options), seed, /*init_frames=*/1,
                                   /*monocular=*/false, mapper_options, /*max_points_ratio=*/0.8,
                                   /*max_end_ratio=*/1.0);
+        if (HasFatalFailure()) return;
+    }
+}
+
+// Map merging (map-merging spec section 6). MonoClosesLoop's loop extended to
+// 600 deg (401 frames), so the second lap passes all of the first lap's
+// first 140 frames' view again (frames 240-380).
+test::SyntheticSequenceOptions MergeLoopOptions() {
+    test::SyntheticSequenceOptions options = LoopOptions();
+    options.turn_deg = 600.0;
+    options.num_frames = 401;
+    return options;
+}
+
+// The blackout of a merge run: frames 140-165 (1.3 s), once map 1 has at
+// least min_frames_to_keep (10) Frames (measured 10-11: a thin margin, see
+// docs/TODO.md), and longer than MergeTrackerOptions' recently_lost_seconds,
+// so map 1 is lost for good and kept inactive; map 2 starts after it (stereo
+// at frame 166, mono about frame 174) in the area beyond map 1's, and
+// returns to map 1's area from frame 240 on.
+constexpr Blackout kMergeBlackout{.begin = 140, .end = 165};
+
+// recently_lost_seconds 1 s: the default 5 s is 100 frames, 150 deg of this
+// 20 s run, after which map 2 would not reach the LoopCloser's
+// min_map_frames (12) before the camera leaves map 1's area again.
+tracking::TrackerOptions MergeTrackerOptions() {
+    tracking::TrackerOptions options;
+    options.relocalization.recently_lost_seconds = 1.0;
+    return options;
+}
+
+// What a merge run (or its baseline without the blackout) measured.
+struct MergeRun {
+    std::vector<uint32_t> live_maps;  // at the end
+    std::vector<uint32_t> maps_created;
+    size_t num_merges = 0;          // the Mapper's
+    size_t num_merge_events = 0;    // LoopDetected across maps
+    size_t num_loop_events = 0;     // LoopDetected within a map
+    double merge_scale = 1.0;       // the first merge LoopDetected's Sim3 scale
+    size_t merge_query_frame = 0;   // its query Frame, as a frame index
+    // The final map's Frames before the blackout and after it (both parts).
+    size_t frames_before = 0;
+    size_t frames_after = 0;
+    // Whole-run error: RMS camera-centre error, in true units, of every Frame
+    // of the final map against truth under one alignment (Umeyama: a
+    // similarity for mono, rigid for stereo), and the Frames it covers.
+    double frames_rms = 0.0;
+    size_t num_rms_frames = 0;
+    // The same, over the Frames before the blackout and after it (all of
+    // them in "before" without a blackout).
+    double rms_before = 0.0;
+    double rms_after = 0.0;
+    // TrackingLost after the blackout.
+    size_t lost_after_blackout = 0;
+    size_t num_final_lost = 0;
+    // The first frame the Tracker tracked in the merge's target map after its
+    // last in the absorbed map: its index, whether it is the next frame (no
+    // gap across the merge), and its stage.
+    std::optional<size_t> first_after_merge;
+    bool tracked_across_merge = false;
+    events::TrackingStage stage_after_merge = events::TrackingStage::MotionModel;
+    // Frames after the blackout that published no FrameTracked, from the
+    // first one tracked in map 2.
+    size_t untracked_after_start = 0;
+    bool tracked_to_end = false;
+    RunCounts counts;
+};
+
+template <typename TSequence>
+MergeRun RunMerge(const TSequence& sequence, size_t init_frames, bool monocular,
+                  const mapping::MapperOptions& mapper_options, std::optional<Blackout> blackout) {
+    loop_closing::LoopCloserOptions loop_closer_options;
+    loop_closer_options.enabled = true;  // merging is part of loop closing
+    ProtocolRecorder recorder;
+    MergeRun run;
+    RunSequence(sequence, init_frames, mapper_options, recorder, run.counts,
+                {.tracker_options = MergeTrackerOptions(),
+                 .vocabulary = PlaceVocabulary(),
+                 .blackout = blackout,
+                 .loop_closer_options = loop_closer_options,
+                 .lock_step = true});
+    run.live_maps.clear();
+    for (const map::MapId id : recorder.atlas.map_ids()) run.live_maps.push_back(id.value);
+    run.maps_created = recorder.map_created;
+    run.num_merges = run.counts.merges;
+    for (const LoopRecord& loop : recorder.loops) {
+        if (loop.query_map == loop.match_map) {
+            ++run.num_loop_events;
+            continue;
+        }
+        if (run.num_merge_events++ == 0) {
+            run.merge_scale = loop.S_query_match.scale;
+            for (const StampedPose& keyframe : recorder.keyframes) {
+                if (keyframe.frame == loop.query_frame) run.merge_query_frame = FrameIndexOf(keyframe.timestamp);
+            }
+        }
+    }
+    const double blackout_end = blackout ? sequence.frames[blackout->end].measurement.timestamp() : -1.0;
+    for (size_t i = 0; i < recorder.tracking_lost_at.size(); ++i) {
+        if (recorder.tracking_lost_at[i] > blackout_end) ++run.lost_after_blackout;
+        if (recorder.tracking_lost_final[i]) ++run.num_final_lost;
+    }
+    if (recorder.positions.empty()) return run;
+    run.tracked_to_end = FrameIndexOf(recorder.positions.back().timestamp) == sequence.frames.size() - 1;
+
+    // The final map's Frames against truth.
+    if (run.live_maps.size() == 1) {
+        const auto& final_map = recorder.live_map(run.live_maps.front());
+        std::vector<std::pair<geometry::TVector3DF, geometry::TVector3DF>> centres;  // (estimated, true)
+        std::vector<bool> part_after;  // per centre: of a Frame after the blackout
+        for (const map::FrameId id : final_map.keyframe_ids()) {
+            const auto* frame = final_map.keyframe(id);
+            const size_t k =
+                FrameIndexOf(std::visit([](const auto& m) { return m.timestamp(); }, frame->measurement()));
+            if (blackout && k < blackout->begin) ++run.frames_before;
+            if (blackout && k > blackout->end) ++run.frames_after;
+            part_after.push_back(blackout && k > blackout->end);
+            centres.emplace_back(test::MapAlignment::Centre(frame->T_cw),
+                                 test::MapAlignment::Centre(sequence.frames[k].T_cw));
+        }
+        run.num_rms_frames = centres.size();
+        if (centres.size() >= 3) {
+            Eigen::Matrix3Xd estimated(3, static_cast<Eigen::Index>(centres.size()));
+            Eigen::Matrix3Xd truth(3, static_cast<Eigen::Index>(centres.size()));
+            for (size_t i = 0; i < centres.size(); ++i) {
+                estimated.col(static_cast<Eigen::Index>(i)) = centres[i].first;
+                truth.col(static_cast<Eigen::Index>(i)) = centres[i].second;
+            }
+            const Eigen::Matrix4d T = Eigen::umeyama(estimated, truth, /*with_scaling=*/monocular);
+            const Eigen::Matrix3Xd aligned =
+                (T.topLeftCorner<3, 3>() * estimated).colwise() + T.topRightCorner<3, 1>();
+            const Eigen::RowVectorXd squared = (aligned - truth).colwise().squaredNorm();
+            run.frames_rms = std::sqrt(squared.mean());
+            // Per part, under the same alignment.
+            double sum_before = 0.0, sum_after = 0.0;
+            for (size_t i = 0; i < centres.size(); ++i) {
+                (part_after[i] ? sum_after : sum_before) += squared(static_cast<Eigen::Index>(i));
+            }
+            const auto num_after = static_cast<size_t>(std::count(part_after.begin(), part_after.end(), true));
+            if (num_after > 0) run.rms_after = std::sqrt(sum_after / static_cast<double>(num_after));
+            if (num_after < centres.size()) {
+                run.rms_before = std::sqrt(sum_before / static_cast<double>(centres.size() - num_after));
+            }
+        }
+    }
+
+    // Across the merge: the Tracker's last frame in the absorbed map and its
+    // first after it in the target.
+    if (!recorder.merges.empty()) {
+        const MergeRecord& merge = recorder.merges.front();
+        std::optional<size_t> last_absorbed;
+        for (const StampedPose& position : recorder.positions) {
+            const size_t k = FrameIndexOf(position.timestamp);
+            if (position.map == merge.absorbed) {
+                last_absorbed = k;
+            } else if (position.map == merge.target && last_absorbed && k > *last_absorbed &&
+                       !run.first_after_merge) {
+                run.first_after_merge = k;
+                run.stage_after_merge = position.stage;
+            }
+        }
+        run.tracked_across_merge = last_absorbed && run.first_after_merge == *last_absorbed + 1;
+    }
+    if (blackout) {
+        // Every frame from map 2's first tracked one on.
+        std::vector<bool> tracked(sequence.frames.size(), false);
+        std::optional<size_t> start;
+        for (const StampedPose& position : recorder.positions) {
+            const size_t k = FrameIndexOf(position.timestamp);
+            tracked[k] = true;
+            if (k > blackout->end && (!start || k < *start)) start = k;
+        }
+        for (size_t k = start.value_or(sequence.frames.size()); k < sequence.frames.size(); ++k) {
+            run.untracked_after_start += tracked[k] ? 0 : 1;
+        }
+    }
+    return run;
+}
+
+// Runs `sequence` (a MergeLoopOptions loop) with loop closing, once without
+// the blackout (one continuous map closing its loop: the baseline) and once
+// with kMergeBlackout, and expects (spec section 6): map 1 kept inactive at
+// the loss, map 2 created after it, then merged into map 1, ending with one
+// live map, map 1, holding Frames of both parts; no tracking loss across the
+// merge (no TrackingLost after the blackout, every frame from map 2's start
+// tracked, the first after the merge included) and tracking to the end; and a
+// whole-run error at most 1.5x the baseline's. Records the numbers under
+// `seed`; returns the merge run.
+template <typename TSequence>
+MergeRun ExpectMergesMaps(const TSequence& sequence, uint32_t seed, size_t init_frames, bool monocular,
+                          const mapping::MapperOptions& mapper_options) {
+    const MergeRun baseline = RunMerge(sequence, init_frames, monocular, mapper_options, std::nullopt);
+    if (::testing::Test::HasFatalFailure()) return {};
+    const MergeRun merged = RunMerge(sequence, init_frames, monocular, mapper_options, kMergeBlackout);
+    if (::testing::Test::HasFatalFailure()) return {};
+
+    // A sound baseline: one map, no loss, its loop closed.
+    EXPECT_EQ(baseline.maps_created, std::vector<uint32_t>{1});
+    EXPECT_EQ(baseline.lost_after_blackout, 0u);
+    EXPECT_EQ(baseline.num_merges, 0u);
+    EXPECT_GE(baseline.num_loop_events, 1u);
+    EXPECT_TRUE(baseline.tracked_to_end);
+
+    EXPECT_EQ(merged.maps_created, (std::vector<uint32_t>{1, 2}));
+    EXPECT_EQ(merged.num_merges, 1u);
+    EXPECT_EQ(merged.live_maps, std::vector<uint32_t>{1});  // the target survives
+    EXPECT_GT(merged.frames_before, 0u);
+    EXPECT_GT(merged.frames_after, 0u);
+    EXPECT_EQ(merged.lost_after_blackout, 0u);
+    EXPECT_EQ(merged.untracked_after_start, 0u);
+    EXPECT_TRUE(merged.tracked_across_merge);
+    EXPECT_TRUE(merged.tracked_to_end);
+    EXPECT_GT(baseline.frames_rms, 0.0);
+    EXPECT_LE(merged.frames_rms, 1.5 * baseline.frames_rms);
+    if (!monocular) {
+        EXPECT_DOUBLE_EQ(merged.merge_scale, 1.0);
+    }
+
+    const std::string prefix = "seed_" + std::to_string(seed) + "_";
+    const auto record = [&](const std::string& key, const auto& value) {
+        ::testing::Test::RecordProperty(prefix + key, std::to_string(value));
+    };
+    record("frames_rms_baseline_m", baseline.frames_rms);
+    record("frames_rms_merged_m", merged.frames_rms);
+    record("rms_ratio", baseline.frames_rms > 0.0 ? merged.frames_rms / baseline.frames_rms : 0.0);
+    record("rms_before_m", merged.rms_before);
+    record("rms_after_m", merged.rms_after);
+    record("rms_frames_baseline", baseline.num_rms_frames);
+    record("rms_frames_merged", merged.num_rms_frames);
+    record("frames_before", merged.frames_before);
+    record("frames_after", merged.frames_after);
+    record("merge_events", merged.num_merge_events);
+    record("merge_query_frame", merged.merge_query_frame);
+    record("merge_scale", merged.merge_scale);
+    record("first_after_merge", merged.first_after_merge.value_or(0));
+    record("stage_after_merge", static_cast<int>(merged.stage_after_merge));
+    record("final_losses", merged.num_final_lost);
+    record("other_map_skipped", merged.counts.other_map_skipped);
+    record("global_ba_merges", merged.counts.global_ba_merges);
+    return merged;
+}
+
+// Measured (2026-10-11, three runs; whole-run error merged / baseline, ratio,
+// the merge's query frame and Sim3 scale): seed 1 0.0109-0.0130 / 0.0101 m
+// (1.08-1.29x, frame 303, scale 0.862); seed 2 0.0054 / 0.0086 m (0.63x,
+// 311, 0.882); seed 3 0.0074 / 0.0056 m (1.31x, 294, 0.919). The first frame
+// after the merge is tracked by the motion model in every run. With the
+// blackout at frames 160-185 instead (one run, not adopted): 0.81 / 4.84 /
+// 3.30x, map 2's own open-loop drift (docs/TODO.md).
+TEST(SlamTest, MonoMergesMaps) {
+    mapping::MapperOptions mapper_options;
+    mapper_options.initializer.reconstruction.min_parallax_deg = 4.0;  // as MonoClosesLoop
+    for (uint32_t seed = 1; seed <= 3; ++seed) {
+        SCOPED_TRACE("seed " + std::to_string(seed));
+        test::SyntheticSequenceOptions options = MergeLoopOptions();
+        options.seed = seed;
+        ExpectMergesMaps(test::MakeSyntheticSequence(options), seed, /*init_frames=*/30, /*monocular=*/true,
+                         mapper_options);
+        if (HasFatalFailure()) return;
+    }
+}
+
+// Measured (2026-10-11, three runs): seed 1 0.0046-0.0047 / 0.0052 m
+// (0.90x, frame 310); seed 2 0.0041-0.0043 / 0.0031 m (1.33-1.40x, 322);
+// seed 3 0.0048-0.0050 / 0.0046 m (1.02-1.08x, 315). Blackout at 160-185
+// (one run, not adopted): 1.13 / 1.61 / 0.85x.
+TEST(SlamTest, StereoMergesMaps) {
+    mapping::MapperOptions mapper_options;
+    mapper_options.initializer.stereo_min_features = 150;  // as StereoClosesLoop
+    for (uint32_t seed = 1; seed <= 3; ++seed) {
+        SCOPED_TRACE("seed " + std::to_string(seed));
+        test::SyntheticStereoSequenceOptions options;
+        options.trajectory = MergeLoopOptions();
+        options.trajectory.num_points = 700;
+        options.trajectory.seed = seed;
+        ExpectMergesMaps(test::MakeSyntheticStereoSequence(options), seed, /*init_frames=*/1,
+                         /*monocular=*/false, mapper_options);
         if (HasFatalFailure()) return;
     }
 }

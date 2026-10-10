@@ -2158,7 +2158,75 @@ final `TrackingLost(M)` in the Mapper, which ignores that loss as stale (M is
 removed; had it read the loss first, it would have rejected the merge): the
 Tracker publishes a final `TrackingLost(N)` with the first one's timestamp,
 and the Mapper handles it as any final loss (N kept inactive or discarded,
-the next initialization builds a new map).
+the next initialization builds a new map). Any other change of the active
+map resets (`AdoptMap`); a merge of the active map that leaves no map
+active (a shape the Mapper never sends) resets too, as `AdoptMap` of the
+target (map merging Task 7). A merge that does not absorb the active map
+leaves the Tracker alone (`TrackerMergeTest.MergeOfAnotherMapLeavesTrackerAlone`).
+
+**Map merging end to end** (map merging Task 7, spec section 6).
+`SlamTest.{Mono,Stereo}MergesMaps` run MonoClosesLoop's loop extended to
+600° (401 frames, so frames 240–380 pass the first lap's first 140 frames'
+view again) with loop closing (and global BA) on, a blackout over frames
+140–165 and `recently_lost_seconds` 1 s, over seeds 1–3, each against the
+same run without the blackout. In every run map 1 is lost with 10–11
+Frames and kept inactive, map 2 starts after the blackout (stereo at frame
+166, mono about frame 174, once the parallax reaches 4°), the LoopCloser detects one merge on the
+return (query frames 294–322) and the Mapper applies it; the run ends with
+one live map, map 1, holding Frames of both parts; no `TrackingLost` after
+the blackout and every frame from map 2's start tracked, the first one
+after the merge by the motion model (`MotionModel` stage). The Mapper skips
+one in-flight `FrameTracked` of map 2 per run (`other_map_skipped()`): the
+real interplay of a merge with a frame tracked in M. Whole-run error (RMS of
+the final map's Frame centres against truth, one alignment), merged /
+baseline, measured 2026-10-11 (three runs; the numbers repeat to four
+digits except where two values are given):
+
+| Seed | Mono (m) | Ratio | Merge scale | Stereo (m) | Ratio |
+|---|---|---|---|---|---|
+| 1 | 0.0109–0.0130 / 0.0101 | 1.08–1.29 | 0.862 | 0.0046 / 0.0052 | 0.90 |
+| 2 | 0.0054 / 0.0086 | 0.63 | 0.882 | 0.0041–0.0043 / 0.0031 | 1.33–1.40 |
+| 3 | 0.0074 / 0.0056 | 1.31 | 0.919 | 0.0048–0.0050 / 0.0046 | 1.02–1.08 |
+
+The bar is 1.5× (spec section 6). Margins are thin: map 1 holds 10–11
+Frames at the loss against `min_frames_to_keep` 10, and the error ratio
+depends on where the blackout falls. With the blackout at frames 160–185
+(measured once, not adopted) the ratios were mono 0.81 / 4.84 / 3.30 and
+stereo 1.13 / 1.61 / 0.85: map 2's part is distorted on its own (mono seed
+2: 0.047 m RMS under its own alignment against 0.018 m for map 1's part).
+The merge links the maps at one seam and nothing closes map 2's own drift
+between its start and the seam, whereas the baseline closes its loop; the
+error is map 2's open-loop drift, a random walk (TODO).
+
+**Map merging smoke** (2026-10-11, corridor1 full, 5990 frames, Release,
+`--rate=0 --vocabulary`, each run alone). Merge runs add `--loop_closing
+--drop_frames 1500:1700` (global BA on). In every merge run the blackout
+lost map 1 for good with 359–377 Frames (kept inactive), map 2 started
+right after it and was merged back into map 1 about 4 s later (query at
+t+89.1 s, frame ~1784, against a map-1 Frame at t+70.5–71.5 s, frame
+~1410–1430). False merges are checked against the default stereo run's
+trajectory (SE3 ATE 0.064 m against mocap; mocap covers only the first 27
+s and the last 25 s): both camera positions 0.38–1.12 m apart, so every
+merge was true (the first one with the camera turned about 95°, which the
+fisheye views still share).
+
+| Run | Merges found / applied / false | Maps over time | Final map | ATE of map 1 (`ate.py --map 1`) | Peak RSS | Wall |
+|---|---|---|---|---|---|---|
+| Mono 1 | 2 / 2 / 0 | 1 → lost at ~1600 (373 Frames, kept) → 2 at ~1700 → merged into 1 at ~1790; 1 lost at ~4600 (1220 Frames, kept) after a false loop → 3 → merged into 1 at ~5000 | 1 (1589 Frames) | Sim3 0.664 m | 2.08 GB | 9:41 |
+| Mono 2 | 1 / 1 / 0 | 1 → lost (377, kept) → 2 → merged into 1 at ~1790 | 1 (1543) | Sim3 0.448 m | 2.23 GB | 9:36 |
+| Stereo 1 | 1 / 1 / 0 | 1 → lost (359, kept) → 2 → merged into 1 at ~1784 | 1 (1696) | SE3 20.12 m | 2.73 GB | 18:58 |
+| Stereo 2 | 1 / 1 / 0 | 1 → lost (364, kept) → 2 → merged into 1 at ~1784 | 1 (1636) | SE3 19.53 m | 2.69 GB | 18:36 |
+| Stereo, default flags (memory) | — | one map | 1 (1808) | SE3 0.064 m | **1.23 GB** (master about 1.7 GB) | 18:27 |
+
+No tracking loss followed a merge: the next loss came 4–8 min (wall) later, after
+loop corrections. Against the reference trajectory the merged runs stay
+within 0.02–0.13 m (stereo) and 0.2–0.6 m (mono, Sim3) until a later loop
+correction: the large ATEs jump at the false loops of frames ~3100 (mono)
+and ~5020 (stereo), corridor1's look-alikes (step 6), not at a merge. Merge
+cost: 229–266 ms (windows 25–30 / 26 Frames), of which the weld 202–247 ms;
+the second mono merge (1220 + 163 Frames) 465 ms, weld 220 ms. The
+default-flags stereo run's peak RSS is 1.23 GB (1808 Frames), against
+master's about 1.7 GB: the shared measurements (Task 1 measured 1.21 GB).
 
 **Apps.** `--loop_closing` enables loop closing (`LoopCloserOptions::enabled`;
 it needs `--vocabulary`). Without it the vocabulary serves relocalization and
@@ -2835,6 +2903,10 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-11 | (Map merging Task 4, fix round 2) **`DetectNBestCandidates` group scoring counts only filtered hits**: a hit's group score adds its top-10 covisible Frames' scores only for Frames that passed the int(0.8 · max) common-words filter. ORB-SLAM3 adds every word-sharing KeyFrame's `mPlaceRecognitionScore` (set only for filtered ones, so possibly stale from an earlier query). Also: `LoopDetected::matched_points` drops a self-pair (equal ids) only for a loop; a merge's pairs span two maps whose point ids restart per map, so equal ids are two points (`KeepsPairsWithCollidingIds`). | The filtered form is ORB-SLAM2's and what the old `RelocalizationCandidates` path did; it avoids the stale-score dependence. The id filter dropped every true merge pair whose ids collided, which Task 5 fuses from. |
 | 2026-10-11 | (Map merging Task 6, spec section 4) **The Tracker follows a merge instead of adopting N.** A transaction whose `absorbed_map` is the Tracker's active map and whose `active_map` is the target keeps the Tracker's state, velocity and reference Frame, shifts `last_frame_` through the loop-correction anchors (reference Frame, else the Frames observing its matches; taken in M before the transaction, looked up in N after) and translates its matches with `AtlasReplica::TranslatePoint`. Any other change of the active map still resets (`AdoptMap`). | A merge moves the Tracker's own Frames, so the 4b epoch path applies unchanged; a reset would lose tracking at every merge (spec: no tracking loss across a merge). |
 | 2026-10-11 | (Map merging Task 6, fix round 1; controller ruling) **A Lost Tracker re-announces its loss after a merge.** When a merge of its map lands while the Tracker is Lost, it publishes a final `TrackingLost(N)` (timestamp of its last final loss); the Mapper needs no change. Tests: `TrackerMergeTest.LostTrackerReannouncesLossAfterMerge`, `MapperMergeTest.ReannouncedLossAfterMergeDeactivatesTarget`; a merge while Tracking or RecentlyLost publishes no loss. | Without it the race (the merge applied before the stale `TrackingLost(M)`) leaves the Mapper Mapping in N and the Tracker Lost forwarding `InitializationMeasurement`s the Mapper ignores, with nothing to end it. The Tracker-side fix is always correct: it only sees such a merge when the Mapper read its loss after the merge. |
+| 2026-10-10 | (Map merging, roadmap step 5; user decisions in the design conversation, spec `2026-10-10-map-merging-design.md`) **Scope A, ORB-SLAM3 parity**: keep lost maps of at least 10 Frames inactive, detect revisits of inactive maps in the LoopCloser and merge the active map into the inactive one (`MergeLocal`, visual path); relocalization stays active-map-only (into inactive maps: TODO). **Every replica mirrors the whole Atlas**, with each Frame's measurement created once and shared read-only. **The target map survives**: the inactive map keeps its id and world and absorbs the active map, whose points take new ids appended to the target's (the id rule) and which is retired; the active map is named explicitly (`active_map`), never "the newest id". Merging is part of loop closing (opt-in). | ORB-SLAM3's Atlas behaviour with the project's rules (one writer, lock-free replicas, ids never reused); sharing measurements keeps every replica holding every map affordable. |
+| 2026-10-10 | (Map merging, controller rulings not recorded above) Task 5 produces `AtlasReplica::TranslatePoint(absorbed, old)` (the id rule's owner) and Task 6 consumes it. Task 1: a pooled event releases its measurement when its slot is reused (`Reset()` on `Create`), not on recycle: no pool change, the delay is bounded by the pool size; `Mapper::KeyFrame(FrameId) const` is a Mapper-thread accessor added for the shared-measurement test. Task 2: `AtlasReplica::active_or_empty()` serves holders that work on the active map only. Task 3: the review's cheap minors were taken at once (a bounded hook in the inactive-map GlobalBA test, both orders of the deactivation test). | Small, local choices; recorded so the decisions log holds every ruling of the plan. |
+| 2026-10-11 | (Map merging Task 5; controller ruling) **"A correction or merge is running" is read as queue order.** The Mapper handles one event at a time, so a merge or loop queued behind a merge is rejected because it names the removed map; a merge queued behind a *loop correction* of M is accepted: its `S_query_match` is camera to camera, so the corrected query pose S·T_match does not depend on M's world. Rejecting it would need an epoch on `LoopDetected` (TODO). | No running state exists to test; the accepted case is geometrically sound. |
+| 2026-10-11 | (Map merging Task 7) **Integration and harness.** `SlamTest.{Mono,Stereo}MergesMaps` run MonoClosesLoop's loop extended to 600° (401 frames) with a blackout over frames 140–165 and `recently_lost_seconds` 1 s (the default 5 s is 150° of this 20 s run: map 2 would not reach the LoopCloser's 12 Frames before leaving map 1's area); baseline: the same run without the blackout. The whole-run error is the RMS of every final-map Frame's centre against truth under one Umeyama alignment (similarity for mono, rigid for stereo): tracked poses before a merge are in another map's world, the final map's Frames are in one. The lock-step harness now waits for the Tracker to have processed each frame (`Tracker::num_processed()`) and for the Mapper to have handled every `InitializationMeasurement` (`Mapper::num_initialization_measurements()`): without it, a Lost Tracker forwarded the whole blackout tail and the Mapper's new mono map started far behind the camera (lost at once, maps 2..6). `Mapper::other_map_skipped()` counts `FrameTracked` of a map that is not active (in flight across a merge or a loss) so the gate accounts for them. Tracker: a merge of the active map that leaves no map active falls back to `AdoptMap(target)` (a reset) instead of keeping M's ids in the last frame (the Mapper never sends that shape). The apps print the Atlas (live maps, active, merges); the merge log names both Frames' timestamps and the weld time; `tools/ate.py --map ID` evaluates one map. | The spec's integration bars on a scene where both maps reach the Atlas thresholds at their default values; counters rather than sleeps keep the harness deterministic. |
 
 ## 9. Open Questions
 
@@ -2872,7 +2944,7 @@ branch → review → merge to `master`. Update this document at the end.
    (`parent`, `children`) and loop edges kept by every replica, the essential
    graph built from them for the correction; see "Loop Closing", "Map graph".
 9. Keyframe culling and how `Frame` removal propagates (`KeyFrameRemoved` event?).
-10. IMU / multi-map (Atlas) support — out of scope for now.
+10. IMU support — out of scope for now. ~~Multi-map (Atlas)~~ — done 2026-10-11 (roadmap step 5, map merging): see "Mapper" (§4), the replica rule (§6) and "Loop Closing" (merge detection, the merge, the Tracker across a merge).
 15. ~~Tracker threading~~ — decided 2026-10-02: own thread, two queues (§4).
 16. ~~Measurement naming and timestamps~~ — decided 2026-10-02:
     `MonocularMeasurement` / `BinocularMeasurement`, timestamp in the measurement.
@@ -3070,6 +3142,15 @@ branch → review → merge to `master`. Update this document at the end.
   of the essential graph's; corridor1 smoke Musts met, with long runs and
   more memory (TODO).
 
+- Map merging, roadmap step 5 (branch `feat/map-merging`, 2026-10-11): the
+  Atlas (lost maps of at least 10 Frames kept inactive), the replica rule
+  (replacing "newest id wins"), shared measurements, merge detection in the
+  LoopCloser, the Mapper's merge (`MergeLocal`) with the id rule, the Tracker
+  following a merge (see "Mapper", §6 and "Loop Closing"). Synthetic merges
+  meet the spec's bars (thin margins, TODO); corridor1 merge smoke: every
+  merge true, no tracking loss caused by a merge; default stereo peak RSS
+  1.23 GB (was 1.7 GB).
+
 **Required follow-up:**
 - Decide `MapPointStorage` growth / compaction (Open Question 2); ids are
   append-only since 2026-10-05.
@@ -3080,11 +3161,15 @@ branch → review → merge to `master`. Update this document at the end.
   rounding). Building OpenCV from source to link against
   (in progress, user).
 - Tracker measurement policy (19).
-- Roadmap (`docs/ROADMAP.md`): relocalization into other maps comes with
-  map merging (step 5).
+- Roadmap (`docs/ROADMAP.md`): TUM-VI tuning (step 6); relocalization into
+  inactive maps is TODO ("Map merging follow-ups").
 - Event pool lifetime (Open Question 25).
-- Test suite (2026-10-10, map merging Task 4): 705 tests (685 `unit`, 19
-  `integration`, 1 `vocabulary`); `check_all` about 18–24 s, set by
-  `SlamTest.MonoClosesLoop` (14–25 s: its lock-step runs are bursty, so the
-  time follows the CPU's frequency scaling) and the two
-  `*GlobalBaRefinesLoop` tests (about 16–17 s each, run in parallel).
+- Test suite (2026-10-11, map merging Task 7): 735 tests (713 `unit`, 21
+  `integration`, 1 `vocabulary`); `check_all` about 26–38 s, set by
+  `SlamTest.{Mono,Stereo}MergesMaps` (about 20–26 s each, six lock-step runs
+  of 401 frames), `SlamTest.MonoClosesLoop` (14–25 s: its lock-step runs are
+  bursty, so the time follows the CPU's frequency scaling) and the two
+  `*GlobalBaRefinesLoop` tests (about 17–20 s each), run in parallel.
+  ThreadSanitizer (2026-10-11, scratch tree `-fsanitize=thread -O1 -g`,
+  `setarch -R`): `voyah_slam_tests` 266 and `voyah_integration_tests` 21
+  passed, no warnings.
