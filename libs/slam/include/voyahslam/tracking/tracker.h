@@ -30,6 +30,7 @@
 #include <voyahslam/memory/object_pool.h>
 #include <voyahslam/optimization/pose_optimization.h>
 #include <voyahslam/tracking/local_map.h>
+#include <voyahslam/tracking/atlas_replica.h>
 #include <voyahslam/tracking/map_replica.h>
 #include <voyahslam/tracking/relocalizer.h>
 
@@ -124,7 +125,13 @@ struct TrackerOptions {
 // Lost at once (final = true). Lost, like WaitingForMap, forwards
 // measurements to the Mapper for a new map.
 //
-// MapTransactions. A new map starts tracking from its start Frame. An added
+// MapTransactions. They build the Tracker's AtlasReplica (the replica rule:
+// atlas_replica.h); the Tracker tracks and relocalizes only in the active map
+// (replica()). A change of the active map to another map resets the last
+// frame, the velocity and the reference Frame; current_map_id() is the last
+// active map (kept while none is active, after a final loss). Only a
+// transaction of the active map acts on the Tracker's state below. A new map
+// starts tracking from its start Frame. An added
 // Frame whose measurement is the last tracked one (same timestamp) merges its
 // observations into the last frame's matches, so the next motion-model search
 // uses the Mapper's new points at once. Then the last frame's matches follow
@@ -180,7 +187,10 @@ public:
 
     // Tracker-thread state, for tests that drive ProcessPending()
     // synchronously: never read while the worker runs.
-    [[nodiscard]] const MapReplica<TFeatureExtractor>& replica() const { return replica_; }
+    [[nodiscard]] const AtlasReplica<TFeatureExtractor>& atlas() const { return atlas_; }
+    // The active map, which the Tracker tracks and relocalizes in; empty if
+    // there is none.
+    [[nodiscard]] const MapReplica<TFeatureExtractor>& replica() const { return atlas_.active_or_empty(); }
     // The last tracked frame's inlier matches: per (left) feature, the
     // MapPointId value or -1.
     [[nodiscard]] const std::vector<int64_t>& last_matches() const { return last_frame_.matches; }
@@ -207,9 +217,12 @@ private:
         std::optional<map::FrameId> reference_frame_id;
     };
 
-    // Applies the consumer rule; returns false if the event is stale.
-    bool AdoptMapOf(const events::Event& event);
+    // Applies a transaction to the Atlas (the replica rule); a change of the
+    // active map adopts the new one.
     void ApplyEvent(const events::Event& event);
+    // The active map became `map_id`: nothing tracked against the previous
+    // one carries over.
+    void AdoptMap(map::MapId map_id);
     void OnMapTransaction(const events::MapTransaction<TFeatureExtractor>& transaction);
     // A Frame's pose before a loop correction is applied.
     struct FramePose {
@@ -275,7 +288,7 @@ private:
     std::atomic<map::MapId> current_map_id_{map::MapId{0}};
 
     // Tracker-thread state.
-    MapReplica<TFeatureExtractor> replica_;
+    AtlasReplica<TFeatureExtractor> atlas_;
     LastFrame last_frame_;
     std::optional<geometry::RigidTransformation> velocity_;  // T_cur_last
     // The last FrameTracked's reference Frame (the start Frame of a new map).

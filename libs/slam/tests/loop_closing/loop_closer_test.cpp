@@ -283,6 +283,7 @@ public:
         }
         transaction->map_id = map_id;
         transaction->map_epoch = map_epoch_;
+        transaction->active_map = map_id;  // as the Mapper: the map it builds
         transaction->new_map = new_map;
         if (new_map) transaction->start_frame = frame.id;
         events::NewFrame<Extractor>& added = transaction->added_frames.emplace_back();
@@ -319,6 +320,7 @@ public:
         auto* transaction = transaction_pool_.Create();
         transaction->map_id = map::MapId{1};
         transaction->map_epoch = map_epoch_;
+        transaction->active_map = map::MapId{1};
         transaction->removed_frames.push_back(frame);
         mapper_.Notify(transaction);
     }
@@ -331,6 +333,18 @@ public:
         auto* transaction = transaction_pool_.Create();
         transaction->map_id = map::MapId{1};
         transaction->map_epoch = map_epoch;
+        transaction->active_map = map::MapId{1};
+        mapper_.Notify(transaction);
+        return Run();
+    }
+
+    // Publishes the Mapper's answer to a final loss of map `map_id` (removed,
+    // none active), then runs the LoopCloser; returns what it published.
+    std::vector<Loop> PublishRemoval(map::MapId map_id) {
+        auto* transaction = transaction_pool_.Create();
+        transaction->map_id = map_id;
+        transaction->map_epoch = map_epoch_;
+        transaction->removed_maps.push_back(map_id);
         mapper_.Notify(transaction);
         return Run();
     }
@@ -891,8 +905,9 @@ TEST(LoopCloserTest, UnmappedLookAlikeRejected) {
     }
 }
 
-// Review Focus 3: a new map, or a final TrackingLost of the current one,
-// drops the replica and the pending region.
+// Review Focus 3: a new map, or the Mapper dropping the current one after a
+// final TrackingLost, drops the replica and the pending region; a
+// TrackingLost alone changes nothing.
 TEST(LoopCloserTest, ClearsOnNewMap) {
     for (const bool by_tracking_lost : {false, true}) {
         SCOPED_TRACE(by_tracking_lost ? "final TrackingLost" : "new map");
@@ -913,6 +928,8 @@ TEST(LoopCloserTest, ClearsOnNewMap) {
             EXPECT_EQ(harness.loop_closer().num_coincidences(), 2u);
             EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), 15u);
             EXPECT_TRUE(harness.PublishTrackingLost(map::MapId{1}, true).empty());
+            EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), 15u);
+            EXPECT_TRUE(harness.PublishRemoval(map::MapId{1}).empty());
             EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), 0u);
             EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
             // A late transaction of the lost map is ignored.

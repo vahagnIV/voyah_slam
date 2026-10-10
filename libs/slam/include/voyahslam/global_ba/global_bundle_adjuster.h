@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <utility>
 #include <voyahslam/events/event_node.h>
 #include <voyahslam/events/global_ba_finished.h>
@@ -14,6 +15,7 @@
 #include <voyahslam/logging/logger.h>
 #include <voyahslam/map/map_id.h>
 #include <voyahslam/memory/object_pool.h>
+#include <voyahslam/tracking/atlas_replica.h>
 #include <voyahslam/tracking/map_replica.h>
 
 namespace voyahslam::global_ba {
@@ -22,21 +24,23 @@ namespace voyahslam::global_ba {
 // the map and its own thread, and publishes GlobalBAFinished for the Mapper to
 // merge. Consumes the Mapper's MapTransactions; never modifies map objects.
 //
-// Trigger: an applied transaction of the current map that adds a loop edge
+// Trigger: an applied transaction of the active map that adds a loop edge
 // (the correction at epoch N). After the inbox is drained, one run optimizes
 // a snapshot of the replica at epoch N (RunGlobalBa's contract).
 // Transactions arriving meanwhile are applied, and so released, at each poll
 // of should_stop: the Mapper's transaction pool aborts when exhausted and a
 // run on a large map lasts seconds, so none may be held for a run.
 // Interruption: Stop(), or an arrived transaction that is a newer correction
-// (a larger map epoch with a loop edge) or a new map (new_map or a newer map
-// id). An interrupted run publishes nothing; a newer correction applied
-// during the run starts a new run next, a new map drops it. A run interrupted
-// by Stop() is not resumed: after a restart there is no global BA until the
-// next loop correction.
+// of the run's map (a larger map epoch with a loop edge), recreates it
+// (new_map), or leaves it not active (a new active map, or none after the
+// Mapper drops a finally lost map). An interrupted run publishes nothing; a
+// newer correction applied during the run starts a new run next, a change of
+// the active map drops it. A run interrupted by Stop() is not resumed: after
+// a restart there is no global BA until the next loop correction.
 // The result carries the run's map id and epoch N.
-// Map ids: events of map 0 and of older maps are ignored; a new map clears the
-// replica (it clears itself) and drops a pending run.
+// Maps: the replica is an AtlasReplica (the replica rule: atlas_replica.h),
+// and the run is on the active map. A change of the active map, or a new map,
+// drops a pending run.
 template <typename TFeatureExtractor>
 class GlobalBundleAdjuster : public events::EventNode {
 public:
@@ -58,9 +62,14 @@ public:
 
     // GlobalBA-thread state, for tests that drive ProcessPending()
     // synchronously: never read while the worker runs.
-    [[nodiscard]] const tracking::MapReplica<TFeatureExtractor>& replica() const { return replica_; }
+    [[nodiscard]] const tracking::AtlasReplica<TFeatureExtractor>& atlas() const { return atlas_; }
+    // The active map; empty if there is none.
+    [[nodiscard]] const tracking::MapReplica<TFeatureExtractor>& replica() const {
+        return atlas_.active_or_empty();
+    }
     [[nodiscard]] size_t num_runs_started() const { return num_runs_started_; }
-    // Runs cut short by Stop() or an arrived newer correction or new map.
+    // Runs cut short by Stop(), an arrived newer correction or a change of
+    // the active map.
     [[nodiscard]] size_t num_runs_interrupted() const { return num_runs_interrupted_; }
     // Results dropped because max_events_in_flight GlobalBAFinished were in use.
     [[nodiscard]] size_t num_results_dropped() const { return num_results_dropped_; }
@@ -79,7 +88,10 @@ public:
     void set_publish_hook(std::function<void()> hook) { publish_hook_ = std::move(hook); }
 
 private:
-    void ApplyEvent(const events::Event& event);
+    // Applies a transaction to the Atlas; true iff it supersedes the run of
+    // (map_id, map_epoch) (pass none for no run).
+    bool ApplyEvent(const events::Event& event, std::optional<map::MapId> map_id = std::nullopt,
+                    uint32_t map_epoch = 0);
     // Runs the global BA of the replica and publishes its result unless
     // interrupted.
     void Run();
@@ -94,7 +106,7 @@ private:
     std::atomic<bool> stop_requested_{false};
 
     // GlobalBA-thread state.
-    tracking::MapReplica<TFeatureExtractor> replica_;
+    tracking::AtlasReplica<TFeatureExtractor> atlas_;
     bool run_pending_ = false;
     size_t num_runs_started_ = 0;
     size_t num_runs_interrupted_ = 0;

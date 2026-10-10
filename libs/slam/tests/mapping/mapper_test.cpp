@@ -137,6 +137,9 @@ struct Published {
     std::vector<std::pair<map::FrameId, map::FrameId>> parent_changes;
     std::vector<std::pair<map::FrameId, map::FrameId>> added_loop_edges;
     uint32_t map_epoch = 0;
+    // The Atlas parts.
+    std::optional<map::MapId> active_map;
+    std::vector<map::MapId> removed_maps;
 
     // The `k`th added Frame.
     [[nodiscard]] const PublishedFrame& frame(size_t k = 0) const { return frames.at(k); }
@@ -236,6 +239,15 @@ protected:
                 p.parent_changes = transaction->parent_changes;
                 p.added_loop_edges = transaction->added_loop_edges;
                 p.map_epoch = transaction->map_epoch;
+                p.active_map = transaction->active_map;
+                p.removed_maps = transaction->removed_maps;
+                // Every transaction names the active map: its own, or none
+                // when it drops its map.
+                if (p.removed_maps.empty()) {
+                    EXPECT_EQ(p.active_map, p.map_id);
+                } else {
+                    EXPECT_FALSE(p.active_map.has_value());
+                }
             }
             ExpectApplied(p);
             if (after_each) {
@@ -265,6 +277,32 @@ protected:
             EXPECT_FALSE(actual.start_frame.has_value());
         }
         EXPECT_EQ(actual.num_other_parts, 0u);
+    }
+
+    // The Mapper dropping map `map` after a final loss: a transaction of that
+    // map with removed_maps = {map}, no active map and nothing else.
+    static void ExpectRemoval(const Published& actual, uint32_t map) {
+        EXPECT_EQ(actual.type, events::EventType::MapTransaction);
+        EXPECT_EQ(actual.map_id, map::MapId{map});
+        EXPECT_EQ(actual.removed_maps, std::vector<map::MapId>{map::MapId{map}});
+        EXPECT_FALSE(actual.active_map.has_value());
+        EXPECT_FALSE(actual.new_map);
+        EXPECT_TRUE(actual.frames.empty());
+        EXPECT_EQ(actual.count, 0u);
+        EXPECT_EQ(actual.num_updated, 0u);
+        EXPECT_EQ(actual.num_added_observations, 0u);
+        EXPECT_EQ(actual.num_other_parts, 0u);
+        EXPECT_TRUE(actual.added_loop_edges.empty());
+    }
+
+    // A final TrackingLost of the current map `map`: the Mapper drops it with
+    // one transaction, taken and checked here.
+    void LoseMap(uint32_t map, double timestamp) {
+        PublishTrackingLost(map, timestamp);
+        Drain();
+        const std::vector<Published> removal = TakeCaptured();
+        ASSERT_EQ(removal.size(), 1u);
+        ExpectRemoval(removal[0], map);
     }
 
     // Index of the first frame that initializes against frame 0, measured with
@@ -412,8 +450,7 @@ TEST_F(MapperTest, StereoMapAfterMonoMap) {
     ASSERT_GT(mapper_.num_map_points(), 0u);
 
     const double timestamp = sequence_.frames.back().measurement.timestamp() + 1.0;
-    PublishTrackingLost(1, timestamp);
-    Drain();
+    LoseMap(1, timestamp);
     ASSERT_EQ(mapper_.state(), MapperState::Initializing);
 
     const TBinocularMeasurement measurement = StereoMeasurement(timestamp + 1.0);
@@ -527,8 +564,7 @@ TEST_F(MapperTest, PointIdsRestartAfterTrackingLost) {
     ASSERT_FALSE(first.empty());
     ASSERT_GT(mapper_.num_map_points(), 0u);
 
-    PublishTrackingLost(1, sequence_.frames.back().measurement.timestamp());
-    Drain();
+    LoseMap(1, sequence_.frames.back().measurement.timestamp());
     EXPECT_EQ(mapper_.num_map_points(), 0u);
 
     // A later stretch of the sequence, its first frame the new reference.
@@ -598,7 +634,10 @@ TEST_F(MapperTest, TrackingLostStartsNewMap) {
     EXPECT_EQ(mapper_.state(), MapperState::Initializing);
     EXPECT_EQ(mapper_.num_keyframes(), 0u);
     EXPECT_EQ(mapper_.num_map_points(), 0u);
-    EXPECT_TRUE(TakeCaptured().empty());
+    // The discard, published: map 1 removed, no active map.
+    const auto removal = TakeCaptured();
+    ASSERT_EQ(removal.size(), 1u);
+    ExpectRemoval(removal[0], 1);
 
     PublishInitializationMeasurement(StereoMeasurement(2.0));
     Drain();
@@ -973,7 +1012,10 @@ TEST_F(MapperInboxTest, TrackingLostAfterFrameTrackedCreatesNoFrame) {
     PublishTrackingLost(1, sequence_.frames[next_].measurement.timestamp());
     Drain();
 
-    EXPECT_TRUE(TakeCaptured().empty());
+    // Only the discard of map 1 is published.
+    const auto captured = TakeCaptured();
+    ASSERT_EQ(captured.size(), 1u);
+    ExpectRemoval(captured[0], 1);
     EXPECT_EQ(mapper_.num_frame_evaluations(), evaluations);
     EXPECT_EQ(mapper_.state(), MapperState::Initializing);
     EXPECT_EQ(mapper_.num_keyframes(), 0u);
@@ -3641,8 +3683,7 @@ TEST_F(MapperLoopTest, IgnoresLoopOfOldMap) {
     // live Frames but map 1 as the query's or the match's map (or both) are
     // ignored; the same loop of map 2 is corrected.
     InitializeStereo(0.0);
-    PublishTrackingLost(1, 0.5);
-    Drain();
+    LoseMap(1, 0.5);
     scene_map_ = map::MapId{2};
     BuildScene();
     ASSERT_EQ(mapper_.current_map_id(), map::MapId{2});
@@ -4074,8 +4115,7 @@ TEST_F(MapperGlobalBaTest, RejectsOldMap) {
     InitializeStereo(0.0);
     const Result old_map = Snapshot();
     ASSERT_EQ(old_map.map_id, map::MapId{1});
-    PublishTrackingLost(1, 0.5);
-    Drain();
+    LoseMap(1, 0.5);
     ASSERT_EQ(mapper_.state(), MapperState::Initializing);
     EXPECT_TRUE(Merge(old_map).empty());
     EXPECT_EQ(mapper_.num_global_ba_rejected(), 1u);

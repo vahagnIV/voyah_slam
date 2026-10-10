@@ -133,8 +133,9 @@ public:
                 map_epoch = transaction.map_epoch;
                 corrections.push_back(keyframes.size());
                 epoch_from_loop = !transaction.added_loop_edges.empty();
-            } else if (!transaction.new_map) {
-                // A Frame's creation, or its refinement (local BA, culling).
+            } else if (!transaction.new_map && transaction.removed_maps.empty()) {
+                // A Frame's creation, or its refinement (local BA, culling);
+                // not the Mapper dropping a lost map.
                 ++(transaction.added_frames.empty() ? num_refinements : num_creations);
             }
             if (transaction.num_new_points() > 0) {
@@ -190,7 +191,9 @@ public:
     std::vector<StampedPose> keyframes;  // added Frames, in publication order
     std::vector<size_t> transaction_new_points;  // per transaction, in publication order
     std::vector<StampedPose> positions;
-    // The Mapper's current map, rebuilt from its transactions.
+    // The Mapper's latest map, rebuilt from its transactions: one map, which a
+    // new map clears (a dropped map stays until then; an AtlasReplica would
+    // drop it at once).
     tracking::MapReplica<features::OrbFeatureExtractor> replica;
     // The LoopCloser's LoopDetected, copied (not pooled).
     std::vector<LoopRecord> loops;

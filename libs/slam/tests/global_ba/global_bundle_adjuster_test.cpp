@@ -158,6 +158,14 @@ public:
         });
     }
 
+    // The Mapper's answer to a final loss of map `map_id`: removed, none active.
+    void SendRemoval(map::MapId map_id) {
+        Send(map_id, 0, [&](TTransaction& transaction) {
+            transaction.removed_maps.push_back(map_id);
+            transaction.active_map.reset();
+        });
+    }
+
     // A loop correction at `map_epoch`: a loop edge between Frames a and b.
     void SendCorrection(map::MapId map_id, uint32_t map_epoch, uint32_t a = 0, uint32_t b = kNumFrames - 2) {
         Send(map_id, map_epoch, [&](TTransaction& transaction) {
@@ -212,6 +220,7 @@ private:
         ++num_sent_;
         transaction->map_id = map_id;
         transaction->map_epoch = map_epoch;
+        transaction->active_map = map_id;  // as the Mapper: the map it builds
         fill(*transaction);
         mapper_.Notify(transaction);
     }
@@ -322,20 +331,34 @@ TEST(GlobalBundleAdjusterTest, NewMapClearsAndDropsRun) {
     }
 }
 
-// A newer map id without new_map is a new map too.
-TEST(GlobalBundleAdjusterTest, NewerMapIdDropsRun) {
-    Harness harness;
-    harness.SendMap(kMap);
-    harness.SendCorrection(kMap, 1);
-    harness.SendOrdinary(map::MapId{2}, 0);
-    EXPECT_TRUE(harness.Run().empty());
-    EXPECT_EQ(harness.global_ba().num_runs_started(), 0u);
-    EXPECT_EQ(harness.global_ba().replica().map_id(), map::MapId{2});
+// The Mapper dropping the map (a final loss) drops the pending run, whether
+// it comes before the run (in the same drain) or while it runs.
+TEST(GlobalBundleAdjusterTest, RemovedMapDropsRun) {
+    for (const bool during_run : {false, true}) {
+        SCOPED_TRACE(during_run ? "during the run" : "before the run");
+        Harness harness;
+        harness.SendMap(kMap);
+        harness.SendCorrection(kMap, 1);
+        if (during_run) {
+            harness.global_ba().set_run_hook([&] { harness.SendRemoval(kMap); });
+        } else {
+            harness.SendRemoval(kMap);
+        }
+        EXPECT_TRUE(harness.Run().empty());
+        harness.global_ba().set_run_hook({});
+
+        EXPECT_EQ(harness.global_ba().num_runs_started(), during_run ? 1u : 0u);
+        EXPECT_EQ(harness.global_ba().num_runs_interrupted(), during_run ? 1u : 0u);
+        EXPECT_FALSE(harness.global_ba().atlas().active_map().has_value());
+        EXPECT_TRUE(harness.global_ba().atlas().map_ids().empty());
+    }
 }
 
-// Events of an older map (and of map 0) neither start nor interrupt a run.
-TEST(GlobalBundleAdjusterTest, IgnoresOldMap) {
+// Events of a removed map (and of map 0) neither start nor interrupt a run.
+TEST(GlobalBundleAdjusterTest, IgnoresRemovedMap) {
     Harness harness;
+    harness.SendMap(kMap);
+    harness.SendRemoval(kMap);
     harness.SendMap(map::MapId{2});
     harness.SendCorrection(kMap, 5);
     harness.SendCorrection(map::MapId{0}, 5);

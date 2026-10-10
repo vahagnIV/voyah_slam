@@ -48,10 +48,12 @@ struct ReplicaKeyFrame {
     }
 };
 
-// The Tracker's private copy of the map, built only from Mapper events and
-// touched only on the Tracker thread (no locks). Same map-id rule as the viewer's
-// SceneState: map 0 is exempt (ignored), events of older maps are ignored, and an
-// event of a newer map clears the replica and adopts the id.
+// A private copy of one map, built only from the Mapper's transactions of
+// that map and touched only on its owner's thread (no locks). It holds one map
+// only: the AtlasReplica (atlas_replica.h) routes each transaction to the map
+// it names and applies the Atlas parts (removed_maps, active_map), which a
+// MapReplica ignores. A new_map transaction clears the replica and gives it
+// its map id; a transaction of another map is a caller error (asserted).
 //
 // A MapTransaction is applied whole, in one Apply(), in the spec's order: new
 // map, Frames with their parents, loop edges, points, observations (each new
@@ -74,6 +76,7 @@ public:
 
     void Apply(const events::Event& event);
 
+    // The map of the transactions applied; 0 before the first.
     [[nodiscard]] map::MapId map_id() const { return map_id_; }
     // Number of ids issued; ids restart at 0 per map, so storage is dense.
     [[nodiscard]] size_t num_points() const { return positions_.size(); }
@@ -133,8 +136,6 @@ public:
     [[nodiscard]] bool CheckConsistency() const;
 
 private:
-    // Applies the multi-map rule; returns false if the event must not be applied.
-    bool AdmitMap(map::MapId map_id);
     void Clear();
     void ApplyTransaction(const events::MapTransaction<TFeatureExtractor>& transaction);
     // Sets point ids[i] from column i of the buffers; unknown ids are skipped.
@@ -194,7 +195,6 @@ const features::TLevels& LeftLevels(const TMeasurement& measurement) {
 template <typename TFeatureExtractor>
 void MapReplica<TFeatureExtractor>::Apply(const events::Event& event) {
     using events::EventType;
-    if (!AdmitMap(event.map_id)) return;
     // No default case: adding an EventType must produce a -Wswitch warning here.
     switch (event.type) {
         case EventType::MapTransaction:
@@ -212,8 +212,11 @@ void MapReplica<TFeatureExtractor>::Apply(const events::Event& event) {
 template <typename TFeatureExtractor>
 void MapReplica<TFeatureExtractor>::ApplyTransaction(
     const events::MapTransaction<TFeatureExtractor>& transaction) {
-    // 1. New map: nothing of an earlier map of the same id survives.
+    // 1. New map: nothing of what the replica held survives.
     if (transaction.new_map) Clear();
+    // One map only (the AtlasReplica routes transactions by map).
+    assert(transaction.new_map || map_id_.value == 0 || transaction.map_id == map_id_);
+    map_id_ = transaction.map_id;
     map_epoch_ = transaction.map_epoch;
 
     // 2. Frames, then their parents (a parent may be added in the same
@@ -474,16 +477,6 @@ bool MapReplica<TFeatureExtractor>::CheckGraph() const {
                 return false;
             }
         }
-    }
-    return true;
-}
-
-template <typename TFeatureExtractor>
-bool MapReplica<TFeatureExtractor>::AdmitMap(map::MapId map_id) {
-    if (map_id.value == 0 || map_id < map_id_) return false;
-    if (map_id > map_id_) {
-        Clear();
-        map_id_ = map_id;
     }
     return true;
 }

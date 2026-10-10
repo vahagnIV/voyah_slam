@@ -71,12 +71,14 @@ geometry::RigidTransformation MakePose(double angle, double tx, double ty, doubl
                                          Eigen::Vector3d(tx, ty, tz).cast<precision_t>());
 }
 
-// Applies one transaction of map `map`, filled by `fill`.
+// Applies one transaction of map `map`, filled by `fill`; as the Mapper's, it
+// names its map as the active one.
 template <typename TFill>
 void ApplyTransaction(TOrbScene& out_scene, uint32_t map, TFill fill) {
     memory::ObjectPool<TOrbTransaction, memory::ThreadSafePolicy> pool(1);
     TOrbTransaction* event = pool.Create();
     event->map_id = {map};
+    event->active_map = map::MapId{map};
     fill(*event);
     out_scene.Apply(*event);
     event->Recycle();
@@ -88,6 +90,19 @@ void AddFrame(TOrbTransaction& out_event, uint32_t frame, const geometry::RigidT
     added.T_cw = pose;
 }
 
+// Creates map `map` (active), without Frames or points.
+void NewMap(TOrbScene& out_scene, uint32_t map) {
+    ApplyTransaction(out_scene, map, [](TOrbTransaction& event) { event.new_map = true; });
+}
+
+// The Mapper's answer to a final loss of map `map`: removed, none active.
+void RemoveMap(TOrbScene& out_scene, uint32_t map) {
+    ApplyTransaction(out_scene, map, [&](TOrbTransaction& event) {
+        event.removed_maps.push_back(map::MapId{map});
+        event.active_map.reset();
+    });
+}
+
 // Applies a transaction that adds Frame `frame` and `new_points` from id `start`.
 void CreateKeyFrame(TOrbScene& out_scene, uint32_t map, uint32_t frame,
                     const geometry::RigidTransformation& pose,
@@ -95,6 +110,7 @@ void CreateKeyFrame(TOrbScene& out_scene, uint32_t map, uint32_t frame,
     memory::ObjectPool<TOrbTransaction, memory::ThreadSafePolicy> pool(1);
     TOrbTransaction* event = pool.Create();
     event->map_id = {map};
+    event->active_map = map::MapId{map};
     AddFrame(*event, frame, pose);
     event->new_points_start_id = {start};
     event->ResizeNewPoints(static_cast<uint32_t>(new_points.size()));
@@ -134,6 +150,7 @@ const std::vector<Eigen::Vector3d> kThreePoints = {{1, 2, 3}, {4, 5, 6}, {7, 8, 
 
 TEST(SceneStateTest, PointsAddedUpdatedRemoved) {
     TOrbScene scene;
+    NewMap(scene, 1);
     AddPoints(scene, 1, 0, kThreePoints);
     ASSERT_EQ(scene.point_positions().size(), 3u);
     EXPECT_EQ(scene.num_alive_points(), 3u);
@@ -157,11 +174,13 @@ TEST(SceneStateTest, PointsAddedUpdatedRemoved) {
 
 TEST(SceneStateTest, TransactionAddsFrameAndUpdatesPoints) {
     TOrbScene scene;
+    NewMap(scene, 1);
     CreateKeyFrame(scene, 1, 0, MakePose(0, 0, 0, 0), kThreePoints);
 
     memory::ObjectPool<TOrbTransaction, memory::ThreadSafePolicy> pool(1);
     TOrbTransaction* event = pool.Create();
     event->map_id = {1};
+    event->active_map = map::MapId{1};
     AddFrame(*event, 1, MakePose(0.1, 1, 0, 0));
     event->new_points_start_id = {3};
     event->ResizeNewPoints(1);
@@ -183,6 +202,7 @@ TEST(SceneStateTest, TransactionAddsFrameAndUpdatesPoints) {
 
 TEST(SceneStateTest, AddedWithGapLeavesGapDead) {
     TOrbScene scene;
+    NewMap(scene, 1);
     AddPoints(scene, 1, 5, {{1, 1, 1}, {2, 2, 2}});
     ASSERT_EQ(scene.point_positions().size(), 7u);
     for (size_t i = 0; i < 5; ++i) EXPECT_FALSE(scene.point_alive()[i]) << i;
@@ -193,6 +213,7 @@ TEST(SceneStateTest, AddedWithGapLeavesGapDead) {
 
 TEST(SceneStateTest, KeyFramesInsertedAndUpdated) {
     TOrbScene scene;
+    NewMap(scene, 1);
     CreateKeyFrame(scene, 1, 3, MakePose(0.1, 1, 2, 3));
     ASSERT_EQ(scene.keyframes().size(), 1u);
 
@@ -208,6 +229,7 @@ TEST(SceneStateTest, KeyFramesInsertedAndUpdated) {
 
 TEST(SceneStateTest, FrameTrackedSetsPoseAndTrajectory) {
     TOrbScene scene;
+    NewMap(scene, 1);
     const auto pose = MakePose(0.5, 1, 2, 3);
     TrackFrame(scene, 1, pose);
     ASSERT_TRUE(scene.current_pose().has_value());
@@ -222,6 +244,7 @@ TEST(SceneStateTest, FrameTrackedSetsPoseAndTrajectory) {
 
 TEST(SceneStateTest, FrameTrackedSetsTrackedAndVisible) {
     TOrbScene scene;
+    NewMap(scene, 1);
     memory::ObjectPool<TOrbFrameTracked, memory::ThreadSafePolicy> pool(1);
     TOrbFrameTracked* event = pool.Create();
     event->map_id = {1};
@@ -245,6 +268,7 @@ TEST(SceneStateTest, FrameTrackedSetsTrackedAndVisible) {
 
 TEST(SceneStateTest, TrackingLostClearsTrackedSets) {
     TOrbScene scene;
+    NewMap(scene, 1);
     memory::ObjectPool<TOrbFrameTracked, memory::ThreadSafePolicy> pool(1);
     TOrbFrameTracked* event = pool.Create();
     event->map_id = {1};
@@ -261,8 +285,10 @@ TEST(SceneStateTest, TrackingLostClearsTrackedSets) {
     EXPECT_TRUE(scene.local_frames().empty());
 }
 
-TEST(SceneStateTest, NewerMapClearsTrackedSets) {
+// A new active map clears the tracked sets.
+TEST(SceneStateTest, NewActiveMapClearsTrackedSets) {
     TOrbScene scene;
+    NewMap(scene, 1);
     memory::ObjectPool<TOrbFrameTracked, memory::ThreadSafePolicy> pool(1);
     TOrbFrameTracked* event = pool.Create();
     event->map_id = {1};
@@ -271,6 +297,7 @@ TEST(SceneStateTest, NewerMapClearsTrackedSets) {
     event->local_frames = {{4}};
     scene.Apply(*event);
     event->Recycle();
+    NewMap(scene, 2);
     AddPoints(scene, 2, 0, {{1, 1, 1}});
     EXPECT_TRUE(scene.tracked_points().empty());
     EXPECT_TRUE(scene.visible_points().empty());
@@ -279,6 +306,7 @@ TEST(SceneStateTest, NewerMapClearsTrackedSets) {
 
 TEST(SceneStateTest, TransactionAppliesUpdatedPoints) {
     TOrbScene scene;
+    NewMap(scene, 1);
     CreateKeyFrame(scene, 1, 0, MakePose(0, 0, 0, 0), kThreePoints);
 
     ApplyTransaction(scene, 1, [](TOrbTransaction& event) {
@@ -308,6 +336,7 @@ TEST(SceneStateTest, NewMapSetsCurrentPose) {
 
 TEST(SceneStateTest, TrackingLostKeepsScene) {
     TOrbScene scene;
+    NewMap(scene, 1);
     CreateKeyFrame(scene, 1, 0, MakePose(0, 0, 0, 0), kThreePoints);
     TrackFrame(scene, 1, MakePose(0.1, 1, 1, 1));
     LoseTracking(scene, 1);
@@ -319,6 +348,7 @@ TEST(SceneStateTest, TrackingLostKeepsScene) {
 
 TEST(SceneStateTest, NonFinalLostKeepsScene) {
     TOrbScene scene;
+    NewMap(scene, 1);
     CreateKeyFrame(scene, 1, 0, MakePose(0, 0, 0, 0), kThreePoints);
     TrackFrame(scene, 1, MakePose(0.1, 1, 1, 1));
     LoseTracking(scene, 1, /*final=*/false);
@@ -343,21 +373,49 @@ TEST(SceneStateTest, NonFinalLostKeepsScene) {
     EXPECT_EQ(scene.num_alive_points(), 3u);
 }
 
-TEST(SceneStateTest, OlderMapIgnored) {
+// After the Mapper drops map 1 (a final loss), nothing is shown and the
+// status stays Lost; map 1's late events are ignored, a new map is shown.
+TEST(SceneStateTest, RemovedMapIgnored) {
     TOrbScene scene;
+    NewMap(scene, 1);
+    CreateKeyFrame(scene, 1, 0, MakePose(0, 0, 0, 0), kThreePoints);
+    TrackFrame(scene, 1, MakePose(0.1, 1, 1, 1));
+    LoseTracking(scene, 1);
+    RemoveMap(scene, 1);
+    EXPECT_EQ(scene.current_map_id().value, 0u);
+    EXPECT_TRUE(scene.map_ids().empty());
+    EXPECT_EQ(scene.num_alive_points(), 0u);
+    EXPECT_TRUE(scene.keyframes().empty());
+    EXPECT_FALSE(scene.current_pose().has_value());
+    EXPECT_TRUE(scene.trajectory().empty());
+    EXPECT_EQ(scene.status(), TrackingStatus::Lost);
+
+    AddPoints(scene, 1, 3, {{9, 9, 9}});
+    NewMap(scene, 1);
+    TrackFrame(scene, 1, MakePose(0.2, 1, 1, 1));
+    EXPECT_TRUE(scene.map_ids().empty());
+    EXPECT_FALSE(scene.current_pose().has_value());
+
+    NewMap(scene, 2);
     AddPoints(scene, 2, 0, kThreePoints);
     AddPoints(scene, 1, 0, {{9, 9, 9}});
     EXPECT_EQ(scene.current_map_id().value, 2u);
+    EXPECT_EQ(scene.map_ids(), std::vector<map::MapId>{map::MapId{2}});
     EXPECT_EQ(scene.point_positions().size(), 3u);
-    EXPECT_EQ(scene.applied_count(EventType::MapTransaction), 2u);
+    EXPECT_EQ(scene.status(), TrackingStatus::None);
+    EXPECT_EQ(scene.applied_count(EventType::MapTransaction), 8u);
 }
 
-TEST(SceneStateTest, NewerMapClearsAndAdopts) {
+// A new active map is shown alone; the previous one is kept, inactive.
+TEST(SceneStateTest, NewActiveMapShownAlone) {
     TOrbScene scene;
+    NewMap(scene, 1);
     CreateKeyFrame(scene, 1, 0, MakePose(0, 0, 0, 0), kThreePoints);
     TrackFrame(scene, 1, MakePose(0.1, 1, 1, 1));
+    NewMap(scene, 2);
     AddPoints(scene, 2, 0, {{1, 1, 1}}, /*frame=*/7);
     EXPECT_EQ(scene.current_map_id().value, 2u);
+    EXPECT_EQ(scene.map_ids(), (std::vector<map::MapId>{map::MapId{1}, map::MapId{2}}));
     EXPECT_EQ(scene.point_positions().size(), 1u);
     EXPECT_EQ(scene.num_alive_points(), 1u);
     // Only map 2's Frame.
@@ -366,19 +424,36 @@ TEST(SceneStateTest, NewerMapClearsAndAdopts) {
     EXPECT_FALSE(scene.current_pose().has_value());
     EXPECT_TRUE(scene.trajectory().empty());
     EXPECT_EQ(scene.status(), TrackingStatus::None);
+
+    // The inactive map's camera events are ignored; its transactions are kept.
+    TrackFrame(scene, 1, MakePose(0.2, 1, 1, 1));
+    EXPECT_FALSE(scene.current_pose().has_value());
+    ApplyTransaction(scene, 1, [](TOrbTransaction& event) {
+        event.active_map = map::MapId{2};
+        event.removed_points = {map::MapPointId{0}};
+    });
+    EXPECT_EQ(scene.current_map_id().value, 2u);
+    EXPECT_EQ(scene.num_alive_points(), 1u);
+
+    // Re-activated (only active_map activates): map 1 shown, with its change.
+    ApplyTransaction(scene, 2, [](TOrbTransaction& event) { event.active_map = map::MapId{1}; });
+    EXPECT_EQ(scene.current_map_id().value, 1u);
+    EXPECT_EQ(scene.num_alive_points(), 2u);
+    EXPECT_EQ(scene.keyframes().size(), 1u);
 }
 
-TEST(SceneStateTest, NewerMapKeyFrameSwitchesScene) {
+// Without new_map an unknown map is not created, nor its active_map taken.
+TEST(SceneStateTest, UnknownMapIgnored) {
     TOrbScene scene;
     AddPoints(scene, 1, 0, kThreePoints);
-    CreateKeyFrame(scene, 2, 0, MakePose(0, 0, 0, 0));
-    EXPECT_EQ(scene.current_map_id().value, 2u);
-    EXPECT_TRUE(scene.point_positions().empty());
-    EXPECT_EQ(scene.keyframes().size(), 1u);
+    EXPECT_TRUE(scene.map_ids().empty());
+    EXPECT_EQ(scene.current_map_id().value, 0u);
+    EXPECT_EQ(scene.num_alive_points(), 0u);
 }
 
 TEST(SceneStateTest, MapZeroCountedOnly) {
     TOrbScene scene;
+    NewMap(scene, 1);
     AddPoints(scene, 1, 0, kThreePoints);
     memory::ObjectPool<TOrbInit, memory::ThreadSafePolicy> pool(1);
     TOrbInit* event = pool.Create();

@@ -23,6 +23,7 @@
 #include <voyahslam/map/map_id.h>
 #include <voyahslam/map/map_point_id.h>
 #include <voyahslam/memory/object_pool.h>
+#include <voyahslam/tracking/atlas_replica.h>
 #include <voyahslam/tracking/map_replica.h>
 
 namespace voyahslam::loop_closing {
@@ -56,9 +57,12 @@ struct QueryStats {
 // the region is dropped; it has priority unless a loop was already published
 // at the replica's map epoch (a repeat found before its correction arrived).
 // A higher map epoch (a loop correction or a global-BA merge, whose
-// coordinates differ from the pending region's) drops the pending region. A new map
-// (new_map, a newer map id, or a final TrackingLost of the current map)
-// clears the replica, the pending region and the queries.
+// coordinates differ from the pending region's) drops the pending region.
+// The replica is an AtlasReplica (the replica rule: atlas_replica.h); loops
+// are detected in the active map only, and only its new Frames are queued. A
+// change of the active map (a new map, or none after the Mapper drops a
+// finally lost map) drops the pending region and the queries. A
+// TrackingLost changes nothing: the Mapper's transaction does.
 template <typename TFeatureExtractor>
 class LoopCloser : public events::EventNode {
 public:
@@ -84,7 +88,11 @@ public:
 
     // LoopCloser-thread state, for tests that drive ProcessPending()
     // synchronously: never read while the worker runs.
-    [[nodiscard]] const tracking::MapReplica<TFeatureExtractor>& replica() const { return replica_; }
+    [[nodiscard]] const tracking::AtlasReplica<TFeatureExtractor>& atlas() const { return atlas_; }
+    // The active map; empty if there is none.
+    [[nodiscard]] const tracking::MapReplica<TFeatureExtractor>& replica() const {
+        return atlas_.active_or_empty();
+    }
     // Confirmations of the pending region; 0 if none.
     [[nodiscard]] size_t num_coincidences() const { return pending_ ? pending_->num_coincidences : 0; }
     // The last DetectCommonRegion's gates.
@@ -112,9 +120,6 @@ private:
     };
 
     void ApplyEvent(const events::Event& event);
-    // Clears the replica and the pending region; events of maps up to
-    // `lost_map` are ignored from now on.
-    void ClearMap(map::MapId lost_map);
     // Detects `query` unless it was culled while queued; times it.
     void DetectQuery(map::FrameId query);
     void DetectLoop(map::FrameId query);
@@ -126,8 +131,7 @@ private:
     events::Listener inbox_listener_ = inbox_.GetListener();
 
     // LoopCloser-thread state.
-    tracking::MapReplica<TFeatureExtractor> replica_;
-    map::MapId lost_map_{0};
+    tracking::AtlasReplica<TFeatureExtractor> atlas_;
     std::optional<PendingRegion> pending_;
     // Frames applied, awaiting detection (at most max_query_backlog after
     // each drain of the inbox).

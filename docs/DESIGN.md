@@ -151,9 +151,10 @@ stub was deleted on 2026-10-05.
   Reference-Frame Tracking"; it returns to `Tracking` in the same map on a
   relocalization, and the rest of this bullet describes a failure without
   it.)
-  One `ProcessPending()` pass: (1) drain the whole inbox applying the `map_id`
-  consumer rule (§6) — every Mapper diff of the current map is applied to the
-  Tracker's `tracking::MapReplica`; a `MapTransaction` with `new_map` sets
+  One `ProcessPending()` pass: (1) drain the whole inbox applying the replica
+  rule (§6) — every Mapper transaction goes to the Tracker's
+  `tracking::AtlasReplica`, and the Tracker tracks in its active map; a
+  `MapTransaction` with `new_map` sets
   `last_frame_` to its `start_frame`'s replica entry (measurement, `T_cw`, observations as matches),
   resets the velocity, sets the map's frame id and moves
   `WaitingForMap`/`Lost` to `Tracking`; (2) take **one**
@@ -221,10 +222,15 @@ stub was deleted on 2026-10-05.
   initial Frame and point and `start_frame` (the last initial Frame); the
   Tracker switches to `Tracking` on it. `InitializationMeasurement` is ignored
   while `Mapping`.
-  `TrackingLost` for the current map (in `Mapping`) clears keyframes and the
+  A final `TrackingLost` for the current map (in `Mapping`) clears keyframes and the
   map-point and observation storage, resets
   the initializer and returns to `Initializing`, so the next success starts
-  map n+1 (relocalization / multi-map later). A stale `TrackingLost` is ignored.
+  map n+1 (relocalization / multi-map later). The discard is published as one
+  `MapTransaction` of the lost map with `removed_maps = {it}` and no
+  `active_map`: every replica drops the map on it (since 2026-10-10, map
+  merging Task 2; before, replicas cleared on the first event of map n+1).
+  Every transaction names the current map as its `active_map`. A stale
+  `TrackingLost` is ignored.
 - Consumes `FrameTracked` (current map, `Mapping` only): drains to the latest
   per map, decides with `ShouldCreateFrame` whether the measurement becomes a
   Frame, and creates it — tracked observations, stereo close points,
@@ -366,12 +372,21 @@ Rules:
   are reused without reset). It is the map the Mapper is building
   (`MapTransaction`), the map the Tracker tracks against (`FrameTracked`,
   `TrackingLost`) or 0 (`InitializationMeasurement`).
-  **Consumer rule** (`map_id == 0` exempt): `< current` -> stale, acknowledge
-  and ignore; `> current` -> first event of a newer map: reset the replica,
-  adopt `current = map_id`, apply (a new map arrives as one `new_map`
-  transaction since 2026-10-07); `== current`
-  -> apply. The Mapper builds map n+1 only after a final `TrackingLost(n)`, so a newer
-  map never appears while the Tracker tracks an older one.
+  **Replica rule** (since 2026-10-10, map merging Task 2; it replaced "newest
+  map id wins"). Every replica — the Tracker's, the LoopCloser's and the
+  GlobalBA's `tracking::AtlasReplica` (`tracking/atlas_replica.h`) and the
+  viewer's `SceneState` — mirrors the Mapper's Atlas: every live map by id,
+  and which one is active. Per `MapTransaction` of map `map_id`: map 0 is no
+  map (ignored); `new_map` creates the map; any other transaction applies to
+  the live map it names, and one naming an unknown or removed map is ignored
+  whole; then the maps in `removed_maps` are dropped and their ids remembered
+  (never admitted again); then the active map is taken from `active_map`
+  only, never from the newest id. The Mapper sets `active_map` on every
+  transaction. Other events (`FrameTracked`, `TrackingLost`, ...) change no
+  replica: a final `TrackingLost` is answered by the Mapper's transaction
+  with `removed_maps`. `absorbed_map` (map merging) is asserted unset until
+  Task 5. The Mapper builds map n+1 only after a final `TrackingLost(n)`, so
+  a newer map never appears while the Tracker tracks an older one.
 - **No subscription filtering:** an `Observable` delivers every event to every
   connected observer (the viewer also receives `InitializationMeasurement` and
   just counts it). A future serializing observer chooses what to send.
@@ -571,9 +586,14 @@ Specs: `docs/superpowers/specs/2026-10-04-pangolin-viewer-design.md`
 (Pangolin viewer), `docs/superpowers/specs/2026-10-03-map-viewer-design.md`.
 
 - **`SceneState` is the scene model.** It is rebuilt purely from events and
-  follows the multi-map rule: it shows the newest map seen; events of older
-  maps are ignored, an event of a newer map clears the scene and adopts it;
-  events with map 0 are counted only.
+  follows the replica rule (§6; voyahviz cannot include
+  `tracking::AtlasReplica`, so it applies the same rule to its own per-map
+  scenes): it keeps every live map's points and keyframes and shows the
+  active map (nothing if none). The camera pose, trajectory and tracked sets
+  come from `FrameTracked` / `TrackingLost` of the active map; a change of
+  the active map clears them, and resets the status unless no map is left
+  active (after a final loss it stays Lost). Events with map 0 are counted
+  only. Showing inactive maps is TODO (map merging spec).
 - **Loop-thread invariant:** only the thread running the loop touches the
   `SceneState`, the renderer and the GL context. The window is created at loop
   entry and destroyed at loop exit (or on close), on that thread. Other threads
@@ -981,10 +1001,12 @@ Spec: `docs/superpowers/specs/2026-10-05-tracking-design.md` (sub-project 1 of
 Growth"; local BA and culling, relocalization are sub-projects 3-4, deferred;
 the user has their own designs for them).
 
-**Replica.** `tracking::MapReplica<FE>` (`tracking/map_replica.h`) is the
-Tracker's private copy of the map, touched only on the Tracker thread and fed
-by the Mapper's events with the `map_id` rule (0 exempt, older ignored, newer
-clears and adopts). It stores point position/descriptor/normal/alive,
+**Replica.** `tracking::MapReplica<FE>` (`tracking/map_replica.h`) is a
+private copy of one map, touched only on its owner's thread; the Tracker's
+`tracking::AtlasReplica<FE>` holds one per live map and routes the Mapper's
+transactions by the replica rule (§6), and the Tracker works on the active
+one. A `MapReplica` holds one map only (a `new_map` transaction clears it and
+gives it its id; a transaction of another map is asserted against). It stores point position/descriptor/normal/alive,
 keyframes (`T_cw`, the shared measurement, observations) and, per point, the first
 keyframe observation as a `map::PointReference` (keyframe, feature, pyramid
 level, distance to the camera centre). It does not count events (decision R).
@@ -1589,7 +1611,8 @@ RecentlyLost: relocalize every measurement
    success → Tracking (same map; velocity reset; the matched Frame is the reference;
              1 s of the post-relocalization guard, ruling J)
    timeout → Lost
-Lost: TrackingLost(final = true) → the Mapper clears its map → initialization (as before)
+Lost: TrackingLost(final = true) → the Mapper clears its map (one transaction,
+      removed_maps = {it}, no active map) → initialization (as before)
 ```
 
 - **`RecentlyLost`** needs a vocabulary and a map with more than
@@ -1895,8 +1918,9 @@ S_cw folds its scale into the translation as `[R, t/s]` (ORB-SLAM3).
   instead of silently lacking it: other machines re-run `conan create
   third_party/g2o` for Debug and Release, then `conan install` (README).
 
-**Detection (LoopCloser).** The LoopCloser keeps its own `MapReplica` (with
-its `FrameDatabase` and covisibility) fed by the Mapper's transactions, and
+**Detection (LoopCloser).** The LoopCloser keeps its own `AtlasReplica` (a
+`MapReplica` per map, each with its `FrameDatabase` and covisibility; it
+detects in the active map) fed by the Mapper's transactions, and
 gets the immutable vocabulary through `Slam`. Loop closing is **opt-in**:
 unless `LoopCloserOptions::enabled` is set (default false; the apps'
 `--loop_closing`), or without a vocabulary, the LoopCloser only acknowledges
@@ -2229,10 +2253,13 @@ the ATE is still dominated by the same-heading false loops (step 6).
   apply-on-receipt rule, for the same reason). `should_stop` is sticky: once
   it returns true it stops polling.
 - **Interruption:** `Stop()`, or a drained transaction that is a newer
-  correction (a larger `map_epoch` with a loop edge) or a new map (`new_map`
-  or a newer map id). An interrupted run publishes nothing. A newer
-  correction starts a new run next; a new map clears the replica and drops
-  the run. A run stopped by `Stop()` is not resumed after a restart.
+  correction of the run's map (a larger `map_epoch` with a loop edge),
+  recreates it (`new_map`), or leaves it not active (a new active map, or
+  none after the Mapper drops a finally lost map; since 2026-10-10 the
+  replica is an `AtlasReplica` and the run is on its active map). An
+  interrupted run publishes nothing. A newer correction starts a new run
+  next; a change of the active map drops the run. A run stopped by `Stop()`
+  is not resumed after a restart.
 - **Optimization** (`RunGlobalBa`): `optimization::BundleAdjust` as one plain
   stage of `GlobalBaOptions::iterations` (10), no robust kernel and no
   outlier removal (ORB `bRobust = false`), raw-pixel residuals through
@@ -2289,7 +2316,8 @@ take `--no_global_ba`.
   recovered; interrupted and empty runs return nothing.
 - `GlobalBundleAdjusterTest` (11): the loop-edge trigger, interruption by a
   newer correction (also between LM iterations) and not by an ordinary
-  transaction, new map and newer map id, old maps ignored, `Stop()`, a full
+  transaction, a new map and a removed map (the final-loss transaction)
+  dropping the run, removed maps ignored, `Stop()`, a full
   result pool, transactions released at each poll (a pool of 4 survives more
   polls than its size), changes during a run not affecting the result
   (bitwise equal to an undisturbed run).
@@ -2694,6 +2722,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-10 | (Global BA Task 5, review minor) `Slam` creates the GlobalBA only with loop closing **in effect**: a vocabulary as well as `LoopCloserOptions::enabled` and `GlobalBaOptions::enabled`. The apps print "Global BA: on/off" from `slam.global_ba()`. Spec section 4 amended (there is no `SlamOptions`: `GlobalBaOptions` is a constructor parameter). | Without a vocabulary the LoopCloser never detects a loop, so a GlobalBA thread would only idle while the app printed "off"; now the printout and the object agree by construction. |
 | 2026-10-10 | Global BA smoke result (corridor1 full, Release, `--vocabulary --loop_closing`, two runs each with and without `--no_global_ba`; "Global BA"): no crash, and no tracking loss caused by a merge (every loss began 0.1–1.0 s after an essential-graph loop correction or long after any merge; the Musts are met). Global BA runs started: mono 4 and 4 (0 and 3 interrupted), completed in 3.4–28.2 s; stereo 4 and 3 (none interrupted), 3.3–85.2 s; merges 3.8–31.7 ms; results 0.56–3.31 MB; nothing dropped or rejected. Peak RSS: stereo 4.23 GB with against 2.28 / 2.33 GB without; mono 2.24 / 2.38 against 1.51 / 1.47 GB. Both mono runs and stereo run 2 with global BA lost map 1 after false-loop corrections (2, 2 and 4 maps) while the runs without kept one map: not separable from run-to-run loop variance with two runs, not tuned. ATE not comparable (map 1 only where it was lost; stereo run 1 SE3 18.68 m from a false loop; without: mono Sim3 0.707 / 0.645 m, stereo SE3 0.836 / 0.768 m). | Spec section 5 has no ATE Must: corridor1's false loops still dominate (step 6). |
 | 2026-10-10 | (Map merging Task 1, spec section 1) A Frame's measurement is **shared and immutable**: `TSharedMeasurement<FE> = std::shared_ptr<const TMeasurement<FE>>` in `FrameTracked`, `NewFrame`, the Mapper's `Frame` and every `ReplicaKeyFrame` (read through `measurement()`). The Tracker creates it once per tracked frame (`AcceptPose`, after stereo matching); the Mapper wraps a new map's initial Frames (from `InitializationMeasurement`, which keeps its by-value copy). Audit: nothing writes to a measurement after creation (the only write, `SetStereoMatches`, runs before tracking). Pooled `FrameTracked` / `MapTransaction` release it in `Reset()`. | Each event and each replica copied about 1 MB per Frame; the Atlas (every replica holding every map) would multiply that. `const` by type makes lock-free sharing safe; ownership by `shared_ptr` keeps the pointer rule (no raw pointers to short-lived data). |
+| 2026-10-10 | (Map merging Task 2, spec section 1) **The replica rule replaces "newest map id wins".** `MapTransaction` gains `active_map` (set on every transaction), `removed_maps` and `absorbed_map` (Task 5; asserted unset). `tracking::AtlasReplica<FE>` holds a `MapReplica` per live map: `new_map` creates a map, other transactions apply to the live map they name, unknown or removed maps are ignored, then `removed_maps` are dropped and remembered (never re-admitted), then `active_map` is taken. `MapReplica` lost its map-id admission and holds one map. The Tracker, LoopCloser and GlobalBA hold an `AtlasReplica` and work on its active map (`replica()` returns it, or an empty map); the viewer's `SceneState` applies the same rule to its own per-map scenes (voyahviz depends only on common and events) and shows the active map. The Mapper's final-loss discard is published as one transaction `removed_maps = {map}`, no `active_map`; a final `TrackingLost` no longer clears the LoopCloser. `AtlasReplica::Apply` returns whether the transaction was admitted (the plan's interface has `void`): the holders act only on admitted transactions of the active map. | ORB-SLAM3's Atlas keeps lost maps and merges them (Tasks 3–5): replicas must hold several maps and learn the active one explicitly, which "newest id wins" cannot express. Behaviour is unchanged while the Mapper still discards a lost map; the visible differences are that replicas (and the viewer) drop the lost map at the loss rather than at the next map, and that a transaction without `active_map` deactivates (test harnesses now set it, as the Mapper does). |
 
 ## 9. Open Questions
 
@@ -2942,8 +2971,8 @@ branch → review → merge to `master`. Update this document at the end.
 - Roadmap (`docs/ROADMAP.md`): relocalization into other maps comes with
   map merging (step 5).
 - Event pool lifetime (Open Question 25).
-- Test suite (2026-10-10, after global BA): 679 tests (660 `unit`, 18
-  `integration`, 1 `vocabulary`); `check_all` about 18 s, set by
+- Test suite (2026-10-10, map merging Task 2): 687 tests (667 `unit`, 19
+  `integration`, 1 `vocabulary`); `check_all` about 18–24 s, set by
   `SlamTest.MonoClosesLoop` (14–25 s: its lock-step runs are bursty, so the
   time follows the CPU's frequency scaling) and the two
   `*GlobalBaRefinesLoop` tests (about 16–17 s each, run in parallel).

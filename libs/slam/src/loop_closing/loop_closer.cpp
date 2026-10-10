@@ -73,48 +73,38 @@ bool LoopCloser<TFeatureExtractor>::ProcessPending() {
 
 template <typename TFeatureExtractor>
 void LoopCloser<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
-    if (event.map_id.value == 0 || event.map_id <= lost_map_) {
-        return;  // map 0 is exempt; a lost map's late events are stale
-    }
-    if (event.type == events::EventType::TrackingLost) {
-        if (static_cast<const events::TrackingLost&>(event).final && event.map_id == replica_.map_id()) {
-            ClearMap(event.map_id);
-        }
-        return;
-    }
+    // Only the Mapper's transactions build the Atlas; a TrackingLost changes
+    // nothing (the Mapper answers a final one with a transaction).
     if (event.type != events::EventType::MapTransaction) {
         return;
     }
     const auto& transaction = static_cast<const events::MapTransaction<TFeatureExtractor>&>(event);
-    if (event.map_id < replica_.map_id()) {
-        return;  // an older map's
+    const std::optional<map::MapId> previous = atlas_.active_map();
+    const uint32_t previous_epoch = replica().map_epoch();
+    if (!atlas_.Apply(transaction)) {
+        return;  // an unknown or removed map's
     }
-    if (transaction.new_map || event.map_id > replica_.map_id()) {
-        pending_.reset();  // the replica clears itself too
+    const std::optional<map::MapId> active = atlas_.active_map();
+    if (transaction.new_map || active != previous) {
+        pending_.reset();  // a new active map, or none
         queries_.clear();
-    } else if (transaction.map_epoch > replica_.map_epoch()) {
+    } else if (transaction.map_id == active && transaction.map_epoch > previous_epoch) {
         pending_.reset();  // a loop correction: its Sim3 is in the old coordinates
     }
-    replica_.Apply(event);
+    if (transaction.map_id != active) {
+        return;  // loops are detected in the active map only
+    }
     for (const events::NewFrame<TFeatureExtractor>& added : transaction.added_frames) {
-        if (replica_.keyframe(added.id) != nullptr) {
+        if (replica().keyframe(added.id) != nullptr) {
             queries_.push_back(added.id);
         }
     }
 }
 
 template <typename TFeatureExtractor>
-void LoopCloser<TFeatureExtractor>::ClearMap(map::MapId lost_map) {
-    replica_ = {};
-    pending_.reset();
-    queries_.clear();
-    lost_map_ = lost_map;
-}
-
-template <typename TFeatureExtractor>
 void LoopCloser<TFeatureExtractor>::DetectQuery(map::FrameId query) {
     // A query culled while it waited is skipped; so is one of a small map.
-    if (replica_.keyframe(query) == nullptr || replica_.num_keyframes() < options_.min_map_frames) {
+    if (replica().keyframe(query) == nullptr || replica().num_keyframes() < options_.min_map_frames) {
         return;
     }
     if (query_hook_) {
@@ -133,15 +123,15 @@ void LoopCloser<TFeatureExtractor>::DetectLoop(map::FrameId query) {
     // A pending region is first checked against this query, from the last
     // confirming query's Sim3 moved by their relative pose.
     if (pending_ && pending_->num_coincidences > 0) {
-        const auto* last = replica_.keyframe(pending_->last_query);
-        const auto* current = replica_.keyframe(query);
+        const auto* last = replica().keyframe(pending_->last_query);
+        const auto* current = replica().keyframe(query);
         std::optional<CommonRegion> confirmed;
         if (last != nullptr && current != nullptr) {
             const geometry::Sim3 S_query_world =
                 geometry::Compose(ToSim3(current->T_cw * last->T_cw.Inverse()), pending_->S_last_world);
             CommonRegionStats refine_stats;
             confirmed =
-                RefineCommonRegion(replica_, query, pending_->match_frame, S_query_world, options_, &refine_stats);
+                RefineCommonRegion(replica(), query, pending_->match_frame, S_query_world, options_, &refine_stats);
             LogNormalRejections(refine_stats);
         }
         if (confirmed) {
@@ -163,7 +153,7 @@ void LoopCloser<TFeatureExtractor>::DetectLoop(map::FrameId query) {
         }
     }
 
-    const CommonRegionResult result = DetectCommonRegion(replica_, query, options_);
+    const CommonRegionResult result = DetectCommonRegion(replica(), query, options_);
     last_stats_ = result.stats;
     LogNormalRejections(result.stats);
     if (!result.region) {
@@ -192,8 +182,8 @@ void LoopCloser<TFeatureExtractor>::LogNormalRejections(const CommonRegionStats&
 
 template <typename TFeatureExtractor>
 void LoopCloser<TFeatureExtractor>::PublishLoop(map::FrameId query, const PendingRegion& region) {
-    const auto* query_keyframe = replica_.keyframe(query);
-    const auto* match_keyframe = replica_.keyframe(region.match_frame);
+    const auto* query_keyframe = replica().keyframe(query);
+    const auto* match_keyframe = replica().keyframe(region.match_frame);
     if (query_keyframe == nullptr || match_keyframe == nullptr) {
         return;
     }
@@ -211,9 +201,9 @@ void LoopCloser<TFeatureExtractor>::PublishLoop(map::FrameId query, const Pendin
                    region.match_frame.value, options_.max_events_in_flight);
         return;
     }
-    event->map_id = replica_.map_id();
-    event->query_map_id = replica_.map_id();
-    event->match_map_id = replica_.map_id();
+    event->map_id = replica().map_id();
+    event->query_map_id = replica().map_id();
+    event->match_map_id = replica().map_id();
     event->query_frame = query;
     event->match_frame = region.match_frame;
     event->S_query_match = S_query_match;
@@ -221,10 +211,10 @@ void LoopCloser<TFeatureExtractor>::PublishLoop(map::FrameId query, const Pendin
     // found again before that correction reaches this replica (no new epoch
     // since the last loop published) is a repeat the Mapper drops: it waits
     // for the local BA.
-    const std::pair<map::MapId, uint32_t> epoch{replica_.map_id(), replica_.map_epoch()};
+    const std::pair<map::MapId, uint32_t> epoch{replica().map_id(), replica().map_epoch()};
     event->priority = last_loop_epoch_ != epoch;
     last_loop_epoch_ = epoch;
-    const PointMatches query_points = PointsOf(replica_, *query_keyframe);
+    const PointMatches query_points = PointsOf(replica(), *query_keyframe);
     for (size_t i = 0; i < region.matches.size() && i < query_points.size(); ++i) {
         if (region.matches[i] && query_points[i] && *region.matches[i] != *query_points[i]) {
             event->matched_points.emplace_back(*query_points[i], *region.matches[i]);

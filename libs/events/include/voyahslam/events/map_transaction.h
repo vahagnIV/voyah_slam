@@ -11,6 +11,7 @@
 #include <voyahslam/features/measurement.h>
 #include <voyahslam/geometry/rigid_transformation.h>
 #include <voyahslam/map/frame_id.h>
+#include <voyahslam/map/map_id.h>
 #include <voyahslam/map/map_point_id.h>
 #include <voyahslam/memory/column_buffer.h>
 #include <voyahslam/memory/recyclable.h>
@@ -60,7 +61,10 @@ struct NewFrame {
 };
 
 // Everything one Mapper step changes in map `map_id`: the only event the
-// Mapper publishes. Every part may be empty. A consumer applies the parts in
+// Mapper publishes. Every part may be empty. The Atlas parts (removed_maps,
+// active_map) come last: a replica applies the transaction to map `map_id`
+// (created by new_map; ignored if that map is unknown or removed), then drops
+// removed_maps and takes active_map. A consumer applies the parts in
 // this order (spec section 2): new map, add Frames (with their parents), add
 // loop edges, add points, add observations (the new Frames' own, then
 // added_observations), update points, update poses, remove observations,
@@ -75,8 +79,8 @@ struct MapTransaction
     using TDescriptorScalar = typename TFeatureExtractor::TDescriptorScalarType;
     static constexpr int kDescriptorSize = TFeatureExtractor::DescriptorSize;
 
-    // A new map: consumers drop what they hold of older maps; the Tracker
-    // starts tracking from Frame `start_frame`.
+    // A new map: consumers create map `map_id` (clearing whatever they hold of
+    // it); the Tracker starts tracking from Frame `start_frame`.
     bool new_map = false;
     std::optional<map::FrameId> start_frame;
 
@@ -110,6 +114,15 @@ struct MapTransaction
     // The map's correction epoch: 0 for a new map, incremented by every loop
     // correction and every global-BA merge.
     uint32_t map_epoch = 0;
+
+    // The Atlas. The active map after this transaction: set on every
+    // transaction; none after a final loss, until the next new map.
+    std::optional<map::MapId> active_map;
+    // Maps dropped after this transaction (a discarded map; later, a map
+    // absorbed by a merge); their ids are never admitted again.
+    std::vector<map::MapId> removed_maps;
+    // Map merging (not yet produced): map `absorbed_map` merged into `map_id`.
+    std::optional<map::MapId> absorbed_map;
 
     // Set the number of new / updated points in every column; allocate only
     // beyond capacity.
@@ -146,6 +159,9 @@ struct MapTransaction
         parent_changes.clear();
         added_loop_edges.clear();
         map_epoch = 0;
+        active_map.reset();
+        removed_maps.clear();
+        absorbed_map.reset();
     }
 
     MapTransaction()

@@ -109,7 +109,9 @@ enum class MapperState : uint8_t {
 // covisible Frames (spec sections 5, 4.2). Every change is published as one
 // MapTransaction: a new map with all its Frames and points, or, per created
 // Frame, transaction 1 (creation, culling, fusion) and transaction 2 (local
-// BA, Frame culling). A final TrackingLost of the current map discards it; a
+// BA, Frame culling). Every transaction names the current map as the Atlas's
+// active_map. A final TrackingLost of the current map discards it, published
+// as one transaction with removed_maps = {the map} and no active map; a
 // non-final one (the Tracker is recently lost) is ignored. In a map with more
 // than relocalization_guard_min_frames Frames, no Frame is created from a
 // FrameTracked within relocalization_guard_seconds of the latest relocalized

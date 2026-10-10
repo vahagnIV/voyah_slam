@@ -212,9 +212,15 @@ void Mapper<TFeatureExtractor>::OnTrackingLost(const events::TrackingLost& event
     if (event.map_id != current_map_id() || state() != MapperState::Mapping) {
         return;  // stale: an older map
     }
+    // The map is discarded: one transaction drops it from every replica's
+    // Atlas and leaves none active until the next new map.
+    auto* transaction = CreateTransaction();
+    transaction->removed_maps.push_back(current_map_id());
+    transaction->active_map.reset();
     ClearMap();
     initializer_.Reset();
     SetState(MapperState::Initializing);
+    observable_.Notify(transaction);
 }
 
 template <typename TFeatureExtractor>
@@ -361,6 +367,8 @@ auto Mapper<TFeatureExtractor>::CreateTransaction() -> events::MapTransaction<TF
     transaction->map_id = current_map_id();
     transaction->priority = false;
     transaction->map_epoch = map_epoch_;
+    // The Atlas: the map being built is the active one.
+    transaction->active_map = current_map_id();
     return transaction;
 }
 

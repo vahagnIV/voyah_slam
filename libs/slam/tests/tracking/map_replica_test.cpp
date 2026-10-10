@@ -223,7 +223,7 @@ TEST(MapReplicaTest, DatabaseFollowsTransactions) {
     EXPECT_TRUE(replica.database().Contains({9}));
     EXPECT_FALSE(replica.database().Contains({5}));
 
-    ApplyTransaction(replica, 2, [&](TTransaction&) {});  // a newer map clears
+    ApplyTransaction(replica, 2, [&](TTransaction& event) { event.new_map = true; });  // a new map clears
     EXPECT_EQ(replica.database().size(), 0u);
 }
 
@@ -253,7 +253,8 @@ TEST(MapReplicaTest, UpdatedPoses) {
     EXPECT_EQ(replica.keyframe({99}), nullptr);
 }
 
-TEST(MapReplicaTest, NewerMapClears) {
+// A new map clears the replica and gives it its id (map ids: AtlasReplicaTest).
+TEST(MapReplicaTest, NewMapClears) {
     TReplica replica;
     AddPoints(replica, 1, 0, kThreePoints);
     CreateKeyFrame(replica, 1, 3, MakePose(0.1, 1, 2, 3), {0, 0, 0}, {{0, 0}});
@@ -269,24 +270,6 @@ TEST(MapReplicaTest, NewerMapClears) {
 
     AddPoints(replica, 2, 0, {{1, 1, 1}});
     EXPECT_EQ(replica.num_points(), 1u);
-}
-
-TEST(MapReplicaTest, OlderAndZeroMapIgnored) {
-    TReplica replica;
-    AddPoints(replica, 2, 0, kThreePoints);
-    AddPoints(replica, 1, 3, {{0, 0, 0}});
-    AddPoints(replica, 0, 3, {{0, 0, 0}});
-    CreateKeyFrame(replica, 1, 3, MakePose(0.1, 1, 2, 3), {0, 0, 0}, {{0, 0}});
-    CreateKeyFrame(replica, 0, 4, MakePose(0.1, 1, 2, 3), {0, 0, 0}, {{0, 0}});
-    EXPECT_EQ(replica.map_id().value, 2u);
-    EXPECT_EQ(replica.num_points(), 3u);
-    // Only map 2's Frame, the one that carried its points.
-    EXPECT_EQ(replica.keyframe_ids(), std::vector<map::FrameId>{map::FrameId{100}});
-
-    TReplica fresh;
-    AddPoints(fresh, 0, 0, kThreePoints);
-    EXPECT_EQ(fresh.map_id().value, 0u);
-    EXPECT_EQ(fresh.num_points(), 0u);
 }
 
 TEST(MapReplicaTest, AppliesFrameInsertionAtomically) {
@@ -577,10 +560,11 @@ TEST(MapReplicaTest, StoresParentsAndLoopEdges) {
     EXPECT_EQ(replica.children(FrameId{0}), Edges{FrameId{4}});
     EXPECT_FALSE(replica.parent(FrameId{2}).has_value());
 
-    // A newer map clears the graph and the epoch.
+    // A new map clears the graph and the epoch.
     ApplyTransaction(replica, 1, [](TTransaction& event) { event.map_epoch = 3; });
     EXPECT_EQ(replica.map_epoch(), 3u);
     ApplyTransaction(replica, 2, [](TTransaction& event) {
+        event.new_map = true;
         AddFrame(event, 10, MakePose(0.0, 0, 0, 0), {0}, {});
     });
     EXPECT_TRUE(replica.CheckConsistency());

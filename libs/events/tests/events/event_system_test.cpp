@@ -170,6 +170,9 @@ void FillEveryPart(OrbMapTransaction& out_event) {
     out_event.parent_changes.emplace_back(map::FrameId{4}, map::FrameId{1});
     out_event.added_loop_edges.emplace_back(map::FrameId{4}, map::FrameId{1});
     out_event.map_epoch = 3;
+    out_event.active_map = map::MapId{2};
+    out_event.removed_maps.push_back(map::MapId{1});
+    out_event.absorbed_map = map::MapId{1};
 }
 
 TEST(EventSystemTest, RecycledMapTransactionIsResetAndReusesItsBuffers) {
@@ -207,6 +210,9 @@ TEST(EventSystemTest, RecycledMapTransactionIsResetAndReusesItsBuffers) {
     EXPECT_TRUE(reused->parent_changes.empty());
     EXPECT_TRUE(reused->added_loop_edges.empty());
     EXPECT_EQ(reused->map_epoch, 0u);
+    EXPECT_FALSE(reused->active_map.has_value());
+    EXPECT_TRUE(reused->removed_maps.empty());
+    EXPECT_FALSE(reused->absorbed_map.has_value());
     reused->ResizeNewPoints(300);
     EXPECT_EQ(reused->new_positions.matrix().data(), positions);
     EXPECT_EQ(reused->new_descriptors.matrix().data(), descriptors);

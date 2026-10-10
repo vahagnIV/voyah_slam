@@ -239,6 +239,7 @@ TEST_F(TrackerTest, MergesOwnFrameObservationsIntoLastFrame) {
     const auto inject = [&](uint32_t frame, const auto& measurement) {
         auto* created = transaction_pool_.Create();
         created->map_id = map::MapId{1};
+        created->active_map = map::MapId{1};  // as the Mapper
         auto& added = created->added_frames.emplace_back();
         added.id = map::FrameId{frame};
         added.T_cw = sequence.frames[1].T_cw;
@@ -289,6 +290,7 @@ TEST_F(TrackerTest, RemovedAndReplacedPointsInLastFrame) {
 
     auto* transaction = transaction_pool_.Create();
     transaction->map_id = map::MapId{1};
+    transaction->active_map = map::MapId{1};  // as the Mapper
     transaction->replaced_points = {{loser, *winner}};
     transaction->removed_points = {removed};
     injector_.Notify(transaction);
@@ -785,6 +787,7 @@ protected:
         const MapReplica<Extractor>& replica = tracker_.replica();
         auto* correction = transaction_pool_.Create();
         correction->map_id = replica.map_id();
+        correction->active_map = replica.map_id();  // as the Mapper
         correction->map_epoch = epoch;
         for (const map::FrameId id : replica.keyframe_ids()) {
             correction->updated_poses.emplace_back(id, replica.keyframe(id)->T_cw * S.Inverse());
