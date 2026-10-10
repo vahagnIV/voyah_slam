@@ -1,7 +1,20 @@
+#include <cstdint>
 #include <voyahslam/features/instantiation.h>
 #include <voyahslam/slam/slam.h>
 
 namespace voyahslam::slam {
+
+namespace {
+
+// Lost maps are kept only to be merged, and merging needs the LoopCloser: with
+// none (loop closing off, or no vocabulary) they are discarded as before the
+// Atlas.
+mapping::MapperOptions MapperOptionsFor(mapping::MapperOptions options, bool has_loop_closer) {
+    if (!has_loop_closer) options.atlas.min_frames_to_keep = SIZE_MAX;
+    return options;
+}
+
+}  // namespace
 
 template <typename TFeatureExtractor>
 Slam<TFeatureExtractor>::Slam(mapping::MapperOptions mapper_options,
@@ -10,7 +23,7 @@ Slam<TFeatureExtractor>::Slam(mapping::MapperOptions mapper_options,
                               loop_closing::LoopCloserOptions loop_closer_options,
                               global_ba::GlobalBaOptions global_ba_options)
     : tracker_(tracker_options, vocabulary),
-      mapper_(mapper_options, vocabulary),
+      mapper_(MapperOptionsFor(mapper_options, vocabulary && loop_closer_options.enabled), vocabulary),
       loop_closer_(loop_closer_options, vocabulary) {
     tracker_.AddObserver(mapper_.inbox());
     mapper_.AddObserver(tracker_.inbox());

@@ -120,8 +120,8 @@ build/build/Release/examples/full_slam/binocular_full_slam <dataset_root> [optio
   synthetic loops and nearby revisits, but on TUM-VI corridor1 same-heading look-alikes make the
   ATE worse (see `docs/DESIGN.md` "Loop Closing"; tuning is roadmap step 6). With it the maps are
   also merged: a lost map of at least 10 Frames is kept inactive and merged with the active map
-  when the camera revisits it (ORB-SLAM3's Atlas); the apps print the maps left and the merges at
-  the end
+  when the camera revisits it (ORB-SLAM3's Atlas); without it every lost map is discarded; the
+  apps print the maps left and the merges at the end
 - `--no_global_ba`: with `--loop_closing`, correct loops by the essential graph only. By default a
   global BA (ORB-SLAM3's, in its own thread) follows each loop correction; on a full corridor1 map
   it takes up to about 85 s (stereo) and keeps one more copy of the map (peak memory about 4 GB

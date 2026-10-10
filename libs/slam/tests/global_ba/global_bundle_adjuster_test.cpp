@@ -9,6 +9,7 @@
 #include <Eigen/Geometry>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -466,16 +467,18 @@ TEST(GlobalBundleAdjusterTest, StopInterruptsRunningBa) {
     harness.SendCorrection(kMap, 1);
     std::atomic<bool> in_run{false};
     GlobalBundleAdjuster<Extractor>& global_ba = harness.global_ba();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     global_ba.set_run_hook([&] {
         in_run.store(true);
-        while (!global_ba.stop_requested()) {
+        while (!global_ba.stop_requested() && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::yield();
         }
     });
     global_ba.Start();
-    while (!in_run.load()) {
+    while (!in_run.load() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::yield();
     }
+    if (!in_run.load()) ADD_FAILURE() << "the run never started within 5 s";
     global_ba.Stop();
     global_ba.set_run_hook({});
 

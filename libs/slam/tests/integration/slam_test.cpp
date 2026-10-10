@@ -1642,6 +1642,35 @@ MergeRun ExpectMergesMaps(const TSequence& sequence, uint32_t seed, size_t init_
     return merged;
 }
 
+// Without a LoopCloser (the default options) a lost map cannot be merged, so
+// it is discarded as before the Atlas, whatever its size; with loop closing
+// the same loss keeps it (it is then merged: MonoMergesMaps).
+TEST(SlamTest, LostMapsDiscardedWithoutLoopClosing) {
+    mapping::MapperOptions mapper_options;
+    mapper_options.initializer.reconstruction.min_parallax_deg = 4.0;  // as MonoClosesLoop
+    test::SyntheticSequenceOptions options = MergeLoopOptions();
+    options.seed = 1;
+    const test::SyntheticSequence sequence = test::MakeSyntheticSequence(options);
+
+    ProtocolRecorder recorder;
+    RunCounts counts;
+    RunSequence(sequence, /*init_frames=*/30, mapper_options, recorder, counts,
+                {.tracker_options = MergeTrackerOptions(), .blackout = kMergeBlackout, .lock_step = true});
+    if (HasFatalFailure()) return;
+    ASSERT_FALSE(recorder.map_created.empty());
+    EXPECT_EQ(recorder.map_created.front(), 1u);
+    EXPECT_GE(recorder.map_created.size(), 2u);  // the loss started a new map
+    // Only the active map is left: every lost map was discarded (a mutant
+    // that keeps them leaves the 10-Frame map 2 behind).
+    EXPECT_LE(recorder.atlas.map_ids().size(), 1u);
+    EXPECT_EQ(counts.merges, 0u);
+
+    // With loop closing the same loss keeps map 1 (merged into: it survives).
+    const MergeRun merged = RunMerge(sequence, 30, /*monocular=*/true, mapper_options, kMergeBlackout);
+    if (HasFatalFailure()) return;
+    EXPECT_EQ(merged.live_maps, std::vector<uint32_t>{1});
+}
+
 // Measured (2026-10-11, three runs; whole-run error merged / baseline, ratio,
 // the merge's query frame and Sim3 scale): seed 1 0.0109-0.0130 / 0.0101 m
 // (1.08-1.29x, frame 303, scale 0.862); seed 2 0.0054 / 0.0086 m (0.63x,

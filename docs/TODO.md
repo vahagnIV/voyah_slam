@@ -574,8 +574,7 @@ merge, map merging end to end); spec `2026-10-10-map-merging-design.md`.
       removes) is untested (Task 5 mutant survives); no test of the per-list
       `num_candidates` cap or of one list starving the other;
       `NeverMatchesRemovedMap` is partly vacuous; no death test for
-      `MapReplica`'s foreign-map assert; `GlobalBA`'s inactive-map test hangs
-      (times out) rather than fails under a mutant.
+      `MapReplica`'s foreign-map assert.
 - [ ] **LoopCloser detection in a lost map:** until the Mapper's
       deactivation transaction arrives, the LoopCloser may detect in the lost
       map; the Mapper rejects the stale loop.
@@ -592,8 +591,11 @@ merge, map merging end to end); spec `2026-10-10-map-merging-design.md`.
       `GeometryTest.SquaredSampsonErrorScaleIndependent` uses an unseeded
       random matrix (failed once); `GlobalBundleAdjusterTest.StopInterruptsRunningBa`
       hung once for 2 h 45 min (main thread spinning on `while (!in_run)`,
-      worker parked in `WakeSignal::Wait`; the run hook never ran): diagnose,
-      and bound the test's wait.
+      worker parked in `WakeSignal::Wait`). Diagnosis: test-only. It
+      reproduces when the harness leaves `active_map` unset, so the run never
+      becomes pending and the worker parks. The real path was ruled out by a
+      stress run of 12 processes x 3000 repeats. Both spin-waits of the test
+      now have a 5 s deadline and fail instead of hanging.
 
 ## TUM-VI tuning (roadmap step 6)
 

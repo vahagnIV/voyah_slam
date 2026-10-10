@@ -2436,7 +2436,7 @@ the ATE is still dominated by the same-heading false loops (step 6).
   outlier removal (ORB `bRobust = false`), raw-pixel residuals through
   `geometry::Camera`, σ = `sigma_px · level_scale^level` (the
   `MapperOptions::fuse` defaults, ruling: a third σ source, TODO). Gauge:
-  the map's first Frame, or the oldest surviving one, is fixed. Mono poses
+  the spanning tree's root is fixed. Mono poses
   are SE3: the scale is the one the correction left.
 - **Test-only seams:** `stop_requested()` (an atomic read, any thread: a
   test's run hook can see that `Stop()` has set the flag, which a test flag
@@ -2483,7 +2483,7 @@ take `--no_global_ba`.
 
 **Tests.**
 - `GlobalBaProblemTest` (6): the problem covers every Frame and observed
-  point; the first, or oldest surviving, Frame is fixed; a perturbed map is
+  point; the spanning tree's root is fixed; a perturbed map is
   recovered; interrupted and empty runs return nothing.
 - `GlobalBundleAdjusterTest` (11): the loop-edge trigger, interruption by a
   newer correction (also between LM iterations) and not by an ordinary
@@ -2907,6 +2907,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-10 | (Map merging, controller rulings not recorded above) Task 5 produces `AtlasReplica::TranslatePoint(absorbed, old)` (the id rule's owner) and Task 6 consumes it. Task 1: a pooled event releases its measurement when its slot is reused (`Reset()` on `Create`), not on recycle: no pool change, the delay is bounded by the pool size; `Mapper::KeyFrame(FrameId) const` is a Mapper-thread accessor added for the shared-measurement test. Task 2: `AtlasReplica::active_or_empty()` serves holders that work on the active map only. Task 3: the review's cheap minors were taken at once (a bounded hook in the inactive-map GlobalBA test, both orders of the deactivation test). | Small, local choices; recorded so the decisions log holds every ruling of the plan. |
 | 2026-10-11 | (Map merging Task 5; controller ruling) **"A correction or merge is running" is read as queue order.** The Mapper handles one event at a time, so a merge or loop queued behind a merge is rejected because it names the removed map; a merge queued behind a *loop correction* of M is accepted: its `S_query_match` is camera to camera, so the corrected query pose S·T_match does not depend on M's world. Rejecting it would need an epoch on `LoopDetected` (TODO). | No running state exists to test; the accepted case is geometrically sound. |
 | 2026-10-11 | (Map merging Task 7) **Integration and harness.** `SlamTest.{Mono,Stereo}MergesMaps` run MonoClosesLoop's loop extended to 600° (401 frames) with a blackout over frames 140–165 and `recently_lost_seconds` 1 s (the default 5 s is 150° of this 20 s run: map 2 would not reach the LoopCloser's 12 Frames before leaving map 1's area); baseline: the same run without the blackout. The whole-run error is the RMS of every final-map Frame's centre against truth under one Umeyama alignment (similarity for mono, rigid for stereo): tracked poses before a merge are in another map's world, the final map's Frames are in one. The lock-step harness now waits for the Tracker to have processed each frame (`Tracker::num_processed()`) and for the Mapper to have handled every `InitializationMeasurement` (`Mapper::num_initialization_measurements()`): without it, a Lost Tracker forwarded the whole blackout tail and the Mapper's new mono map started far behind the camera (lost at once, maps 2..6). `Mapper::other_map_skipped()` counts `FrameTracked` of a map that is not active (in flight across a merge or a loss) so the gate accounts for them. Tracker: a merge of the active map that leaves no map active falls back to `AdoptMap(target)` (a reset) instead of keeping M's ids in the last frame (the Mapper never sends that shape). The apps print the Atlas (live maps, active, merges); the merge log names both Frames' timestamps and the weld time; `tools/ate.py --map ID` evaluates one map. | The spec's integration bars on a scene where both maps reach the Atlas thresholds at their default values; counters rather than sleeps keep the harness deterministic. |
+| 2026-10-11 | (Map merging final review, I1) **Lost maps are kept only when `Slam` has a LoopCloser** (loop closing enabled and a vocabulary). Otherwise `Slam` passes the Mapper `atlas.min_frames_to_keep = SIZE_MAX`, so every lost map is discarded as on master; a kept map could never be merged and would only grow memory per loss. `SlamTest.LostMapsDiscardedWithoutLoopClosing`. | Binding ruling; merging needs the LoopCloser. |
 
 ## 9. Open Questions
 

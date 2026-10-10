@@ -214,7 +214,8 @@ re-rooted tree, seam fusion, weld, essential graph of the rest, merge edge)
 as one transaction; the target keeps its id and world. Every replica (Tracker,
 LoopCloser, GlobalBA, viewer) mirrors the whole Atlas under the replica rule
 (replacing "newest id wins"), with each Frame's measurement shared read-only;
-the Tracker follows a merge without a reset. Opt-in with loop closing.
+the Tracker follows a merge without a reset. Opt-in with loop closing: without it (or
+without a vocabulary) lost maps are discarded, as before the Atlas.
 
 Synthetic loops with a blackout (integration, seeds 1–3, mono and stereo):
 one map at the end holding both parts, no tracking loss across the merge,
