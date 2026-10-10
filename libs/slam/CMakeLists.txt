@@ -11,6 +11,7 @@ add_library(voyah_slam STATIC
     src/loop_closing/common_region.cpp
     src/loop_closing/loop_closer.cpp
     src/global_ba/global_ba.cpp
+    src/global_ba/global_bundle_adjuster.cpp
     src/slam/slam.cpp
 )
 
