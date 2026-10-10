@@ -117,7 +117,7 @@ defined in `libs/slam/src/` with `INSTANTIATE_CLASS` (ORB + SIFT).
 |---|---|---|
 | `tracking::Tracker<FE>` | `tracking/tracker.h` | `Start()`, `Stop()`, `Track(TMonocularMeasurement)`, `Track(TBinocularMeasurement)`, `ProcessPending()`, `state()`, `current_map_id()`, `pending_measurements()` |
 | `mapping::Mapper<FE>` | `mapping/mapper.h` | `Mapper(MapperOptions)`, `Start()`, `Stop()`, `ProcessPending()`, `state()`, `current_map_id()` |
-| `loop_closing::LoopCloser<FE>` | `loop_closing/loop_closer.h` | `LoopCloser(LoopCloserOptions, vocabulary)`, `Start()`, `Stop()`, `ProcessPending()` (applies every transaction to its replica, queues the new Frames as queries, detects one; with loop closing off or no vocabulary only acknowledges), `replica()`, `num_coincidences()`, `last_stats()`, `num_dropped_loops()`, `query_stats()` — see "Loop Closing" |
+| `loop_closing::LoopCloser<FE>` | `loop_closing/loop_closer.h` | `LoopCloser(LoopCloserOptions, vocabulary)`, `Start()`, `Stop()`, `ProcessPending()` (applies every transaction to its replica, queues the new Frames as queries, detects one; with loop closing off or no vocabulary only acknowledges), `replica()`, `atlas()`, `num_coincidences()`, `num_merge_coincidences()`, `last_stats()`, `last_merge_stats()`, `num_dropped_loops()`, `query_stats()` — see "Loop Closing" (merge detection since map merging Task 4) |
 | `global_ba::GlobalBundleAdjuster<FE>` | `global_ba/global_bundle_adjuster.h` | `GlobalBundleAdjuster(GlobalBaOptions)`, `Start()`, `Stop()` (interrupts a running BA), `ProcessPending()` (applies every transaction, runs one pending global BA), `replica()`, `num_runs_started()`, `num_runs_interrupted()`, `num_results_dropped()`; test-only `stop_requested()`, `set_run_hook()`, `set_poll_hook()`, `set_publish_hook()` — see "Global BA" |
 
 Each component owns a `events::WorkerThread` (`events/worker_thread.h`) bound to
@@ -325,7 +325,7 @@ The distortion models now live in `geometry/distortion_models/` (moved from
 |---|---|---|
 | `FrameTracked<FE>` | Tracker → Mapper, viewer | every tracked measurement: timestamp, pose (`T_cw` after `OptimizePose`), the shared measurement (binocular: stereo-matched; since 2026-10-10 a `shared_ptr<const>`, not a copy), inlier pairs `observed_features[i]` -> `observed_points[i]`, `visible_points` (local points passing the projection gate, matched ones included), `reference_frame_id` (optional), `local_frames`, `stage` (the source of the initial pose the local-map step refined: `MotionModel` / `ZeroMotion` / `ReferenceFrame` / `Relocalization`; 2026-10-08, ruling C), `num_matches`, `num_inliers`, `urgent` (mirrored in `Event::priority`), `map_epoch` (the Tracker replica's epoch; since 2026-10-09 the Mapper drops a `FrameTracked` of an older epoch, after counting its visible/found) |
 | `MapTransaction<FE>` | Mapper → all | **every Mapper change, as one atomic transaction** (since 2026-10-07; replaces `KeyFrameCreated`, `MapCreated`, `MapPointsUpdated`, `MapPointsRemoved`, `KeyFramePoseUpdated`). Parts, each possibly empty: `new_map` + `start_frame`; added Frames (id, `T_cw`, measurement, own observations, and since 2026-10-08 the Frame's `bow::BowVector bow` and `bow::FeatureVector features`, empty without a vocabulary); new points (`new_points_start_id`, contiguous ids, positions / normals / descriptors); `added_observations` (frame, feature, point, depth and right index, -1 when absent); updated points (ids, positions, normals, descriptors); `replaced_points` (loser, winner); `removed_points`; `updated_poses`; `removed_observations`; `removed_frames`; since 2026-10-09 (loop closing) the map graph and epoch: `NewFrame::parent` (spanning tree), `parent_changes` (frame, new parent), `added_loop_edges` (frame, frame) and `map_epoch` (+1 per loop correction; 0 for a new map). A loop correction is one more transaction carrying every corrected pose and point. Pooled (256 in the Mapper): a transaction is recycled once every consumer has acknowledged it, so consumers apply on receipt (the LoopCloser too, since 2026-10-10) and never hold one for long work. Apply order and contract: see "Map Quality" |
-| `LoopDetected` | LoopCloser → Mapper | `query_map_id`, `match_map_id` (equal for now), `query_frame`, `match_frame`, `S_query_match` (`geometry::Sim3`, x_query = S · x_match in camera coordinates, ORB Scm; scale 1 for stereo), `matched_points` ((query point, match point) pairs). `priority` (interrupts a running local BA) unless a loop was already published at the LoopCloser replica's epoch. Pool of 16, published with `TryCreate`. See "Loop Closing" |
+| `LoopDetected` | LoopCloser → Mapper | `query_map_id` (the active map), `match_map_id` (equal for a loop; an inactive map's id for a merge, since map merging Task 4), `query_frame`, `match_frame`, `S_query_match` (`geometry::Sim3`, x_query = S · x_match in camera coordinates, ORB Scm; scale 1 for stereo), `matched_points` ((query point, match point) pairs). `priority` (interrupts a running local BA) unless a loop was already published at the LoopCloser replica's epoch. Pool of 16, published with `TryCreate`. See "Loop Closing" |
 | `GlobalBAFinished` | GlobalBA → Mapper | `map_id`, `map_epoch` (N, the correction epoch optimized), `frame_poses` ((FrameId, T_cw) of every Frame of the run), `point_positions` ((MapPointId, world position) of every point of the run): plain data only. `priority` (interrupts a running local BA). Pool of `GlobalBaOptions::max_events_in_flight` (2), published with `TryCreate` (exhausted: the result is dropped and counted). The Mapper merges it as one `MapTransaction` at N + 1, or rejects it (another map or epoch). About 1.2 MB for a corridor1 map of 600 Frames and 38k points. See "Global BA" |
 | `InitializationMeasurement<FE>` | Tracker → Mapper (+ other Tracker observers) | `features::TMeasurement<FE>` (`map_id` 0) |
 | `TrackingLost` | Tracker → all | timestamp, `final` (`map_id` = the lost map). Since 2026-10-08: `final = false` on entering `RecentlyLost` (the Mapper ignores it and keeps the map), `final = true` on entering `Lost` (only this one clears the Mapper's map) |
@@ -1961,11 +1961,39 @@ still use the vocabulary). Every Frame of
   (Release, `--rate=1`, 2026-10-10) mono 55 ms mean / 133 ms max over 1793
   queries (run beside three other apps and TSan), stereo 43.5 ms / 96.5 ms
   over 2258 queries, no query dropped in either.
-- **A correction drops the pending region**: a transaction raising the map
-  epoch resets it, since its Sim3 is in the old coordinates.
-- **Candidates** (`DetectNBestCandidates`): `FrameDatabase::Query` hits
-  minus the query's covisible Frames, kept above int(0.8 · max) common
-  words, grouped over the top 10 covisible Frames; the best 3.
+- **A correction drops the pending region**: a transaction raising the
+  epoch of the region's match map resets it, since its Sim3 is in the old
+  coordinates; so does the removal of that map.
+- **Candidates** (`DetectNBestCandidates`, ORB `KeyFrameDatabase::
+  DetectNBestCandidates`): the `FrameDatabase::Query` hits of every live
+  map (each `MapReplica` has its own database, dropped with the map on
+  `removed_maps`) minus the query's covisible Frames, kept above
+  int(0.8 · max) common words (max over all maps' hits), each grouped over
+  its top 10 covisible Frames in its own map; by group score, the best 3 of
+  the active map are the **loop** candidates and the best 3 of the other
+  (inactive) maps the **merge** candidates.
+- **Merge detection (map merging Task 4, ORB `NewDetectCommonRegions`).**
+  Merge candidates go through the same `DetectCommonRegion` gates and
+  options as loops, the match side read from the inactive map's replica
+  (`RefineCommonRegion` likewise takes the match map's replica). A mono
+  query solves a free-scale Sim3 (two mono maps have unrelated scales),
+  stereo scale 1, as for loops. The merge region has its own pending state
+  (`mnMergeNumCoincidences`, `mnMergeNumNotFound`): each pending region is
+  refined against the query first; unless one then has 3 confirmations, the
+  candidates are searched once and each kind not confirmed by this query is
+  verified. A confirmed merge is published as `LoopDetected` with
+  `match_map_id` the inactive map's; a loop confirmed at the same query is
+  dropped unpublished (ORB handles `mbMergeDetected` first and resets the
+  loop). ORB does not reset `mnMergeNumNotFound` on a confirmation; we do,
+  as for loops (2 failures *in a row* drop either region). Synthetic
+  two-map scene (`LoopCloserMergeTest`, seeds 1–5, map scale ratios 0.5,
+  1.1, 2 mono and 1 stereo, first detection): BoW 400, RANSAC 164–332,
+  coarse 396–400, optimized 209–368, projection 393–398 (thresholds 20 /
+  15 / 50 / 20 / 80); the published Sim3 within 0.06° and 1.4 % of scale
+  (mono) of the truth. *Normal gate across maps:*
+  it compares each pair's normals in their own maps' coordinates, which for
+  a merge are unrelated world frames (each map's world is its first
+  Frame's camera); see TODO.
 - **Per candidate** (`DetectCommonRegionsFromBoW`, `common_region.cpp`): the
   window is the candidate plus its top 10 covisible Frames (dropped if it
   touches the query's neighbourhood); `SearchByBoW` (ratio 0.9) from the
@@ -2013,7 +2041,8 @@ still use the vocabulary). Every Frame of
 - **`LoopDetected`** (priority: it interrupts the Mapper's local BA, unless a
   loop was already published at the replica's current epoch — a repeat found
   before its correction arrived, which the Mapper drops anyway; 2026-10-10):
-  `query_map_id`, `match_map_id` (equal for now), `query_frame`,
+  `query_map_id`, `match_map_id` (equal for a loop, the inactive map's for
+  a merge), `query_frame`,
   `match_frame`, `S_query_match` (scale 1 for stereo) and the matched
   `(query point, match point)` pairs (features without points are dropped:
   TODO). Published from a pool of 16 with `TryCreate`: a loop found while
@@ -2742,6 +2771,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-10 | (Map merging Task 2, spec section 1) **The replica rule replaces "newest map id wins".** `MapTransaction` gains `active_map` (set on every transaction), `removed_maps` and `absorbed_map` (Task 5; asserted unset). `tracking::AtlasReplica<FE>` holds a `MapReplica` per live map: `new_map` creates a map, other transactions apply to the live map they name, unknown or removed maps are ignored, then `removed_maps` are dropped and remembered (never re-admitted), then `active_map` is taken. `MapReplica` lost its map-id admission and holds one map. The Tracker, LoopCloser and GlobalBA hold an `AtlasReplica` and work on its active map (`replica()` returns it, or an empty map); the viewer's `SceneState` applies the same rule to its own per-map scenes (voyahviz depends only on common and events) and shows the active map. The Mapper's final-loss discard is published as one transaction `removed_maps = {map}`, no `active_map`; a final `TrackingLost` no longer clears the LoopCloser. `AtlasReplica::Apply` returns whether the transaction was admitted (the plan's interface has `void`): the holders act only on admitted transactions of the active map. | ORB-SLAM3's Atlas keeps lost maps and merges them (Tasks 3–5): replicas must hold several maps and learn the active one explicitly, which "newest id wins" cannot express. Behaviour is unchanged while the Mapper still discards a lost map; the visible differences are that replicas (and the viewer) drop the lost map at the loss rather than at the next map, and that a transaction without `active_map` deactivates (test harnesses now set it, as the Mapper does). |
 
 | 2026-10-10 | (Map merging Task 3, spec sections 1, 5) **The Mapper's Atlas.** Per-map state moves into a private `MapState` held in `std::map<MapId, MapState> maps_` with `std::optional<MapId> active_`; existing code works on `Active()` (a cached pointer to the active map's node, kept with `active_`; `std::map` nodes are stable). On a final loss of the active map: fewer than `MapperOptions::atlas.min_frames_to_keep` (10) Frames → discarded, one transaction `removed_maps = {id}`, no `active_map`; otherwise kept inactive, one transaction with no `active_map`. The next initialization takes the next id. Inactive maps are frozen through the existing "another map" guards (now `IsActive(id)`). `num_keyframes()` / `num_map_points()` (atomics) are the active map's, 0 without one; `current_map_id()` stays the newest map's id. Public Mapper-thread accessors (`covisibility()`, `Reference()`, ...) read an empty map when none is active. | ORB-SLAM3 `Tracking`: `ResetActiveMap` below 10 KeyFrames, `CreateMapInAtlas` otherwise; keeping lost maps is what map merging (Tasks 4–5) merges into. A per-point map lookup would cost a `std::map::find` on hot paths, hence the cached pointer. |
+| 2026-10-10 | (Map merging Task 4, spec section 2) **Merge detection in the LoopCloser.** `DetectNBestCandidates(atlas, query, options)` queries every live map's `FrameDatabase` (one per `MapReplica`, dropped with it on `removed_maps`) and splits the grouped hits into loop candidates (the active map) and merge candidates (inactive maps), best 3 each, the common-words threshold over all maps (ORB `KeyFrameDatabase::DetectNBestCandidates`). `DetectCommonRegion(atlas, query, candidates, options)` verifies either list with the same gates, the match side read from the candidate's map (`CommonRegion::match_map`); `RefineCommonRegion` takes the match map's replica. The LoopCloser keeps a second `PendingRegion` (`pending_merge_`) with its own counters; the loop/merge order follows ORB `NewDetectCommonRegions` and `Run`: a merge confirmed at the same query as a loop is published and the loop dropped. A pending region records its match map's epoch and is dropped when that map's epoch changes or the map is removed (this subsumes the old "active epoch drops the pending region" rule). The single-map `DetectCommonRegion(replica, query, options)` stays for tests. Deviation: the merge's not-found counter resets on a confirmation, as the loop's (ORB does not reset `mnMergeNumNotFound`). | Spec section 2; rulings: one database per live map, merges verified against the inactive map's replica, mono merges free-scale (the loop path already frees it for a mono query), the merge wins over a loop, no looser gates. The not-found reset keeps one rule ("2 failures in a row") for both kinds. |
 
 ## 9. Open Questions
 
@@ -2990,7 +3020,7 @@ branch → review → merge to `master`. Update this document at the end.
 - Roadmap (`docs/ROADMAP.md`): relocalization into other maps comes with
   map merging (step 5).
 - Event pool lifetime (Open Question 25).
-- Test suite (2026-10-10, map merging Task 2): 687 tests (667 `unit`, 19
+- Test suite (2026-10-10, map merging Task 4): 703 tests (683 `unit`, 19
   `integration`, 1 `vocabulary`); `check_all` about 18–24 s, set by
   `SlamTest.MonoClosesLoop` (14–25 s: its lock-step runs are bursty, so the
   time follows the CPU's frequency scaling) and the two

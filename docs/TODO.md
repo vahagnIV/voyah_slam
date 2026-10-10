@@ -382,10 +382,24 @@ Spec `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; DESIGN
       ORB's `minFeat`), so the essential graph pulls the loop through one
       edge. ORB-SLAM3 behaves the same and relies on global BA (4c, done
       2026-10-10: DESIGN "Global BA").
-- [ ] **Map merging** (roadmap step 5): `LoopDetected` carries both map ids
-      and the correction steps take a window and a Sim3, but detection
-      searches only the current map and the Mapper rejects a loop across
-      maps.
+- [ ] **Map merging** (roadmap step 5): detection finds merges in inactive
+      maps (Task 4, 2026-10-10); the Mapper still rejects a `LoopDetected`
+      across maps until the merge (Task 5).
+- [ ] **Normal gate across maps (merge detection, Task 4):** the gate
+      compares each pair's normals in their own maps' world coordinates. For
+      a merge the two worlds are unrelated (each map's world is its first
+      Frame's camera, `MapInitializer`), so a true merge between maps whose
+      worlds are rotated by more than 60° is rejected, and a false one
+      between aligned worlds is not caught by it. Aligning the match-side
+      normals by the region's own Sim3 would make the gate vacuous (the Sim3
+      agrees with the images by construction). The synthetic merge scene
+      rotates the worlds by only 4°. Decide with the corridor1 merge smoke
+      (Task 6/7): e.g. skip the gate for merges, or compare normals relative
+      to the query and match cameras.
+- [ ] **Merge detection test gap:** a merge region confirmed by a query is
+      not searched again in that query (ORB `bMergeDetectedInKF`); no test
+      tells this from a re-search, since in the synthetic scene both give
+      the same confirmations (mutation M7 of Task 4 survives).
 - [ ] **Scale without IMU:** mono scale is corrected only at a loop (the
       essential graph spreads the loop's Sim3 scale over the graph, start
       included); between loops it drifts freely, and nothing makes the map
