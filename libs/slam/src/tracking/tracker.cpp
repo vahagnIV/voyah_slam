@@ -99,18 +99,22 @@ void Tracker<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
         return;
     }
     const auto& transaction = static_cast<const events::MapTransaction<TFeatureExtractor>&>(event);
-    // A loop correction of the active map: the anchors' poses before it, to
-    // follow after it.
+    // A loop correction of the active map, or a merge of the active map into
+    // another (map-merging spec section 4): the anchors' poses before it, to
+    // follow after it. A merged Frame keeps its id in the target map.
     const std::optional<map::MapId> previous = atlas_.active_map();
-    const bool correction = !transaction.new_map && previous == transaction.map_id &&
-                            transaction.map_epoch > replica().map_epoch();
+    const bool merge = previous && transaction.absorbed_map == previous && transaction.map_id != *previous;
+    const bool correction = merge || (!transaction.new_map && previous == transaction.map_id &&
+                                      transaction.map_epoch > replica().map_epoch());
     std::vector<FramePose> anchors;
     if (correction) anchors = AnchorsBeforeCorrection();
     if (!atlas_.Apply(transaction)) {
         return;  // an unknown or removed map's
     }
     const std::optional<map::MapId> active = atlas_.active_map();
-    if (active && active != previous) {
+    if (merge && active == transaction.map_id) {
+        FollowMerge(*previous);
+    } else if (active && active != previous) {
         AdoptMap(*active);
     }
     if (active != transaction.map_id) {
@@ -128,6 +132,23 @@ void Tracker<TFeatureExtractor>::AdoptMap(map::MapId map_id) {
     velocity_.reset();
     reference_frame_id_.reset();
     tracked_frames_ = 0;
+}
+
+template <typename TFeatureExtractor>
+void Tracker<TFeatureExtractor>::FollowMerge(map::MapId absorbed) {
+    const map::MapId target = *atlas_.active_map();
+    log_->info("Map {} merged into map {} ({})", absorbed.value, target.value, ToString(state()));
+    current_map_id_.store(target, std::memory_order_release);
+    size_t unmatched = 0;
+    for (int64_t& match : last_frame_.matches) {
+        if (match < 0) continue;
+        const std::optional<map::MapPointId> point =
+            atlas_.TranslatePoint(absorbed, map::MapPointId{static_cast<uint32_t>(match)});
+        match = point ? static_cast<int64_t>(point->value) : -1;
+        unmatched += point ? 0 : 1;
+    }
+    log_->debug("Map {} merged into map {}: last frame {} matches, {} unmatched", absorbed.value, target.value,
+                CountMatches(last_frame_.matches), unmatched);
 }
 
 template <typename TFeatureExtractor>
@@ -156,13 +177,13 @@ void Tracker<TFeatureExtractor>::FollowCorrection(const std::vector<FramePose>& 
             // T_cw convention: T_last * T_ref^-1 (the last camera relative to
             // the reference) is unchanged.
             last_frame_.T_cw = last_frame_.T_cw * anchor.T_cw.Inverse() * frame->T_cw;
-            log_->debug("Loop correction (epoch {}): last frame follows Frame {}",
+            log_->debug("Correction (epoch {}): last frame follows Frame {}",
                         replica().map_epoch(), anchor.frame.value);
             return;
         }
     }
     if (state() == TrackerState::Tracking) {
-        log_->warn("Loop correction (epoch {}): no Frame of the last frame left; last frame not moved",
+        log_->warn("Correction (epoch {}): no Frame of the last frame left; last frame not moved",
                    replica().map_epoch());
     }
 }

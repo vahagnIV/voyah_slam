@@ -437,7 +437,8 @@ Rules:
   transaction, then drops the absorbed map (it is in `removed_maps`).
   `AtlasReplica::TranslatePoint(absorbed, old)` gives an absorbed point's id
   in the merged map, after the merge's fusions (nullopt if it was not alive or
-  is gone): the Tracker's references follow it (Task 6). The Mapper builds map n+1 only after a
+  is gone): the Tracker's last-frame matches follow it (Task 6, "Loop
+  Closing", Tracker across a merge). The Mapper builds map n+1 only after a
   final `TrackingLost(n)`, so a newer map never appears while the Tracker
   tracks an older one.
 - **No subscription filtering:** an `Observable` delivers every event to every
@@ -2141,6 +2142,19 @@ T_ref_new (the first Frame observing its matches if the reference is gone);
 the velocity is unchanged. For mono the relative translation and the
 velocity stay in the old scale for that one frame (TODO).
 
+**Tracker across a merge** (since 2026-10-11, map merging Task 6, spec
+section 4). A transaction merging the active map M into N (`absorbed_map` M,
+`active_map` N) is followed like a correction, not adopted like a new map:
+the Tracker switches to N (`current_map_id()`), keeps its state, velocity and
+reference Frame (Frames keep their ids in N), and, while Tracking, shifts
+`last_frame_` by the anchors taken in M before the transaction (the epoch path
+above). `last_frame_.matches` then take their ids in N through
+`AtlasReplica::TranslatePoint` (id rule, then the merge's fusions); a point
+without one becomes unmatched. While RecentlyLost or Lost there is no last
+frame: relocalization searches N. `FrameTracked` carries N and N's epoch.
+The local map is rebuilt per frame from the replica, so it holds no ids
+across a merge.
+
 **Apps.** `--loop_closing` enables loop closing (`LoopCloserOptions::enabled`;
 it needs `--vocabulary`). Without it the vocabulary serves relocalization and
 triangulation only. The apps print whether loop closing is on.
@@ -2814,6 +2828,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-11 | (Map merging Task 5, spec section 3) **The merge absorbs first.** The Mapper moves M into N by the id rule before the correction steps (ORB-SLAM3 moves the window into the merge map during the correction and the rest after), so `CorrectWindow`, `FuseLoopPoints`, `FinishCorrection` and the tree edits run unchanged on one map; only the windows are built per map (`Connected` / `MergeWindowOf` take a `MapState`). The result is the same: the windows never share a Frame and are built before any fusion. The essential graph of step 6 holds only M's Frames, the welded window fixed (`EssentialGraphProblem::also_fixed`, new): in ORB-SLAM3's merge overload the merge window has no edge to M's other Frames (no common pose to measure from), so fixing it is the same as leaving it out. Deviations: the graph also runs for mono (ORB-SLAM3 only moves mono's rest rigidly; our window start keeps the merge scale, so the edges stay consistent, and the rest follows the weld); the `LoopDetected` pairs are fused as in a loop correction (spec section 3, step 4; ORB `MergeLocal` relies on `SearchAndFuse` alone); N's own recent points are dropped (the frozen map's list is stale). "A correction or merge is running" (spec section 3) has no separate state: the Mapper handles one event at a time, so the in-flight case is a merge or loop queued behind a merge, rejected because it names the removed map (`RejectsWhileCorrecting`). The viewer's `SceneState` (its own replica rule) absorbs too (`MapScene::Absorb`, same header), so the merged map shows both parts. | One code path for loops and merges; the id rule is the only thing replicas must reproduce, and it lives in one header (`map/absorbed_point_ids.h`) used by the Mapper, `AtlasReplica` and the viewer. |
 | 2026-10-11 | (Map merging Task 5, fix round 1; review Critical 1) **Merges chain.** A merge target can later be absorbed itself (map 3 into 1, then 1 into 2), so the absorbed map's Frame ids may lie below and above the target's. The Mapper's `MapState` slots Frames by id from `first_slot` (the lowest id it ever held, slots sized over both maps at a merge) and keeps the spanning tree's `root` separately; `RootKeyFrame()` (was `FirstKeyFrame()`) is the never-culled local-BA gauge and Frame-culling exception. The global BA's gauge is the root too (the oldest Frame without a parent), no longer simply the oldest Frame. The replicas (`std::map` by Frame id) and the viewer were already order-independent (`AtlasReplicaTest.MergeAbsorbsInterleavedFrameIds`). | ORB-SLAM3 merges any number of maps; the slot vector's "the source's ids come after the target's" held only for a first merge (`MapperMergeTest.ChainedMergesThreeMaps` aborted on it). The root, not the oldest Frame, is the map's origin after a merge. |
 | 2026-10-11 | (Map merging Task 4, fix round 2) **`DetectNBestCandidates` group scoring counts only filtered hits**: a hit's group score adds its top-10 covisible Frames' scores only for Frames that passed the int(0.8 · max) common-words filter. ORB-SLAM3 adds every word-sharing KeyFrame's `mPlaceRecognitionScore` (set only for filtered ones, so possibly stale from an earlier query). Also: `LoopDetected::matched_points` drops a self-pair (equal ids) only for a loop; a merge's pairs span two maps whose point ids restart per map, so equal ids are two points (`KeepsPairsWithCollidingIds`). | The filtered form is ORB-SLAM2's and what the old `RelocalizationCandidates` path did; it avoids the stale-score dependence. The id filter dropped every true merge pair whose ids collided, which Task 5 fuses from. |
+| 2026-10-11 | (Map merging Task 6, spec section 4) **The Tracker follows a merge instead of adopting N.** A transaction whose `absorbed_map` is the Tracker's active map and whose `active_map` is the target keeps the Tracker's state, velocity and reference Frame, shifts `last_frame_` through the loop-correction anchors (reference Frame, else the Frames observing its matches; taken in M before the transaction, looked up in N after) and translates its matches with `AtlasReplica::TranslatePoint`. Any other change of the active map still resets (`AdoptMap`). | A merge moves the Tracker's own Frames, so the 4b epoch path applies unchanged; a reset would lose tracking at every merge (spec: no tracking loss across a merge). |
 
 ## 9. Open Questions
 

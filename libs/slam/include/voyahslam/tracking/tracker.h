@@ -144,6 +144,16 @@ struct TrackerOptions {
 // relative and unchanged. While RecentlyLost or Lost there is no last frame:
 // relocalization and a new map use the corrected replica. FrameTracked
 // carries the replica's epoch.
+//
+// Map merging (map-merging spec section 4). A transaction merging the active
+// map M into map N (absorbed_map M, active_map N) switches the Tracker to N
+// without a reset: its state, velocity and reference Frame are kept (Frames
+// keep their ids in N). While Tracking, the last frame follows its reference
+// Frame (or another Frame of its matches) as through a loop correction; its
+// matches take their ids in N by the merge's id rule and fusions
+// (AtlasReplica::TranslatePoint), and one that has none becomes unmatched.
+// While RecentlyLost or Lost there is no last frame: relocalization searches
+// N. FrameTracked then carries N and N's epoch.
 template <typename TFeatureExtractor>
 class Tracker : public events::EventNode {
 public:
@@ -223,18 +233,23 @@ private:
     // The active map became `map_id`: nothing tracked against the previous
     // one carries over.
     void AdoptMap(map::MapId map_id);
+    // The active map `absorbed` was merged into the new active map (already
+    // applied): the Tracker switches to it, keeping its state, and
+    // last_frame_'s points take their ids in it
+    // (AtlasReplica::TranslatePoint); a point without one becomes unmatched.
+    void FollowMerge(map::MapId absorbed);
     void OnMapTransaction(const events::MapTransaction<TFeatureExtractor>& transaction);
     // A Frame's pose before a loop correction is applied.
     struct FramePose {
         map::FrameId frame;
         geometry::RigidTransformation T_cw;
     };
-    // The Frames last_frame_ may follow through a loop correction, with their
-    // current poses: the reference Frame first, then the Frames observing its
-    // matches, most matches first. Empty unless Tracking.
+    // The Frames last_frame_ may follow through a loop correction or a merge,
+    // with their current poses: the reference Frame first, then the Frames
+    // observing its matches, most matches first. Empty unless Tracking.
     [[nodiscard]] std::vector<FramePose> AnchorsBeforeCorrection() const;
-    // After the correction: last_frame_ keeps its pose relative to the first
-    // anchor still in the replica; unchanged if none is.
+    // After the correction or merge: last_frame_ keeps its pose relative to
+    // the first anchor still in the (new) active map; unchanged if none is.
     void FollowCorrection(const std::vector<FramePose>& anchors);
     // Makes the replica's Frame `start_frame` the last frame and starts tracking.
     void StartTracking(map::FrameId start_frame);

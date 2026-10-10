@@ -384,8 +384,16 @@ Spec `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; DESIGN
       2026-10-10: DESIGN "Global BA").
 - [ ] **Map merging** (roadmap step 5): detection finds merges in inactive
       maps (Task 4, 2026-10-10) and the Mapper merges them (Task 5,
-      2026-10-11); the Tracker does not follow a merge yet (Task 6), and the
+      2026-10-11); the Tracker follows a merge (Task 6, 2026-10-11); the
       integration tests and smoke runs are Task 7.
+- [ ] **Merge while the Tracker is Lost (step 5):** if the Mapper merges M
+      before it reads the Tracker's final `TrackingLost(M)`, it ignores that
+      loss as stale (M is removed) and keeps N active in `Mapping`, while the
+      Tracker is Lost in N and forwards `InitializationMeasurement`s the
+      Mapper ignores: nothing ends it. Candidate fix: the Tracker, Lost when
+      a merge of its map lands, publishes a final `TrackingLost(N)` (the
+      Mapper then keeps N inactive), or the Mapper treats a final loss of a
+      map it absorbed into the active map as a loss of that map. Untested.
 - [ ] **Mono merge in the Mapper is untested (step 5, Task 7):** the
       `MapperMergeTest` scene is stereo; the mono path (free-scale similarity,
       scale folded by `CorrectWindow`, the essential graph of the rest with
