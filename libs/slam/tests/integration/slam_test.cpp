@@ -588,12 +588,27 @@ void RunSequence(const TSequence& sequence, size_t init_frames,
         return mapper.num_frame_evaluations() + mapper.backlog_skipped() + mapper.stale_epoch_skipped();
     };
     // With global BA: until the latest loop correction's run is merged (a
-    // merge raises the epoch again), at most 60 s; a dropped or rejected
-    // result shows in the counts.
+    // merge raises the epoch again), at most 60 s. A rejected result (the
+    // Mapper's count grows) or a timeout (e.g. a dropped result) ends the
+    // wait for that correction for good: it fails the test with the counts
+    // after the Slam stopped, rather than waiting 60 s per later frame.
+    std::optional<size_t> given_up_correction;  // its index in out_recorder.corrections
+    std::string given_up_reason;
     const auto await_global_ba = [&] {
-        if (slam.global_ba() == nullptr) return;
-        static_cast<void>(out_recorder.WaitFor([&] { return !out_recorder.epoch_from_loop; },
-                                               std::chrono::seconds(60)));
+        if (slam.global_ba() == nullptr || !out_recorder.epoch_from_loop) return;
+        const size_t correction = out_recorder.corrections.size() - 1;
+        if (given_up_correction == correction) return;
+        const size_t rejected_before = slam.mapper().num_global_ba_rejected();
+        const bool ended = out_recorder.WaitFor(
+            [&] {
+                return !out_recorder.epoch_from_loop || slam.mapper().num_global_ba_rejected() > rejected_before;
+            },
+            std::chrono::seconds(60));
+        // Still this correction's epoch: not merged.
+        if (out_recorder.epoch_from_loop && out_recorder.corrections.size() - 1 == correction) {
+            given_up_correction = correction;
+            given_up_reason = ended ? "a result was rejected" : "no merge within 60 s";
+        }
     };
     for (size_t i = init_frames; i < sequence.frames.size(); ++i) {
         const auto& blackout = setup.blackout;
@@ -639,6 +654,13 @@ void RunSequence(const TSequence& sequence, size_t init_frames,
         out_counts.global_ba_runs_started = global_ba->num_runs_started();
         out_counts.global_ba_runs_interrupted = global_ba->num_runs_interrupted();
         out_counts.global_ba_results_dropped = global_ba->num_results_dropped();
+    }
+    if (given_up_correction) {
+        ADD_FAILURE() << "Global BA of loop correction " << *given_up_correction + 1 << " not merged: "
+                      << given_up_reason << " (runs started " << out_counts.global_ba_runs_started
+                      << ", interrupted " << out_counts.global_ba_runs_interrupted << ", results dropped "
+                      << out_counts.global_ba_results_dropped << "; merged " << out_counts.global_ba_merges
+                      << ", rejected " << out_counts.global_ba_rejected << ")";
     }
 }
 
@@ -1143,23 +1165,24 @@ TEST(SlamTest, StereoClosesLoop) {
     ExpectClosesLoop(sequence, options.trajectory.seed, /*init_frames=*/1, /*monocular=*/false, mapper_options);
 }
 
-// The GlobalBundleAdjuster exists only with loop closing and global BA both
-// enabled; by default (loop closing off) there is none, so no GlobalBAFinished
-// can reach the Mapper.
-TEST(SlamTest, GlobalBaAbsentByDefault) {
+// The GlobalBundleAdjuster exists only with loop closing in effect (a
+// vocabulary and LoopCloserOptions::enabled) and global BA enabled: not by
+// default (loop closing off), not with global BA disabled, not without a
+// vocabulary (no loop can be detected). That no GlobalBAFinished reaches the
+// Mapper over a whole run without one is checked by ExpectClosesLoop.
+TEST(SlamTest, GlobalBaCreatedOnlyWithLoopClosing) {
     OrbSlam by_default;
     EXPECT_EQ(by_default.global_ba(), nullptr);
-    OrbSlam global_ba_disabled({}, {}, nullptr, loop_closing::LoopCloserOptions{.enabled = true},
+    OrbSlam global_ba_disabled({}, {}, PlaceVocabulary(), loop_closing::LoopCloserOptions{.enabled = true},
                                global_ba::GlobalBaOptions{.enabled = false});
     EXPECT_EQ(global_ba_disabled.global_ba(), nullptr);
-    OrbSlam loop_closing_on({}, {}, nullptr, loop_closing::LoopCloserOptions{.enabled = true});
+    OrbSlam no_vocabulary({}, {}, nullptr, loop_closing::LoopCloserOptions{.enabled = true});
+    EXPECT_EQ(no_vocabulary.global_ba(), nullptr);
+    OrbSlam loop_closing_on({}, {}, PlaceVocabulary(), loop_closing::LoopCloserOptions{.enabled = true});
     EXPECT_NE(loop_closing_on.global_ba(), nullptr);
     // Wired and started like the other components.
     loop_closing_on.Start();
     loop_closing_on.Stop();
-    by_default.Start();
-    by_default.Stop();
-    EXPECT_EQ(by_default.mapper().num_global_ba_merges() + by_default.mapper().num_global_ba_rejected(), 0u);
 }
 
 // Runs `sequence` (a LoopOptions loop) with loop closing by the essential
@@ -1180,6 +1203,10 @@ double ExpectGlobalBaRefinesLoop(const TSequence& sequence, uint32_t seed, size_
 
     EXPECT_FALSE(essential.counts.has_global_ba);
     EXPECT_GE(essential.num_corrections, 1u);
+    // A sound baseline: a second map or a loss would inflate its errors.
+    EXPECT_EQ(essential.num_maps, 1u);
+    EXPECT_EQ(essential.num_lost, 0u);
+    EXPECT_TRUE(essential.tracked_to_end);
     EXPECT_TRUE(refined.counts.has_global_ba);
     EXPECT_GE(refined.num_loops, 1u);
     EXPECT_GE(refined.counts.global_ba_runs_started, 1u);

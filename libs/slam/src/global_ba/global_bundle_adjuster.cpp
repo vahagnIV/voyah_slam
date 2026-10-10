@@ -1,4 +1,5 @@
 #include <chrono>
+#include <cstddef>
 #include <functional>
 #include <optional>
 #include <utility>
@@ -131,8 +132,13 @@ void GlobalBundleAdjuster<TFeatureExtractor>::Run() {
         log_->warn("Global BA of map {} at epoch {} failed after {:.1f} ms", map_id.value, map_epoch, ms);
         return;
     }
-    log_->info("Global BA of map {} at epoch {}: {} Frames, {} points in {:.1f} ms", map_id.value, map_epoch,
-               solution->frame_poses.size(), solution->point_positions.size(), ms);
+    // The payload of the result event (the vectors' elements).
+    const size_t result_bytes =
+        solution->frame_poses.size() * sizeof(typename decltype(solution->frame_poses)::value_type) +
+        solution->point_positions.size() * sizeof(typename decltype(solution->point_positions)::value_type);
+    log_->info("Global BA of map {} at epoch {}: {} Frames, {} points in {:.1f} ms, result {:.2f} MB", map_id.value,
+               map_epoch, solution->frame_poses.size(), solution->point_positions.size(), ms,
+               static_cast<double>(result_bytes) / (1024.0 * 1024.0));
     Publish(map_id, map_epoch, std::move(*solution));
 }
 

@@ -370,20 +370,18 @@ Spec `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; DESIGN
       the same. Comparing the normals through the hypothesized Sim3
       measures something else, so this is not a fix in itself; decide
       together with the same-heading item above.
-- [ ] **Re-run ThreadSanitizer after every loop-closing change.** Last run
-      2026-10-10, after the final-review fix wave (query backlog):
-      `voyah_slam_tests` (191) and `voyah_integration_tests` (15) clean.
+- [ ] **Re-run ThreadSanitizer after every loop-closing or global-BA
+      change.** Last run 2026-10-10, global BA (Tasks 2 and 4):
+      `voyah_slam_tests` (217) and `voyah_integration_tests` (18) with no
+      warnings.
 - [ ] **Mono scale after corrections:** mono loops carry extreme scales after
       wrong corrections (0.314–1.774 in the 2026-10-09 smoke). Revisit once
       wrong loops are rejected.
 - [ ] **Single loop connection:** in corridor maps most corrections had only
       the query–match loop connection (other new links share < 100 points,
       ORB's `minFeat`), so the essential graph pulls the loop through one
-      edge. ORB-SLAM3 behaves the same and relies on global BA (4c).
-- [ ] **Global BA** (roadmap step 4c): ORB-SLAM3 runs a full BA in its own
-      thread after every loop correction; we stop at the essential graph, so
-      points keep the essential graph's (pose-only) correction and the loop's
-      residual stays until local BA reaches it.
+      edge. ORB-SLAM3 behaves the same and relies on global BA (4c, done
+      2026-10-10: DESIGN "Global BA").
 - [ ] **Map merging** (roadmap step 5): `LoopDetected` carries both map ids
       and the correction steps take a window and a Sim3, but detection
       searches only the current map and the Mapper rejects a loop across
@@ -465,6 +463,66 @@ Spec `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; DESIGN
       without loop closing, lock-step): the longest test in `check_all`.
       Natural mono drift is a random walk, so the scale part needs a seed
       range; a scene with a systematic mono scale drift would allow one seed.
+
+## Global BA (roadmap step 4c, 2026-10-10)
+
+Spec `docs/superpowers/specs/2026-10-10-global-ba-design.md`; DESIGN "Global
+BA" (smoke table there).
+
+- [ ] **Late joining:** a component that starts mid-run (a GlobalBA or
+      LoopCloser switched on later, or a remote one) needs a full-map
+      snapshot to build its replica. Today components exist from the start
+      or not at all (user decision).
+- [ ] **Serialization and a gRPC transport** for pluggable components: the
+      events are plain data (`GlobalBAFinished`, `LoopDetected`,
+      `MapTransaction`) but nothing serializes them yet.
+- [ ] **Memory, about 1 MB per Frame:** stereo corridor1 peaked at 1.7 GB with
+      1780 Frames and 113k points. The 2026-10-10 global-BA smoke measured
+      2.28 / 2.33 GB without global BA (1649 / 1709 Frames, about 101k / 106k
+      points) and **4.23 GB with it** (1758 Frames, 108k points); mono 1.51 /
+      1.47 GB without and 2.24 / 2.38 GB with. Global BA adds another full
+      replica plus the g2o problem of a full BA. Each replica holds every
+      Frame's measurement; find what dominates (measurements, BoW,
+      per-replica copies, the BA problem) before trimming.
+- [ ] **Global BA iteration or size cap:** on corridor1 (2026-10-10 smoke)
+      a run took 3.3–28.2 s in mono and up to 82.5 / 85.2 s in stereo
+      (1465 / 1654 Frames, 92k / 103k points), at 10 iterations; in mono
+      run 2, 3 of 4 runs were interrupted by the next correction after
+      15–35 s, so their work was lost. An interruption lands only at the next
+      LM iteration (up to about 6 s on the largest mono map). ORB-SLAM3 has
+      no cap either. Options: fewer iterations on large maps, a time budget,
+      or polling inside an iteration.
+- [ ] **More maps with global BA on corridor1** (2026-10-10 smoke): both mono
+      runs and stereo run 2 with global BA lost map 1 after a false-loop
+      correction (2, 2 and 4 maps), while the four essential-graph-only runs
+      kept one map. No loss was caused by a merge itself; with two runs per
+      mode the effect is not separable from run-to-run loop variance.
+      Re-measure once look-alikes are rejected (step 6), with more runs.
+- [ ] **A dropped result is not retried:** when the `GlobalBAFinished` pool
+      (2) is exhausted, the map keeps the essential-graph correction until
+      the next loop (counted in `num_results_dropped`). ORB-SLAM3 has no pool.
+- [ ] **A lost map's run:** the GlobalBA is not wired to `TrackingLost`; a
+      run on a map the Tracker lost goes on until the next map's first
+      transaction, and the Mapper then rejects its result (not `Mapping`).
+      Wasted work only.
+- [ ] **The snapshot contract is enforced by documentation:**
+      `ChangesDuringRunDoNotAffectResult` catches a `RunGlobalBa` that reads
+      the replica after its first poll only when the data it reads changed.
+- [ ] **Integration coverage of the merge's propagation:** the lock-step
+      harness waits for each correction's merge before feeding the next
+      frame, so no Frame or point is created during a run and the
+      propagation branch (Frames and points outside the result) is exercised
+      only by the Mapper unit tests; "no tracking loss across a merge" there
+      means the Tracker follows the new epoch on the next frame. A dropped
+      result makes the harness wait 60 s once per run before it fails.
+- [ ] **Deferred test gaps:** `RunGlobalBa` returning nullopt on a
+      non-finite result; `robust = false` keeping outliers; a single
+      intrinsics in the problem tests (no per-Frame camera, no mixed mono and
+      stereo); the pose of a Frame without observations; the gauge when the
+      oldest surviving Frame has no observations (nothing fixed in practice,
+      as in ORB-SLAM3); `SkipsCulledAndFused` does not tell fused from culled
+      points; the merge's uncorrected-subtree branch (neither the root nor an
+      ancestor in the result) is untested.
 
 ## TUM-VI tuning (roadmap step 6)
 
@@ -593,18 +651,20 @@ Spec `docs/superpowers/specs/2026-10-07-relocalization-design.md`; DESIGN
 Spec `docs/superpowers/specs/2026-10-07-map-quality-design.md`; DESIGN "Map
 Quality" (smoke table there).
 
-- [ ] **Global BA in a separate thread** (roadmap step 4, with loop closing):
-      local BA stays in the Mapper thread; global BA needs its own thread and
-      a way to merge its result into a map that kept changing meanwhile.
 - [ ] **Tuning** for TUM-VI (roadmap step 6): every map-quality threshold is an
       ORB-SLAM3 default; nothing was tuned.
 - [ ] **Two σ sources (ruling K):** local BA takes `sigma_px` / `level_scale`
-      from `MapperOptions::fuse`, the Tracker from `TrackerOptions`. Derive
-      both from one place (with the extractor's scale factor).
+      from `MapperOptions::fuse`, the Tracker from `TrackerOptions`, and since
+      2026-10-10 global BA from `GlobalBaOptions` (same defaults, a third
+      source; global-BA pre-flight ruling). Derive all from one place (with
+      the extractor's scale factor).
 - [ ] **Reference distance goes stale after BA:** a point's reference
       (scale-prediction) distance is set when the reference is assigned; when
       BA moves the point or its reference Frame and the reference survives,
       the distance is not recomputed (ORB-SLAM3 `UpdateNormalAndDepth`).
+      The same holds after a loop correction and after a global-BA merge
+      (2026-10-10): the Mapper and the replicas keep consistent but slightly
+      stale distances.
 - [ ] **Culled Frames leave empty slots** in the Mapper's Frame array (lookup by
       id stays O(1) because ids are consecutive per map). Long runs grow it
       without bound; compact or switch to a map when it matters.

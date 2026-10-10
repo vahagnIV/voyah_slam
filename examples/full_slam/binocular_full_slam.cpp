@@ -39,8 +39,6 @@ int main(int argc, char** argv) {
 
         std::cout << "Loop closing: " << (options.loop_closing && vocabulary ? "on" : "off")
                   << (options.loop_closing && !vocabulary ? " (--loop_closing needs --vocabulary)" : "") << "\n";
-        std::cout << "Global BA: " << (options.loop_closing && vocabulary && options.global_ba ? "on" : "off")
-                  << "\n";
         if (options.drop_frames) {
             std::cout << "Dropping frames " << options.drop_frames->first << ".."
                       << options.drop_frames->last << " (no features)\n";
@@ -63,6 +61,8 @@ int main(int argc, char** argv) {
         if (!options.trajectory_out.empty()) trajectory.emplace(options.trajectory_out);
         TSlam slam({}, {}, vocabulary, loop_closing::LoopCloserOptions{.enabled = options.loop_closing},
                    global_ba::GlobalBaOptions{.enabled = options.global_ba});
+        // From the object: Slam creates a GlobalBA only with loop closing in effect.
+        std::cout << "Global BA: " << (slam.global_ba() != nullptr ? "on" : "off") << "\n";
         // Also when an exception unwinds: stop the producers, then the viewer
         // and the trajectory (their final drains recycle events into slam's
         // pools), all before ~Slam destroys those pools. Stop() and Poll()

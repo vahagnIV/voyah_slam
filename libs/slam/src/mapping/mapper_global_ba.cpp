@@ -19,8 +19,9 @@ namespace voyahslam::mapping {
 
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::OnGlobalBaFinished(const events::GlobalBAFinished& event) {
-    // A result of an older map (or with no map), or of the map before a later
-    // correction (ORB-SLAM3 mnFullBAIdx), is not merged.
+    // A result of another map (or with no map, or while the map is lost), or
+    // of another epoch of the map (a later correction came in between:
+    // ORB-SLAM3 mnFullBAIdx), is not merged.
     if (state() != MapperState::Mapping || event.map_id != current_map_id() || event.map_epoch != map_epoch_) {
         log_->debug("GlobalBAFinished of map {} at epoch {}: the current map is {} at epoch {}, ignored",
                     event.map_id.value, event.map_epoch, current_map_id().value, map_epoch_);

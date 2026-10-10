@@ -30,8 +30,9 @@ public:
     // `vocabulary` (may be null) goes to the Mapper, the Tracker and the LoopCloser; it is
     // immutable, so the threads share it without locks. Loop closing is opt-in: it needs the
     // vocabulary and `loop_closer_options.enabled` (off by default). Global BA after each loop
-    // correction exists only with loop closing enabled and `global_ba_options.enabled` (on by
-    // default): otherwise no GlobalBundleAdjuster is created.
+    // correction exists only with loop closing in effect (a vocabulary and
+    // `loop_closer_options.enabled`) and `global_ba_options.enabled` (on by default): otherwise
+    // no GlobalBundleAdjuster is created.
     explicit Slam(mapping::MapperOptions mapper_options = {},
                   tracking::TrackerOptions tracker_options = {},
                   std::shared_ptr<const typename TMapper::TVocabulary> vocabulary = nullptr,

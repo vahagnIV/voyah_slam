@@ -119,7 +119,10 @@ build/build/Release/examples/full_slam/binocular_full_slam <dataset_root> [optio
   synthetic loops and nearby revisits, but on TUM-VI corridor1 same-heading look-alikes make the
   ATE worse (see `docs/DESIGN.md` "Loop Closing"; tuning is roadmap step 6)
 - `--no_global_ba`: with `--loop_closing`, correct loops by the essential graph only. By default a
-  global BA (ORB-SLAM3's, in its own thread) follows each loop correction
+  global BA (ORB-SLAM3's, in its own thread) follows each loop correction; on a full corridor1 map
+  it takes up to about 85 s (stereo) and keeps one more copy of the map (peak memory about 4 GB
+  instead of 2.3 GB). The app prints "Global BA: on" only when it runs (it needs `--loop_closing`
+  and `--vocabulary`)
 - `--drop_frames a:b`: feed frames a..b (inclusive, 0-based) without features (a simulated blackout)
 
 ### Vocabulary (ORB-SLAM3's `ORBvoc.txt`)

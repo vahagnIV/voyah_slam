@@ -61,8 +61,8 @@ result is merged into a map that kept changing meanwhile.
 - `GlobalBundleAdjuster` runs in its own thread with its own `MapReplica`.
 - It subscribes to the Mapper's `MapTransaction` stream from the start of the
   run.
-- `Slam` creates it only when loop closing is enabled and
-  `GlobalBaOptions::enabled` is set.
+- `Slam` creates it only when loop closing is in effect (a vocabulary and
+  `LoopCloserOptions::enabled`) and `GlobalBaOptions::enabled` is set.
 
 **Trigger.**
 - A run starts when GlobalBA applies a transaction of the current map that
@@ -164,7 +164,11 @@ merging (step 5) can reuse the propagation.
 - **`GlobalBaOptions`:**
   - `enabled` (true; only takes effect when loop closing is on);
   - `iterations` 10.
-- **`SlamOptions`** carries `GlobalBaOptions`.
+- **`Slam`** takes `GlobalBaOptions` as a constructor parameter after
+  `LoopCloserOptions` (there is no `SlamOptions`). It creates the
+  GlobalBA only with loop closing in effect: a vocabulary and
+  `LoopCloserOptions::enabled` (amended 2026-10-10, Task 5: without a
+  vocabulary no loop can be detected, so no idle thread is created).
 - **The apps:** `--no_global_ba`, for comparing the essential graph alone with
   the essential graph followed by global BA.
 
