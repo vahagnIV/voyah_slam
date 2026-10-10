@@ -4,7 +4,6 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <deque>
 #include <functional>
 #include <utility>
 #include <voyahslam/events/event_node.h>
@@ -25,14 +24,17 @@ namespace voyahslam::global_ba {
 //
 // Trigger: an applied transaction of the current map that adds a loop edge
 // (the correction at epoch N). After the inbox is drained, one run optimizes
-// the replica as it stands; transactions arriving meanwhile stay queued and
-// are applied after it.
-// Interruption: Stop(), or a waiting transaction that is a newer correction
+// a snapshot of the replica at epoch N (RunGlobalBa's contract).
+// Transactions arriving meanwhile are applied, and so released, at each poll
+// of should_stop: the Mapper's transaction pool aborts when exhausted and a
+// run on a large map lasts seconds, so none may be held for a run.
+// Interruption: Stop(), or an arrived transaction that is a newer correction
 // (a larger map epoch with a loop edge) or a new map (new_map or a newer map
-// id). An interrupted run publishes nothing; a newer correction starts a new
-// run once applied. The inbox cannot be peeked, so the stop check moves the
-// waiting events, unapplied and in order, to a backlog that the next drain
-// applies first (they were held in the inbox anyway).
+// id). An interrupted run publishes nothing; a newer correction applied
+// during the run starts a new run next, a new map drops it. A run interrupted
+// by Stop() is not resumed: after a restart there is no global BA until the
+// next loop correction.
+// The result carries the run's map id and epoch N.
 // Map ids: events of map 0 and of older maps are ignored; a new map clears the
 // replica (it clears itself) and drops a pending run.
 template <typename TFeatureExtractor>
@@ -44,7 +46,8 @@ public:
 
     // Start() and Stop() must be called from one controlling thread.
     void Start();
-    // Interrupts a running BA (it publishes nothing) and joins the worker.
+    // Interrupts a running BA (it publishes nothing and is not resumed by a
+    // later Start()) and joins the worker.
     void Stop();
 
     // Drains the inbox, applying every transaction, then runs a pending
@@ -57,7 +60,7 @@ public:
     // synchronously: never read while the worker runs.
     [[nodiscard]] const tracking::MapReplica<TFeatureExtractor>& replica() const { return replica_; }
     [[nodiscard]] size_t num_runs_started() const { return num_runs_started_; }
-    // Runs cut short by Stop() or a waiting newer correction or new map.
+    // Runs cut short by Stop() or an arrived newer correction or new map.
     [[nodiscard]] size_t num_runs_interrupted() const { return num_runs_interrupted_; }
     // Results dropped because max_events_in_flight GlobalBAFinished were in use.
     [[nodiscard]] size_t num_results_dropped() const { return num_results_dropped_; }
@@ -67,16 +70,21 @@ public:
     // Tests: `hook` is called on the GlobalBA thread before each run. Set it
     // while the worker is stopped.
     void set_run_hook(std::function<void()> hook) { run_hook_ = std::move(hook); }
+    // Tests: `hook` is called on the GlobalBA thread at each poll of a run's
+    // should_stop (before the first LM iteration and after each), before the
+    // inbox is checked. Set it while the worker is stopped.
+    void set_poll_hook(std::function<void()> hook) { poll_hook_ = std::move(hook); }
 
 private:
     void ApplyEvent(const events::Event& event);
     // Runs the global BA of the replica and publishes its result unless
     // interrupted.
     void Run();
-    // Moves every waiting event to waiting_; true iff one supersedes the run
-    // of (map_id, map_epoch).
-    bool CheckWaiting(map::MapId map_id, uint32_t map_epoch);
-    void Publish(GlobalBaSolution&& solution);
+    // Applies (and releases) every event in the inbox; true iff one
+    // supersedes the run of (map_id, map_epoch).
+    bool ApplyArrived(map::MapId map_id, uint32_t map_epoch);
+    // Publishes the result of the run of (map_id, map_epoch).
+    void Publish(map::MapId map_id, uint32_t map_epoch, GlobalBaSolution&& solution);
 
     const GlobalBaOptions options_;
     events::Listener inbox_listener_ = inbox_.GetListener();
@@ -84,14 +92,12 @@ private:
 
     // GlobalBA-thread state.
     tracking::MapReplica<TFeatureExtractor> replica_;
-    // Popped from the inbox during a run, not yet applied (oldest first);
-    // each is released once applied.
-    std::deque<events::Event*> waiting_;
     bool run_pending_ = false;
     size_t num_runs_started_ = 0;
     size_t num_runs_interrupted_ = 0;
     size_t num_results_dropped_ = 0;
     std::function<void()> run_hook_;
+    std::function<void()> poll_hook_;
 
     // Published with TryCreate: a result finished while every event is in
     // flight (a Mapper backlog) is dropped and counted; the map keeps its

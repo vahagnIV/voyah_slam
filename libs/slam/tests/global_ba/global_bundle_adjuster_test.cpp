@@ -25,6 +25,7 @@ using geometry::RigidTransformation;
 using geometry::TPoint3DF;
 
 constexpr size_t kNumFrames = 6;
+constexpr map::MapId kMap{1};
 
 // A deterministic scene (as GlobalBaTest's): a 7 x 5 grid of points at
 // depths 5 and 7 m in front of a camera moving 0.2 m to the right and turning
@@ -81,6 +82,8 @@ struct Result {
     std::vector<uint32_t> frames;  // sorted
     std::vector<uint32_t> points;  // sorted
     bool priority = false;
+    std::vector<std::pair<map::FrameId, RigidTransformation>> frame_poses;  // as published
+    std::vector<std::pair<map::MapPointId, TPoint3DF>> point_positions;
 };
 
 std::vector<uint32_t> Range(uint32_t n) {
@@ -93,7 +96,9 @@ std::vector<uint32_t> Range(uint32_t n) {
 // Mapper.
 class Harness {
 public:
-    explicit Harness(GlobalBaOptions options = {}) : global_ba_(options) {
+    // `pool_size`: the MapTransactions this harness can have in flight.
+    explicit Harness(GlobalBaOptions options = {}, size_t pool_size = 16)
+        : transaction_pool_(pool_size), global_ba_(options) {
         mapper_.ConnectAsync(global_ba_.inbox());
         global_ba_.AddObserver(capture_);
     }
@@ -107,7 +112,8 @@ public:
     }
 
     // Publishes a new map `map_id` at `map_epoch`: the scene's Frames at
-    // their true poses, each observing every point.
+    // their true poses, each observing every point (exactly), the points
+    // slightly off.
     void SendMap(map::MapId map_id, uint32_t map_epoch = 0) {
         Send(map_id, map_epoch, [](TTransaction& transaction) {
             const Scene& scene = TheScene();
@@ -128,7 +134,9 @@ public:
             transaction.ResizeNewPoints(static_cast<uint32_t>(scene.points.size()));
             for (size_t i = 0; i < scene.points.size(); ++i) {
                 const auto col = static_cast<Eigen::Index>(i);
-                transaction.new_positions.col(col) = scene.points[i];
+                // Off by up to 5 cm (deterministic): the BA iterates.
+                const double offset = 0.05 * (static_cast<double>(i % 5) - 2.0) / 2.0;
+                transaction.new_positions.col(col) = scene.points[i] + TPoint3DF(offset, -offset, offset);
                 transaction.new_descriptors.col(col).setZero();
                 transaction.new_normals.col(col) = TPoint3DF(0, 0, -1);
             }
@@ -140,8 +148,18 @@ public:
         Send(map_id, map_epoch, [](TTransaction&) {});
     }
 
+    // A transaction of map 1 at epoch 1 that culls Frame 5 and points 3 and
+    // 4, and moves Frame 2.
+    void SendEdit() {
+        Send(kMap, 1, [](TTransaction& transaction) {
+            transaction.removed_frames.push_back(map::FrameId{5});
+            transaction.removed_points = {{3}, {4}};
+            transaction.updated_poses.emplace_back(map::FrameId{2}, TheScene().poses[0]);
+        });
+    }
+
     // A loop correction at `map_epoch`: a loop edge between Frames a and b.
-    void SendCorrection(map::MapId map_id, uint32_t map_epoch, uint32_t a = 0, uint32_t b = kNumFrames - 1) {
+    void SendCorrection(map::MapId map_id, uint32_t map_epoch, uint32_t a = 0, uint32_t b = kNumFrames - 2) {
         Send(map_id, map_epoch, [&](TTransaction& transaction) {
             transaction.added_loop_edges.emplace_back(map::FrameId{a}, map::FrameId{b});
         });
@@ -168,6 +186,8 @@ public:
             result.map_id = finished.map_id;
             result.map_epoch = finished.map_epoch;
             result.priority = finished.priority;
+            result.frame_poses = finished.frame_poses;
+            result.point_positions = finished.point_positions;
             for (const auto& [id, pose] : finished.frame_poses) result.frames.push_back(id.value);
             for (const auto& [id, position] : finished.point_positions) result.points.push_back(id.value);
             std::sort(result.frames.begin(), result.frames.end());
@@ -177,11 +197,19 @@ public:
     }
 
     GlobalBundleAdjuster<Extractor>& global_ba() { return global_ba_; }
+    // Sends that found every transaction in flight (none was published).
+    [[nodiscard]] size_t num_exhausted() const { return num_exhausted_; }
+    [[nodiscard]] size_t num_sent() const { return num_sent_; }
 
 private:
     template <typename TFill>
     void Send(map::MapId map_id, uint32_t map_epoch, TFill fill) {
-        TTransaction* transaction = transaction_pool_.Create();
+        TTransaction* transaction = transaction_pool_.TryCreate();
+        if (transaction == nullptr) {
+            ++num_exhausted_;
+            return;
+        }
+        ++num_sent_;
         transaction->map_id = map_id;
         transaction->map_epoch = map_epoch;
         fill(*transaction);
@@ -196,9 +224,9 @@ private:
     events::AsyncObserver capture_;
     events::Listener listener_ = capture_.GetListener();
     bool hold_ = false;
+    size_t num_exhausted_ = 0;
+    size_t num_sent_ = 0;
 };
-
-constexpr map::MapId kMap{1};
 
 // Ordinary transactions start nothing; a correction starts one run whose
 // result covers every Frame and point at the correction's epoch, and is
@@ -376,6 +404,90 @@ TEST(GlobalBundleAdjusterTest, DropsResultWhenPoolExhausted) {
     const std::vector<Result> results = harness.Take();
     ASSERT_EQ(results.size(), 1u);
     EXPECT_EQ(results[0].map_epoch, 1u);
+}
+
+// A run applies (and so releases) each transaction it finds at a poll: the
+// Mapper's pool never waits for the run to end. 2 transactions per poll from a
+// pool of 4 run out by the third poll if they are held.
+TEST(GlobalBundleAdjusterTest, RunReleasesTransactionsAtEachPoll) {
+    constexpr size_t kPool = 4;
+    Harness harness({}, kPool);
+    harness.SendMap(kMap);
+    harness.SendCorrection(kMap, 2);
+    size_t polls = 0;
+    harness.global_ba().set_poll_hook([&] {
+        ++polls;
+        harness.SendOrdinary(kMap, 2);
+        harness.SendOrdinary(kMap, 2);
+    });
+    const std::vector<Result> results = harness.Run();
+    harness.global_ba().set_poll_hook({});
+
+    ASSERT_GT(polls, kPool);  // more sent during the run than the pool holds
+    EXPECT_EQ(harness.num_exhausted(), 0u);
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_EQ(results[0].map_epoch, 2u);
+    EXPECT_EQ(harness.global_ba().num_runs_interrupted(), 0u);
+}
+
+// A newer correction that arrives after the BA started iterating (at its
+// second poll) interrupts it too.
+TEST(GlobalBundleAdjusterTest, NewerCorrectionInterruptsBetweenIterations) {
+    Harness harness;
+    harness.SendMap(kMap);
+    harness.SendCorrection(kMap, 1);
+    size_t polls = 0;
+    harness.global_ba().set_poll_hook([&] {
+        if (++polls == 2) harness.SendCorrection(kMap, 2, 1, 4);
+    });
+    const std::vector<Result> results = harness.Run();
+    harness.global_ba().set_poll_hook({});
+
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_EQ(results[0].map_epoch, 2u);
+    EXPECT_EQ(harness.global_ba().num_runs_started(), 2u);
+    EXPECT_EQ(harness.global_ba().num_runs_interrupted(), 1u);
+}
+
+// RunGlobalBa's contract: it optimizes the replica as it stood at its first
+// poll. A transaction applied during the run (culling a Frame and points,
+// moving another Frame) changes neither the problem nor the published result,
+// which carries the run's map id and epoch.
+TEST(GlobalBundleAdjusterTest, ChangesDuringRunDoNotAffectResult) {
+    std::vector<Result> undisturbed;
+    {
+        Harness harness;
+        harness.SendMap(kMap);
+        harness.SendCorrection(kMap, 1);
+        undisturbed = harness.Run();
+    }
+    ASSERT_EQ(undisturbed.size(), 1u);
+
+    Harness harness;
+    harness.SendMap(kMap);
+    harness.SendCorrection(kMap, 1);
+    size_t polls = 0;
+    harness.global_ba().set_poll_hook([&] {
+        if (++polls == 1) harness.SendEdit();
+    });
+    const std::vector<Result> results = harness.Run();
+    harness.global_ba().set_poll_hook({});
+
+    ASSERT_GT(polls, 1u);  // the edit was applied before the run ended
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_EQ(results[0].map_id, kMap);
+    EXPECT_EQ(results[0].map_epoch, 1u);
+    EXPECT_EQ(results[0].frames, Range(kNumFrames));
+    EXPECT_EQ(results[0].points, Range(static_cast<uint32_t>(TheScene().points.size())));
+    ASSERT_EQ(results[0].frame_poses.size(), undisturbed[0].frame_poses.size());
+    for (size_t i = 0; i < results[0].frame_poses.size(); ++i) {
+        EXPECT_EQ(results[0].frame_poses[i].first, undisturbed[0].frame_poses[i].first);
+        EXPECT_EQ(results[0].frame_poses[i].second.rotation(), undisturbed[0].frame_poses[i].second.rotation());
+        EXPECT_EQ(results[0].frame_poses[i].second.translation(),
+                  undisturbed[0].frame_poses[i].second.translation());
+    }
+    EXPECT_EQ(results[0].point_positions, undisturbed[0].point_positions);
+    EXPECT_EQ(harness.global_ba().replica().num_keyframes(), kNumFrames - 1);
 }
 
 } // namespace

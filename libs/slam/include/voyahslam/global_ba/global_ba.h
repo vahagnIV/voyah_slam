@@ -45,7 +45,10 @@ struct GlobalBaSolution {
 // or the oldest surviving if it was culled) is fixed; mono poses are SE3, with
 // no scale variable. `should_stop` is polled before the first iteration and
 // after every iteration. nullopt if interrupted, on a map without Frames,
-// points or observations, or on a non-finite result. Reads the replica only.
+// points or observations, or on a non-finite result. Reads the replica only,
+// and only before the first should_stop poll: the problem is a self-contained
+// snapshot, so the replica may change once should_stop is first called (the
+// GlobalBundleAdjuster applies arriving transactions there).
 template <typename TFeatureExtractor>
 std::optional<GlobalBaSolution> RunGlobalBa(const tracking::MapReplica<TFeatureExtractor>& replica,
                                             const GlobalBaOptions& options,

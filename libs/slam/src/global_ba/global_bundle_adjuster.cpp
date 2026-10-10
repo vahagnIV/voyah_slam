@@ -7,13 +7,26 @@
 #include <voyahslam/global_ba/global_bundle_adjuster.h>
 
 namespace voyahslam::global_ba {
+namespace {
+
+// True iff `event` supersedes the run of (map_id, map_epoch): a transaction
+// of a non-zero, not older map that starts a new map (new_map or a newer map
+// id) or is a newer correction (a larger epoch with a loop edge).
+template <typename TFeatureExtractor>
+bool Supersedes(const events::Event& event, map::MapId map_id, uint32_t map_epoch) {
+    if (event.map_id.value == 0 || event.type != events::EventType::MapTransaction || event.map_id < map_id) {
+        return false;
+    }
+    const auto& transaction = static_cast<const events::MapTransaction<TFeatureExtractor>&>(event);
+    return transaction.new_map || event.map_id > map_id ||
+           (transaction.map_epoch > map_epoch && !transaction.added_loop_edges.empty());
+}
+
+} // namespace
 
 template <typename TFeatureExtractor>
 GlobalBundleAdjuster<TFeatureExtractor>::~GlobalBundleAdjuster() {
     worker_.Stop();
-    for (events::Event* event : waiting_) {
-        event->recycle_(event);
-    }
 }
 
 template <typename TFeatureExtractor>
@@ -36,17 +49,10 @@ void GlobalBundleAdjuster<TFeatureExtractor>::Stop() {
 
 template <typename TFeatureExtractor>
 bool GlobalBundleAdjuster<TFeatureExtractor>::ProcessPending() {
-    // The events a run moved aside come first: they were popped before
-    // anything still in the inbox. Each is released once applied, so no
-    // transaction is held during a run beyond those that arrive meanwhile.
+    // Every event is applied on receipt and so released at once, here and at
+    // each poll of a run: GlobalBA never holds the Mapper's pooled
+    // transactions.
     bool processed = false;
-    while (!waiting_.empty()) {
-        events::Event* event = waiting_.front();
-        waiting_.pop_front();
-        processed = true;
-        ApplyEvent(*event);
-        event->recycle_(event);
-    }
     while (const events::Event* event = inbox_listener_.GetNextEvent()) {
         processed = true;  // acknowledged by the next GetNextEvent()
         ApplyEvent(*event);
@@ -81,22 +87,14 @@ void GlobalBundleAdjuster<TFeatureExtractor>::ApplyEvent(const events::Event& ev
 }
 
 template <typename TFeatureExtractor>
-bool GlobalBundleAdjuster<TFeatureExtractor>::CheckWaiting(map::MapId map_id, uint32_t map_epoch) {
-    // The inbox cannot be peeked: waiting events move, unapplied and in
-    // order, to waiting_, which the next ProcessPending() applies first.
+bool GlobalBundleAdjuster<TFeatureExtractor>::ApplyArrived(map::MapId map_id, uint32_t map_epoch) {
+    // Each event is judged against the run, then applied and released: the
+    // run optimizes its own snapshot (RunGlobalBa's contract), so the
+    // replica may move on under it.
     bool superseded = false;
-    events::Event* event = nullptr;
-    while (inbox_.TryPop(event)) {
-        waiting_.push_back(event);
-        if (event->map_id.value == 0 || event->type != events::EventType::MapTransaction ||
-            event->map_id < map_id) {
-            continue;
-        }
-        const auto& transaction = static_cast<const events::MapTransaction<TFeatureExtractor>&>(*event);
-        if (transaction.new_map || event->map_id > map_id ||
-            (transaction.map_epoch > map_epoch && !transaction.added_loop_edges.empty())) {
-            superseded = true;  // a new map, or a newer correction
-        }
+    while (const events::Event* event = inbox_listener_.GetNextEvent()) {
+        superseded = Supersedes<TFeatureExtractor>(*event, map_id, map_epoch) || superseded;
+        ApplyEvent(*event);
     }
     return superseded;
 }
@@ -112,7 +110,13 @@ void GlobalBundleAdjuster<TFeatureExtractor>::Run() {
     bool interrupted = false;
     // Sticky: once true, the BA stops at this poll.
     const std::function<bool()> should_stop = [&] {
-        interrupted = interrupted || stop_requested() || CheckWaiting(map_id, map_epoch);
+        if (interrupted) {
+            return true;
+        }
+        if (poll_hook_) {
+            poll_hook_();
+        }
+        interrupted = stop_requested() || ApplyArrived(map_id, map_epoch);
         return interrupted;
     };
     const auto start = std::chrono::steady_clock::now();
@@ -129,20 +133,22 @@ void GlobalBundleAdjuster<TFeatureExtractor>::Run() {
     }
     log_->info("Global BA of map {} at epoch {}: {} Frames, {} points in {:.1f} ms", map_id.value, map_epoch,
                solution->frame_poses.size(), solution->point_positions.size(), ms);
-    Publish(std::move(*solution));
+    Publish(map_id, map_epoch, std::move(*solution));
 }
 
 template <typename TFeatureExtractor>
-void GlobalBundleAdjuster<TFeatureExtractor>::Publish(GlobalBaSolution&& solution) {
+void GlobalBundleAdjuster<TFeatureExtractor>::Publish(map::MapId map_id, uint32_t map_epoch,
+                                                      GlobalBaSolution&& solution) {
     auto* event = result_pool_.TryCreate();
     if (event == nullptr) {
         ++num_results_dropped_;
         log_->warn("Global BA result of map {} at epoch {} dropped: {} GlobalBAFinished events in flight",
-                   replica_.map_id().value, replica_.map_epoch(), options_.max_events_in_flight);
+                   map_id.value, map_epoch, options_.max_events_in_flight);
         return;
     }
-    event->map_id = replica_.map_id();
-    event->map_epoch = replica_.map_epoch();
+    // The run's: the replica may have moved on since.
+    event->map_id = map_id;
+    event->map_epoch = map_epoch;
     event->frame_poses = std::move(solution.frame_poses);
     event->point_positions = std::move(solution.point_positions);
     // Urgent: the Mapper's running local BA stops for the merge.

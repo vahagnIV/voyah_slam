@@ -72,16 +72,27 @@ result is merged into a map that kept changing meanwhile.
   as the end of ORB-SLAM3's `CorrectLoop` is.
 
 **The run.**
-- It optimizes the replica as it stands at epoch N.
-- While it runs, incoming transactions stay queued and are applied after it.
+- It optimizes a snapshot of the replica as it stands at epoch N:
+  `RunGlobalBa` builds a self-contained problem before its first
+  `should_stop` poll and never reads the replica again.
+- While it runs, each incoming transaction is applied to the replica (and so
+  released) at the next `should_stop` poll, after it is checked for
+  interruption (below). The result still carries epoch N.
+- Why: the Mapper's transaction pool (256) aborts when exhausted, and a run
+  on a large map lasts seconds, at about 2 transactions per KeyFrame.
+  Holding them for the run would exhaust it (the LoopCloser's "apply on
+  receipt" rule, for the same reason).
 
 **Interruption.**
-- BundleAdjust's `should_stop` callback looks at GlobalBA's inbox. It returns
-  true when a waiting transaction either:
+- BundleAdjust's `should_stop` callback drains GlobalBA's inbox (applying
+  each transaction, as above). It returns true when a drained transaction
+  either:
   - is a newer correction: larger `map_epoch` and a new loop edge; or
-  - starts a new map (`new_map`).
+  - starts a new map (`new_map` or a newer map id).
+  It also returns true once `Stop()` is requested; a run stopped so is not
+  resumed after a restart.
 - An interrupted run publishes nothing.
-- After applying the queued transactions, a newer correction starts a new run.
+- A newer correction applied during the run starts a new run next.
   This mirrors ORB-SLAM3 aborting the running GBA from `CorrectLoop`.
 
 **New map.** A new map clears the replica and drops any pending run.
