@@ -233,10 +233,18 @@ struct Loop {
     std::vector<std::pair<map::MapPointId, map::MapPointId>> matched_points;
 };
 
-// A LoopCloser fed hand-built MapTransactions in place of the Mapper.
+// The default options with loop closing enabled (it is opt-in).
+LoopCloserOptions EnabledOptions() {
+    LoopCloserOptions options;
+    options.enabled = true;
+    return options;
+}
+
+// A LoopCloser fed hand-built MapTransactions in place of the Mapper;
+// enabled unless `options` says otherwise.
 class Harness {
 public:
-    explicit Harness(std::shared_ptr<const TVocabulary> vocabulary, LoopCloserOptions options = {})
+    explicit Harness(std::shared_ptr<const TVocabulary> vocabulary, LoopCloserOptions options = EnabledOptions())
         : loop_closer_(options, std::move(vocabulary)) {
         mapper_.ConnectAsync(loop_closer_.inbox());
         tracker_.ConnectAsync(loop_closer_.inbox());
@@ -655,7 +663,7 @@ TEST(LoopCloserTest, FailedConfirmationsDropPendingRegion) {
 // max_events_in_flight 1, held by the consumer) a loop is dropped, not an
 // abort, and the next free event serves the next detection.
 TEST(LoopCloserTest, DropsLoopWhileEventsAreInFlight) {
-    LoopCloserOptions options;
+    LoopCloserOptions options = EnabledOptions();
     options.max_events_in_flight = 1;
     Harness harness(MakeRegionVocabulary(), options);
     LoopScene scene(1, Revisit::Drifted, MonoDrift(), false);
@@ -743,7 +751,7 @@ TEST(LoopCloserTest, NoVocabularyDoesNothing) {
 }
 
 LoopCloserOptions WithoutNormalGate() {
-    LoopCloserOptions options;
+    LoopCloserOptions options = EnabledOptions();
     options.max_normal_disagreement = 1.0;
     return options;
 }
@@ -820,8 +828,22 @@ TEST(LoopCloserTest, RefinementRejectedByNormals) {
     EXPECT_GE(stats.normal_rejections[0].agreement.disagreement, 0.9);
 }
 
-// Disabled (the apps' --no_loop_closing), the LoopCloser does what it does
-// without a vocabulary, which the Mapper and the Tracker keep.
+// Loop closing is opt-in (user decision 2026-10-10): with the default
+// options and a vocabulary, the LoopCloser keeps no replica and publishes no
+// loop on a scene where an enabled one does (DetectsLoopAfterThreeConfirmations).
+TEST(LoopCloserTest, OffByDefault) {
+    Harness harness(MakeRegionVocabulary(), LoopCloserOptions{});
+    LoopScene scene(1, Revisit::Drifted, MonoDrift(), false);
+    EXPECT_TRUE(scene.PublishStartAndMiddle(harness).empty());
+    for (size_t k = 0; k < kReturnFrames; ++k) {
+        EXPECT_TRUE(scene.PublishReturn(harness, k).empty()) << "L" << k;
+    }
+    EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), 0u);
+}
+
+// Disabled (the default; the apps without --loop_closing), the LoopCloser
+// does what it does without a vocabulary, which the Mapper and the Tracker
+// keep.
 TEST(LoopCloserTest, DisabledDoesNothing) {
     LoopCloserOptions options;
     options.enabled = false;
@@ -838,7 +860,7 @@ TEST(LoopCloserTest, DisabledDoesNothing) {
 // The ORB-SLAM3 source values (LoopClosing.cc, KeyFrameDatabase.cc).
 TEST(LoopCloserOptionsTest, OrbSlam3Defaults) {
     const LoopCloserOptions options;
-    EXPECT_TRUE(options.enabled);
+    EXPECT_FALSE(options.enabled);  // opt-in, user decision 2026-10-10
     EXPECT_DOUBLE_EQ(options.max_normal_disagreement, 0.5);  // user decision, not ORB-SLAM3
     EXPECT_EQ(options.min_map_frames, 12u);
     EXPECT_EQ(options.num_candidates, 3u);

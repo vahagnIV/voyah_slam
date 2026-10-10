@@ -27,8 +27,8 @@ namespace voyahslam::loop_closing {
 // Detects loops on its own replica of the map and publishes LoopDetected
 // (ORB-SLAM3 NewDetectCommonRegions); the Mapper closes them. Consumes the
 // Mapper's MapTransactions; runs on its own thread; never modifies map
-// objects. Without a vocabulary, or disabled (LoopCloserOptions::enabled),
-// it only acknowledges what it receives.
+// objects. Opt-in: unless LoopCloserOptions::enabled is set (it is off by
+// default), or without a vocabulary, it only acknowledges what it receives.
 //
 // Every Frame a transaction adds is a query, once the map has min_map_frames
 // Frames. A pending region (one confirmed at least once) is first checked

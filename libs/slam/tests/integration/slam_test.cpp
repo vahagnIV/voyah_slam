@@ -862,8 +862,10 @@ LoopRun RunLoop(const TSequence& sequence, size_t init_frames, bool monocular,
                 const mapping::MapperOptions& mapper_options, bool loop_closing) {
     std::vector<geometry::RigidTransformation> truth;
     for (const auto& frame : sequence.frames) truth.push_back(frame.T_cw);
+    // Without loop closing: the default options, which leave it off (opt-in)
+    // although the run has a vocabulary.
     loop_closing::LoopCloserOptions loop_closer_options;
-    loop_closer_options.enabled = loop_closing;
+    if (loop_closing) loop_closer_options.enabled = true;
     ProtocolRecorder recorder;
     RunCounts counts;
     RunSequence(sequence, init_frames, mapper_options, recorder, counts,
@@ -941,8 +943,9 @@ LoopRun RunLoop(const TSequence& sequence, size_t init_frames, bool monocular,
     return run;
 }
 
-// Runs `sequence` (a LoopOptions loop) without and with loop closing and
-// expects: without, no loop and tracking to the end; with, the loop detected
+// Runs `sequence` (a LoopOptions loop) without loop closing (the default
+// options: it is opt-in) and with it enabled, and expects: without, no
+// LoopDetected and tracking to the end; with, the loop detected
 // on the return to the first lap's view and corrected, one map, no tracking
 // loss across the correction (the Tracker follows a real Mapper correction),
 // and an end error, measured, at most a third of the run without. Records

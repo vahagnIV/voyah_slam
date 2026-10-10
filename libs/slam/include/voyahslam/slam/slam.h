@@ -23,7 +23,8 @@ public:
     using TLoopCloser = loop_closing::LoopCloser<TFeatureExtractor>;
 
     // `vocabulary` (may be null) goes to the Mapper, the Tracker and the LoopCloser; it is
-    // immutable, so the threads share it without locks. Without it there is no loop closing.
+    // immutable, so the threads share it without locks. Loop closing is opt-in: it needs the
+    // vocabulary and `loop_closer_options.enabled` (off by default).
     explicit Slam(mapping::MapperOptions mapper_options = {},
                   tracking::TrackerOptions tracker_options = {},
                   std::shared_ptr<const typename TMapper::TVocabulary> vocabulary = nullptr,

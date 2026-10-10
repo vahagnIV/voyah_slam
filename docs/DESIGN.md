@@ -475,8 +475,8 @@ reference applications:
 Usage: `<app> <dataset_root> [--rate=R] [--max-frames=N]` (rate 1 = real
 time, 0 = as fast as possible). Both apps print lateness and load/extract
 timings. Further options: `--show`, `--viewer`, `--trajectory_out <file>`,
-`--vocabulary <file.bin>`, `--no_loop_closing` (the vocabulary then serves
-relocalization only), `--drop_frames a:b`.
+`--vocabulary <file.bin>`, `--loop_closing` (opt-in, needs the vocabulary;
+off by default, see "Loop Closing"), `--drop_frames a:b`.
 
 **`EurocDatasetReader`** reads the EuRoC layout (`mav0/cam{0,1}/data.csv`,
 `data/<ns>.png`) used by EuRoC MAV and TUM-VI. Calibration: Kalibr
@@ -1801,6 +1801,22 @@ and scale for mono), following ORB-SLAM3's visual-only `LoopClosing`
 for the algorithm, its thresholds (checked against the ORB-SLAM3 source) and
 its order. Global BA is step 4c, map merging step 5 (TODO).
 
+**Status (2026-10-10): implemented, opt-in, off by default.**
+- *What works:* loops on synthetic scenes, and revisits of nearby views. In
+  the integration tests the end error with loop closing is 0.04–0.15 of the
+  error without, with the scale drift corrected. On corridor1, stereo loops
+  between nearby views correct in 231–688 ms with a clean next BA.
+- *What fails:* on corridor1 it makes the ATE worse. Same-heading
+  look-alikes (a corridor pattern repeating 7–30 m apart) pass every gate,
+  and correcting one breaks the map. Mono goes from 0.341 / 0.500 m without
+  to 0.679 / 0.669 m with; stereo from 0.098 / 0.138 m to 1.295 / 18.16 m.
+- *Normal gate weakness:* once a bad correction has rotated the map, the
+  gate also blocks the true return (below).
+- *Default:* off. Enable it with `LoopCloserOptions::enabled` or the apps'
+  `--loop_closing`.
+- *Next:* look-alike rejection is the first item of roadmap step 6 (TUM-VI
+  tuning).
+
 | ORB-SLAM3 | Ours |
 |---|---|
 | LoopClosing detects and corrects, pausing LocalMapping | The LoopCloser only detects, on its own replica; the Mapper corrects and does no local mapping meanwhile |
@@ -1854,9 +1870,11 @@ S_cw folds its scale into the translation as `[R, t/s]` (ORB-SLAM3).
 
 **Detection (LoopCloser).** The LoopCloser keeps its own `MapReplica` (with
 its `FrameDatabase` and covisibility) fed by the Mapper's transactions, and
-gets the immutable vocabulary through `Slam`. Without a vocabulary, or with
-`LoopCloserOptions::enabled` false (the apps' `--no_loop_closing`), it only
-acknowledges events and everything else behaves as before. Every Frame of
+gets the immutable vocabulary through `Slam`. Loop closing is **opt-in**:
+unless `LoopCloserOptions::enabled` is set (default false; the apps'
+`--loop_closing`), or without a vocabulary, the LoopCloser only acknowledges
+events and everything else behaves as before (the Tracker and the Mapper
+still use the vocabulary). Every Frame of
 `added_frames` is a query once the map has `min_map_frames` (12) Frames.
 - **Candidates** (`DetectNBestCandidates`): `FrameDatabase::Query` hits
   minus the query's covisible Frames, kept above int(0.8 · max) common
@@ -1898,6 +1916,13 @@ acknowledges events and everything else behaves as before. Every Frame of
   - *What it misses:* same-heading look-alikes, such as frames 2215–2236
     against 692–807 (a corridor pattern repeating 14.9 m apart), have
     consistent normals and are not caught (TODO).
+  - *Map-frame weakness:* the normals are compared in map coordinates, so
+    the gate assumes that the two ends of a loop are rotated by less than
+    60° against each other in the map. Once a bad correction has rotated
+    them (corridor1, after a same-heading false loop), the gate blocks the
+    true return: in the fix-round-1 smoke it rejected 70–188 true-return
+    candidates per run, 0.1–1.0 m apart. Large mono rotation drift would do
+    the same (TODO).
 - **`LoopDetected`** (priority: it interrupts the Mapper's local BA):
   `query_map_id`, `match_map_id` (equal for now), `query_frame`,
   `match_frame`, `S_query_match` (scale 1 for stereo) and the matched
@@ -1959,8 +1984,9 @@ T_ref_new (the first Frame observing its matches if the reference is gone);
 the velocity is unchanged. For mono the relative translation and the
 velocity stay in the old scale for that one frame (TODO).
 
-**Apps.** `--no_loop_closing` disables loop closing while the vocabulary
-still serves relocalization (`LoopCloserOptions::enabled`).
+**Apps.** `--loop_closing` enables loop closing (`LoopCloserOptions::enabled`;
+it needs `--vocabulary`). Without it the vocabulary serves relocalization and
+triangulation only. The apps print whether loop closing is on.
 
 **Tests.**
 - **`voyah_algs`:**
@@ -2031,16 +2057,18 @@ still serves relocalization (`LoopCloserOptions::enabled`).
     | Stereo | 0.0157 / 0.0023 m | – |
 
     Over seeds 1–5, the ratio is at most 0.18 for mono and 0.25 for stereo.
-- **ThreadSanitizer** (scratch tree, `-fsanitize=thread -O1 -g`,
-  2026-10-09, at e529d07, before the normal gate): `voyah_slam_tests` (183)
-  and `voyah_integration_tests` (15, the loop tests included) pass with no
+- **ThreadSanitizer** (scratch tree, `-fsanitize=thread -O1 -g`): clean on
+  2026-10-09 at e529d07, with 183 + 15 tests. Re-run on 2026-10-10 after the
+  normal gate and the opt-in default: `voyah_slam_tests` (186) and
+  `voyah_integration_tests` (15, the loop tests included) pass with no
   warnings.
 
 **Smoke, fix round 1, with the normal gate.** Setup:
 - corridor1 1024, the full sequence of 5990 frames;
 - Release, ORB 1500, `--vocabulary ORBvoc.bin`, `--rate=0`;
 - debug logs, headless, runs in sequence;
-- 2026-10-09, two runs each with and without `--no_loop_closing`;
+- 2026-10-09, two runs each with and without loop closing (then switched off
+  with `--no_loop_closing`, since replaced by the opt-in `--loop_closing`);
 - the previous round (before the gate) is summarized below the table.
 
 How to read the table:
@@ -2382,12 +2410,13 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-09 | Detection step 4 follows ORB: after RANSAC, the candidate window's points are projected into the query through the RANSAC Sim3 into a fresh match list (th 8, ratio 1.5, ≥ 50) before `OptimizeSim3`; a later query's refinement re-projects with the optimized Sim3; ORB's match-window widening for fewer than 10 covisibles is skipped. | ORB's source re-projects with the unoptimized guess (apparently a bug); the widening only matters on sparse maps (TODO). |
 | 2026-10-09 | The LoopCloser does not suppress duplicate loops and is not wired to `TrackingLost` in `Slam`; the Mapper ignores a closed loop and another map's loop. Features without points are dropped from `matched_points`. | Avoids blocking Tracker events on the LoopCloser; costs some detection work and some fusable pairs (TODO). |
 | 2026-10-09 | Mono correction: point reference distances are not rescaled (ORB `UpdateNormalAndDepth`); the middle Frames' rotation error under the identity-weighted essential graph (2.0° → 3.2° in the ring test) is accepted; the Tracker's relative last-to-reference translation and velocity stay in the old scale for one frame. | Mapper and replicas stay consistent; the cost is scale-gated misses until points are re-observed and one weaker prediction (TODO). |
-| 2026-10-09 | `LoopCloserOptions::enabled` (default true) and the apps' `--no_loop_closing`: disabled, the LoopCloser behaves as without a vocabulary while the Tracker and Mapper keep theirs. | A no-loop baseline with otherwise identical behaviour (BoW triangulation, relocalization) for the smoke runs and the integration tests. |
+| 2026-10-09 | `LoopCloserOptions::enabled` (default true at first; default false since 2026-10-10, below) and the apps' `--no_loop_closing` (replaced by `--loop_closing`): disabled, the LoopCloser behaves as without a vocabulary while the Tracker and Mapper keep theirs. | A no-loop baseline with otherwise identical behaviour (BoW triangulation, relocalization) for the smoke runs and the integration tests. |
 | 2026-10-09 | `Mapper::num_frame_evaluations()` counts a `FrameTracked` once the Frame it created, if any, is published and refined; `stale_epoch_skipped()` counts `FrameTracked` of an older epoch. The integration tests' `RunSetup::lock_step` feeds each frame once the previous is tracked and the Mapper has handled every `FrameTracked` (evaluated, skipped or stale) and refined every Frame it created. | With the count before the creation a lock-step run raced the Mapper; lock-step takes the Tracker and Mapper out of thread timing (the LoopCloser is not gated, so when a correction arrives still can vary; three runs agree to four digits). |
 | 2026-10-09 | `SlamTest.{Mono,Stereo}ClosesLoop`: a synthetic outward-looking loop (450° at 1.5° per frame) with place words; end error (last 20 frames, relative to the first-lap Frame of the same true pose in the final map, mono in its local scale; required to be measured in both runs) with loop closing ≤ 1/3 of without, no tracking loss across the correction; mono over seeds 1–3, where every seed whose end-of-run scale drift against truth exceeds 2 % without loop closing (some must) has it cut to at most a third with it. Measured mono 0.0676 / 0.0101, 0.1139 / 0.0157, 0.1429 / 0.0060 m and scale drift 5.5 / 0.4, 0.7 / 1.4, 4.6 / 0.5 %; stereo 0.0157 / 0.0023 m (without / with). | In an exact synthetic scene drift is a random walk; its scale part varies by scene (0.3–6 % over seeds 1–5), so the scale check needs a seed range, and it checks the correction, not only the detected Sim3 scale. |
 | 2026-10-09 | (Task 8 ruling) Before any fix for the corridor1 false loops, diagnose whether they come from a fidelity bug or from an inherent weakness of ORB-SLAM3's gates. Result (`.superpowers/sdd/2026-10-09-loop-closing/false-loop-diagnosis.md`): inherent. Every deviation from ORB-SLAM3's source makes our chain stricter; an ORB-exact chain accepts the stereo 2262→1587 loop with 81 final matches (ours 82), and a full ORB-exact run accepts another false loop at exactly 80 (SE3 0.789 m against 0.077 m without loop closing). | A fix aimed at a fidelity bug would have missed; the gates must be extended instead. |
 | 2026-10-09 | **User decision:** the LoopCloser adds a normal-consistency gate that ORB-SLAM3 does not have. A candidate (after step 5), a covisible confirmation, or a later query's refinement is rejected when more than `LoopCloserOptions::max_normal_disagreement` (0.5) of its final matched pairs (own map point, matched map point) have normals more than 60° apart. Pairs with an undefined normal are skipped. Not addressed: same-heading look-alikes (14.9 m translational repeats, normals consistent), and verifying a correction before publishing it (rejected option); both in TODO. | The diagnosis measured 0.96–1.00 of the pairs disagreeing on opposite-facing false loops, against 0.00–0.05 on true loops: a wide margin on both sides of 0.5. A deliberate deviation from ORB-SLAM3. |
 | 2026-10-09 | Loop-closing smoke result (corridor1 full, Release, `--vocabulary`, two runs each with and without `--no_loop_closing`; "Loop Closing"). Before the normal gate (e529d07): every loop-closing run corrected an opposite-facing false loop that broke the map (mono ATE Sim3 0.652 m against 0.316 m without, and 2 maps in run 2; stereo 4 maps in both runs against 1 map at SE3 0.077 m). With the gate (fix round 1): every opposite-facing false loop was rejected (0.84–1.00) and every run keeps one map, but each run corrected a same-heading false loop 7–30 m apart, after which, in three of the four runs, the gate also rejected the true returns: mono 0.679 / 0.669 m against 0.341 / 0.500 m, stereo 1.295 / 18.16 m against 0.098 / 0.138 m. The Musts are **missed**; nothing was tuned. | The cause is established by the diagnosis (inherent in ORB-SLAM3's visual gates) and by the smoke: same-heading look-alikes are the remaining false loops, left for a user decision (TODO). |
+| 2026-10-10 | **User decision:** loop closing is **opt-in and off by default**. `LoopCloserOptions::enabled` defaults to false, so a `Slam` with a vocabulary detects no loops unless it is enabled; relocalization and BoW triangulation keep using the vocabulary. The apps' `--no_loop_closing` is replaced by an opt-in `--loop_closing`. The branch merges as "implemented, opt-in". | Fix-round-1 smoke (corridor1, with the normal gate): every run keeps one map, but each corrects at least one same-heading look-alike (7–30 m apart), and the ATE with loop closing is worse than without (mono Sim3 0.679 / 0.669 m against 0.341 / 0.500 m; stereo SE3 1.295 / 18.16 m against 0.098 / 0.138 m). On synthetic loops it works (end error 0.04–0.15 of the error without). Next: look-alike rejection as the first item of roadmap step 6 (TUM-VI tuning). |
 
 ## 9. Open Questions
 
@@ -2597,9 +2626,10 @@ branch → review → merge to `master`. Update this document at the end.
   epoch; `geometry::Sim3`, `SolveSim3Ransac`, `OptimizeSim3`,
   `OptimizeEssentialGraph` (g2o `types_sim3`); LoopCloser replica and ORB-SLAM3
   common-region detection; Mapper correction as one transaction; Tracker
-  shift; `--no_loop_closing`; the normal-consistency gate (user decision)
-  (see "Loop Closing"). The synthetic loop tests pass; the corridor1 smoke
-  Musts are missed (same-heading false loops, TODO).
+  shift; the normal-consistency gate (user decision); **opt-in**
+  (`--loop_closing`, off by default; user decision 2026-10-10) (see "Loop
+  Closing"). The synthetic loop tests pass; the corridor1 smoke Musts are
+  missed (same-heading look-alikes, roadmap step 6).
 
 **Required follow-up:**
 - Decide `MapPointStorage` growth / compaction (Open Question 2); ids are
@@ -2615,6 +2645,7 @@ branch → review → merge to `master`. Update this document at the end.
   then global BA in its own thread (step 4c); relocalization into other maps
   comes with map merging (step 5).
 - Event pool lifetime (Open Question 25).
-- Test suite (2026-10-09): 643 tests (627 `unit`, 15 `integration`, 1
-  `vocabulary`); `check` about 4.5 s, `check_all` about 17 s, set by
-  `SlamTest.MonoClosesLoop` (about 14 s).
+- Test suite (2026-10-10): 644 tests (628 `unit`, 15 `integration`, 1
+  `vocabulary`); `check` about 5.5 s, `check_all` 17–25 s, set by
+  `SlamTest.MonoClosesLoop` (14–25 s: its lock-step runs are bursty, so the
+  time follows the CPU's frequency scaling).

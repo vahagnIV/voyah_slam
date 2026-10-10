@@ -73,8 +73,8 @@ Debug (tree `cmake-build-debug/build/Debug`):
 conan install . --output-folder=cmake-build-debug --build=missing -s build_type=Debug
 cmake --preset conan-debug
 cmake --build cmake-build-debug/build/Debug -j"$(nproc)"
-cmake --build cmake-build-debug/build/Debug --target check       # unit tests (627, ~4.5 s)
-cmake --build cmake-build-debug/build/Debug --target check_all   # every test (643, ~16 s)
+cmake --build cmake-build-debug/build/Debug --target check       # unit tests (628, ~5.5 s)
+cmake --build cmake-build-debug/build/Debug --target check_all   # every test (644, 17-25 s)
 ```
 
 `check` runs `ctest -L unit`, `check_all` runs every label (`unit`, `integration`, `vocabulary`); both build the
@@ -114,6 +114,10 @@ build/build/Release/examples/full_slam/binocular_full_slam <dataset_root> [optio
   <file> <dataset_root>/mav0/mocap0/data.csv` reports the ATE against the mocap
 - `--vocabulary <file.bin>`: bag-of-words vocabulary in our binary format (see below); without it
   the Mapper matches by brute force when triangulating, which is much slower
+- `--loop_closing`: enable loop closing (needs `--vocabulary`). Off by default: it works on
+  synthetic loops and nearby revisits, but on TUM-VI corridor1 same-heading look-alikes make the
+  ATE worse (see `docs/DESIGN.md` "Loop Closing"; tuning is roadmap step 6)
+- `--drop_frames a:b`: feed frames a..b (inclusive, 0-based) without features (a simulated blackout)
 
 ### Vocabulary (ORB-SLAM3's `ORBvoc.txt`)
 

@@ -15,9 +15,12 @@ namespace voyahslam::loop_closing {
 // Place recognition (spec sections 2 and 4; ORB-SLAM3 NewDetectCommonRegions).
 // Values from the ORB-SLAM3 source (LoopClosing.cc, KeyFrameDatabase.cc).
 struct LoopCloserOptions {
-    // False: no loop closing (the apps' --no_loop_closing), as without a
-    // vocabulary; the Mapper and the Tracker still use theirs.
-    bool enabled = true;
+    // Loop closing is opt-in (user decision 2026-10-10: on corridor1 it makes
+    // the ATE worse through same-heading look-alikes; roadmap step 6). False:
+    // no loop closing, as without a vocabulary; the Mapper and the Tracker
+    // still use theirs (BoW triangulation, relocalization). The apps' option
+    // is --loop_closing.
+    bool enabled = false;
     // A map with fewer Frames is not searched.
     size_t min_map_frames = 12;
     // DetectNBestCandidates: the best groups' Frames tried per query.

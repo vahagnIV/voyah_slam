@@ -33,7 +33,8 @@ int main(int argc, char** argv) {
         std::cout << "Dataset: " << options.dataset << ", " << reader.size() << " frames, "
                   << camera.width << "x" << camera.height << "\n";
 
-        if (options.vocabulary.empty() || !options.loop_closing) std::cout << "Loop closing: off\n";
+        std::cout << "Loop closing: " << (options.loop_closing && vocabulary ? "on" : "off")
+                  << (options.loop_closing && !vocabulary ? " (--loop_closing needs --vocabulary)" : "") << "\n";
         if (options.drop_frames) {
             std::cout << "Dropping frames " << options.drop_frames->first << ".."
                       << options.drop_frames->last << " (no features)\n";

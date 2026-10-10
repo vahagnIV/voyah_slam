@@ -8,7 +8,8 @@ keyframes and map growth (sub-project 2, merged b93fcf4), restructure
 (step 0, merged 7426697), map quality (step 1, merged 9da7081), own DBoW2
 (step 2, merged 6fb863a), relocalization (step 3, merged 6afacc7).
 Implemented, not done: loop detection and correction (step 4a+4b, branch
-`feat/loop-closing`; its corridor1 smoke Musts are missed, see below).
+`feat/loop-closing`): implemented (opt-in, off by default); corridor1 Musts
+missed → step 6.
 
 ## 0. Restructure (done 2026-10-07)
 
@@ -137,7 +138,7 @@ Plus reference-Frame tracking. Fixes the stereo loss in fast rotation
 
 ## 4. Loop closing
 
-### 4a+4b. Detection and correction (implemented 2026-10-09; smoke Musts missed)
+### 4a+4b. Detection and correction: implemented (opt-in, off by default); corridor1 Musts missed → step 6
 
 **Result:** the LoopCloser detects on its own replica, ORB-SLAM3
 `NewDetectCommonRegions` with its source thresholds (BoW candidates, Sim3
@@ -146,7 +147,9 @@ RANSAC, `OptimizeSim3`, projections, three confirmations) and publishes
 (`CorrectLoop`: window, points, `SearchAndFuse`, essential graph, loop edge)
 as one `MapTransaction` at a new map epoch; the Tracker's last frame follows
 its reference Frame. The map has a spanning tree and loop edges. The apps
-take `--no_loop_closing`. The LoopCloser adds a normal-consistency gate.
+take `--loop_closing`: loop closing is opt-in and off by default (user
+decision 2026-10-10), because on corridor1 it makes the ATE worse (below).
+The LoopCloser adds a normal-consistency gate.
 Synthetic loops (integration): the end error with
 loop closing is 0.04–0.15 of the error without (mono over three seeds,
 stereo), with no tracking loss across the correction. Smoke on corridor1
@@ -164,11 +167,11 @@ round 1:
 
 Before the gate (e529d07), the opposite-facing loop 2262→1587 cost map 1 in
 both stereo runs (4 maps) and mono run 2 (2 maps). The smoke Musts are
-**missed**; nothing was tuned. Same-heading look-alikes are in TODO for a
-decision with the user.
+**missed**; nothing was tuned. Same-heading look-alike rejection is the first
+item of step 6.
 
 Spec: `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; see
-DESIGN "Loop Closing" and the 2026-10-09 decisions-log entries. Out of scope
+DESIGN "Loop Closing" and the 2026-10-09 / 2026-10-10 decisions-log entries. Out of scope
 and in TODO: global BA (4c), map merging (step 5), scale without IMU.
 
 ### 4c. Global BA
@@ -182,4 +185,8 @@ map clears and adopts (old maps must be kept).
 
 ## 6. TUM-VI tuning
 
-At the very end.
+At the very end. First item: loop-closing look-alike rejection. Same-heading
+corridor look-alikes pass every gate, and correcting them makes corridor1
+worse, so loop closing stays off by default until they are rejected. The
+candidates are a drift-bound gate, verify-before-publish, or both (TODO
+"TUM-VI tuning").

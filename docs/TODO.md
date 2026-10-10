@@ -358,19 +358,9 @@ Spec `docs/superpowers/specs/2026-10-07-bow-design.md`; DESIGN "Bag of Words"
 Spec `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; DESIGN
 "Loop Closing" (smoke table there).
 
-- [ ] **Same-heading look-alikes (corridor1, 2026-10-09; DESIGN "Loop
-      Closing").** A regular corridor pattern repeats 7–30 m apart with the
-      same heading. The pairs' normals agree, so the normal gate cannot
-      reject such a loop: examples are frames 2215–2236 against 692–807
-      (14.9 m apart), 3210→792 (22 m) and 5017→2950 (30 m). With the gate in
-      place, every loop-closing smoke run still corrected at least one of
-      them. The correction leaves the two ends of the map rotated against
-      each other, and the next local BA starts at 10⁷–10⁸ with 25–60 %
-      outliers. Candidates, to decide with the user:
-      - a map-distance check: the query and the match region lie far apart
-        in the map's own geometry, which is safe in stereo while drift is
-        ≪ 15 m;
-      - a check that the hypothesized correction agrees with the map.
+- [ ] **Loop closing is opt-in and off by default** (user decision
+      2026-10-10) until the same-heading look-alikes are rejected: see "TUM-VI
+      tuning (roadmap step 6)" below.
 - [ ] **The normal gate blocks true loops once the map is rotated.** It
       compares normals in map coordinates. After a same-heading false loop
       is corrected, the two ends of the map are rotated against each other,
@@ -381,11 +371,9 @@ Spec `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; DESIGN
       the same. Comparing the normals through the hypothesized Sim3
       measures something else, so this is not a fix in itself; decide
       together with the same-heading item above.
-- [ ] **Verify a correction before publishing it** (rejected for now, user
-      decision 2026-10-09): check the reprojection error of the fused points
-      after the essential graph, or the next local BA's initial cost, and
-      drop the correction if it breaks the map. Keep it as an option if the
-      gates above are not enough.
+- [ ] **Re-run ThreadSanitizer after every loop-closing change.** Last run
+      2026-10-10, after the normal gate and the opt-in default:
+      `voyah_slam_tests` (186) and `voyah_integration_tests` (15) clean.
 - [ ] **Mono scale after corrections:** mono loops carry extreme scales after
       wrong corrections (0.314–1.774 in the 2026-10-09 smoke). Revisit once
       wrong loops are rejected.
@@ -462,10 +450,44 @@ Spec `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; DESIGN
 - [ ] **`friend struct MapperTestAccess`** (`mapper.h`, Task 1): the first
       friend test seam in the codebase, carried to Task 6 and still there;
       replace it with the real `LoopDetected` path in the tests that use it.
-- [ ] **`SlamTest.MonoClosesLoop` costs 13.7 s** (three seeds, each with and
+- [ ] **`SlamTest.MonoClosesLoop` costs 14–25 s** (three seeds, each with and
       without loop closing, lock-step): the longest test in `check_all`.
       Natural mono drift is a random walk, so the scale part needs a seed
       range; a scene with a systematic mono scale drift would allow one seed.
+
+## TUM-VI tuning (roadmap step 6)
+
+- [ ] **First: reject same-heading look-alikes in loop closing.** On
+      corridor1, a regular corridor pattern repeats 7–30 m apart with the
+      same heading. Examples:
+      - frames 2215–2236 against 692–807 (14.9 m apart);
+      - 3210→792 (22 m);
+      - 4666→4029 (22 m);
+      - 5017→2950 (30 m).
+
+      The pairs' normals agree, so the normal gate passes them. ORB-SLAM3's
+      visual gates pass them as well: the false-loop diagnosis,
+      `.superpowers/sdd/2026-10-09-loop-closing/false-loop-diagnosis.md`,
+      found this inherent to those gates, not a fidelity bug. In the
+      fix-round-1 smoke, every loop-closing run corrected at least one. The
+      next local BA then started at 10⁷–10⁸ with 25–60 % outliers, and the
+      ATE was worse than without loop closing (mono 0.679 / 0.669 m against
+      0.341 / 0.500 m; stereo 1.295 / 18.16 m against 0.098 / 0.138 m).
+      This is why loop closing is opt-in (2026-10-10).
+
+      Candidate fixes, to compare on corridor1 and decide with the user:
+      1. **A drift-bound gate:** reject a loop whose query and match region
+         lie farther apart in the map than the drift could explain since the
+         match, for example a bound per metre travelled. It is safe in
+         stereo while drift ≪ 15 m; mono needs a scale-aware bound.
+      2. **Verify before publishing:** check the reprojection error of the
+         fused points after the essential graph, or the next local BA's
+         initial cost, and drop a correction that breaks the map. This was
+         rejected for the first round, on 2026-10-09.
+      3. **Both together.**
+
+      The normal gate's map-frame weakness (see "Loop closing") disappears
+      once no false correction gets through, so retest the gate after the fix.
 
 ## Relocalization (roadmap step 3, 2026-10-08)
 
