@@ -181,9 +181,12 @@ bool LoopCloser<TFeatureExtractor>::ConfirmPending(std::optional<PendingRegion>&
         out_pending->S_last_world = confirmed->S_query_world;
         out_pending->matches = std::move(confirmed->matches);
         out_pending->num_not_found = 0;
-        log_->debug("{} region of Frame {} confirmed by Frame {} ({}/{})",
+        // A merge's normals are not gated; their share is logged for
+        // diagnosis.
+        log_->debug("{} region of Frame {} confirmed by Frame {} ({}/{}), {:.2f} of {} normals disagree",
                     out_pending->match_map == replica().map_id() ? "Loop" : "Merge", out_pending->match_frame.value,
-                    query.value, out_pending->num_coincidences, options_.required_coincidences);
+                    query.value, out_pending->num_coincidences, options_.required_coincidences,
+                    confirmed->normals.disagreement, confirmed->normals.pairs);
         return true;
     }
     if (match_map == nullptr || last == nullptr || ++out_pending->num_not_found >= options_.max_unconfirmed_queries) {

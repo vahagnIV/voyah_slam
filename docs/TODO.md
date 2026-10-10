@@ -385,18 +385,17 @@ Spec `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; DESIGN
 - [ ] **Map merging** (roadmap step 5): detection finds merges in inactive
       maps (Task 4, 2026-10-10); the Mapper still rejects a `LoopDetected`
       across maps until the merge (Task 5).
-- [ ] **Normal gate across maps (merge detection, Task 4):** the gate
-      compares each pair's normals in their own maps' world coordinates. For
-      a merge the two worlds are unrelated (each map's world is its first
-      Frame's camera, `MapInitializer`), so a true merge between maps whose
-      worlds are rotated by more than 60° is rejected, and a false one
-      between aligned worlds is not caught by it. Aligning the match-side
-      normals by the region's own Sim3 would make the gate vacuous (the Sim3
-      agrees with the images by construction). The synthetic merge scene
-      rotates the worlds by only 4°. Decide with the corridor1 merge smoke
-      (Task 6/7): e.g. skip the gate for merges, or compare normals relative
-      to the query and match cameras.
-- [ ] **Merge detection test gap:** a merge region confirmed by a query is
+- [ ] **Hypothesis-independent check for merges (step 6):** the normal gate
+      is not applied to merges (ruling 2026-10-10: the two maps' worlds are
+      related only by the merge hypothesis), so false-merge protection is
+      weaker than for loops. Candidates: a gravity / up-direction
+      consistency check (needs an IMU or a level prior), or verify-before-
+      publish (e.g. track the query's next Frames in the match map before
+      the merge is applied).
+- [ ] **Thin mono merge scale margin (step 6):** `LoopCloserMergeTest`
+      measured up to 1.34 % scale error against the 2 % bound (about 1.5x
+      margin; the loop tests have about 3x).
+- [ ] **Merge detection test gap (step 6):** a merge region confirmed by a query is
       not searched again in that query (ORB `bMergeDetectedInKF`); no test
       tells this from a re-search, since in the synthetic scene both give
       the same confirmations (mutation M7 of Task 4 survives).

@@ -1422,6 +1422,24 @@ TEST(LoopCloserMergeTest, MonoMergeFreeScale) {
     }
 }
 
+// The normal gate is for loops only (controller ruling 2026-10-10): a
+// merge's normals are in two unrelated worlds (each map's world is its first
+// Frame's camera). Map 2's world here is turned 120 deg against map 1's, so
+// every pair's normals are 120 deg apart in world coordinates (about 1.0 of
+// them disagree; the gate would reject at 0.5), yet the merge is true: it is
+// confirmed and published, mono and stereo.
+TEST(LoopCloserMergeTest, AcceptsMergeAcrossRotatedWorlds) {
+    for (const bool binocular : {false, true}) {
+        Sim3 drift = binocular ? StereoDrift() : MonoDrift();
+        drift.R = Eigen::AngleAxis<double>(120.0 * std::numbers::pi / 180.0, geometry::TVector3DF::UnitY())
+                      .toRotationMatrix() *
+                  drift.R;
+        for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+            ExpectMergeAtThirdConfirmation(seed, drift, binocular);
+        }
+    }
+}
+
 // The loop and merge regions have their own pending states
 // (mnLoopNumCoincidences / mnMergeNumCoincidences and their not-found
 // counters): R0 and R1 see both regions (one confirmation each); R2 sees only

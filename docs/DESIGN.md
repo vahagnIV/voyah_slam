@@ -1990,10 +1990,12 @@ still use the vocabulary). Every Frame of
   1.1, 2 mono and 1 stereo, first detection): BoW 400, RANSAC 164–332,
   coarse 396–400, optimized 209–368, projection 393–398 (thresholds 20 /
   15 / 50 / 20 / 80); the published Sim3 within 0.06° and 1.4 % of scale
-  (mono) of the truth. *Normal gate across maps:*
-  it compares each pair's normals in their own maps' coordinates, which for
-  a merge are unrelated world frames (each map's world is its first
-  Frame's camera); see TODO.
+  (mono) of the truth. *No normal gate for merges* (controller ruling
+  2026-10-10): it compares normals in world coordinates, and two maps'
+  worlds are related only by the merge hypothesis, so merges rely on
+  ORB-SLAM3's gates; the disagreement share is still logged.
+  `AcceptsMergeAcrossRotatedWorlds` (map 2's world turned 120°) fails if
+  the gate is applied to merges.
 - **Per candidate** (`DetectCommonRegionsFromBoW`, `common_region.cpp`): the
   window is the candidate plus its top 10 covisible Frames (dropped if it
   touches the query's neighbourhood); `SearchByBoW` (ratio 0.9) from the
@@ -2772,6 +2774,7 @@ branch → review → merge to `master`. Update this document at the end.
 
 | 2026-10-10 | (Map merging Task 3, spec sections 1, 5) **The Mapper's Atlas.** Per-map state moves into a private `MapState` held in `std::map<MapId, MapState> maps_` with `std::optional<MapId> active_`; existing code works on `Active()` (a cached pointer to the active map's node, kept with `active_`; `std::map` nodes are stable). On a final loss of the active map: fewer than `MapperOptions::atlas.min_frames_to_keep` (10) Frames → discarded, one transaction `removed_maps = {id}`, no `active_map`; otherwise kept inactive, one transaction with no `active_map`. The next initialization takes the next id. Inactive maps are frozen through the existing "another map" guards (now `IsActive(id)`). `num_keyframes()` / `num_map_points()` (atomics) are the active map's, 0 without one; `current_map_id()` stays the newest map's id. Public Mapper-thread accessors (`covisibility()`, `Reference()`, ...) read an empty map when none is active. | ORB-SLAM3 `Tracking`: `ResetActiveMap` below 10 KeyFrames, `CreateMapInAtlas` otherwise; keeping lost maps is what map merging (Tasks 4–5) merges into. A per-point map lookup would cost a `std::map::find` on hot paths, hence the cached pointer. |
 | 2026-10-10 | (Map merging Task 4, spec section 2) **Merge detection in the LoopCloser.** `DetectNBestCandidates(atlas, query, options)` queries every live map's `FrameDatabase` (one per `MapReplica`, dropped with it on `removed_maps`) and splits the grouped hits into loop candidates (the active map) and merge candidates (inactive maps), best 3 each, the common-words threshold over all maps (ORB `KeyFrameDatabase::DetectNBestCandidates`). `DetectCommonRegion(atlas, query, candidates, options)` verifies either list with the same gates, the match side read from the candidate's map (`CommonRegion::match_map`); `RefineCommonRegion` takes the match map's replica. The LoopCloser keeps a second `PendingRegion` (`pending_merge_`) with its own counters; the loop/merge order follows ORB `NewDetectCommonRegions` and `Run`: a merge confirmed at the same query as a loop is published and the loop dropped. A pending region records its match map's epoch and is dropped when that map's epoch changes or the map is removed (this subsumes the old "active epoch drops the pending region" rule). The single-map `DetectCommonRegion(replica, query, options)` stays for tests. Deviation: the merge's not-found counter resets on a confirmation, as the loop's (ORB does not reset `mnMergeNumNotFound`). | Spec section 2; rulings: one database per live map, merges verified against the inactive map's replica, mono merges free-scale (the loop path already frees it for a mono query), the merge wins over a loop, no looser gates. The not-found reset keeps one rule ("2 failures in a row") for both kinds. |
+| 2026-10-10 | (Map merging Task 4, fix round 1; controller ruling) **The normal-consistency gate is not applied to merges** (candidates, covisible confirmations, later-query refinements); loops keep it unchanged. The disagreement share is still measured and logged. Spec section 2 and Constraints updated. | The gate compares map-point normals in world coordinates; each map's world is its first Frame's camera, so across maps the comparison is meaningless, and the only relation between the two worlds is the merge hypothesis itself (aligning by it makes the gate vacuous). Applied literally it rejects every true merge between worlds turned by more than 60°. Cost: false-merge protection is weaker than for loops; merging stays opt-in (TODO: a hypothesis-independent check). |
 
 ## 9. Open Questions
 
@@ -3020,7 +3023,7 @@ branch → review → merge to `master`. Update this document at the end.
 - Roadmap (`docs/ROADMAP.md`): relocalization into other maps comes with
   map merging (step 5).
 - Event pool lifetime (Open Question 25).
-- Test suite (2026-10-10, map merging Task 4): 703 tests (683 `unit`, 19
+- Test suite (2026-10-10, map merging Task 4): 704 tests (684 `unit`, 19
   `integration`, 1 `vocabulary`); `check_all` about 18–24 s, set by
   `SlamTest.MonoClosesLoop` (14–25 s: its lock-step runs are bursty, so the
   time follows the CPU's frequency scaling) and the two

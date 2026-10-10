@@ -50,8 +50,9 @@ struct LoopCloserOptions {
     size_t refine_min_optimized = 50;
     size_t refine_min_projection = 100;
     // Normal consistency (an addition to ORB-SLAM3, user decision
-    // 2026-10-09): a candidate, a covisible confirmation or a later query's
-    // confirmation is rejected when more than this share of its final matched
+    // 2026-10-09; loops only, not merges, ruling 2026-10-10): a candidate, a
+    // covisible confirmation or a later query's confirmation of a loop is
+    // rejected when more than this share of its final matched
     // pairs (own map point, matched map point) have normals more than 60 deg
     // apart; pairs with an undefined normal do not count. Opposite-facing
     // false loops measured >= 0.89 on corridor1, true loops <= 0.05.
@@ -205,9 +206,10 @@ template <typename TFeatureExtractor>
 //      required_coincidences of them confirm, each by projection of the
 //      window's points with its pose relative to the query
 //      (confirmation_projection).
-// Steps 4 and 5 also need the normal gate (max_normal_disagreement), which
-// compares each pair's normals in their maps' coordinates; its rejections
-// are listed in the stats.
+// For a loop, steps 4 and 5 also need the normal gate
+// (max_normal_disagreement); its rejections are listed in the stats. A merge
+// skips it (its normals are in two unrelated worlds) and relies on
+// ORB-SLAM3's gates; CommonRegion::normals still measures it.
 // A Sim3 that is not finite or has a scale <= 0 drops the candidate. The
 // candidate with the most matches in step 4 wins (the first on a tie).
 // Candidates of a map that is gone are skipped. Deterministic.
@@ -229,9 +231,9 @@ template <typename TFeatureExtractor>
 // S_query_world (match-side world to query camera): projection of the match
 // Frame's window points (confirmation_projection), OptimizeSim3 over the
 // matched query points (more than refine_min_optimized inliers), projection
-// with the refined Sim3 (refine_min_projection), then the normal gate on
-// those matches. None if a gate fails or a Frame is unknown; a normal
-// rejection is added to `out_stats` if given.
+// with the refined Sim3 (refine_min_projection), then, for a loop (the same
+// map), the normal gate on those matches. None if a gate fails or a Frame is
+// unknown; a normal rejection is added to `out_stats` if given.
 template <typename TFeatureExtractor>
 [[nodiscard]] std::optional<CommonRegion> RefineCommonRegion(
     const tracking::MapReplica<TFeatureExtractor>& replica, map::FrameId query_frame,

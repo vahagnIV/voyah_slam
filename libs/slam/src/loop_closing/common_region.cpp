@@ -137,8 +137,14 @@ NormalAgreement CompareNormals(const TReplica<TFeatureExtractor>& replica, const
     return {pairs, pairs > 0 ? static_cast<double>(disagreeing) / static_cast<double>(pairs) : 0.0};
 }
 
-bool Disagrees(const NormalAgreement& agreement, const LoopCloserOptions& options) {
-    return agreement.disagreement > options.max_normal_disagreement;
+// The normal gate, for loops only: across two maps the normals are in
+// unrelated world coordinates, and the only relation between those worlds is
+// the merge hypothesis itself, so a merge relies on ORB-SLAM3's gates
+// (controller ruling 2026-10-10). Its measurement is still reported.
+template <typename TFeatureExtractor>
+bool Disagrees(const NormalAgreement& agreement, const TReplica<TFeatureExtractor>& replica,
+               const TReplica<TFeatureExtractor>& match_replica, const LoopCloserOptions& options) {
+    return replica.map_id() == match_replica.map_id() && agreement.disagreement > options.max_normal_disagreement;
 }
 
 size_t Count(const PointMatches& matches) {
@@ -438,7 +444,7 @@ CommonRegionResult VerifyCandidates(const TReplica<TFeatureExtractor>& replica, 
         }
         // The normal gate (not in ORB-SLAM3).
         const NormalAgreement normals = CompareNormals(replica, query_points, match_replica, matches);
-        if (Disagrees(normals, options)) {
+        if (Disagrees(normals, replica, match_replica, options)) {
             result.stats.normal_rejections.push_back({query_frame, candidate, normals});
             continue;
         }
@@ -464,7 +470,7 @@ CommonRegionResult VerifyCandidates(const TReplica<TFeatureExtractor>& replica, 
             }
             const NormalAgreement confirming_normals =
                 CompareNormals(replica, PointsOf(replica, *neighbour), match_replica, confirming);
-            if (Disagrees(confirming_normals, options)) {
+            if (Disagrees(confirming_normals, replica, match_replica, options)) {
                 result.stats.normal_rejections.push_back({frame, candidate, confirming_normals});
                 continue;
             }
@@ -552,7 +558,7 @@ std::optional<CommonRegion> RefineCommonRegion(const tracking::MapReplica<TFeatu
     // The normal gate (not in ORB-SLAM3).
     const NormalAgreement normals =
         CompareNormals(replica, PointsOf(replica, *query), match_replica, refined_matches);
-    if (Disagrees(normals, options)) {
+    if (Disagrees(normals, replica, match_replica, options)) {
         if (out_stats != nullptr) {
             out_stats->normal_rejections.push_back({query_frame, match_frame, normals});
         }

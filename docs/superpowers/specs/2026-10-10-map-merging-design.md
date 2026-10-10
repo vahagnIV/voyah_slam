@@ -46,6 +46,8 @@ and global BA (4c).
   default.
 - A wrong merge corrupts two maps, so merges never get looser gates than
   loops.
+- False-merge protection is weaker than for loops (no normal gate across
+  maps); merging stays opt-in.
 
 **Out of scope (TODO):**
 - relocalization into inactive maps;
@@ -115,9 +117,13 @@ Detection is skipped while the active map has fewer than `min_map_frames`
   - Sim3 RANSAC;
   - the two projection stages;
   - `OptimizeSim3`;
-  - the normal-consistency gate.
+  - the normal-consistency gate: loops only; merges rely on ORB-SLAM3's
+    gates.
 
-  The ORB-SLAM3 thresholds are the same for loops and merges.
+  The ORB-SLAM3 thresholds are the same for loops and merges. The normal
+  gate compares map-point normals in world coordinates, and two maps' worlds
+  are related only by the merge hypothesis itself, so it has no correct form
+  for a merge (controller ruling, 2026-10-10).
 - Mono merges solve a Sim3 with free scale, since two mono maps have
   unrelated scales. Stereo keeps scale 1.
 
