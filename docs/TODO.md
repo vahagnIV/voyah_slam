@@ -489,7 +489,9 @@ BA" (smoke table there).
       (1465 / 1654 Frames, 92k / 103k points), at 10 iterations; in mono
       run 2, 3 of 4 runs were interrupted by the next correction after
       15–35 s, so their work was lost. An interruption lands only at the next
-      LM iteration (up to about 6 s on the largest mono map). ORB-SLAM3 has
+      LM iteration (up to about 6 s on the largest mono map).
+      `Slam::Stop()` waits for the current LM iteration too, about 6-8 s on a
+      full corridor1 stereo map. ORB-SLAM3 has
       no cap either. Options: fewer iterations on large maps, a time budget,
       or polling inside an iteration.
 - [ ] **More maps with global BA on corridor1** (2026-10-10 smoke): both mono

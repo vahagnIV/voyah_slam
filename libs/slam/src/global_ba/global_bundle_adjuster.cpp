@@ -27,6 +27,8 @@ bool Supersedes(const events::Event& event, map::MapId map_id, uint32_t map_epoc
 
 template <typename TFeatureExtractor>
 GlobalBundleAdjuster<TFeatureExtractor>::~GlobalBundleAdjuster() {
+    // Interrupts a running BA instead of waiting it out (it publishes nothing).
+    stop_requested_.store(true, std::memory_order_release);
     worker_.Stop();
 }
 
@@ -139,6 +141,14 @@ void GlobalBundleAdjuster<TFeatureExtractor>::Run() {
     log_->info("Global BA of map {} at epoch {}: {} Frames, {} points in {:.1f} ms, result {:.2f} MB", map_id.value,
                map_epoch, solution->frame_poses.size(), solution->point_positions.size(), ms,
                static_cast<double>(result_bytes) / (1024.0 * 1024.0));
+    if (publish_hook_) {
+        publish_hook_();
+    }
+    if (stop_requested()) {  // a Stop() after the last poll: publish nothing
+        ++num_runs_interrupted_;
+        log_->info("Global BA of map {} at epoch {} discarded: stop requested", map_id.value, map_epoch);
+        return;
+    }
     Publish(map_id, map_epoch, std::move(*solution));
 }
 

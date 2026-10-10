@@ -46,8 +46,8 @@ public:
 
     // Start() and Stop() must be called from one controlling thread.
     void Start();
-    // Interrupts a running BA (it publishes nothing and is not resumed by a
-    // later Start()) and joins the worker.
+    // Interrupts a running BA (it publishes nothing, even if it had passed its
+    // last poll, and is not resumed by a later Start()) and joins the worker.
     void Stop();
 
     // Drains the inbox, applying every transaction, then runs a pending
@@ -74,6 +74,9 @@ public:
     // should_stop (before the first LM iteration and after each), before the
     // inbox is checked. Set it while the worker is stopped.
     void set_poll_hook(std::function<void()> hook) { poll_hook_ = std::move(hook); }
+    // Tests: `hook` is called on the GlobalBA thread after a run's last poll,
+    // just before its result is published. Set it while the worker is stopped.
+    void set_publish_hook(std::function<void()> hook) { publish_hook_ = std::move(hook); }
 
 private:
     void ApplyEvent(const events::Event& event);
@@ -98,6 +101,7 @@ private:
     size_t num_results_dropped_ = 0;
     std::function<void()> run_hook_;
     std::function<void()> poll_hook_;
+    std::function<void()> publish_hook_;
 
     // Published with TryCreate: a result finished while every event is in
     // flight (a Mapper backlog) is dropped and counted; the map keeps its

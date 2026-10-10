@@ -61,8 +61,11 @@ private:
     TTracker tracker_;
     TMapper mapper_;
     TLoopCloser loop_closer_;
-    // After the Mapper: destroyed first, so the transaction its listener
-    // holds is recycled into a live Mapper pool.
+    // After the Mapper: destroyed first. Safe because the Mapper recycles
+    // every GlobalBAFinished within one ProcessPending(), so none outlives
+    // this member's pool; and the GlobalBA holds no Mapper transaction once
+    // it has drained its inbox (a Mapper that parked events would break the
+    // first, so keep it so).
     std::optional<TGlobalBundleAdjuster> global_ba_;
 };
 

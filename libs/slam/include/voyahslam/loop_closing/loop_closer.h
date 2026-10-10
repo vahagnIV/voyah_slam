@@ -55,7 +55,8 @@ struct QueryStats {
 // confirmations LoopDetected is published for the latest confirming query and
 // the region is dropped; it has priority unless a loop was already published
 // at the replica's map epoch (a repeat found before its correction arrived).
-// A loop correction (a higher map epoch) drops the pending region. A new map
+// A higher map epoch (a loop correction or a global-BA merge, whose
+// coordinates differ from the pending region's) drops the pending region. A new map
 // (new_map, a newer map id, or a final TrackingLost of the current map)
 // clears the replica, the pending region and the queries.
 template <typename TFeatureExtractor>

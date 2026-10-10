@@ -385,6 +385,22 @@ TEST(GlobalBundleAdjusterTest, StopInterruptsRunningBa) {
     EXPECT_EQ(global_ba.num_runs_interrupted(), 1u);
 }
 
+// A Stop() requested after the run's last poll, before the publish: nothing is
+// published.
+TEST(GlobalBundleAdjusterTest, StopAfterLastPollPublishesNothing) {
+    Harness harness;
+    harness.SendMap(kMap);
+    harness.SendCorrection(kMap, 1);
+    GlobalBundleAdjuster<Extractor>& global_ba = harness.global_ba();
+    global_ba.set_publish_hook([&] { global_ba.Stop(); });
+    const std::vector<Result> results = harness.Run();
+    global_ba.set_publish_hook({});
+
+    EXPECT_TRUE(results.empty());
+    EXPECT_EQ(global_ba.num_runs_started(), 1u);
+    EXPECT_EQ(global_ba.num_runs_interrupted(), 1u);
+}
+
 // Review Focus 5: with every result in flight the next one is dropped and
 // counted, without an abort.
 TEST(GlobalBundleAdjusterTest, DropsResultWhenPoolExhausted) {

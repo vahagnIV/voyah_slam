@@ -121,7 +121,7 @@ enum class MapperState : uint8_t {
 // and match Frames get a loop edge; all of it is one MapTransaction at the
 // next correction epoch. A LoopDetected of another map, naming a culled Frame
 // or a loop already closed is ignored. A FrameTracked of an older epoch (the
-// Tracker had not seen the correction) creates no Frame; its points are
+// Tracker had not seen the correction or the global-BA merge) creates no Frame; its points are
 // counted. A GlobalBAFinished of the current map at the current epoch is
 // merged (ORB-SLAM3's post-GBA block in LoopClosing::RunGlobalBundleAdjustment,
 // global-BA spec section 3): the optimized Frames and points take their
