@@ -265,12 +265,16 @@ void LoopCloser<TFeatureExtractor>::PublishLoop(map::FrameId query, const Pendin
     event->priority = last_loop_epoch_ != epoch;
     last_loop_epoch_ = epoch;
     const PointMatches query_points = PointsOf(replica(), *query_keyframe);
+    // A loop's pairs are in one map, where a point matched to itself is no
+    // pair; a merge's are in two, whose point ids restart per map, so equal
+    // ids are two points.
+    const bool is_loop = region.match_map == replica().map_id();
     for (size_t i = 0; i < region.matches.size() && i < query_points.size(); ++i) {
-        if (region.matches[i] && query_points[i] && *region.matches[i] != *query_points[i]) {
+        if (region.matches[i] && query_points[i] && (!is_loop || *region.matches[i] != *query_points[i])) {
             event->matched_points.emplace_back(*query_points[i], *region.matches[i]);
         }
     }
-    if (region.match_map == replica().map_id()) {
+    if (is_loop) {
         log_->info("Loop detected: Frame {} with Frame {} (scale {:.3f}, {} matched points)", query.value,
                    region.match_frame.value, S_query_match.scale, event->matched_points.size());
     } else {

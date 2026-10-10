@@ -20,6 +20,7 @@
 #include <numbers>
 #include <optional>
 #include <random>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -1154,9 +1155,13 @@ constexpr uint32_t kMap2FirstFrame = 20;
 // come back to the start's place 0.4..0.8 m off (LoopScene::ReturnPose) and
 // observe region A through new points 800..1199 (a merge with map 1) and/or
 // region D through new points 1200..1599 (a loop in map 2).
+// `map1_region_a` moves map 1's region A ids (0..399 by default; ids
+// 0..map1_region_a-1 then stay unused, which the replica allows): at
+// kReturnA every true merge pair shares its id across the two maps.
 class MergeScene {
 public:
-    MergeScene(uint32_t seed, const Sim3& drift, bool binocular) : rng_(seed), drift_(drift), binocular_(binocular) {
+    MergeScene(uint32_t seed, const Sim3& drift, bool binocular, uint32_t map1_region_a = 0)
+        : rng_(seed), drift_(drift), binocular_(binocular), map1_region_a_(map1_region_a) {
         region_a_ = MakeRegion(kRegionPoints, LoopScene::StartPose(0), 0x00, rng_);
         region_b_ = MakeRegion(kRegionPoints, LoopScene::MiddlePose(0), 0xFF, rng_);
         region_d_ = MakeRegion(kRegionPoints, LoopScene::StartPose(0), 0x00, rng_);
@@ -1186,8 +1191,11 @@ public:
         const Sim3 identity;
         for (size_t k = 0; k < kStartFrames; ++k) {
             const RigidTransformation T = LoopScene::StartPose(k);
-            const NewPoints points = k == 0 ? PointsOf(region_a_, 0, identity, Centre(T), rng_) : NewPoints{};
-            Append(loops, harness.Publish(Observe(LoopScene::StartId(k), T, T, region_a_, 0, binocular_, rng_), points,
+            const NewPoints points =
+                k == 0 ? PointsOf(region_a_, map1_region_a_, identity, Centre(T), rng_) : NewPoints{};
+            Append(loops, harness.Publish(Observe(LoopScene::StartId(k), T, T, region_a_, map1_region_a_, binocular_,
+                                                  rng_),
+                                          points,
                                           k == 0));
         }
         for (size_t k = 0; k < kMiddleFrames; ++k) {
@@ -1268,7 +1276,10 @@ public:
     }
 
     // Region A point index of a map 1 point or a map 2 return point, or -1.
-    static int64_t RegionAPointOfMap1(map::MapPointId id) { return id.value < kRegionPoints ? id.value : -1; }
+    [[nodiscard]] int64_t RegionAPointOfMap1(map::MapPointId id) const {
+        return id.value >= map1_region_a_ && id.value < map1_region_a_ + kRegionPoints ? id.value - map1_region_a_
+                                                                                       : -1;
+    }
     static int64_t RegionAPointOfMap2(map::MapPointId id) {
         return id.value >= kReturnA && id.value < kReturnA + kRegionPoints ? id.value - kReturnA : -1;
     }
@@ -1287,6 +1298,7 @@ private:
     std::mt19937 rng_;
     Sim3 drift_;
     bool binocular_;
+    uint32_t map1_region_a_;
     std::vector<ScenePoint> region_a_;
     std::vector<ScenePoint> region_b_;
     std::vector<ScenePoint> region_d_;
@@ -1396,7 +1408,7 @@ void ExpectMergeAtThirdConfirmation(uint32_t seed, const Sim3& drift, bool binoc
     size_t correct = 0;
     for (const auto& [query_point, match_point] : merge.matched_points) {
         const int64_t scene_point = MergeScene::RegionAPointOfMap2(query_point);
-        correct += scene_point >= 0 && scene_point == MergeScene::RegionAPointOfMap1(match_point) ? 1 : 0;
+        correct += scene_point >= 0 && scene_point == scene.RegionAPointOfMap1(match_point) ? 1 : 0;
     }
     EXPECT_GE(static_cast<double>(correct), 0.95 * static_cast<double>(merge.matched_points.size()));
 }
@@ -1437,6 +1449,44 @@ TEST(LoopCloserMergeTest, AcceptsMergeAcrossRotatedWorlds) {
         for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
             ExpectMergeAtThirdConfirmation(seed, drift, binocular);
         }
+    }
+}
+
+// Point ids restart per map, so a true merge pair may share its id: (map 2
+// point k, map 1 point k) is not a self-match. With map 1's region A at the
+// return points' ids (800..), every true pair collides; the published pairs,
+// as region A point pairs, are exactly those of the same scene without the
+// collision (the ids change nothing else), and each true pair has equal ids.
+TEST(LoopCloserMergeTest, KeepsPairsWithCollidingIds) {
+    using ScenePairs = std::set<std::pair<int64_t, int64_t>>;
+    const auto merge_pairs = [](uint32_t seed, uint32_t map1_region_a) {
+        Harness harness(MakeRegionVocabulary());
+        MergeScene scene(seed, MonoDrift(), /*binocular=*/false, map1_region_a);
+        std::vector<Loop> loops = scene.PublishUpTo(harness, 4, Sees::A);
+        ScenePairs pairs;
+        size_t equal_ids = 0;
+        EXPECT_EQ(loops.size(), 1u);
+        for (const Loop& loop : loops) {
+            for (const auto& [query_point, match_point] : loop.matched_points) {
+                pairs.emplace(MergeScene::RegionAPointOfMap2(query_point), scene.RegionAPointOfMap1(match_point));
+                equal_ids += query_point == match_point ? 1 : 0;
+            }
+        }
+        return std::pair{pairs, equal_ids};
+    };
+    for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+        SCOPED_TRACE("seed " + std::to_string(seed));
+        const auto [separate, separate_equal] = merge_pairs(seed, 0);
+        const auto [colliding, colliding_equal] = merge_pairs(seed, MergeScene::kReturnA);
+        EXPECT_EQ(separate_equal, 0u);
+        ASSERT_GE(separate.size(), 100u);
+        EXPECT_EQ(colliding, separate);
+        size_t true_pairs = 0;
+        for (const auto& [query_index, match_index] : colliding) {
+            true_pairs += query_index >= 0 && query_index == match_index ? 1 : 0;
+        }
+        EXPECT_EQ(colliding_equal, true_pairs);
+        EXPECT_GE(true_pairs, 100u);
     }
 }
 
