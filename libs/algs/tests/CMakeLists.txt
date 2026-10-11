@@ -60,3 +60,18 @@ voyah_add_test_binary(voyah_vocabulary_tests
 target_compile_definitions(voyah_vocabulary_tests
     PRIVATE VOYAH_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/bow/data"
 )
+
+# Real-data feature tests on TUM-VI corridor1 ($VOYAHSLAM_CORRIDOR1, else
+# ~/Downloads/dataset-corridor1_1024_16; skip when missing): the ORB extractor
+# golden regression and the FAST port against live cv::FAST. OpenCV is linked
+# here as a test reference only, never by voyah_algs.
+voyah_add_test_binary(voyah_algs_dataset_tests
+    LABEL integration
+    SOURCES
+        features/orb_extractor_golden_test.cpp
+    LIBS
+        voyah_algs
+)
+target_compile_definitions(voyah_algs_dataset_tests
+    PRIVATE VOYAH_FEATURES_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/features/data"
+)
