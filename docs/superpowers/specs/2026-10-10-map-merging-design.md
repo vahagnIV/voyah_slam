@@ -1,7 +1,7 @@
 # Map Merging (Multi-Map Atlas) — Design Spec
 
 Date: 2026-10-10
-Status: approved in conversation, pending spec review
+Status: approved and implemented; merged 9326160 (2026-10-11)
 Roadmap: step 5 in `docs/ROADMAP.md`. Builds on loop closing (4a+4b, opt-in)
 and global BA (4c).
 

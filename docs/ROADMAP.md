@@ -9,8 +9,8 @@ keyframes and map growth (sub-project 2, merged b93fcf4), restructure
 (step 2, merged 6fb863a), relocalization (step 3, merged 6afacc7), loop
 detection and correction (step 4a+4b: implemented (opt-in, off by default),
 merged 2026-10-10; corridor1 Musts missed → step 6), global BA (step 4c,
-merged 9245f92), map merging (step 5, branch `feat/map-merging`, done
-2026-10-11).
+merged 9245f92), map merging (step 5,
+merged 9326160).
 
 ## 0. Restructure (done 2026-10-07)
 
@@ -203,7 +203,7 @@ iteration or size cap, memory, late joining, serialization.
 Spec: `docs/superpowers/specs/2026-10-10-global-ba-design.md`; see DESIGN
 "Global BA".
 
-## 5. Map merging (multi-map Atlas) (done 2026-10-11, branch `feat/map-merging`)
+## 5. Map merging (multi-map Atlas) (merged 9326160, 2026-10-11)
 
 **Result:** ORB-SLAM3's Atlas (scope A). A lost map with at least 10 Frames
 is kept inactive; the LoopCloser detects revisits of inactive maps (merge

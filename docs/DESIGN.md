@@ -3143,7 +3143,7 @@ branch → review → merge to `master`. Update this document at the end.
   of the essential graph's; corridor1 smoke Musts met, with long runs and
   more memory (TODO).
 
-- Map merging, roadmap step 5 (branch `feat/map-merging`, 2026-10-11): the
+- Map merging, roadmap step 5 (merged 9326160, 2026-10-11): the
   Atlas (lost maps of at least 10 Frames kept inactive), the replica rule
   (replacing "newest id wins"), shared measurements, merge detection in the
   LoopCloser, the Mapper's merge (`MergeLocal`) with the id rule, the Tracker
