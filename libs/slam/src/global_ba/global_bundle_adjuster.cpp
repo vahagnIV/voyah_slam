@@ -99,7 +99,7 @@ void GlobalBundleAdjuster<TFeatureExtractor>::Run() {
     }
     ++num_runs_started_;
     // Pending only while the active map is the corrected one.
-    const tracking::MapReplica<TFeatureExtractor>& run_map = replica();
+    const tracking::MapReplica<TFeatureExtractor>& run_map = map_replica();
     const map::MapId map_id = run_map.map_id();
     const uint32_t map_epoch = run_map.map_epoch();
     bool interrupted = false;

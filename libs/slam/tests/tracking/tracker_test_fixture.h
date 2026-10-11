@@ -132,7 +132,7 @@ protected:
     std::vector<Captured> Feed(TMeasurement measurement) {
         tracker_.Track(std::move(measurement));
         Drain();
-        EXPECT_TRUE(tracker_.replica().CheckConsistency());
+        EXPECT_TRUE(tracker_.map_replica().CheckConsistency());
         return TakeCaptured();
     }
 
@@ -173,7 +173,7 @@ protected:
     // the current map to ground truth `T_cw_of_frame` (indexed by frame).
     test::MapAlignment AlignmentOf(const std::vector<geometry::RigidTransformation>& T_cw_of_frame,
                                    bool monocular) const {
-        const MapReplica<Extractor>& replica = tracker_.replica();
+        const MapReplica<Extractor>& replica = tracker_.map_replica();
         const std::vector<map::FrameId> ids = replica.keyframe_ids();
         const auto truth_of = [&](map::FrameId id) {
             const double timestamp = std::visit([](const auto& m) { return m.timestamp(); },
@@ -193,7 +193,7 @@ protected:
     // Expects the replica's last-frame matches to be exactly the observations
     // of the current map's keyframe `frame`.
     void ExpectLastMatchesAreKeyFrameObservations(map::FrameId frame) const {
-        const auto* keyframe = tracker_.replica().keyframe(frame);
+        const auto* keyframe = tracker_.map_replica().keyframe(frame);
         ASSERT_NE(keyframe, nullptr);
         const std::vector<int64_t>& matches = tracker_.last_matches();
         size_t matched = 0;
