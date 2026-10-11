@@ -224,27 +224,35 @@ void DetectFast(const uint8_t* data, int width, int height, std::ptrdiff_t strid
     simd = ResolveFastSimd(simd);
 
     // Up to two vector kernels, wide first (AVX2 32 px, then 16 px), as
-    // OpenCV runs its AVX2 dispatch before the 128-bit loop.
-    RowKernel kernels[2] = {nullptr, nullptr};
+    // OpenCV runs its AVX2 dispatch before the 128-bit loop. A kernel whose
+    // block never fits the view is skipped (ORB grid cells are ~35 px wide).
+    struct Kernel {
+        RowKernel run;
+        int block;
+    };
+    Kernel kernels[2] = {{nullptr, 0}, {nullptr, 0}};
     switch (simd) {
 #if defined(VOYAHSLAM_FAST_AVX2)
         case FastSimd::kAvx2:
-            kernels[0] = fast_internal::ProcessRowAvx2;
-            kernels[1] = fast_internal::ProcessRowSse2;
+            kernels[0] = {fast_internal::ProcessRowAvx2, 32};
+            kernels[1] = {fast_internal::ProcessRowSse2, 16};
             break;
 #endif
 #if defined(VOYAHSLAM_FAST_SSE2)
         case FastSimd::kSse2:
-            kernels[0] = fast_internal::ProcessRowSse2;
+            kernels[0] = {fast_internal::ProcessRowSse2, 16};
             break;
 #endif
 #if defined(VOYAHSLAM_FAST_NEON)
         case FastSimd::kNeon:
-            kernels[0] = fast_internal::ProcessRowNeon;
+            kernels[0] = {fast_internal::ProcessRowNeon, 16};
             break;
 #endif
         default:
             break;
+    }
+    for (Kernel& kernel : kernels) {
+        if (kernel.run && 3 >= width - kernel.block - 3) kernel.run = nullptr;
     }
 
     int i, j, k, pixel[25];
@@ -280,8 +288,8 @@ void DetectFast(const uint8_t* data, int width, int height, std::ptrdiff_t strid
 
         if (i < height - 3) {
             j = 3;
-            for (RowKernel kernel : kernels) {
-                if (kernel) kernel(j, ptr, curr, cornerpos, ncorners, args);
+            for (const Kernel& kernel : kernels) {
+                if (kernel.run) kernel.run(j, ptr, curr, cornerpos, ncorners, args);
             }
             for (; j < width - 3; j++, ptr++) {
                 int v = ptr[0];
