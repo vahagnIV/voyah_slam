@@ -4,7 +4,7 @@
 # only the tests and benchmarks link it, as a reference.
 find_package(g2o REQUIRED)
 
-add_library(voyah_algs STATIC
+add_library(voyah_algs
     src/bow/vocabulary_io.cpp
     src/estimators/essential_estimator.cpp
     src/estimators/homography_estimator.cpp
@@ -50,15 +50,22 @@ elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
 endif()
 
 target_include_directories(voyah_algs
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+# stb is header-only: BUILD_INTERFACE keeps it out of the exported link
+# interface. g2o stays PRIVATE; for a static voyah_algs CMake still exports it
+# as $<LINK_ONLY:g2o::...> (link-time only, no compile flags), which is why the
+# package config calls find_dependency(g2o) for a static build.
 target_link_libraries(voyah_algs
     PUBLIC voyah_common
-    PRIVATE stb::stb
+    PRIVATE $<BUILD_INTERFACE:stb::stb>
     PRIVATE g2o::core g2o::stuff g2o::types_sba g2o::types_sim3 g2o::types_slam3d g2o::solver_eigen
 )
 
-add_subdirectory(tests)
-add_subdirectory(benchmarks)
+if(VOYAHSLAM_BUILD_TESTS)
+    add_subdirectory(tests)
+    add_subdirectory(benchmarks)
+endif()

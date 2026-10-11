@@ -30,4 +30,6 @@ target_link_libraries(voyahviz
     PRIVATE pango_display
 )
 
-add_subdirectory(tests)
+if(VOYAHSLAM_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()
