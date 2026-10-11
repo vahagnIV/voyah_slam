@@ -975,6 +975,15 @@ Deferred minor findings from the per-task reviews.
       export per library (`voyah_common`, `voyah_events`, `voyah_algs`,
       `voyah_slam`, umbrella `voyahslam`), with `find_dependency(OpenCV)` in the
       config of the package that links it (DESIGN §7).
+      - **Build options (user decision, 2026-10-11):** add
+        `VOYAHSLAM_BUILD_TESTS` and `VOYAHSLAM_BUILD_EXAMPLES`, both OFF by
+        default.
+        - Only when one is ON are the `tests/` directories added and
+          `find_package(OpenCV … highgui)` called.
+        - The library itself is meant to be OpenCV-free; tests may keep
+          using OpenCV.
+        - Until the ORB extractor is ported (FAST first, then the pyramid,
+          blur and so on), `voyah_algs` itself still needs OpenCV.
 - [ ] **`libs/test_support/support/synthetic_sequence.h` needs algs**
       (`features/stereo_matcher.h`) but sits in the common-level support root
       (`voyah_test_support` links only `voyah_common`). Only a compile failure in

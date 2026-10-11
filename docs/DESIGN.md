@@ -825,7 +825,7 @@ compile; in-repo users use the new path. New pure virtual `DistortJacobian(p)`
 | Model | Class | Calibration names | Coefficients |
 |---|---|---|---|
 | Kannala-Brandt (fisheye) | `KannalaBrandtDistortionModel` | `equidistant` (Kalibr, EuRoC/TUM-VI) | k1..k4 |
-| Brown-Conrady (radial-tangential) | `BrownConradyDistortionModel` | OpenCV standard model = ROS `plumb_bob` = Kalibr `radtan` = EuRoC `radial-tangential` | k1, k2, p1, p2[, k3] (OpenCV order) |
+| Brown-Conrady (radial-tangential) | `BrownConradyDistortionModel` | OpenCV standard model = ROS `plumb_bob` = Kalibr `radtan` = EuRoC `radial-tangential` | k1, k2, p1, p2[, k3] (OpenCV order; EuRoC ships 4, ROS `plumb_bob` 5) |
 
 **Brown-Conrady** (`geometry/distortion_models/brown_conrady_distortion_model.h`,
 added 2026-10-11 for EuRoC MAV). On the z = 1 plane, r² = x² + y²,
