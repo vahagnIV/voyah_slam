@@ -40,7 +40,9 @@ struct BinocularFrame {
 //   <root>/mav0/cam{0,1}/data.csv, <root>/mav0/cam{0,1}/data/<timestamp>.png
 // Calibration comes from <root>/dso/camchain.yaml (Kalibr, as shipped with
 // TUM-VI) if present, otherwise from <root>/mav0/cam{0,1}/sensor.yaml (EuRoC).
-// Only the "equidistant" (Kannala-Brandt) distortion model is supported so far.
+// Distortion models: "equidistant" (Kannala-Brandt), Brown-Conrady under its
+// EuRoC / Kalibr / ROS names "radial-tangential" / "radtan" / "plumb_bob"
+// ([k1, k2, p1, p2] or [k1, k2, p1, p2, k3]), and "none".
 //
 // The reader does no timing and starts no threads: frames are loaded on
 // demand, by index, on the caller's thread. Images are returned as 8-bit

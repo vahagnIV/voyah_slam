@@ -2,9 +2,11 @@
 #include <cmath>
 #include "voyahslam/defs.h"
 #include "voyahslam/geometry/camera.h"
+#include "voyahslam/geometry/distortion_models/brown_conrady_distortion_model.h"
 #include "voyahslam/geometry/distortion_models/kannala_brandt_distortion_model.h"
 
 using namespace voyahslam::geometry;
+using voyahslam::geometry::distortion_models::BrownConradyDistortionModel;
 using voyahslam::geometry::distortion_models::KannalaBrandtDistortionModel;
 using voyahslam::precision_t;
 
@@ -71,6 +73,36 @@ TEST(CameraTest, ProjectJacobianMatchesFiniteDifferences) {
             }
             EXPECT_LT((analytic - numeric).norm(), 1e-6 * analytic.norm())
                 << "i=" << i << (m ? " KB" : " pinhole");
+        }
+    }
+}
+
+// EuRoC MH_01 cam0 (radial-tangential, 752x480): every raw pixel unprojects
+// to a ray that projects back onto it, and the projection Jacobian matches
+// finite differences.
+TEST(CameraTest, ProjectUnprojectRoundTripBrownConrady) {
+    const BrownConradyDistortionModel model(-0.28340811, 0.07395907, 0.00019359, 1.76187114e-05);
+    Camera camera;
+    camera.K << 458.654880721, 0, 367.215803962, 0, 457.296696463, 248.375340610, 0, 0, 1;
+    camera.distortion = &model;
+    for (int u = 0; u <= 752; u += 47) {
+        for (int v = 0; v <= 480; v += 40) {
+            const TPoint2DF pixel(u, v);
+            const THomogenousPointF ray = camera.Unproject(pixel);
+            ASSERT_DOUBLE_EQ(ray.z(), 1.0);
+            const TPoint3DF Xc = 2.5 * ray;
+            EXPECT_LT((camera.Project(Xc) - pixel).norm(), 1e-8) << "pixel " << u << ", " << v;
+
+            const auto analytic = camera.ProjectJacobian(Xc);
+            Eigen::Matrix<precision_t, 2, 3> numeric;
+            for (int c = 0; c < 3; ++c) {
+                const precision_t h = 1e-6;
+                TPoint3DF plus = Xc, minus = Xc;
+                plus(c) += h;
+                minus(c) -= h;
+                numeric.col(c) = (camera.Project(plus) - camera.Project(minus)) / (2 * h);
+            }
+            EXPECT_LT((analytic - numeric).norm(), 1e-6 * analytic.norm()) << "pixel " << u << ", " << v;
         }
     }
 }

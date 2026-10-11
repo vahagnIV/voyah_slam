@@ -51,7 +51,10 @@ as soon as they come up.
 
 - [ ] Contrast equalization (own CLAHE) as an app-side preprocessing step —
       ORB-SLAM3 applies CLAHE(3.0, 8×8) to every TUM-VI image.
-- [ ] Radial-tangential distortion model for EuRoC MAV. (OQ 23)
+- [ ] **Real-data run on EuRoC MH_01** (https://doi.org/10.3929/ethz-b-000690084),
+      mono and stereo, with the Brown-Conrady model (added 2026-10-11, unit
+      tests only so far; never run on EuRoC images). Check tracking, maps and
+      ATE (`tools/ate.py`).
 
 ## Geometry
 
@@ -157,6 +160,20 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
       (Xc = (0, 0, z) → K₂ₓ₂·[1/z, 0, 0; 0, 1/z, 0]).
 - [ ] Tests under `libs/common/tests/geometry` for the moved distortion models still use
       namespace `test::features`; rename to `test::geometry`.
+- [ ] **`rational_polynomial`** distortion (OpenCV 8 coefficients
+      `[k1, k2, p1, p2, k3, k4, k5, k6]`, ROS name): extend Brown-Conrady with
+      the radial denominator (1 + k4r² + k5r⁴ + k6r⁶) and accept 8 coefficients
+      in the reader.
+- [ ] Failed undistortion is silent: `DistortionModel::Undistort` leaves a
+      non-invertible point unchanged (Brown-Conrady, Kannala-Brandt) and no
+      caller (`MonocularMeasurement`, `Camera::Unproject`) can tell. Consider a
+      validity mask and dropping such features in `MonocularMeasurement`.
+- [ ] The 85° drop (`MonocularMeasurement::DropFeaturesBeyondMaxRayAngle`)
+      assumes the distorted radius grows monotonically with the ray angle.
+      Brown-Conrady is not radially symmetric (p1, p2) and folds for some
+      coefficients (k1 < 0, small k2): Distort(tan 85°) can land anywhere, so
+      the test may keep or drop the wrong features. Harmless for EuRoC (no
+      feature is near 85°); a per-model "valid region" would be cleaner.
 
 ## Stereo (2026-10-04)
 

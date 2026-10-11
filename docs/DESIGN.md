@@ -581,7 +581,10 @@ distortion models and builds the `StereoRig` from both cameras' `T_cam_imu`
 (`T_rl = T_right_imu · T_left_imu⁻¹` with `T_cam_imu` mapping IMU to camera, so `p_right = T_rl p_left`: `StereoRig::T_rl` maps left → right).
 Images: decoded to 8 bit (16-bit PNGs reduced) and returned as
 `images::TWorkingImage` (8-bit grayscale).
-Only `equidistant` (Kannala-Brandt) and `none` distortion are supported.
+Distortion models: `equidistant` (Kannala-Brandt), Brown-Conrady under its
+names `radial-tangential` (EuRoC), `radtan` (Kalibr) and `plumb_bob` (ROS)
+with 4 (`[k1, k2, p1, p2]`) or 5 (`[..., k3]`) coefficients (any other count is
+rejected), and `none`. See "Camera models (lens distortion)".
 
 **Timing — no reader thread.** The reader is synchronous and index-based. The
 app's main loop paces itself with `PlaybackClock::WaitUntil(timestamp)`:
@@ -707,7 +710,7 @@ every reprojection residual and gate after them is in raw pixels.
 | Component | Header | Summary |
 |---|---|---|
 | `Camera` | `geometry/camera.h` | K + `const DistortionModel*` (null = pinhole); `Project` (camera point → raw pixel), `ProjectJacobian` (2×3), `Unproject` (raw pixel → z = 1 ray). See "Camera Model and Raw-Pixel Residuals". |
-| `DistortionModel` (+ Dummy, Kannala-Brandt) | `geometry/distortion_models/*.h` | `Distort` / `Undistort` on normalized points, analytic `DistortJacobian`. Forwarding headers at `features/distortion_models/`. |
+| `DistortionModel` (+ Dummy, Kannala-Brandt, Brown-Conrady) | `geometry/distortion_models/*.h` | `Distort` / `Undistort` on normalized points, analytic `DistortJacobian`. Forwarding headers at `features/distortion_models/`. |
 | `RigidTransformation` | `geometry/rigid_transformation.h` | Value type, hidden representation (R, t now). `T_ab` maps frame b to frame a: `p_a = T_ab * p_b`, `T_ac = T_ab * T_bc`. `Inverse()`, `Transform()`, `ToMatrix34/44()`. |
 | `TwoViewCorrespondences` | `geometry/two_view_correspondences.h` | `x1`, `x2` (2xN normalized) + `sigma`. |
 | `TwoViewEstimator` concept, `ModelScore` | `estimators/two_view_estimator.h` | `TModel`, `kSampleSize`, `Estimate(corr, sample)` -> 0..n candidates, `Score(model, corr)` -> score + inlier mask. |
@@ -814,6 +817,39 @@ compile; in-repo users use the new path. New pure virtual `DistortJacobian(p)`
   1 / (1 + r²), d′(θ) = 1 + 3k1θ² + 5k2θ⁴ + 7k3θ⁶ + 9k4θ⁸; J = I for r < 1e-8
   (the limit). Verified against central finite differences (Ruling U: the
   first spec draft had an extra 1/r).
+- Brown-Conrady: the analytic (symmetric) 2×2 Jacobian of the OpenCV
+  polynomial below.
+
+### Camera models (lens distortion)
+
+| Model | Class | Calibration names | Coefficients |
+|---|---|---|---|
+| Kannala-Brandt (fisheye) | `KannalaBrandtDistortionModel` | `equidistant` (Kalibr, EuRoC/TUM-VI) | k1..k4 |
+| Brown-Conrady (radial-tangential) | `BrownConradyDistortionModel` | OpenCV standard model = ROS `plumb_bob` = Kalibr `radtan` = EuRoC `radial-tangential` | k1, k2, p1, p2[, k3] (OpenCV order) |
+
+**Brown-Conrady** (`geometry/distortion_models/brown_conrady_distortion_model.h`,
+added 2026-10-11 for EuRoC MAV). On the z = 1 plane, r² = x² + y²,
+x_d = x(1 + k1r² + k2r⁴ + k3r⁶) + 2p1xy + p2(r² + 2x²) and
+y_d = y(1 + k1r² + k2r⁴ + k3r⁶) + p1(r² + 2y²) + 2p2xy, exactly OpenCV's
+`projectPoints` (tests compare against `cv::projectPoints` and
+`cv::undistortPoints` live, plus hard-coded values; OpenCV stays in the test
+target only). `Distort` returns z = 1; `Undistort` keeps the input's z;
+|z| < 1e-8 columns are left unchanged. `Undistort` is Newton's method on the
+analytic Jacobian from the distorted point, residual < 1e-12, ≤ 20 iterations
+(OpenCV's fixed-point `undistortPoints` stops after 5 by default).
+
+**Failed undistortion.** A point Newton does not invert (no convergence, or a
+root on the folded branch where the Jacobian has det ≤ 0 or trace ≤ 0, e.g. the
+mirrored preimage k1 < 0 has beyond its turning radius) is **left unchanged**:
+it stays the distorted normalized point, with no flag. Kannala-Brandt behaves
+alike (it keeps its best θ, or the input if tan θ is not finite). No caller
+checks: `MonocularMeasurement` (→ `normalized_points()`, `points()`, used by
+two-view RANSAC, triangulation, the stereo matcher and the Mapper's stereo
+points), `Camera::Unproject` (→ PnP bearings) all take the result as a valid
+ray. A failure therefore yields a silently wrong ray, off by the local
+distortion. It only happens far outside the calibrated field of view (for
+EuRoC cam0 the whole 752×480 image inverts to 1e-10), so it is accepted;
+a per-point validity flag is a TODO.
 
 **Measurements keep both** the distortion model pointer and the raw keypoints:
 `MonocularMeasurement::distorted_points()` are the keypoints as passed to the
@@ -2908,6 +2944,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-11 | (Map merging Task 5; controller ruling) **"A correction or merge is running" is read as queue order.** The Mapper handles one event at a time, so a merge or loop queued behind a merge is rejected because it names the removed map; a merge queued behind a *loop correction* of M is accepted: its `S_query_match` is camera to camera, so the corrected query pose S·T_match does not depend on M's world. Rejecting it would need an epoch on `LoopDetected` (TODO). | No running state exists to test; the accepted case is geometrically sound. |
 | 2026-10-11 | (Map merging Task 7) **Integration and harness.** `SlamTest.{Mono,Stereo}MergesMaps` run MonoClosesLoop's loop extended to 600° (401 frames) with a blackout over frames 140–165 and `recently_lost_seconds` 1 s (the default 5 s is 150° of this 20 s run: map 2 would not reach the LoopCloser's 12 Frames before leaving map 1's area); baseline: the same run without the blackout. The whole-run error is the RMS of every final-map Frame's centre against truth under one Umeyama alignment (similarity for mono, rigid for stereo): tracked poses before a merge are in another map's world, the final map's Frames are in one. The lock-step harness now waits for the Tracker to have processed each frame (`Tracker::num_processed()`) and for the Mapper to have handled every `InitializationMeasurement` (`Mapper::num_initialization_measurements()`): without it, a Lost Tracker forwarded the whole blackout tail and the Mapper's new mono map started far behind the camera (lost at once, maps 2..6). `Mapper::other_map_skipped()` counts `FrameTracked` of a map that is not active (in flight across a merge or a loss) so the gate accounts for them. Tracker: a merge of the active map that leaves no map active falls back to `AdoptMap(target)` (a reset) instead of keeping M's ids in the last frame (the Mapper never sends that shape). The apps print the Atlas (live maps, active, merges); the merge log names both Frames' timestamps and the weld time; `tools/ate.py --map ID` evaluates one map. | The spec's integration bars on a scene where both maps reach the Atlas thresholds at their default values; counters rather than sleeps keep the harness deterministic. |
 | 2026-10-11 | (Map merging final review, I1) **Lost maps are kept only when `Slam` has a LoopCloser** (loop closing enabled and a vocabulary). Otherwise `Slam` passes the Mapper `atlas.min_frames_to_keep = SIZE_MAX`, so every lost map is discarded as on master; a kept map could never be merged and would only grow memory per loss. `SlamTest.LostMapsDiscardedWithoutLoopClosing`. | Binding ruling; merging needs the LoopCloser. |
+| 2026-10-11 | **Brown-Conrady distortion model, naming.** The class is `BrownConradyDistortionModel` (coefficients in OpenCV order `[k1, k2, p1, p2, k3]`); one model under four names: Brown-Conrady = OpenCV standard = ROS `plumb_bob` = Kalibr `radtan` (= EuRoC `radial-tangential`). The reader accepts all three calibration strings with 4 or 5 coefficients. `Undistort` is Newton (1e-12, ≤ 20 iterations); a point it cannot invert, or whose root lies on the folded branch, is left unchanged, as with Kannala-Brandt. Tests may use OpenCV as a reference; the library may not. | The physical model's name, not one tool's; the calibration names are listed so each file format maps to it. Leaving failures unchanged keeps the `DistortionModel` interface; they occur only outside the calibrated field of view. |
 
 ## 9. Open Questions
 
@@ -3009,8 +3046,9 @@ branch → review → merge to `master`. Update this document at the end.
     the Tracker design. Since 2026-10-05 residuals and gates are in raw pixels
     (only the geometry stays on z = 1 rays), so keeping features beyond 85°
     needs bearing vectors only on the ray side (TODO).
-23. **Radial-tangential distortion** (EuRoC MAV) is not implemented; the reader
-    rejects such calibrations.
+23. ~~**Radial-tangential distortion** (EuRoC MAV) is not implemented~~ —
+    resolved 2026-10-11: `BrownConradyDistortionModel` (see "Camera models
+    (lens distortion)").
 24. ~~Mono/stereo variants share an event tag~~ — resolved 2026-10-03:
     measurements travel as `features::TMeasurement<FE>`, a `std::variant`
     inside the events (§6). Mixed keyframes in one map remain OQ 17.

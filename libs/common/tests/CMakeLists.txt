@@ -1,4 +1,5 @@
-# OpenCV: kannala_brandt_distortion_model_test uses calib3d as a reference.
+# OpenCV (test target only, never voyah_common): the Kannala-Brandt and
+# Brown-Conrady distortion tests use calib3d as a reference.
 voyah_add_test_binary(voyah_common_tests
     LABEL unit
     SOURCES
@@ -9,6 +10,7 @@ voyah_add_test_binary(voyah_common_tests
         features/monocular_measurement_test.cpp
         features/stereo_rig_test.cpp
         geometry/camera_test.cpp
+        geometry/distortion_models/brown_conrady_distortion_model_test.cpp
         geometry/distortion_models/distortion_model_test.cpp
         geometry/distortion_models/kannala_brandt_distortion_model_test.cpp
         geometry/rigid_transformation_test.cpp
