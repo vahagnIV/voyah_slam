@@ -49,7 +49,10 @@ as soon as they come up.
       `voyah_algs_tests` (`FastTest.*`) for arm64 (Android NDK or an arm64
       Linux box), run it, and run `voyah_algs_dataset_tests`
       (`FastCorridor1Test`) there with the corridor1 frames; then time it with
-      `fast_benchmark` against `cv::FAST` on the same device.
+      `fast_benchmark` against `cv::FAST` on the same device. Note: on arm64
+      `cv::FAST` may go through `cv_hal_FAST` / `cv_hal_FASTv2` (e.g.
+      KleidiCV); if so the live reference is that HAL, not `FAST_t`, and a
+      bit-exactness mismatch may be the HAL's.
 - [ ] Preallocate blur and pyramid buffers (no per-frame image allocations).
 - [ ] Check border handling (ORB-SLAM3 pads levels by 19 px).
 - [ ] Parallel left/right extraction for stereo.

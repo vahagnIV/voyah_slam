@@ -25,7 +25,7 @@ struct Buffer {
     std::vector<uint8_t> pixels;
 
     Buffer(int w, int h, std::ptrdiff_t s, uint8_t fill = 0)
-        : width(w), height(h), stride(s), pixels(static_cast<size_t>(s) * h + 1, fill) {}
+        : width(w), height(h), stride(s), pixels(static_cast<size_t>(s) * h, fill) {}
     uint8_t& At(int x, int y) { return pixels[static_cast<size_t>(y) * stride + x]; }
     const uint8_t* Data() const { return pixels.data(); }
 };

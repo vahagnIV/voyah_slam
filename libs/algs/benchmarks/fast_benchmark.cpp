@@ -160,33 +160,49 @@ int main(int argc, char** argv) {
                         const std::vector<View> views =
                             cells_mode ? OrbCells(view) : std::vector<View>{view};
 
-                        // OpenCV.
-                        auto start = Clock::now();
+                        // OpenCV and ours alternate who goes first, so neither always runs
+                        // on cache-warm data.
                         size_t cv_count = 0;
-                        for (const View& v : views) {
-                            const cv::Mat mat(v.height, v.width, CV_8U, const_cast<uint8_t*>(v.data),
-                                              static_cast<size_t>(v.stride));
-                            cv::FAST(mat, keypoints, threshold, true);
-                            if (cells_mode && keypoints.empty() && threshold == kInitThreshold)
-                                cv::FAST(mat, keypoints, kMinThreshold, true);
-                            cv_count += keypoints.size();
-                        }
-                        samples[0].push_back(std::chrono::duration<double, std::micro>(Clock::now() - start).count());
-
-                        for (size_t p = 0; p < paths.size(); ++p) {
-                            start = Clock::now();
-                            size_t count = 0;
+                        std::vector<size_t> counts(paths.size(), 0);
+                        const auto run_cv = [&] {
+                            const auto start = Clock::now();
+                            cv_count = 0;
                             for (const View& v : views) {
-                                DetectFast(v.data, v.width, v.height, v.stride, threshold, true, ours, paths[p]);
-                                if (cells_mode && ours.empty() && threshold == kInitThreshold)
-                                    DetectFast(v.data, v.width, v.height, v.stride, kMinThreshold, true, ours,
-                                               paths[p]);
-                                count += ours.size();
+                                const cv::Mat mat(v.height, v.width, CV_8U, const_cast<uint8_t*>(v.data),
+                                                  static_cast<size_t>(v.stride));
+                                cv::FAST(mat, keypoints, threshold, true);
+                                if (cells_mode && keypoints.empty() && threshold == kInitThreshold)
+                                    cv::FAST(mat, keypoints, kMinThreshold, true);
+                                cv_count += keypoints.size();
                             }
-                            samples[1 + p].push_back(
+                            samples[0].push_back(
                                 std::chrono::duration<double, std::micro>(Clock::now() - start).count());
-                            if (count != cv_count) all_equal = false;
+                        };
+                        const auto run_ours = [&] {
+                            for (size_t p = 0; p < paths.size(); ++p) {
+                                const auto start = Clock::now();
+                                counts[p] = 0;
+                                for (const View& v : views) {
+                                    DetectFast(v.data, v.width, v.height, v.stride, threshold, true, ours,
+                                               paths[p]);
+                                    if (cells_mode && ours.empty() && threshold == kInitThreshold)
+                                        DetectFast(v.data, v.width, v.height, v.stride, kMinThreshold, true,
+                                                   ours, paths[p]);
+                                    counts[p] += ours.size();
+                                }
+                                samples[1 + p].push_back(
+                                    std::chrono::duration<double, std::micro>(Clock::now() - start).count());
+                            }
+                        };
+                        if ((static_cast<size_t>(rep) + static_cast<size_t>(&pyramid - pyramids.data())) % 2 == 0) {
+                            run_cv();
+                            run_ours();
+                        } else {
+                            run_ours();
+                            run_cv();
                         }
+                        for (size_t count : counts)
+                            if (count != cv_count) all_equal = false;
 
                         // Exactness check on the first repetition (untimed).
                         if (rep == 0 && !cells_mode) {

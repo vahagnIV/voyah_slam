@@ -767,25 +767,27 @@ day, no `voyah_*` library uses OpenCV.
   `~/Downloads/dataset-corridor1_1024_16`, and skip without it.
 - **Benchmark** (`libs/algs/benchmarks/fast_benchmark`, built with `all`, not
   part of `check` / `check_all`; Release, single thread, 20 corridor1 frames
-  × 50 repetitions, median per frame, ratio = ours / OpenCV, 2026-10-11):
+  × 50 repetitions, median per frame, ratio = ours / OpenCV, 2026-10-11;
+  OpenCV and ours alternate who runs first per frame and repetition, so neither
+  always gets cache-warm data):
 
   | level (size) | t | OpenCV µs | ours (AVX2) µs | ratio | SSE2 only | scalar only |
   |---|---|---|---|---|---|---|
-  | 0 (1024²) | 20 / 7 | 282 / 544 | 242 / 499 | 0.86 / 0.92 | 1.12 / 1.12 | 3.69 / 3.66 |
-  | 1 (853²) | 20 / 7 | 219 / 414 | 187 / 379 | 0.85 / 0.92 | 1.09 / 1.13 | 3.52 / 3.55 |
-  | 2 (711²) | 20 / 7 | 153 / 313 | 136 / 292 | 0.89 / 0.93 | 1.15 / 1.13 | 3.74 / 3.67 |
-  | 3 (593²) | 20 / 7 | 122 / 258 | 111 / 241 | 0.91 / 0.93 | 1.12 / 1.07 | 3.56 / 3.41 |
-  | 4 (494²) | 20 / 7 | 100 / 196 | 89 / 183 | 0.89 / 0.93 | 1.11 / 1.16 | 3.29 / 3.56 |
-  | 5 (412²) | 20 / 7 | 73 / 156 | 68 / 145 | 0.94 / 0.93 | 1.15 / 1.13 | 3.47 / 3.51 |
-  | 6 (343²) | 20 / 7 | 56 / 121 | 52 / 112 | 0.92 / 0.93 | 1.12 / 1.11 | 3.42 / 3.52 |
-  | 7 (286²) | 20 / 7 | 51 / 104 | 46 / 96 | 0.91 / 0.92 | 1.07 / 1.11 | 3.03 / 3.37 |
-  | all levels, both t | | 3161 | 2877 | **0.91** | 1.12 | 3.56 |
-  | ORB cells, all levels | | 14215 | 8001 | **0.56** | 0.56 | 0.88 |
+  | 0 (1024²) | 20 / 7 | 262 / 523 | 237 / 498 | 0.90 / 0.95 | 1.18 / 1.14 | 3.97 / 3.77 |
+  | 1 (853²) | 20 / 7 | 204 / 401 | 183 / 384 | 0.90 / 0.96 | 1.15 / 1.15 | 3.80 / 3.67 |
+  | 2 (711²) | 20 / 7 | 146 / 300 | 134 / 290 | 0.92 / 0.97 | 1.19 / 1.17 | 3.94 / 3.76 |
+  | 3 (593²) | 20 / 7 | 122 / 248 | 110 / 240 | 0.90 / 0.96 | 1.11 / 1.10 | 3.59 / 3.50 |
+  | 4 (494²) | 20 / 7 | 96 / 192 | 90 / 185 | 0.94 / 0.96 | 1.15 / 1.17 | 3.43 / 3.57 |
+  | 5 (412²) | 20 / 7 | 73 / 151 | 68 / 144 | 0.94 / 0.95 | 1.14 / 1.15 | 3.43 / 3.56 |
+  | 6 (343²) | 20 / 7 | 56 / 114 | 53 / 110 | 0.95 / 0.96 | 1.14 / 1.15 | 3.46 / 3.66 |
+  | 7 (286²) | 20 / 7 | 49 / 99 | 46 / 95 | 0.94 / 0.96 | 1.10 / 1.12 | 3.06 / 3.31 |
+  | all levels, both t | | 3037 | 2867 | **0.94** | 1.15 | 3.68 |
+  | ORB cells, all levels | | 13886 | 7933 | **0.57** | 0.57 | 0.92 |
 
-  Whole levels: ours (auto = AVX2) is 6–15% faster than `cv::FAST` at every
-  level and threshold; SSE2 alone is ~10% slower than OpenCV's AVX2. The
+  Whole levels: ours (auto = AVX2) is 3–10% faster than `cv::FAST` at every
+  level and threshold; SSE2 alone is ~15% slower than OpenCV's AVX2. The
   extractor's real workload, one call per 35-px cell (plus the threshold-7
-  retry), is 1.8× faster: `cv::FAST` resizes its output to ≥ 1000 KeyPoints
+  retry), is 1.75× faster: `cv::FAST` resizes its output to ≥ 1000 KeyPoints
   and tries HAL hooks on every call; ours reuses thread-local rows.
 - The other OQ 21 items (FAST once per level instead of per cell, blind
   strips, buffers, border padding) are separate; this port keeps the
@@ -3041,7 +3043,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-11 | (Map merging final review, I1) **Lost maps are kept only when `Slam` has a LoopCloser** (loop closing enabled and a vocabulary). Otherwise `Slam` passes the Mapper `atlas.min_frames_to_keep = SIZE_MAX`, so every lost map is discarded as on master; a kept map could never be merged and would only grow memory per loss. `SlamTest.LostMapsDiscardedWithoutLoopClosing`. | Binding ruling; merging needs the LoopCloser. |
 | 2026-10-11 | **Brown-Conrady distortion model, naming.** The class is `BrownConradyDistortionModel` (coefficients in OpenCV order `[k1, k2, p1, p2, k3]`); one model under four names: Brown-Conrady = OpenCV standard = ROS `plumb_bob` = Kalibr `radtan` (= EuRoC `radial-tangential`). The reader accepts all three calibration strings with 4 or 5 coefficients. `Undistort` is Newton (1e-12, ≤ 20 iterations); a point it cannot invert, or whose root lies on the folded branch, is left unchanged, as with Kannala-Brandt. Tests may use OpenCV as a reference; the library may not. | The physical model's name, not one tool's; the calibration names are listed so each file format maps to it. Leaving failures unchanged keeps the `DistortionModel` interface; they occur only outside the calibrated field of view. |
 | 2026-10-11 | **FAST ported from OpenCV, bit-exact.** `features::DetectFast` (`voyah_algs`, public `features/fast.h`) is OpenCV 5's `FAST_t<16>` + `cornerScore<16>` + AVX2 kernel (5.x at `20e367198c`, 5.1.0-dev = the installed OpenCV; unchanged since tag 5.0.0), keeping OpenCV's Apache-2.0 notice and Rosten's BSD notice. Same corners, order and responses as `cv::FAST(img, kps, t, true)`, TYPE_9_16; stride-aware views; `FastCorner{x, y, response}`. The ORB extractor calls it per cell exactly where it called `cv::FAST` (unused `cv::minMaxLoc` dropped); its output is byte-identical (golden digests recorded with `cv::FAST` before the switch). | User decisions: own FAST to drop OpenCV from the library, bit-exact so the switch changes nothing downstream (vocabulary, matching, tests). The per-level rework of OQ 21 is a separate, behaviour-changing step. |
-| 2026-10-11 | **FAST SIMD paths: scalar, SSE2, AVX2 (run-time), NEON.** Each path is OpenCV's algorithm for its width and all are tested against live `cv::FAST`. x86-64: SSE2 baseline; AVX2 in its own file built with `-mavx2`, chosen by `__builtin_cpu_supports` (no `-march`, still runs without AVX2). arm64: NEON baseline. `FastSimd` lets tests and the benchmark force a path. Speed (user decision: at least as fast as `cv::FAST`, single thread): 0.85–0.94 of OpenCV's time per whole level, 0.56 on the extractor's per-cell workload. NEON verified only under SIMDe emulation (TODO: arm64 hardware). | OpenCV here runs its AVX2 dispatch for FAST, so SSE2 alone (~1.1×) is not enough; run-time dispatch keeps one binary portable. NEON for the Android app. |
+| 2026-10-11 | **FAST SIMD paths: scalar, SSE2, AVX2 (run-time), NEON.** Each path is OpenCV's algorithm for its width and all are tested against live `cv::FAST`. x86-64: SSE2 baseline; AVX2 in its own file built with `-mavx2`, chosen by `__builtin_cpu_supports` (no `-march`, still runs without AVX2). arm64: NEON baseline. `FastSimd` lets tests and the benchmark force a path. Speed (user decision: at least as fast as `cv::FAST`, single thread): 0.90–0.97 of OpenCV's time per whole level (0.94 overall), 0.57 on the extractor's per-cell workload. NEON verified only under SIMDe emulation (TODO: arm64 hardware). | OpenCV here runs its AVX2 dispatch for FAST, so SSE2 alone (~1.1×) is not enough; run-time dispatch keeps one binary portable. NEON for the Android app. |
 | 2026-10-11 | **SIFT extractor removed** (user decision): header, source, tests, the `INSTANTIATE_CLASS` entry and every explicit instantiation; `Slam<SIFT>` in `SlamTest.TrackEnqueuesMonocularAndBinocularMeasurements` became `OrbSlam`. Supersedes the SIFT parts of the 2026-10-04 level / `max_distance` rows and the 2026-10-07 `Vocabulary<FE>` row (ruling A now covers ORB only). | It was the last OpenCV user in the library, had no vocabulary, and doubled every template's instantiation. |
 | 2026-10-11 | **The `voyah_*` libraries are OpenCV-free.** `voyah_algs` no longer links OpenCV (`opencv_bindings.h` and the include in `orb/extract_node.h` deleted); targets that compare with OpenCV (`voyah_algs_tests`, `voyah_algs_dataset_tests`, `fast_benchmark`, `voyah_common_tests`) link it themselves; `voyahviz` keeps it `PRIVATE`. New integration binary `voyah_algs_dataset_tests` for the corridor1 tests (skip without the dataset); `fast_benchmark` is built with `all` but is not in `check` / `check_all`. | Completes the 2026-10-03 goal "drop the OpenCV dependency" for the library; a package export no longer needs `find_dependency(OpenCV)`. |
 

@@ -41,7 +41,9 @@ enum class FastSimd { kAuto, kScalar, kSse2, kAvx2, kNeon };
 // (0, 0), rows are `stride` bytes apart (stride >= width), and only pixels
 // inside width x height are read, so a sub-view of a larger image needs no
 // copy. Corners lie at least 3 px from the view border; views smaller than
-// 7x7 have none. `threshold` is clamped to [0, 255]. `out_corners` is
+// 7x7 have none. `threshold` is clamped to [0, 255]; output is bit-exact with
+// cv::FAST only for thresholds 0-255 (outside, we clamp, OpenCV's SIMD paths
+// do not). `out_corners` is
 // replaced. Requesting an unavailable `simd` path is a programming error
 // (asserted); release builds fall back to kAuto.
 void DetectFast(const uint8_t* data, int width, int height, std::ptrdiff_t stride, int threshold,

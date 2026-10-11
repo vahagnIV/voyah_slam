@@ -5,7 +5,8 @@
 // dataset reader does) for the FAST and ORB regression tests.
 //
 // The dataset lives outside the repository: $VOYAHSLAM_CORRIDOR1, else
-// ~/Downloads/dataset-corridor1_1024_16. Tests skip when it is missing.
+// ~/Downloads/dataset-corridor1_1024_16. Tests skip when the directory is absent;
+// a present dataset with too few frames fails.
 
 #include <voyahslam/images/image.h>
 #include <voyahslam/io/read_image.h>
@@ -40,6 +41,12 @@ inline std::vector<std::filesystem::path> Corridor1Frames() {
     }
     std::sort(frames.begin(), frames.end());
     return frames;
+}
+
+// Whether the dataset directory exists (tests skip only when it does not).
+inline bool Corridor1Present() {
+    std::error_code error;
+    return std::filesystem::is_directory(Corridor1Cam0Dir(), error);
 }
 
 // A spread of frames across the sequence: indices 0, 1000, 2000, ...

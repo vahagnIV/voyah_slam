@@ -41,6 +41,9 @@ uint64_t HashValue(const T& value, uint64_t hash) {
     return Fnv1a(&value, sizeof(T), hash);
 }
 
+// The digests hash raw float bytes, so they pin x86-64 with this compiler. On
+// another compiler or on arm64 (FMA contraction) they may need re-recording
+// with VOYAHSLAM_RECORD_ORB_GOLDEN=1 for reasons unrelated to FAST.
 // One line per (frame, level): count and digests of each output array,
 // restricted to that level's columns (the extractor emits levels in order).
 std::string Digest(const std::string& frame, const OrbFeatureExtractor::TFeatures& features,
@@ -73,7 +76,9 @@ std::string GoldenPath() { return std::string(VOYAH_FEATURES_DATA_DIR) + "/orb_c
 
 TEST(OrbExtractorGoldenTest, Corridor1OutputUnchanged) {
     const auto frames = test::Corridor1SampleFrames(kNumFrames);
-    if (frames.size() < kNumFrames) GTEST_SKIP() << "corridor1 dataset not found";
+    if (!test::Corridor1Present()) GTEST_SKIP() << "corridor1 dataset not found";
+    ASSERT_GE(frames.size(), kNumFrames)
+        << "corridor1 dataset at " << test::Corridor1Cam0Dir() << " is present but has too few frames";
 
     OrbFeatureExtractor extractor;  // defaults: 1.2, 8 levels, FAST 20 / 7
     std::string actual;

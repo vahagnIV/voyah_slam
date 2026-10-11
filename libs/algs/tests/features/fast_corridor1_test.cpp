@@ -54,7 +54,9 @@ std::vector<precision_t> ScaleFactors() {
 
 TEST(FastCorridor1Test, EveryLevelThresholdAndCellMatchesOpenCv) {
     const auto frames = test::Corridor1SampleFrames(kNumFrames);
-    if (frames.size() < kNumFrames) GTEST_SKIP() << "corridor1 dataset not found";
+    if (!test::Corridor1Present()) GTEST_SKIP() << "corridor1 dataset not found";
+    ASSERT_GE(frames.size(), kNumFrames)
+        << "corridor1 dataset at " << test::Corridor1Cam0Dir() << " is present but has too few frames";
     const auto paths = test::RunnableFastPaths();
 
     size_t total_corners = 0, total_cells = 0;
