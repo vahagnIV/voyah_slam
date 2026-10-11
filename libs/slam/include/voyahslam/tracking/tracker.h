@@ -127,7 +127,7 @@ struct TrackerOptions {
 //
 // MapTransactions. They build the Tracker's AtlasReplica (the replica rule:
 // atlas_replica.h); the Tracker tracks and relocalizes only in the active map
-// (replica()). A change of the active map to another map resets the last
+// (map_replica()). A change of the active map to another map resets the last
 // frame, the velocity and the reference Frame; current_map_id() is the last
 // active map (kept while none is active, after a final loss). Only a
 // transaction of the active map acts on the Tracker's state below. A new map
@@ -206,7 +206,7 @@ public:
     [[nodiscard]] const AtlasReplica<TFeatureExtractor>& atlas() const { return atlas_; }
     // The active map, which the Tracker tracks and relocalizes in; empty if
     // there is none.
-    [[nodiscard]] const MapReplica<TFeatureExtractor>& replica() const { return atlas_.active_or_empty(); }
+    [[nodiscard]] const MapReplica<TFeatureExtractor>& map_replica() const { return atlas_.active_or_empty(); }
     // The last tracked frame's inlier matches: per (left) feature, the
     // MapPointId value or -1.
     [[nodiscard]] const std::vector<int64_t>& last_matches() const { return last_frame_.matches; }

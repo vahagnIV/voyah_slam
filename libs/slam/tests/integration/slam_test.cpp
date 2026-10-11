@@ -825,8 +825,8 @@ TEST(SlamTest, MeasurementsAreShared) {
     while (slam.loop_closer().ProcessPending()) {
     }
 
-    const auto& tracker_replica = slam.tracker().replica();
-    const auto& loop_closer_replica = slam.loop_closer().replica();
+    const auto& tracker_replica = slam.tracker().map_replica();
+    const auto& loop_closer_replica = slam.loop_closer().map_replica();
     const std::vector<map::FrameId> frames = tracker_replica.keyframe_ids();
     ASSERT_GE(frames.size(), 2u);
     EXPECT_EQ(loop_closer_replica.keyframe_ids(), frames);

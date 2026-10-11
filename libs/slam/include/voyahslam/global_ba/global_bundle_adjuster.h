@@ -64,7 +64,7 @@ public:
     // synchronously: never read while the worker runs.
     [[nodiscard]] const tracking::AtlasReplica<TFeatureExtractor>& atlas() const { return atlas_; }
     // The active map; empty if there is none.
-    [[nodiscard]] const tracking::MapReplica<TFeatureExtractor>& replica() const {
+    [[nodiscard]] const tracking::MapReplica<TFeatureExtractor>& map_replica() const {
         return atlas_.active_or_empty();
     }
     [[nodiscard]] size_t num_runs_started() const { return num_runs_started_; }

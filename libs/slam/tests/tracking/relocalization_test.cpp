@@ -54,7 +54,7 @@ protected:
             ASSERT_EQ(captured.size(), 1u) << "frame " << k;
             ASSERT_EQ(captured[0].type, events::EventType::FrameTracked) << "frame " << k;
         }
-        ASSERT_GE(tracker_.replica().num_keyframes(), 2u);
+        ASSERT_GE(tracker_.map_replica().num_keyframes(), 2u);
         for (size_t k = kMappedFrames; k < kResumeFrame; ++k) {
             const auto captured = Feed(test::MakeBinocular(0, FrameTimestamp(k)));
             if (k == kMappedFrames) {
@@ -79,7 +79,7 @@ protected:
             binocular->SetStereoMatches(features::MatchStereo<Extractor>(*binocular, options.stereo_matcher));
         }
         const PoseRefinement refinement{options.pose_optimization, options.sigma_px, options.level_scale};
-        return Relocalize(tracker_.replica(), measurement, *MakeRootVocabulary(), options.relocalization,
+        return Relocalize(tracker_.map_replica(), measurement, *MakeRootVocabulary(), options.relocalization,
                           refinement, options.matcher);
     }
 
@@ -272,7 +272,7 @@ TEST_F(RelocalizationTest, SkipsFrameRemovedMidRecovery) {
     MapThenBlackOut(sequence);
     const RelocalizationResult first = RelocalizeDirectly(sequence.frames[kResumeFrame].measurement);
     ASSERT_TRUE(first.success);
-    ASSERT_NE(tracker_.replica().keyframe(first.frame), nullptr);
+    ASSERT_NE(tracker_.map_replica().keyframe(first.frame), nullptr);
 
     // The Mapper removes the Frame relocalization would match while the
     // Tracker is RecentlyLost.
@@ -282,13 +282,13 @@ TEST_F(RelocalizationTest, SkipsFrameRemovedMidRecovery) {
     transaction->removed_frames = {first.frame};
     injector_.Notify(transaction);
     Drain();
-    ASSERT_EQ(tracker_.replica().keyframe(first.frame), nullptr);
-    ASSERT_FALSE(tracker_.replica().database().Contains(first.frame));
+    ASSERT_EQ(tracker_.map_replica().keyframe(first.frame), nullptr);
+    ASSERT_FALSE(tracker_.map_replica().database().Contains(first.frame));
 
     const RelocalizationResult second = RelocalizeDirectly(sequence.frames[kResumeFrame].measurement);
     ASSERT_TRUE(second.success);
     EXPECT_NE(second.frame, first.frame);
-    EXPECT_NE(tracker_.replica().keyframe(second.frame), nullptr);
+    EXPECT_NE(tracker_.map_replica().keyframe(second.frame), nullptr);
 
     const auto captured = Feed(sequence.frames[kResumeFrame].measurement);
     ExpectRelocalized(captured, sequence, kResumeFrame);

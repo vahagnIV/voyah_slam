@@ -608,7 +608,7 @@ void ExpectLoopAtThirdConfirmation(uint32_t seed, const Sim3& drift, bool binocu
         if (k == 0) {
             // Gates of the first detection, with margins over the thresholds.
             const CommonRegionResult result =
-                DetectCommonRegion(loop_closer.replica(), LoopScene::ReturnId(0), LoopCloserOptions{});
+                DetectCommonRegion(loop_closer.map_replica(), LoopScene::ReturnId(0), LoopCloserOptions{});
 
             const CommonRegionStats& stats = result.stats;
             ::testing::Test::RecordProperty(
@@ -805,7 +805,7 @@ TEST(LoopCloserTest, CorrectionDropsPendingRegion) {
     EXPECT_EQ(harness.loop_closer().num_coincidences(), 1u);
     EXPECT_TRUE(harness.PublishEpoch(1).empty());
     EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
-    EXPECT_EQ(harness.loop_closer().replica().map_epoch(), 1u);
+    EXPECT_EQ(harness.loop_closer().map_replica().map_epoch(), 1u);
 }
 
 // Frames of one place, each a query (min_map_frames 1): Frame 0 adds the
@@ -860,7 +860,7 @@ TEST(LoopCloserTest, SlowDetectorHoldsNoTransaction) {
 
     EXPECT_EQ(harness.num_exhausted(), 0u);
     EXPECT_EQ(feed.num_sent(), kFrames);
-    EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), kFrames);
+    EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), kFrames);
     const QueryStats& queries = harness.loop_closer().query_stats();
     EXPECT_EQ(queries.detected, detected);
     EXPECT_GT(queries.dropped, kFrames / 4);
@@ -880,7 +880,7 @@ TEST(LoopCloserTest, CulledQueryIsSkipped) {
     harness.loop_closer().set_query_hook({});
 
     EXPECT_EQ(detected, std::vector<map::FrameId>{map::FrameId{0}});
-    EXPECT_EQ(harness.loop_closer().replica().keyframe(map::FrameId{1}), nullptr);
+    EXPECT_EQ(harness.loop_closer().map_replica().keyframe(map::FrameId{1}), nullptr);
     EXPECT_EQ(harness.loop_closer().query_stats().detected, 1u);
 }
 
@@ -947,22 +947,22 @@ TEST(LoopCloserTest, ClearsOnNewMap) {
             // A non-final loss keeps everything.
             EXPECT_TRUE(harness.PublishTrackingLost(map::MapId{1}, false).empty());
             EXPECT_EQ(harness.loop_closer().num_coincidences(), 2u);
-            EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), 15u);
+            EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), 15u);
             EXPECT_TRUE(harness.PublishTrackingLost(map::MapId{1}, true).empty());
-            EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), 15u);
+            EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), 15u);
             EXPECT_TRUE(harness.PublishRemoval(map::MapId{1}).empty());
-            EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), 0u);
+            EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), 0u);
             EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
             // A late transaction of the lost map is ignored.
             EXPECT_TRUE(scene.PublishReturn(harness, 3).empty());
-            EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), 0u);
+            EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), 0u);
             EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
         } else {
             EXPECT_TRUE(harness.Publish(first, PointsOf(region, 0, Sim3{}, Centre(Pose(0, 0, 0, 0)), rng), true,
                                         map::MapId{2})
                             .empty());
-            EXPECT_EQ(harness.loop_closer().replica().map_id(), map::MapId{2});
-            EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), 1u);
+            EXPECT_EQ(harness.loop_closer().map_replica().map_id(), map::MapId{2});
+            EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), 1u);
             EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
         }
     }
@@ -1020,7 +1020,7 @@ TEST(LoopCloserTest, NoVocabularyDoesNothing) {
     for (size_t k = 0; k < kReturnFrames; ++k) {
         EXPECT_TRUE(scene.PublishReturn(harness, k).empty()) << "L" << k;
     }
-    EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), 0u);
+    EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), 0u);
     EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
 }
 
@@ -1082,7 +1082,7 @@ TEST(LoopCloserTest, RefinementRejectedByNormals) {
     ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
     ASSERT_TRUE(scene.PublishReturn(harness, 0).empty());
     ASSERT_TRUE(scene.PublishReturn(harness, 1).empty());
-    const auto& replica = harness.loop_closer().replica();
+    const auto& replica = harness.loop_closer().map_replica();
     const CommonRegionResult found = DetectCommonRegion(replica, LoopScene::ReturnId(0), WithoutNormalGate());
     ASSERT_TRUE(found.region.has_value());
     // L1's guess: L0's similarity moved by their relative pose.
@@ -1112,7 +1112,7 @@ TEST(LoopCloserTest, OffByDefault) {
     for (size_t k = 0; k < kReturnFrames; ++k) {
         EXPECT_TRUE(scene.PublishReturn(harness, k).empty()) << "L" << k;
     }
-    EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), 0u);
+    EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), 0u);
 }
 
 // Disabled (the default; the apps without --loop_closing), the LoopCloser
@@ -1127,7 +1127,7 @@ TEST(LoopCloserTest, DisabledDoesNothing) {
     for (size_t k = 0; k < kReturnFrames; ++k) {
         EXPECT_TRUE(scene.PublishReturn(harness, k).empty()) << "L" << k;
     }
-    EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), 0u);
+    EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), 0u);
     EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
 }
 

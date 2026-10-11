@@ -103,7 +103,7 @@ void LoopCloser<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
         return;  // queries are Frames of the active map only
     }
     for (const events::NewFrame<TFeatureExtractor>& added : transaction.added_frames) {
-        if (replica().keyframe(added.id) != nullptr) {
+        if (map_replica().keyframe(added.id) != nullptr) {
             queries_.push_back(added.id);
         }
     }
@@ -112,7 +112,7 @@ void LoopCloser<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
 template <typename TFeatureExtractor>
 void LoopCloser<TFeatureExtractor>::DetectQuery(map::FrameId query) {
     // A query culled while it waited is skipped; so is one of a small map.
-    if (replica().keyframe(query) == nullptr || replica().num_keyframes() < options_.min_map_frames) {
+    if (map_replica().keyframe(query) == nullptr || map_replica().num_keyframes() < options_.min_map_frames) {
         return;
     }
     if (query_hook_) {
@@ -164,14 +164,14 @@ bool LoopCloser<TFeatureExtractor>::ConfirmPending(std::optional<PendingRegion>&
     }
     // The last confirming query's Sim3 moved by their relative pose.
     const tracking::MapReplica<TFeatureExtractor>* match_map = atlas_.map(out_pending->match_map);
-    const auto* last = replica().keyframe(out_pending->last_query);
-    const auto* current = replica().keyframe(query);
+    const auto* last = map_replica().keyframe(out_pending->last_query);
+    const auto* current = map_replica().keyframe(query);
     std::optional<CommonRegion> confirmed;
     if (match_map != nullptr && last != nullptr && current != nullptr) {
         const geometry::Sim3 S_query_world =
             geometry::Compose(ToSim3(current->T_cw * last->T_cw.Inverse()), out_pending->S_last_world);
         CommonRegionStats refine_stats;
-        confirmed = RefineCommonRegion(replica(), query, *match_map, out_pending->match_frame, S_query_world, options_,
+        confirmed = RefineCommonRegion(map_replica(), query, *match_map, out_pending->match_frame, S_query_world, options_,
                                        &refine_stats);
         LogNormalRejections(refine_stats);
     }
@@ -184,7 +184,7 @@ bool LoopCloser<TFeatureExtractor>::ConfirmPending(std::optional<PendingRegion>&
         // A merge's normals are not gated; their share is logged for
         // diagnosis.
         log_->debug("{} region of Frame {} confirmed by Frame {} ({}/{}), {:.2f} of {} normals disagree",
-                    out_pending->match_map == replica().map_id() ? "Loop" : "Merge", out_pending->match_frame.value,
+                    out_pending->match_map == map_replica().map_id() ? "Loop" : "Merge", out_pending->match_frame.value,
                     query.value, out_pending->num_coincidences, options_.required_coincidences,
                     confirmed->normals.disagreement, confirmed->normals.pairs);
         return true;
@@ -232,7 +232,7 @@ void LoopCloser<TFeatureExtractor>::LogNormalRejections(const CommonRegionStats&
 template <typename TFeatureExtractor>
 void LoopCloser<TFeatureExtractor>::PublishLoop(map::FrameId query, const PendingRegion& region) {
     const tracking::MapReplica<TFeatureExtractor>* match_map = atlas_.map(region.match_map);
-    const auto* query_keyframe = replica().keyframe(query);
+    const auto* query_keyframe = map_replica().keyframe(query);
     const auto* match_keyframe = match_map != nullptr ? match_map->keyframe(region.match_frame) : nullptr;
     if (query_keyframe == nullptr || match_keyframe == nullptr) {
         return;
@@ -251,8 +251,8 @@ void LoopCloser<TFeatureExtractor>::PublishLoop(map::FrameId query, const Pendin
                    region.match_frame.value, options_.max_events_in_flight);
         return;
     }
-    event->map_id = replica().map_id();
-    event->query_map_id = replica().map_id();
+    event->map_id = map_replica().map_id();
+    event->query_map_id = map_replica().map_id();
     event->match_map_id = region.match_map;
     event->query_frame = query;
     event->match_frame = region.match_frame;
@@ -261,14 +261,14 @@ void LoopCloser<TFeatureExtractor>::PublishLoop(map::FrameId query, const Pendin
     // found again before that correction reaches this replica (no new epoch
     // since the last loop published) is a repeat the Mapper drops: it waits
     // for the local BA.
-    const std::pair<map::MapId, uint32_t> epoch{replica().map_id(), replica().map_epoch()};
+    const std::pair<map::MapId, uint32_t> epoch{map_replica().map_id(), map_replica().map_epoch()};
     event->priority = last_loop_epoch_ != epoch;
     last_loop_epoch_ = epoch;
-    const PointMatches query_points = PointsOf(replica(), *query_keyframe);
+    const PointMatches query_points = PointsOf(map_replica(), *query_keyframe);
     // A loop's pairs are in one map, where a point matched to itself is no
     // pair; a merge's are in two, whose point ids restart per map, so equal
     // ids are two points.
-    const bool is_loop = region.match_map == replica().map_id();
+    const bool is_loop = region.match_map == map_replica().map_id();
     for (size_t i = 0; i < region.matches.size() && i < query_points.size(); ++i) {
         if (region.matches[i] && query_points[i] && (!is_loop || *region.matches[i] != *query_points[i])) {
             event->matched_points.emplace_back(*query_points[i], *region.matches[i]);
@@ -279,7 +279,7 @@ void LoopCloser<TFeatureExtractor>::PublishLoop(map::FrameId query, const Pendin
                    region.match_frame.value, S_query_match.scale, event->matched_points.size());
     } else {
         log_->info("Merge detected: Frame {} of map {} with Frame {} of map {} (scale {:.3f}, {} matched points)",
-                   query.value, replica().map_id().value, region.match_frame.value, region.match_map.value,
+                   query.value, map_replica().map_id().value, region.match_frame.value, region.match_map.value,
                    S_query_match.scale, event->matched_points.size());
     }
     observable_.Notify(event);

@@ -630,6 +630,26 @@ merge, map merging end to end); spec `2026-10-10-map-merging-design.md`.
 
       The normal gate's map-frame weakness (see "Loop closing") disappears
       once no false correction gets through, so retest the gate after the fix.
+- [ ] **Drift-consistency check for loops (user decision, 2026-10-11).**
+      Reject a loop whose correction cannot be explained by drift. Compare
+      the loop's Sim3 with the map's own estimate of the query–match pose,
+      and reject the loop when the difference exceeds what drift could
+      accumulate along the path between them. Bound rotation and
+      translation per metre travelled; mono also needs a scale bound.
+      - **Diagnosed example:** 2262→1587. The map put the two Frames 9.2 m
+        and 176° apart, the Sim3 claimed 0.2 m and 6°, and stereo drift on
+        corridor1 is about 0.1 m.
+      - **Literature:** this is a known ORB-SLAM3 weakness. It produced 10
+        false loops on 4Seasons Garage (HuMemSLAM, arXiv 2609.17168), and
+        the published TUM-VI results are visual-inertial only.
+      - **ORB-SLAM3's own guard:** its visual-inertial mode rejects a
+        correction rotating roll or pitch by ≥ 0.008 rad, or yaw by ≥
+        0.349 rad ("BAD LOOP!!!" in `LoopClosing.cc`, issue #394). This
+        check is the visual-only stand-in. ROVER, a method for loop
+        verification in repetitive scenes, uses the same trajectory-prior
+        idea.
+      - **Merges:** the check does not apply, because two maps share no
+        world. They need verify-before-publish instead (item 2 above).
 
 ## Relocalization (roadmap step 3, 2026-10-08)
 
