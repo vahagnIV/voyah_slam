@@ -59,6 +59,9 @@ keyframes of different types share the map is still open (Open Question 17).
    OpenCV; public APIs take and return our types (`images::Image`,
    measurements, `ImageFeatures`, ...) and OpenCV is linked `PRIVATE`, so a
    user of the library never needs its headers or `find_package(OpenCV)`.
+   **Since 2026-10-11 the four `voyah_*` libraries use no OpenCV at all**
+   (FAST ported, SIFT removed; see "FAST Corner Detector"): only `voyahviz`
+   (dev tool), tests and benchmarks link it, the latter as a reference.
    Small dependencies (Eigen, spdlog, concurrentqueue) may appear in public
    headers — requiring users to have them is fine.
 
@@ -111,7 +114,7 @@ Every component derives from `events::EventNode` (`events/event_node.h`, no
 virtuals): an `Observable` it publishes through, one `AsyncObserver` inbox it
 consumes, `AddObserver(AsyncObserver&)`, `AddSyncObserver(fn, ctx)`, `inbox()`.
 Components are templated on `TFeatureExtractor`, declared in headers and
-defined in `libs/slam/src/` with `INSTANTIATE_CLASS` (ORB + SIFT).
+defined in `libs/slam/src/` with `INSTANTIATE_CLASS` (ORB; SIFT removed 2026-10-11).
 
 | Component | Header | Public API so far |
 |---|---|---|
@@ -345,7 +348,8 @@ Detailed spec: `docs/superpowers/specs/2026-09-30-core-slam-data-structures-desi
 | `Listener` | `events/listener.h` | Iterates a queue; auto-recycles previous/last event; move-only. |
 
 Ported from slamlab2: `images/`, `io/`, `algebra/`, `geometry/`, `features/`
-(ORB + SIFT extractors, brute-force matcher, Kannala-Brandt distortion), `logging/`.
+(ORB extractor, brute-force matcher, Kannala-Brandt distortion; the SIFT
+extractor also came over and was removed on 2026-10-11), `logging/`.
 The distortion models now live in `geometry/distortion_models/` (moved from
 `features/` on 2026-10-05; forwarding headers remain at the old path).
 
@@ -696,6 +700,97 @@ Specs: `docs/superpowers/specs/2026-10-04-pangolin-viewer-design.md`
   to be closed).
 - Verified with ThreadSanitizer (`MapViewer*:SceneState*`, 2026-10-04: clean).
 
+## FAST Corner Detector (`features/fast.h`, `voyah_algs`)
+
+**Since 2026-10-11** the ORB extractor detects corners with our own port of
+OpenCV's FAST instead of `cv::FAST`; with the SIFT extractor removed the same
+day, no `voyah_*` library uses OpenCV.
+
+- **Source.** `FAST_t<16>` (9-of-16 segment test with non-maximum
+  suppression, `modules/features/src/fast.cpp`), `makeOffsets` and
+  `cornerScore<16>` (`fast_score.cpp`) and the AVX2 kernel
+  (`fast.avx2.cpp`) from OpenCV 5, branch `5.x` at commit `20e367198c`
+  (version 5.1.0-dev: the OpenCV built from source into `/usr/local` that the
+  tests compare with; there is no `5.1.0` tag yet, and these functions are
+  unchanged since tag `5.0.0`). The local checkout `~/git/opencv` was checked
+  byte-for-byte against GitHub at that commit.
+- **Licence.** OpenCV 5 is Apache-2.0; `libs/algs/src/features/fast/fast.cpp`
+  carries OpenCV's copyright list and the Apache-2.0 notice plus Edward
+  Rosten's original BSD notice for the FAST code, and states the changes;
+  the SIMD files carry a short form pointing to it.
+- **Interface.** `DetectFast(data, width, height, stride, threshold,
+  nonmax_suppression[, out_corners][, simd])` (and an `images::TWorkingImage`
+  overload) returns `std::vector<FastCorner{x, y, response}>`, row-major.
+  Stride-aware: only pixels inside the view are read, so the extractor passes
+  each grid cell as a sub-view without copying. `threshold` is clamped to
+  [0, 255] (OpenCV's SIMD paths would use it unclamped; out-of-range
+  thresholds are not part of the contract). Scratch rows are per thread
+  (`thread_local`), so per-cell calls do not allocate.
+- **Bit-exact with `cv::FAST(img, kps, t, true)` (TYPE_9_16):** same corners,
+  order and responses (OpenCV's float positions and scores are integers).
+  Every path runs OpenCV's algorithm for its width: scalar = OpenCV's scalar
+  loop and scalar `cornerScore`; SSE2 / NEON = the `CV_SIMD128` block (16 px)
+  with its vector score; AVX2 = OpenCV's AVX2 block (32 px), then the 16-px
+  block, then the scalar tail, as OpenCV's dispatch does. The scores of the
+  scalar and vector formulas agree on every detected corner (its score is at
+  least the threshold), so all paths give identical output.
+- **SIMD paths and dispatch** (`FastSimd`, `IsFastSimdAvailable`,
+  `ResolveFastSimd`; `kAuto` by default). x86-64: SSE2 is the baseline
+  (`fast_sse2.cpp`, no flags); AVX2 lives in `fast_avx2.cpp`, compiled with
+  `-mavx2` (GCC / Clang) and chosen at run time with
+  `__builtin_cpu_supports("avx2")`, so the library still runs on CPUs without
+  AVX2 and needs no `-march`. arm64: NEON (`fast_neon.cpp`, baseline, no
+  dispatch). Other targets: scalar. The installed OpenCV runs AVX2 here
+  (baseline SSE3, dispatch list SSE4_1 … AVX512_SKX; FAST has only an AVX2
+  dispatch file), so AVX2 is the speed bar. A kernel whose block cannot fit
+  the view is skipped (ORB cells are about 35 px wide).
+- **Verification.** `FastTest.*` (unit, `voyah_algs_tests`) compares every
+  runnable path with live `cv::FAST`: noise at widths around the 16 / 32-px
+  blocks, sparse corners (the block-restart branch), stride ≠ width, flat
+  images, images smaller than 7×7, corners at the 3-px border, thresholds 0
+  and 255. `FastCorridor1Test` (integration, `voyah_algs_dataset_tests`)
+  does the same on three corridor1 frames at all 8 pyramid levels, both
+  extractor thresholds (20, 7), with and without suppression, and on every
+  ORB grid cell as a sub-view. Scalar, SSE2 and AVX2 are verified on this
+  machine (and a deliberate score bug in either SIMD kernel fails both
+  tests). **NEON has not run on arm64 hardware** (no cross compiler or
+  emulator installed): it passed both test files on x86-64 through SIMDe's
+  NEON emulation (v0.8.2, a scratch build outside the repo), which checks
+  the logic but not the real compiler or CPU (TODO).
+- **ORB extractor unchanged.** `OrbExtractorGoldenTest` (same dataset
+  binary) holds per-frame, per-level digests (FNV-1a) of keypoints,
+  responses, angles and descriptors on five corridor1 frames, recorded with
+  the `cv::FAST` extractor before the switch
+  (`libs/algs/tests/features/data/orb_corridor1_golden.txt`); the port
+  reproduces it byte for byte (Debug and Release trees).
+- **Dataset tests** read corridor1 from `$VOYAHSLAM_CORRIDOR1`, else
+  `~/Downloads/dataset-corridor1_1024_16`, and skip without it.
+- **Benchmark** (`libs/algs/benchmarks/fast_benchmark`, built with `all`, not
+  part of `check` / `check_all`; Release, single thread, 20 corridor1 frames
+  × 50 repetitions, median per frame, ratio = ours / OpenCV, 2026-10-11):
+
+  | level (size) | t | OpenCV µs | ours (AVX2) µs | ratio | SSE2 only | scalar only |
+  |---|---|---|---|---|---|---|
+  | 0 (1024²) | 20 / 7 | 282 / 544 | 242 / 499 | 0.86 / 0.92 | 1.12 / 1.12 | 3.69 / 3.66 |
+  | 1 (853²) | 20 / 7 | 219 / 414 | 187 / 379 | 0.85 / 0.92 | 1.09 / 1.13 | 3.52 / 3.55 |
+  | 2 (711²) | 20 / 7 | 153 / 313 | 136 / 292 | 0.89 / 0.93 | 1.15 / 1.13 | 3.74 / 3.67 |
+  | 3 (593²) | 20 / 7 | 122 / 258 | 111 / 241 | 0.91 / 0.93 | 1.12 / 1.07 | 3.56 / 3.41 |
+  | 4 (494²) | 20 / 7 | 100 / 196 | 89 / 183 | 0.89 / 0.93 | 1.11 / 1.16 | 3.29 / 3.56 |
+  | 5 (412²) | 20 / 7 | 73 / 156 | 68 / 145 | 0.94 / 0.93 | 1.15 / 1.13 | 3.47 / 3.51 |
+  | 6 (343²) | 20 / 7 | 56 / 121 | 52 / 112 | 0.92 / 0.93 | 1.12 / 1.11 | 3.42 / 3.52 |
+  | 7 (286²) | 20 / 7 | 51 / 104 | 46 / 96 | 0.91 / 0.92 | 1.07 / 1.11 | 3.03 / 3.37 |
+  | all levels, both t | | 3161 | 2877 | **0.91** | 1.12 | 3.56 |
+  | ORB cells, all levels | | 14215 | 8001 | **0.56** | 0.56 | 0.88 |
+
+  Whole levels: ours (auto = AVX2) is 6–15% faster than `cv::FAST` at every
+  level and threshold; SSE2 alone is ~10% slower than OpenCV's AVX2. The
+  extractor's real workload, one call per 35-px cell (plus the threshold-7
+  retry), is 1.8× faster: `cv::FAST` resizes its output to ≥ 1000 KeyPoints
+  and tries HAL hooks on every call; ours reuses thread-local rows.
+- The other OQ 21 items (FAST once per level instead of per cell, blind
+  strips, buffers, border padding) are separate; this port keeps the
+  extractor's behaviour.
+
 ## Geometry Toolkit (`estimators/`, `geometry/`)
 
 Spec: `docs/superpowers/specs/2026-10-04-two-view-geometry-design.md` (part A of
@@ -1020,12 +1115,10 @@ monotonic across maps.
 
 **Keypoint levels.** `ImageFeatures` stores a pyramid level per keypoint
 (`levels()`); each extractor defines `ScaleFactor(level)`: ORB `scale_factor^level`
-(1.2), SIFT `2^(level/3)/2` with the level decoded from OpenCV's packed
-octave/layer. The matcher restricts candidates to the reference level
-(`max_reference_level`, ORB default 0).
-SIFT keypoints are sorted by response and truncated to `number_of_features`,
-and **SIFT angles are converted to radians** (they were degrees, and columns
-were left uninitialized when over-detecting).
+(1.2). The matcher restricts candidates to the reference level
+(`max_reference_level`, ORB default 0). (The OpenCV-based SIFT extractor,
+with levels decoded from OpenCV's packed octave/layer, was removed on
+2026-10-11.)
 
 ## Stereo Initialization (Tracker stereo matching, stereo `MapInitializer`)
 
@@ -1534,9 +1627,9 @@ OpenCV-free port of DBoW2's `TemplatedVocabulary` (ORB-SLAM3
 
 - **Generic over the extractor:** descriptors are `FE::TDescriptors` (one
   column per node), distances `FE::Distance`. It compiles for every
-  `INSTANTIATE_CLASS` extractor (ORB and SIFT, ruling A), because the Mapper is
-  instantiated for both; the loaders reject a descriptor size that does not
-  match `FE` at run time. Only ORB has a vocabulary.
+  `INSTANTIATE_CLASS` extractor (ruling A; only ORB since SIFT's removal on
+  2026-10-11); the loaders reject a descriptor size that does not match `FE`
+  at run time.
 - **Storage:** nodes in id order as flat arrays (descriptor, parent, weight);
   children (CSR) and word ids are derived from the parents at load. Node 0 is
   the root.
@@ -2641,9 +2734,9 @@ How to read the table:
 
 | Library (target) | Contents | Depends on |
 |---|---|---|
-| `voyah_common` | `defs.h`, ids, `memory/*`, `logging/*`, `algebra/*`, geometry types (`RigidTransformation`, `Camera`, distortion models), image types, feature/measurement data types, stereo rig, the extractor *declarations* (`OrbFeatureExtractor`, `SIFTFeatureExtractor`, `orb/image_pyramid.h`), map storage (`Frame`, `MapPointStorage`, `ObservationStorage`, `CovisibilityIndex`) | Eigen, spdlog (PUBLIC) |
+| `voyah_common` | `defs.h`, ids, `memory/*`, `logging/*`, `algebra/*`, geometry types (`RigidTransformation`, `Camera`, distortion models), image types, feature/measurement data types, stereo rig, the extractor *declarations* (`OrbFeatureExtractor`, `orb/image_pyramid.h`), map storage (`Frame`, `MapPointStorage`, `ObservationStorage`, `CovisibilityIndex`) | Eigen, spdlog (PUBLIC) |
 | `voyah_events` | `events/*`: event types, `Observable` / `AsyncObserver` / `EventNode`, `WakeSignal`, `WorkerThread` | common; concurrentqueue (PUBLIC) |
-| `voyah_algs` | estimators, two-view geometry, image filters, `io/read_image`, the extractor *definitions*, feature grid and matchers, point statistics, keyframe decision, triangulation, `optimization/*`, bag of words (`bow/*`, no OpenCV) | common; OpenCV, stb, g2o (PRIVATE) |
+| `voyah_algs` | estimators, two-view geometry, image filters, `io/read_image`, FAST (`features/fast.h`), the extractor *definitions*, feature grid and matchers, point statistics, keyframe decision, triangulation, `optimization/*`, bag of words (`bow/*`) | common; stb, g2o (PRIVATE); no OpenCV since 2026-10-11 |
 | `voyah_slam` | `tracking/*`, `mapping/{mapper, map_initializer}`, `loop_closing/*`, `slam/*`, `voyahslam.h` | common, events, algs |
 | `voyahslam` (INTERFACE) | umbrella: links all four; the apps link it | all |
 | `voyahviz` | viewer, image windows (dev tool) | common, events; OpenCV, Pangolin (PRIVATE) |
@@ -2691,20 +2784,21 @@ vizualization/              voyahviz (+ voyahviz_tests)
 - One event type per header; file name is the event name in `snake_case`.
 - Every header is self-contained: it compiles when included first and alone.
 - No OpenCV in public headers (principle 8): OpenCV usage lives in `.cpp` files
-  and private headers under `src/` (e.g. `libs/algs/src/opencv_bindings/`,
-  `vizualization/src/opencv_wrapping.h`).
-- Link-level note: `voyah_algs` is a static library, so its consumers
-  (`voyah_slam`, the `voyahslam` umbrella) still *link* OpenCV's shared
-  libraries. In-tree, CMake propagates that
-  automatically. When we add `install()`/package export, the package config must
-  do `find_dependency(OpenCV)` itself (or `voyahslam` becomes a shared
-  library) so the user still never calls `find_package(OpenCV)`.
+  and private headers under `src/` (`vizualization/src/opencv_wrapping.h`).
+  The `voyah_*` libraries have none at all since 2026-10-11 (the old
+  `libs/algs/src/opencv_bindings/` is gone); a test or benchmark that compares
+  with OpenCV links it itself.
+- Link-level note: until 2026-10-11 the static `voyah_algs` linked OpenCV
+  `PRIVATE`, so its consumers (`voyah_slam`, the `voyahslam` umbrella) still
+  linked OpenCV's shared libraries. They no longer do: a package export of the
+  four libraries needs no `find_dependency(OpenCV)`; only `voyahviz` does.
 - Public headers included as `#include <voyahslam/...>`.
 - Template classes header-only; non-template classes have a `.cpp` in `libs/<lib>/src/` mirroring `libs/<lib>/include/`.
 - `[[nodiscard]]` on const accessors.
 - Move semantics throughout.
 - Templates over the feature extractor are explicitly instantiated with
-  `INSTANTIATE_CLASS` (`features/instantiation.h`) for ORB and SIFT.
+  `INSTANTIATE_CLASS` (`features/instantiation.h`) for ORB (SIFT removed
+  2026-10-11).
 - Formatting: `.clang-format` in repo root (4-space indent).
 - New sources go in `libs/<lib>/CMakeLists.txt`, new tests in
   `libs/<lib>/tests/CMakeLists.txt` (mirroring the `include/` layout under
@@ -2720,9 +2814,10 @@ vizualization/              voyahviz (+ voyahviz_tests)
   Build it with a GUI backend for voyahviz (`WITH_GTK=ON`; GTK2 dev files are
   enough). OpenCV 5 renamed `features2d` → `features` and split `calib3d` into
   `calib` / `geometry` / `stereo` (compat headers `features2d.hpp`,
-  `calib3d.hpp` exist). Linked as: `voyah_algs` → core, imgproc, features
-  (PRIVATE); `voyahviz` → core, imgproc, highgui (PRIVATE);
-  `voyah_common_tests` → all (calib3d reference).
+  `calib3d.hpp` exist). Linked as: `voyahviz` → core, imgproc, highgui (PRIVATE);
+  `voyah_common_tests` → all (calib3d reference); `voyah_algs_tests`,
+  `voyah_algs_dataset_tests` and `fast_benchmark` → core, features (the
+  `cv::FAST` reference). No `voyah_*` library links OpenCV (2026-10-11).
 - **g2o is a local Conan package:** vendored in `third_party/g2o/` and built with
   `conan create third_party/g2o --build=missing -s build_type=Debug|Release` once per
   machine, before the project's `conan install` (`conanfile.txt` requires
@@ -2945,6 +3040,10 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-11 | (Map merging Task 7) **Integration and harness.** `SlamTest.{Mono,Stereo}MergesMaps` run MonoClosesLoop's loop extended to 600° (401 frames) with a blackout over frames 140–165 and `recently_lost_seconds` 1 s (the default 5 s is 150° of this 20 s run: map 2 would not reach the LoopCloser's 12 Frames before leaving map 1's area); baseline: the same run without the blackout. The whole-run error is the RMS of every final-map Frame's centre against truth under one Umeyama alignment (similarity for mono, rigid for stereo): tracked poses before a merge are in another map's world, the final map's Frames are in one. The lock-step harness now waits for the Tracker to have processed each frame (`Tracker::num_processed()`) and for the Mapper to have handled every `InitializationMeasurement` (`Mapper::num_initialization_measurements()`): without it, a Lost Tracker forwarded the whole blackout tail and the Mapper's new mono map started far behind the camera (lost at once, maps 2..6). `Mapper::other_map_skipped()` counts `FrameTracked` of a map that is not active (in flight across a merge or a loss) so the gate accounts for them. Tracker: a merge of the active map that leaves no map active falls back to `AdoptMap(target)` (a reset) instead of keeping M's ids in the last frame (the Mapper never sends that shape). The apps print the Atlas (live maps, active, merges); the merge log names both Frames' timestamps and the weld time; `tools/ate.py --map ID` evaluates one map. | The spec's integration bars on a scene where both maps reach the Atlas thresholds at their default values; counters rather than sleeps keep the harness deterministic. |
 | 2026-10-11 | (Map merging final review, I1) **Lost maps are kept only when `Slam` has a LoopCloser** (loop closing enabled and a vocabulary). Otherwise `Slam` passes the Mapper `atlas.min_frames_to_keep = SIZE_MAX`, so every lost map is discarded as on master; a kept map could never be merged and would only grow memory per loss. `SlamTest.LostMapsDiscardedWithoutLoopClosing`. | Binding ruling; merging needs the LoopCloser. |
 | 2026-10-11 | **Brown-Conrady distortion model, naming.** The class is `BrownConradyDistortionModel` (coefficients in OpenCV order `[k1, k2, p1, p2, k3]`); one model under four names: Brown-Conrady = OpenCV standard = ROS `plumb_bob` = Kalibr `radtan` (= EuRoC `radial-tangential`). The reader accepts all three calibration strings with 4 or 5 coefficients. `Undistort` is Newton (1e-12, ≤ 20 iterations); a point it cannot invert, or whose root lies on the folded branch, is left unchanged, as with Kannala-Brandt. Tests may use OpenCV as a reference; the library may not. | The physical model's name, not one tool's; the calibration names are listed so each file format maps to it. Leaving failures unchanged keeps the `DistortionModel` interface; they occur only outside the calibrated field of view. |
+| 2026-10-11 | **FAST ported from OpenCV, bit-exact.** `features::DetectFast` (`voyah_algs`, public `features/fast.h`) is OpenCV 5's `FAST_t<16>` + `cornerScore<16>` + AVX2 kernel (5.x at `20e367198c`, 5.1.0-dev = the installed OpenCV; unchanged since tag 5.0.0), keeping OpenCV's Apache-2.0 notice and Rosten's BSD notice. Same corners, order and responses as `cv::FAST(img, kps, t, true)`, TYPE_9_16; stride-aware views; `FastCorner{x, y, response}`. The ORB extractor calls it per cell exactly where it called `cv::FAST` (unused `cv::minMaxLoc` dropped); its output is byte-identical (golden digests recorded with `cv::FAST` before the switch). | User decisions: own FAST to drop OpenCV from the library, bit-exact so the switch changes nothing downstream (vocabulary, matching, tests). The per-level rework of OQ 21 is a separate, behaviour-changing step. |
+| 2026-10-11 | **FAST SIMD paths: scalar, SSE2, AVX2 (run-time), NEON.** Each path is OpenCV's algorithm for its width and all are tested against live `cv::FAST`. x86-64: SSE2 baseline; AVX2 in its own file built with `-mavx2`, chosen by `__builtin_cpu_supports` (no `-march`, still runs without AVX2). arm64: NEON baseline. `FastSimd` lets tests and the benchmark force a path. Speed (user decision: at least as fast as `cv::FAST`, single thread): 0.85–0.94 of OpenCV's time per whole level, 0.56 on the extractor's per-cell workload. NEON verified only under SIMDe emulation (TODO: arm64 hardware). | OpenCV here runs its AVX2 dispatch for FAST, so SSE2 alone (~1.1×) is not enough; run-time dispatch keeps one binary portable. NEON for the Android app. |
+| 2026-10-11 | **SIFT extractor removed** (user decision): header, source, tests, the `INSTANTIATE_CLASS` entry and every explicit instantiation; `Slam<SIFT>` in `SlamTest.TrackEnqueuesMonocularAndBinocularMeasurements` became `OrbSlam`. Supersedes the SIFT parts of the 2026-10-04 level / `max_distance` rows and the 2026-10-07 `Vocabulary<FE>` row (ruling A now covers ORB only). | It was the last OpenCV user in the library, had no vocabulary, and doubled every template's instantiation. |
+| 2026-10-11 | **The `voyah_*` libraries are OpenCV-free.** `voyah_algs` no longer links OpenCV (`opencv_bindings.h` and the include in `orb/extract_node.h` deleted); targets that compare with OpenCV (`voyah_algs_tests`, `voyah_algs_dataset_tests`, `fast_benchmark`, `voyah_common_tests`) link it themselves; `voyahviz` keeps it `PRIVATE`. New integration binary `voyah_algs_dataset_tests` for the corridor1 tests (skip without the dataset); `fast_benchmark` is built with `all` but is not in `check` / `check_all`. | Completes the 2026-10-03 goal "drop the OpenCV dependency" for the library; a package export no longer needs `find_dependency(OpenCV)`. |
 
 ## 9. Open Questions
 
@@ -3030,11 +3129,13 @@ branch → review → merge to `master`. Update this document at the end.
       `levels()` (used by the initialization matcher).
     - ORB-SLAM3 pads levels with a 19-px reflected border; we have none.
     - ORB-SLAM3 blurs into `uint8` with `cv::GaussianBlur`; our blurred image
-      is float. Unused `cv::minMaxLoc` per cell in ours.
+      is float. ~~Unused `cv::minMaxLoc` per cell in ours.~~ — removed
+      2026-10-11 with the FAST port.
 
-    **Plan:** own FAST-9-16 run once per level, corners assigned to cells
-    (≥ 20 if any, else ≥ 7) — fixes speed, blind strips, and drops OpenCV from
-    detection; preallocated blur/pyramid buffers; ~~round descriptor offsets~~ (done);
+    **Plan:** ~~own FAST-9-16~~ (done 2026-10-11: OpenCV's FAST ported
+    bit-exact, still run per cell; see "FAST Corner Detector") run once per
+    level, corners assigned to cells (≥ 20 if any, else ≥ 7) — fixes speed and
+    blind strips; preallocated blur/pyramid buffers; ~~round descriptor offsets~~ (done);
     keep the level in `ImageFeatures`. Then re-profile. Parallel left/right
     extraction after that.
 22. **Fisheye rays beyond 90°:** `MonocularMeasurement` stores undistorted
@@ -3196,13 +3297,16 @@ branch → review → merge to `master`. Update this document at the end.
 - Decide on Open Question 14 (pool sizing per event type).
 
 **Next:**
-- ORB extractor plan in Open Question 21 (own FAST, buffers, descriptor
-  rounding). Building OpenCV from source to link against
-  (in progress, user).
+- ORB extractor plan in Open Question 21 (FAST once per level, buffers;
+  own FAST and descriptor rounding done). The library no longer needs OpenCV
+  (2026-10-11).
 - Tracker measurement policy (19).
 - Roadmap (`docs/ROADMAP.md`): TUM-VI tuning (step 6); relocalization into
   inactive maps is TODO ("Map merging follow-ups").
 - Event pool lifetime (Open Question 25).
+- Test suite (2026-10-11, FAST port): 764 tests (739 `unit`, 24
+  `integration`, 1 `vocabulary`); the FAST unit tests add ~40 ms and
+  `voyah_algs_dataset_tests` (corridor1) ~1 s.
 - Test suite (2026-10-11, map merging Task 7): 735 tests (713 `unit`, 21
   `integration`, 1 `vocabulary`); `check_all` about 26–38 s, set by
   `SlamTest.{Mono,Stereo}MergesMaps` (about 20–26 s each, six lock-step runs

@@ -39,12 +39,19 @@ as soon as they come up.
 
 ## ORB extractor (OQ 21)
 
-- [ ] Own FAST-9-16, run once per pyramid level; assign corners to cells
-      (≥ 20 if any, else ≥ 7). Removes OpenCV from detection and the blind
-      strips at cell borders.
+- [ ] Run FAST once per pyramid level (our bit-exact port of OpenCV's FAST,
+      `features/fast.h`, since 2026-10-11, still called per cell); assign
+      corners to cells (≥ 20 if any, else ≥ 7). Removes the blind strips at
+      cell borders. Changes the extractor's output: re-record the golden
+      digests (`VOYAHSLAM_RECORD_ORB_GOLDEN=1`).
+- [ ] **Run the FAST NEON path on arm64** (`fast_neon.cpp`): it has only
+      been compiled and run on x86-64 through SIMDe's NEON emulation. Build
+      `voyah_algs_tests` (`FastTest.*`) for arm64 (Android NDK or an arm64
+      Linux box), run it, and run `voyah_algs_dataset_tests`
+      (`FastCorridor1Test`) there with the corridor1 frames; then time it with
+      `fast_benchmark` against `cv::FAST` on the same device.
 - [ ] Preallocate blur and pyramid buffers (no per-frame image allocations).
 - [ ] Check border handling (ORB-SLAM3 pads levels by 19 px).
-- [ ] Remove the unused `cv::minMaxLoc` per cell.
 - [ ] Parallel left/right extraction for stereo.
 
 ## Dataset / preprocessing
@@ -329,7 +336,7 @@ Spec `docs/superpowers/specs/2026-10-07-bow-design.md`; DESIGN "Bag of Words"
 
 - [ ] **Vocabulary training** (out of scope of step 2): our own k-majority
       tree builder, so we do not depend on ORB-SLAM3's `ORBvoc.txt`, and a
-      vocabulary for other extractors (SIFT has none).
+      vocabulary for other extractors.
 - [ ] **`ORBvoc.txt` licence** (deferred, user decision): the file is used
       as is on the user's PC and never committed. Settle its terms before any
       distribution; DBoW2's own code is BSD (keep its notice with the port).
@@ -962,28 +969,31 @@ Deferred minor findings from the per-task reviews.
       `TwoViewOptions` for tests or fewer frames. (2026-10-07: with
       `VOYAHSLAM_OPTIMIZE_TESTS` ON it is 0.24 s and the whole suite 2.3 s;
       this matters only with the option OFF.)
-- [ ] Matcher: per-candidate descriptor copy (matters for SIFT cost).
+- [ ] Matcher: per-candidate descriptor copy (matters for larger descriptors).
 
 ## Library structure (restructure, 2026-10-07)
 
 - [ ] **Descriptor-traits refactor:** template the event, map and viewer code on
       descriptor traits instead of the extractor class, so `voyah_common` no
-      longer declares `OrbFeatureExtractor` / `SIFTFeatureExtractor` (their
-      definitions are in `voyah_algs`; code linking only common that calls
+      longer declares `OrbFeatureExtractor` (its
+      definition is in `voyah_algs`; code linking only common that calls
       `DetectAndExtract` gets a link error, not a compile error).
 - [ ] **Conan packaging of the separate libraries:** `install()` / package
       export per library (`voyah_common`, `voyah_events`, `voyah_algs`,
-      `voyah_slam`, umbrella `voyahslam`), with `find_dependency(OpenCV)` in the
-      config of the package that links it (DESIGN §7).
+      `voyah_slam`, umbrella `voyahslam`). Since 2026-10-11 none of the four
+      links OpenCV, so their package configs need no
+      `find_dependency(OpenCV)` (only a `voyahviz` export would) (DESIGN §7).
       - **Build options (user decision, 2026-10-11):** add
         `VOYAHSLAM_BUILD_TESTS` and `VOYAHSLAM_BUILD_EXAMPLES`, both OFF by
         default.
         - Only when one is ON are the `tests/` directories added and
           `find_package(OpenCV … highgui)` called.
-        - The library itself is meant to be OpenCV-free; tests may keep
-          using OpenCV.
-        - Until the ORB extractor is ported (FAST first, then the pyramid,
-          blur and so on), `voyah_algs` itself still needs OpenCV.
+        - The library is OpenCV-free (FAST ported, SIFT removed,
+          2026-10-11); tests and benchmarks keep using OpenCV as a
+          reference and link it themselves (`voyah_algs_tests`,
+          `voyah_algs_dataset_tests`, `voyah_common_tests`,
+          `fast_benchmark`), so the option must also gate
+          `libs/algs/benchmarks`.
 - [ ] **`libs/test_support/support/synthetic_sequence.h` needs algs**
       (`features/stereo_matcher.h`) but sits in the common-level support root
       (`voyah_test_support` links only `voyah_common`). Only a compile failure in
@@ -1013,6 +1023,11 @@ Deferred minor findings from the per-task reviews.
 - [ ] g2o recipe `package()`: upstream's CMake config files are installed into the
       package (`lib/cmake`); remove them (`rmdir`) since the recipe declares the
       components itself.
+- [ ] **README's OpenCV clone command uses `--branch 5.1.0`, which does not
+      exist** (GitHub has tags `5.0.0` and `5.0.0-alpha` only, 2026-10-11).
+      The dev machine's OpenCV is branch `5.x` at `20e367198c` (5.1.0-dev),
+      which the FAST port and its tests were checked against. Pin the README
+      to that commit (or to a release tag once one exists).
 - [ ] Second dev machine: build OpenCV 5.x from source into `/usr/local` with
       `WITH_GTK=ON` (Conan no longer provides OpenCV).
 - [ ] Recurring: syntax-check all sources with clang-18 + libc++ (clean on
