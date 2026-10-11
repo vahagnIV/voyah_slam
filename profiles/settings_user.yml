@@ -1,0 +1,5 @@
+# Conan 2.18 settings.yml knows clang up to 20; the Android NDK r30 ships
+# clang 21. Install once: conan config install profiles/settings_user.yml
+compiler:
+    clang:
+        version: ["21"]

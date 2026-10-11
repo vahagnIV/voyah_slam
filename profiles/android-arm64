@@ -1,0 +1,24 @@
+# Android arm64-v8a host profile (README "Android"). Use as the host profile
+# with the default build profile:
+#   conan create . --build=missing -pr:h profiles/android-arm64 -pr:b default
+# Needs profiles/settings_user.yml installed once (Conan 2.18 lists clang <= 20).
+{% set ndk = os.getenv("ANDROID_NDK_HOME") or os.path.expanduser("~/Android/Sdk/ndk/30.0.16248370") %}
+
+[settings]
+os=Android
+# Android 7.0. The app's minSdkVersion must be >= this. 24 is the default
+# minSdk of new Android Studio projects and above NDK r30's minimum (21);
+# nothing in the library needs a newer API. Raise it to match the app.
+os.api_level=24
+arch=armv8
+compiler=clang
+# NDK r30 ships clang 21.
+compiler.version=21
+# One JNI .so in the app links our static libraries; the NDK rule: c++_static is
+# safe only while the app has exactly one shared library containing C++.
+compiler.libcxx=c++_static
+compiler.cppstd=20
+build_type=Release
+
+[conf]
+tools.android:ndk_path={{ ndk }}
