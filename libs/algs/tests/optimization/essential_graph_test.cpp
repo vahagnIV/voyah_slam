@@ -202,6 +202,26 @@ TEST(EssentialGraphTest, FixedVertexStays) {
     }
 }
 
+// also_fixed (map merging): every listed vertex keeps its start value along with `fixed`; the
+// others still move.
+TEST(EssentialGraphTest, AlsoFixedVerticesStay) {
+    const std::vector<RigidTransformation> truth = Ring();
+    const std::vector<RigidTransformation> drifted = Drifted(truth, Drift{0.5 * M_PI / 180.0, 0.02, 0.01});
+    EssentialGraphProblem problem = RingProblem(truth, drifted, 1.2, false);
+    problem.fixed = 0;
+    problem.also_fixed = {kQuery, 7};
+    const EssentialGraphResult result = OptimizeEssentialGraph(problem);
+    ASSERT_TRUE(result.success);
+    for (const size_t fixed : {size_t{0}, size_t{7}, kQuery}) {
+        SCOPED_TRACE(fixed);
+        const Sim3 start = problem.corrected_S_cw[fixed].value_or(ToSim3(problem.T_cw[fixed]));
+        EXPECT_EQ(result.S_cw[fixed].scale, start.scale);
+        EXPECT_TRUE(result.S_cw[fixed].R.isApprox(start.R, 1e-12));
+        EXPECT_TRUE(result.S_cw[fixed].t.isApprox(start.t, 1e-12));
+    }
+    EXPECT_GT((result.S_cw[10].t - drifted[10].translation()).norm(), 1e-3);
+}
+
 // fix_scale: every vertex keeps its start scale (1 outside the window, the corrected one inside),
 // though the scale drift pulls on it.
 TEST(EssentialGraphTest, StereoKeepsScale) {
@@ -314,6 +334,11 @@ TEST(EssentialGraphTest, InvalidInputFails) {
     {
         EssentialGraphProblem p = valid;
         p.fixed = kFrames;
+        invalid.push_back(p);
+    }
+    {
+        EssentialGraphProblem p = valid;
+        p.also_fixed = {1, kFrames};
         invalid.push_back(p);
     }
     {

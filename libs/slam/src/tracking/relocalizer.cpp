@@ -190,7 +190,7 @@ RelocalizationResult Relocalize(const MapReplica<TFeatureExtractor>& replica,
         if (keyframe == nullptr) {
             continue;
         }
-        const auto& frame_measurement = LeftOf<TFeatureExtractor>(keyframe->measurement);
+        const auto& frame_measurement = LeftOf<TFeatureExtractor>(keyframe->measurement());
         std::vector<std::optional<map::MapPointId>> frame_points(
             static_cast<size_t>(frame_measurement.points().cols()));
         for (const auto& [feature, point] : keyframe->observations) {
@@ -261,7 +261,7 @@ RelocalizationResult Relocalize(const MapReplica<TFeatureExtractor>& replica,
                 // The candidate Frame's other points (ORB-SLAM3 SearchByProjection
                 // with a KeyFrame: fixed radius, no ratio test).
                 const ReplicaKeyFrame<TFeatureExtractor>& keyframe = *replica.keyframe(candidate.frame);
-                const auto& frame_measurement = LeftOf<TFeatureExtractor>(keyframe.measurement);
+                const auto& frame_measurement = LeftOf<TFeatureExtractor>(keyframe.measurement());
                 const auto project = [&](double window, double max_distance) {
                     features::SearchFromFrame<TFeatureExtractor>(current, pose.T_cw, frame_measurement,
                                                                  keyframe.observations, replica, pose.matches,

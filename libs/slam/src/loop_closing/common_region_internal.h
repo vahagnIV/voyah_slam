@@ -19,7 +19,7 @@ using PointMatches = std::vector<std::optional<map::MapPointId>>;
 // Stereo maps are metric: their similarities keep scale 1.
 template <typename TFeatureExtractor>
 bool FixesScale(const tracking::ReplicaKeyFrame<TFeatureExtractor>& keyframe) {
-    return std::holds_alternative<features::TBinocularMeasurement<TFeatureExtractor>>(keyframe.measurement);
+    return std::holds_alternative<features::TBinocularMeasurement<TFeatureExtractor>>(keyframe.measurement());
 }
 
 // Review Focus 4: a finite similarity with a positive scale.
@@ -36,7 +36,7 @@ template <typename TFeatureExtractor>
 PointMatches PointsOf(const tracking::MapReplica<TFeatureExtractor>& replica,
                       const tracking::ReplicaKeyFrame<TFeatureExtractor>& keyframe) {
     PointMatches points(
-        static_cast<size_t>(features::LeftOf<TFeatureExtractor>(keyframe.measurement).points().cols()));
+        static_cast<size_t>(features::LeftOf<TFeatureExtractor>(keyframe.measurement()).points().cols()));
     for (const auto& [feature, point] : keyframe.observations) {
         if (feature < points.size() && replica.IsAlive(point)) {
             points[feature] = point;

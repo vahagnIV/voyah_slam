@@ -2,6 +2,7 @@
 #define VOYAHSLAM_TESTS_SUPPORT_TEST_MEASUREMENTS_H
 
 #include <cstddef>
+#include <memory>
 #include <utility>
 #include <voyahslam/features/measurement.h>
 #include <voyahslam/features/orb_feature_extractor.h>
@@ -12,6 +13,13 @@ namespace voyahslam::test {
 using TestExtractor = features::OrbFeatureExtractor;
 using TestImageFeatures = features::ImageFeatures<TestExtractor::TDescriptorScalarType,
                                                   TestExtractor::DescriptorSize>;
+
+// `measurement` as events and replicas hold it (shared, immutable), for tests
+// that build a NewFrame or a FrameTracked themselves.
+template <typename TFeatureExtractor = TestExtractor>
+features::TSharedMeasurement<TFeatureExtractor> Share(features::TMeasurement<TFeatureExtractor> measurement) {
+    return std::make_shared<const features::TMeasurement<TFeatureExtractor>>(std::move(measurement));
+}
 
 inline geometry::TMatrix33F TestIntrinsics() {
     geometry::TMatrix33F K = geometry::TMatrix33F::Identity();

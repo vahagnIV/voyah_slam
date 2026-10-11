@@ -9,6 +9,7 @@
 #include <Eigen/Geometry>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -123,7 +124,7 @@ public:
                 events::NewFrame<Extractor>& added = transaction.added_frames.emplace_back();
                 added.id = {static_cast<uint32_t>(k)};
                 added.T_cw = scene.poses[k];
-                added.measurement = Measure(scene.poses[k]);
+                added.measurement = test::Share(Measure(scene.poses[k]));
                 if (k > 0) added.parent = map::FrameId{static_cast<uint32_t>(k - 1)};
                 for (size_t i = 0; i < scene.points.size(); ++i) {
                     added.observed_features.push_back(static_cast<uint32_t>(i));
@@ -155,6 +156,30 @@ public:
             transaction.removed_frames.push_back(map::FrameId{5});
             transaction.removed_points = {{3}, {4}};
             transaction.updated_poses.emplace_back(map::FrameId{2}, TheScene().poses[0]);
+        });
+    }
+
+    // The Mapper's answer to a final loss of map `map_id`: removed, none active.
+    void SendRemoval(map::MapId map_id) {
+        Send(map_id, 0, [&](TTransaction& transaction) {
+            transaction.removed_maps.push_back(map_id);
+            transaction.active_map.reset();
+        });
+    }
+
+    // The Mapper's answer to a final loss of map `map_id` large enough to
+    // keep: kept inactive, none active.
+    void SendDeactivation(map::MapId map_id) {
+        Send(map_id, 0, [](TTransaction& transaction) { transaction.active_map.reset(); });
+    }
+
+    // A loop correction of map `map_id` at `map_epoch` naming `active` as the
+    // active map: of an inactive map if they differ (the Mapper never
+    // publishes one).
+    void SendCorrectionOf(map::MapId map_id, map::MapId active, uint32_t map_epoch) {
+        Send(map_id, map_epoch, [&](TTransaction& transaction) {
+            transaction.added_loop_edges.emplace_back(map::FrameId{0}, map::FrameId{kNumFrames - 2});
+            transaction.active_map = active;
         });
     }
 
@@ -212,6 +237,7 @@ private:
         ++num_sent_;
         transaction->map_id = map_id;
         transaction->map_epoch = map_epoch;
+        transaction->active_map = map_id;  // as the Mapper: the map it builds
         fill(*transaction);
         mapper_.Notify(transaction);
     }
@@ -322,20 +348,94 @@ TEST(GlobalBundleAdjusterTest, NewMapClearsAndDropsRun) {
     }
 }
 
-// A newer map id without new_map is a new map too.
-TEST(GlobalBundleAdjusterTest, NewerMapIdDropsRun) {
-    Harness harness;
-    harness.SendMap(kMap);
-    harness.SendCorrection(kMap, 1);
-    harness.SendOrdinary(map::MapId{2}, 0);
-    EXPECT_TRUE(harness.Run().empty());
-    EXPECT_EQ(harness.global_ba().num_runs_started(), 0u);
-    EXPECT_EQ(harness.global_ba().replica().map_id(), map::MapId{2});
+// The Mapper dropping the map (a final loss) drops the pending run, whether
+// it comes before the run (in the same drain) or while it runs.
+TEST(GlobalBundleAdjusterTest, RemovedMapDropsRun) {
+    for (const bool during_run : {false, true}) {
+        SCOPED_TRACE(during_run ? "during the run" : "before the run");
+        Harness harness;
+        harness.SendMap(kMap);
+        harness.SendCorrection(kMap, 1);
+        if (during_run) {
+            harness.global_ba().set_run_hook([&] { harness.SendRemoval(kMap); });
+        } else {
+            harness.SendRemoval(kMap);
+        }
+        EXPECT_TRUE(harness.Run().empty());
+        harness.global_ba().set_run_hook({});
+
+        EXPECT_EQ(harness.global_ba().num_runs_started(), during_run ? 1u : 0u);
+        EXPECT_EQ(harness.global_ba().num_runs_interrupted(), during_run ? 1u : 0u);
+        EXPECT_FALSE(harness.global_ba().atlas().active_map().has_value());
+        EXPECT_TRUE(harness.global_ba().atlas().map_ids().empty());
+    }
 }
 
-// Events of an older map (and of map 0) neither start nor interrupt a run.
-TEST(GlobalBundleAdjusterTest, IgnoresOldMap) {
+// A loop correction of an inactive live map (fed by hand: the Mapper never
+// publishes one) is applied to its map but neither starts nor interrupts a
+// run, which is the active map's only.
+TEST(GlobalBundleAdjusterTest, InactiveMapLeavesGlobalBaIdle) {
     Harness harness;
+    harness.SendMap(kMap);
+    harness.SendDeactivation(kMap);
+    harness.SendMap(map::MapId{2});
+    harness.SendCorrectionOf(kMap, map::MapId{2}, 5);
+    EXPECT_TRUE(harness.Run().empty());
+    EXPECT_EQ(harness.global_ba().num_runs_started(), 0u);
+    const auto& atlas = harness.global_ba().atlas();
+    EXPECT_EQ(atlas.map_ids(), (std::vector<map::MapId>{kMap, map::MapId{2}}));
+    EXPECT_EQ(atlas.active_map(), map::MapId{2});
+    ASSERT_NE(atlas.map(kMap), nullptr);
+    EXPECT_EQ(atlas.map(kMap)->map_epoch(), 5u);  // applied to its map
+    EXPECT_EQ(harness.global_ba().replica().map_epoch(), 0u);
+
+    // Nor does one arriving while the active map's run polls (sent once: a
+    // GlobalBA that ran on it would otherwise loop).
+    harness.SendCorrection(map::MapId{2}, 1);
+    bool sent = false;
+    harness.global_ba().set_run_hook([&] {
+        if (!sent) harness.SendCorrectionOf(kMap, map::MapId{2}, 9);
+        sent = true;
+    });
+    const std::vector<Result> results = harness.Run();
+    harness.global_ba().set_run_hook({});
+    ASSERT_EQ(results.size(), 1u);
+    EXPECT_EQ(results[0].map_id, map::MapId{2});
+    EXPECT_EQ(results[0].map_epoch, 1u);
+    EXPECT_EQ(harness.global_ba().num_runs_started(), 1u);
+    EXPECT_EQ(harness.global_ba().num_runs_interrupted(), 0u);
+    EXPECT_EQ(atlas.map(kMap)->map_epoch(), 9u);
+}
+
+// The Mapper keeping a lost map inactive (no active map, not removed) drops
+// the pending run, whether it comes before the run (in the same drain) or
+// while it runs; the map stays live.
+TEST(GlobalBundleAdjusterTest, DeactivatedMapDropsRun) {
+    for (const bool during_run : {false, true}) {
+        SCOPED_TRACE(during_run ? "during the run" : "before the run");
+        Harness harness;
+        harness.SendMap(kMap);
+        harness.SendCorrection(kMap, 1);
+        if (during_run) {
+            harness.global_ba().set_run_hook([&] { harness.SendDeactivation(kMap); });
+        } else {
+            harness.SendDeactivation(kMap);
+        }
+        EXPECT_TRUE(harness.Run().empty());
+        harness.global_ba().set_run_hook({});
+
+        EXPECT_EQ(harness.global_ba().num_runs_started(), during_run ? 1u : 0u);
+        EXPECT_EQ(harness.global_ba().num_runs_interrupted(), during_run ? 1u : 0u);
+        EXPECT_FALSE(harness.global_ba().atlas().active_map().has_value());
+        EXPECT_EQ(harness.global_ba().atlas().map_ids(), std::vector<map::MapId>{kMap});
+    }
+}
+
+// Events of a removed map (and of map 0) neither start nor interrupt a run.
+TEST(GlobalBundleAdjusterTest, IgnoresRemovedMap) {
+    Harness harness;
+    harness.SendMap(kMap);
+    harness.SendRemoval(kMap);
     harness.SendMap(map::MapId{2});
     harness.SendCorrection(kMap, 5);
     harness.SendCorrection(map::MapId{0}, 5);
@@ -367,16 +467,18 @@ TEST(GlobalBundleAdjusterTest, StopInterruptsRunningBa) {
     harness.SendCorrection(kMap, 1);
     std::atomic<bool> in_run{false};
     GlobalBundleAdjuster<Extractor>& global_ba = harness.global_ba();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     global_ba.set_run_hook([&] {
         in_run.store(true);
-        while (!global_ba.stop_requested()) {
+        while (!global_ba.stop_requested() && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::yield();
         }
     });
     global_ba.Start();
-    while (!in_run.load()) {
+    while (!in_run.load() && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::yield();
     }
+    if (!in_run.load()) ADD_FAILURE() << "the run never started within 5 s";
     global_ba.Stop();
     global_ba.set_run_hook({});
 

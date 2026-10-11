@@ -20,6 +20,7 @@
 #include <numbers>
 #include <optional>
 #include <random>
+#include <set>
 #include <string>
 #include <thread>
 #include <utility>
@@ -265,30 +266,34 @@ public:
     }
 
     // Publishes `frame` (with its parent, the previous Frame) and `points`,
-    // then runs the LoopCloser; returns what it published.
+    // then runs the LoopCloser; returns what it published. The map is map(),
+    // unless `map_id` is given.
     std::vector<Loop> Publish(const SceneFrame& frame, const NewPoints& points = {}, bool new_map = false,
-                              map::MapId map_id = map::MapId{1}) {
+                              std::optional<map::MapId> map_id = std::nullopt) {
         EXPECT_TRUE(Send(frame, points, new_map, map_id));
         return Run();
     }
 
     // Publishes what Publish() does without running the LoopCloser. False
-    // (counted in num_exhausted()) if every transaction is in flight.
+    // (counted in num_exhausted()) if every transaction is in flight. The
+    // active map is the transaction's, unless `active_map` is given (the
+    // Mapper never names another).
     bool Send(const SceneFrame& frame, const NewPoints& points = {}, bool new_map = false,
-              map::MapId map_id = map::MapId{1}) {
+              std::optional<map::MapId> map_id = std::nullopt, std::optional<map::MapId> active_map = std::nullopt) {
         auto* transaction = transaction_pool_.TryCreate();
         if (transaction == nullptr) {
             ++num_exhausted_;
             return false;
         }
-        transaction->map_id = map_id;
+        transaction->map_id = map_id.value_or(map_);
         transaction->map_epoch = map_epoch_;
+        transaction->active_map = active_map.value_or(transaction->map_id);  // as the Mapper: the map it builds
         transaction->new_map = new_map;
         if (new_map) transaction->start_frame = frame.id;
         events::NewFrame<Extractor>& added = transaction->added_frames.emplace_back();
         added.id = frame.id;
         added.T_cw = frame.T_cw;
-        added.measurement = frame.measurement;
+        added.measurement = test::Share(frame.measurement);
         added.observed_features = frame.features;
         added.observed_points = frame.points;
         if (!new_map) added.parent = previous_;
@@ -319,6 +324,7 @@ public:
         auto* transaction = transaction_pool_.Create();
         transaction->map_id = map::MapId{1};
         transaction->map_epoch = map_epoch_;
+        transaction->active_map = map::MapId{1};
         transaction->removed_frames.push_back(frame);
         mapper_.Notify(transaction);
     }
@@ -331,6 +337,32 @@ public:
         auto* transaction = transaction_pool_.Create();
         transaction->map_id = map::MapId{1};
         transaction->map_epoch = map_epoch;
+        transaction->active_map = map::MapId{1};
+        mapper_.Notify(transaction);
+        return Run();
+    }
+
+    // Publishes the Mapper's answer to a final loss of map `map_id` (removed,
+    // none active), then runs the LoopCloser; returns what it published.
+    std::vector<Loop> PublishRemoval(map::MapId map_id) {
+        auto* transaction = transaction_pool_.Create();
+        transaction->map_id = map_id;
+        transaction->map_epoch = map_epoch_;
+        transaction->removed_maps.push_back(map_id);
+        mapper_.Notify(transaction);
+        return Run();
+    }
+
+    // Publishes an empty transaction of map `map_id` at `map_epoch` with
+    // `active_map` (none: the Mapper keeping a lost map inactive) and
+    // `removed_maps`, then runs the LoopCloser; returns what it published.
+    std::vector<Loop> PublishEmpty(map::MapId map_id, std::optional<map::MapId> active_map, uint32_t map_epoch = 0,
+                                   std::vector<map::MapId> removed_maps = {}) {
+        auto* transaction = transaction_pool_.Create();
+        transaction->map_id = map_id;
+        transaction->map_epoch = map_epoch;
+        transaction->active_map = active_map;
+        transaction->removed_maps = std::move(removed_maps);
         mapper_.Notify(transaction);
         return Run();
     }
@@ -352,6 +384,8 @@ public:
 
     // While held, published events stay in the queue (in flight).
     void set_hold(bool hold) { hold_ = hold; }
+    // The map Publish() and Send() name by default (1).
+    void set_map(map::MapId map_id) { map_ = map_id; }
 
     LoopCloser<Extractor>& loop_closer() { return loop_closer_; }
     [[nodiscard]] size_t num_exhausted() const { return num_exhausted_; }
@@ -380,6 +414,7 @@ public:
     events::Listener listener_ = capture_.GetListener();
     std::optional<map::FrameId> previous_;
     bool hold_ = false;
+    map::MapId map_{1};
     uint32_t map_epoch_ = 0;
     size_t num_exhausted_ = 0;
 };
@@ -891,8 +926,9 @@ TEST(LoopCloserTest, UnmappedLookAlikeRejected) {
     }
 }
 
-// Review Focus 3: a new map, or a final TrackingLost of the current one,
-// drops the replica and the pending region.
+// Review Focus 3: a new map, or the Mapper dropping the current one after a
+// final TrackingLost, drops the replica and the pending region; a
+// TrackingLost alone changes nothing.
 TEST(LoopCloserTest, ClearsOnNewMap) {
     for (const bool by_tracking_lost : {false, true}) {
         SCOPED_TRACE(by_tracking_lost ? "final TrackingLost" : "new map");
@@ -913,6 +949,8 @@ TEST(LoopCloserTest, ClearsOnNewMap) {
             EXPECT_EQ(harness.loop_closer().num_coincidences(), 2u);
             EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), 15u);
             EXPECT_TRUE(harness.PublishTrackingLost(map::MapId{1}, true).empty());
+            EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), 15u);
+            EXPECT_TRUE(harness.PublishRemoval(map::MapId{1}).empty());
             EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), 0u);
             EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
             // A late transaction of the lost map is ignored.
@@ -928,6 +966,50 @@ TEST(LoopCloserTest, ClearsOnNewMap) {
             EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
         }
     }
+}
+
+// A transaction naming an inactive live map (fed by hand: the Mapper never
+// publishes one) leaves the LoopCloser idle: the map's replica follows it,
+// but no query is detected, and its epoch does not drop the active map's
+// pending region. Map 1 is kept inactive; the scene is map 2.
+TEST(LoopCloserTest, InactiveMapLeavesLoopCloserIdle) {
+    Harness harness(MakeRegionVocabulary());
+    std::mt19937 rng(7);
+    const auto region = MakeRegion(50, Pose(0.0, 0.0, 0.0, 0.0), 0x00, rng);
+    const auto observe = [&](uint32_t id) {
+        return Observe(map::FrameId{id}, Pose(0, 0, 0, 0), Pose(0, 0, 0, 0), region, 0, false, rng);
+    };
+    ASSERT_TRUE(harness.Publish(observe(200), PointsOf(region, 0, Sim3{}, Centre(Pose(0, 0, 0, 0)), rng), true)
+                    .empty());
+    ASSERT_TRUE(harness.PublishEmpty(map::MapId{1}, std::nullopt).empty());  // kept inactive
+    const auto& atlas = harness.loop_closer().atlas();
+    ASSERT_EQ(atlas.map_ids(), std::vector<map::MapId>{map::MapId{1}});
+    ASSERT_FALSE(atlas.active_map().has_value());
+
+    harness.set_map(map::MapId{2});
+    LoopScene scene(1, Revisit::Drifted, MonoDrift(), false);
+    ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
+    for (size_t k = 0; k < 3; ++k) {
+        ASSERT_TRUE(scene.PublishReturn(harness, k).empty());
+    }
+    ASSERT_EQ(harness.loop_closer().num_coincidences(), 2u);
+    const size_t detected = harness.loop_closer().query_stats().detected;
+
+    // Map 1, inactive, gains a Frame and a correction epoch.
+    ASSERT_TRUE(harness.Send(observe(201), {}, false, map::MapId{1}, map::MapId{2}));
+    EXPECT_TRUE(harness.Run().empty());
+    EXPECT_TRUE(harness.PublishEmpty(map::MapId{1}, map::MapId{2}, 5).empty());
+
+    EXPECT_EQ(atlas.map(map::MapId{1})->num_keyframes(), 2u);  // applied to its map
+    EXPECT_EQ(atlas.map(map::MapId{1})->map_epoch(), 5u);
+    EXPECT_EQ(atlas.active_map(), map::MapId{2});
+    EXPECT_EQ(harness.loop_closer().query_stats().detected, detected);
+    EXPECT_EQ(harness.loop_closer().num_coincidences(), 2u);
+    // Map 2's pending region goes on to its loop.
+    const std::vector<Loop> loops = scene.PublishReturn(harness, 3);
+    ASSERT_EQ(loops.size(), 1u);
+    EXPECT_EQ(loops[0].map_id, map::MapId{2});
+    EXPECT_EQ(loops[0].query_frame, LoopScene::ReturnId(3));
 }
 
 // Without a vocabulary the LoopCloser only acknowledges: no replica, no loop.
@@ -1008,11 +1090,11 @@ TEST(LoopCloserTest, RefinementRejectedByNormals) {
         replica.keyframe(LoopScene::ReturnId(1))->T_cw * replica.keyframe(LoopScene::ReturnId(0))->T_cw.Inverse();
     const Sim3 S_1w = geometry::Compose(Sim3{1.0, T_10.rotation(), T_10.translation()}, found.region->S_query_world);
 
-    EXPECT_TRUE(RefineCommonRegion(replica, LoopScene::ReturnId(1), found.region->match_frame, S_1w,
+    EXPECT_TRUE(RefineCommonRegion(replica, LoopScene::ReturnId(1), replica, found.region->match_frame, S_1w,
                                    WithoutNormalGate())
                     .has_value());
     CommonRegionStats stats;
-    EXPECT_FALSE(RefineCommonRegion(replica, LoopScene::ReturnId(1), found.region->match_frame, S_1w,
+    EXPECT_FALSE(RefineCommonRegion(replica, LoopScene::ReturnId(1), replica, found.region->match_frame, S_1w,
                                     LoopCloserOptions{}, &stats)
                      .has_value());
     ASSERT_EQ(stats.normal_rejections.size(), 1u);
@@ -1047,6 +1129,488 @@ TEST(LoopCloserTest, DisabledDoesNothing) {
     }
     EXPECT_EQ(harness.loop_closer().replica().num_keyframes(), 0u);
     EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
+}
+
+// ---- Map merging (ORB-SLAM3 NewDetectCommonRegions, merge part) ----
+
+// What a merge-scene return Frame observes of the start's place.
+enum class Sees {
+    A,     // region A, mapped in map 1: a merge
+    D,     // region D, mapped in map 2: a loop
+    Both,  // both regions, one image
+};
+
+constexpr size_t kMergeStartFrames = 5;   // F0..F4 of map 2
+constexpr size_t kMergeMiddleFrames = 7;  // G0..G6 of map 2
+constexpr uint32_t kMap2FirstFrame = 20;
+
+// The synthetic two-map scene (spec section 6, Detection).
+// Map 1, built first and then kept inactive: Frames 0..4 (E) map region A
+// (map 1's points 0..399) from the start poses, Frames 5..11 (B) map region B
+// (400..799) elsewhere. Its coordinates are the true ones.
+// Map 2, active: its coordinates are drift(true) (for a mono map the scale is
+// unrelated to map 1's). Frames 20..24 (F) map region D (map 2's points
+// 0..399: point ids restart per map), other points at the start's place;
+// Frames 25..31 (G) map region G (400..799) elsewhere. Return Frames 32..
+// come back to the start's place 0.4..0.8 m off (LoopScene::ReturnPose) and
+// observe region A through new points 800..1199 (a merge with map 1) and/or
+// region D through new points 1200..1599 (a loop in map 2).
+// `map1_region_a` moves map 1's region A ids (0..399 by default; ids
+// 0..map1_region_a-1 then stay unused, which the replica allows): at
+// kReturnA every true merge pair shares its id across the two maps.
+class MergeScene {
+public:
+    MergeScene(uint32_t seed, const Sim3& drift, bool binocular, uint32_t map1_region_a = 0)
+        : rng_(seed), drift_(drift), binocular_(binocular), map1_region_a_(map1_region_a) {
+        region_a_ = MakeRegion(kRegionPoints, LoopScene::StartPose(0), 0x00, rng_);
+        region_b_ = MakeRegion(kRegionPoints, LoopScene::MiddlePose(0), 0xFF, rng_);
+        region_d_ = MakeRegion(kRegionPoints, LoopScene::StartPose(0), 0x00, rng_);
+        region_g_ = MakeRegion(kRegionPoints, ElsewherePose(0), 0xFF, rng_);
+    }
+
+    static constexpr map::MapId kMap1{1};
+    static constexpr map::MapId kMap2{2};
+    static constexpr uint32_t kRegionG = kRegionPoints;
+    static constexpr uint32_t kReturnA = 2 * kRegionPoints;
+    static constexpr uint32_t kReturnD = 3 * kRegionPoints;
+
+    static RigidTransformation ElsewherePose(size_t k) {
+        return Pose(300.0 + 0.1 * static_cast<double>(k), 0.0, 0.0, 0.5 * static_cast<double>(k));
+    }
+    static map::FrameId ReturnId(size_t k) {
+        return map::FrameId{kMap2FirstFrame + static_cast<uint32_t>(kMergeStartFrames + kMergeMiddleFrames + k)};
+    }
+    static bool InMap1(map::FrameId frame) { return frame.value < kStartFrames + kMiddleFrames; }
+    static bool InMap2(map::FrameId frame) { return frame.value >= kMap2FirstFrame; }
+
+    // Map 1 (the LoopScene's E and B Frames), then the Mapper keeping it
+    // inactive. Returns what the LoopCloser published.
+    std::vector<Loop> PublishMap1(Harness& harness) {
+        std::vector<Loop> loops;
+        harness.set_map(kMap1);
+        const Sim3 identity;
+        for (size_t k = 0; k < kStartFrames; ++k) {
+            const RigidTransformation T = LoopScene::StartPose(k);
+            const NewPoints points =
+                k == 0 ? PointsOf(region_a_, map1_region_a_, identity, Centre(T), rng_) : NewPoints{};
+            Append(loops, harness.Publish(Observe(LoopScene::StartId(k), T, T, region_a_, map1_region_a_, binocular_,
+                                                  rng_),
+                                          points,
+                                          k == 0));
+        }
+        for (size_t k = 0; k < kMiddleFrames; ++k) {
+            const map::FrameId id{static_cast<uint32_t>(kStartFrames + k)};
+            const RigidTransformation T = LoopScene::MiddlePose(k);
+            const NewPoints points =
+                k == 0 ? PointsOf(region_b_, LoopScene::kRegionB, identity, Centre(T), rng_) : NewPoints{};
+            Append(loops, harness.Publish(Observe(id, T, T, region_b_, LoopScene::kRegionB, binocular_, rng_), points));
+        }
+        Append(loops, harness.PublishEmpty(kMap1, std::nullopt));
+        return loops;
+    }
+
+    // Map 2's F and G Frames (a new map, active).
+    std::vector<Loop> PublishMap2(Harness& harness) {
+        std::vector<Loop> loops;
+        harness.set_map(kMap2);
+        for (size_t k = 0; k < kMergeStartFrames; ++k) {
+            const RigidTransformation T = LoopScene::StartPose(k);
+            const NewPoints points = k == 0 ? PointsOf(region_d_, 0, drift_, Centre(MapPose(T)), rng_) : NewPoints{};
+            const map::FrameId id{kMap2FirstFrame + static_cast<uint32_t>(k)};
+            Append(loops, harness.Publish(Observe(id, T, MapPose(T), region_d_, 0, binocular_, rng_), points, k == 0));
+        }
+        for (size_t k = 0; k < kMergeMiddleFrames; ++k) {
+            const RigidTransformation T = ElsewherePose(k);
+            const NewPoints points =
+                k == 0 ? PointsOf(region_g_, kRegionG, drift_, Centre(MapPose(T)), rng_) : NewPoints{};
+            const map::FrameId id{kMap2FirstFrame + static_cast<uint32_t>(kMergeStartFrames + k)};
+            Append(loops, harness.Publish(Observe(id, T, MapPose(T), region_g_, kRegionG, binocular_, rng_), points));
+        }
+        return loops;
+    }
+
+    // Return Frame R_k observing `sees`; a region's new points come with the
+    // first return Frame observing it.
+    std::vector<Loop> PublishReturn(Harness& harness, size_t k, Sees sees) {
+        const RigidTransformation T_true = LoopScene::ReturnPose(k);
+        std::vector<ScenePoint> region;
+        std::vector<uint32_t> ids;
+        NewPoints points;
+        const auto add = [&](const std::vector<ScenePoint>& observed, uint32_t first_id, bool& added) {
+            for (size_t i = 0; i < observed.size(); ++i) {
+                region.push_back(observed[i]);
+                ids.push_back(first_id + static_cast<uint32_t>(i));
+            }
+            if (!added) {
+                const NewPoints fresh = PointsOf(observed, first_id, drift_, Centre(MapPose(T_true)), rng_);
+                if (points.positions.empty()) {
+                    points = fresh;
+                } else {  // contiguous: region D's points follow region A's
+                    points.positions.insert(points.positions.end(), fresh.positions.begin(), fresh.positions.end());
+                    points.descriptors.insert(points.descriptors.end(), fresh.descriptors.begin(),
+                                              fresh.descriptors.end());
+                    points.normals.insert(points.normals.end(), fresh.normals.begin(), fresh.normals.end());
+                }
+                added = true;
+            }
+        };
+        if (sees != Sees::D) add(region_a_, kReturnA, added_a_);
+        if (sees != Sees::A) add(region_d_, kReturnD, added_d_);
+        return harness.Publish(ObserveIds(ReturnId(k), T_true, MapPose(T_true), region, ids, binocular_, rng_),
+                               points);
+    }
+
+    // Map 1, map 2, then R0..R(count-1) observing `sees`.
+    std::vector<Loop> PublishUpTo(Harness& harness, size_t count, Sees sees) {
+        std::vector<Loop> loops = PublishMap1(harness);
+        Append(loops, PublishMap2(harness));
+        for (size_t k = 0; k < count; ++k) Append(loops, PublishReturn(harness, k, sees));
+        return loops;
+    }
+
+    // The true camera similarity of a merge, x_query = S x_match: map 2's
+    // coordinates are drift(true), map 1's the true ones.
+    [[nodiscard]] Sim3 TrueS(size_t return_k, map::FrameId match) const {
+        const RigidTransformation T_qm = LoopScene::ReturnPose(return_k) * LoopScene::StartPose(match.value).Inverse();
+        return {drift_.scale, T_qm.rotation(), drift_.scale * T_qm.translation()};
+    }
+
+    // Region A point index of a map 1 point or a map 2 return point, or -1.
+    [[nodiscard]] int64_t RegionAPointOfMap1(map::MapPointId id) const {
+        return id.value >= map1_region_a_ && id.value < map1_region_a_ + kRegionPoints ? id.value - map1_region_a_
+                                                                                       : -1;
+    }
+    static int64_t RegionAPointOfMap2(map::MapPointId id) {
+        return id.value >= kReturnA && id.value < kReturnA + kRegionPoints ? id.value - kReturnA : -1;
+    }
+
+private:
+    // As LoopScene::MapPose: T_map = s T_true ∘ drift⁻¹ as a rigid motion.
+    [[nodiscard]] RigidTransformation MapPose(const RigidTransformation& T_true) const {
+        const geometry::TMatrix33F R = T_true.rotation() * drift_.R.transpose();
+        return {R, drift_.scale * T_true.translation() - R * drift_.t};
+    }
+
+    static void Append(std::vector<Loop>& out, std::vector<Loop> loops) {
+        for (Loop& loop : loops) out.push_back(std::move(loop));
+    }
+
+    std::mt19937 rng_;
+    Sim3 drift_;
+    bool binocular_;
+    uint32_t map1_region_a_;
+    std::vector<ScenePoint> region_a_;
+    std::vector<ScenePoint> region_b_;
+    std::vector<ScenePoint> region_d_;
+    std::vector<ScenePoint> region_g_;
+    bool added_a_ = false;
+    bool added_d_ = false;
+};
+
+std::string GateCounts(const CommonRegionStats& stats) {
+    return "bow " + std::to_string(stats.bow_matches) + " ransac " + std::to_string(stats.ransac_inliers) +
+           " coarse " + std::to_string(stats.coarse_projection_matches) + " optimized " +
+           std::to_string(stats.optimized_inliers) + " projection " + std::to_string(stats.projection_matches);
+}
+
+// DetectNBestCandidates splits the hits by map: the loop candidates are map
+// 2's (the query's, the active map), the merge candidates map 1's (inactive).
+// The return Frames see only region A, mapped in map 1: map 2's start Frames
+// (region D, the same words) are loop candidates that do not match, and the
+// merge is found in map 1 and published there, never as a loop.
+TEST(LoopCloserMergeTest, FindsMergeOnlyInInactiveMap) {
+    for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+        SCOPED_TRACE("seed " + std::to_string(seed));
+        Harness harness(MakeRegionVocabulary());
+        MergeScene scene(seed, MonoDrift(), /*binocular=*/false);
+        ASSERT_TRUE(scene.PublishUpTo(harness, 1, Sees::A).empty());
+        const LoopCloser<Extractor>& loop_closer = harness.loop_closer();
+        ASSERT_EQ(loop_closer.atlas().active_map(), MergeScene::kMap2);
+
+        const CommonRegionStats& loop_stats = loop_closer.last_stats();
+        EXPECT_FALSE(loop_stats.candidates.empty());
+        EXPECT_TRUE(std::all_of(loop_stats.candidates.begin(), loop_stats.candidates.end(), MergeScene::InMap2));
+        EXPECT_EQ(loop_stats.projection_matches, 0u);
+        const CommonRegionStats& merge_stats = loop_closer.last_merge_stats();
+        ASSERT_FALSE(merge_stats.candidates.empty());
+        EXPECT_TRUE(std::all_of(merge_stats.candidates.begin(), merge_stats.candidates.end(), MergeScene::InMap1));
+        EXPECT_TRUE(std::any_of(merge_stats.candidates.begin(), merge_stats.candidates.end(), IsStartFrame));
+        // The gates of the first detection, with margins over the thresholds.
+        ::testing::Test::RecordProperty("seed" + std::to_string(seed) + "_merge", GateCounts(merge_stats));
+        const LoopCloserOptions options;
+        EXPECT_GE(merge_stats.bow_matches, 2 * options.min_bow_matches);
+        EXPECT_GE(merge_stats.ransac_inliers, 2 * options.min_sim3_inliers);
+        EXPECT_GE(merge_stats.coarse_projection_matches, 2 * options.min_coarse_projection);
+        EXPECT_GE(merge_stats.optimized_inliers, 2 * options.min_optimized);
+        EXPECT_GE(merge_stats.projection_matches, 2 * options.min_projection);
+        EXPECT_TRUE(merge_stats.normal_rejections.empty());
+        EXPECT_EQ(loop_closer.num_coincidences(), 0u);
+
+        std::vector<Loop> loops;
+        for (size_t k = 1; k <= 3; ++k) {
+            for (Loop& loop : scene.PublishReturn(harness, k, Sees::A)) loops.push_back(std::move(loop));
+            EXPECT_EQ(loop_closer.num_coincidences(), 0u) << "R" << k;
+        }
+        ASSERT_EQ(loops.size(), 1u);
+        EXPECT_EQ(loops[0].map_id, MergeScene::kMap2);
+        EXPECT_EQ(loops[0].query_map_id, MergeScene::kMap2);
+        EXPECT_EQ(loops[0].match_map_id, MergeScene::kMap1);
+        EXPECT_TRUE(IsStartFrame(loops[0].match_frame));
+    }
+}
+
+// mnMergeNumCoincidences: no event on R0..R2 (0, 1, 2 confirmations), the
+// merge on R3, its third, close to the true similarity; mono with a free
+// scale, stereo with scale 1. Its pairs match map 2's return points to map
+// 1's region A points.
+void ExpectMergeAtThirdConfirmation(uint32_t seed, const Sim3& drift, bool binocular) {
+    SCOPED_TRACE("seed " + std::to_string(seed) + (binocular ? " stereo" : " mono"));
+    Harness harness(MakeRegionVocabulary());
+    MergeScene scene(seed, drift, binocular);
+    ASSERT_TRUE(scene.PublishUpTo(harness, 0, Sees::A).empty());
+    const LoopCloser<Extractor>& loop_closer = harness.loop_closer();
+    for (size_t k = 0; k < 3; ++k) {
+        EXPECT_TRUE(scene.PublishReturn(harness, k, Sees::A).empty()) << "R" << k;
+        EXPECT_EQ(loop_closer.num_merge_coincidences(), k) << "R" << k;
+        if (k == 0) {
+            ::testing::Test::RecordProperty(
+                "seed" + std::to_string(seed) + (binocular ? "_stereo" : "_mono") + "_scale" +
+                    std::to_string(drift.scale) + "_merge",
+                GateCounts(loop_closer.last_merge_stats()));
+        }
+    }
+    const std::vector<Loop> loops = scene.PublishReturn(harness, 3, Sees::A);
+    ASSERT_EQ(loops.size(), 1u);
+    const Loop& merge = loops[0];
+    EXPECT_TRUE(merge.priority);
+    EXPECT_EQ(merge.query_map_id, MergeScene::kMap2);
+    EXPECT_EQ(merge.match_map_id, MergeScene::kMap1);
+    EXPECT_EQ(merge.query_frame, MergeScene::ReturnId(3));
+    ASSERT_TRUE(IsStartFrame(merge.match_frame));
+    EXPECT_EQ(loop_closer.num_merge_coincidences(), 0u);  // dropped once published
+
+    const Sim3 truth = scene.TrueS(3, merge.match_frame);
+    ::testing::Test::RecordProperty(
+        "seed" + std::to_string(seed) + (binocular ? "_stereo" : "_mono") + "_scale" + std::to_string(drift.scale) +
+            "_error",
+        "rotation_deg " + std::to_string(RotationErrorDeg(merge.S.R, truth.R)) + " scale_ratio " +
+            std::to_string(merge.S.scale / truth.scale) + " translation " +
+            std::to_string((merge.S.t - truth.t).norm()));
+    EXPECT_LT(RotationErrorDeg(merge.S.R, truth.R), 0.3);
+    if (binocular) {
+        EXPECT_EQ(merge.S.scale, 1.0);
+    } else {
+        EXPECT_NEAR(merge.S.scale / truth.scale, 1.0, 0.02);
+    }
+    EXPECT_LT((merge.S.t - truth.t).norm(), 0.05 * truth.scale);
+
+    EXPECT_GE(merge.matched_points.size(), 100u);
+    size_t correct = 0;
+    for (const auto& [query_point, match_point] : merge.matched_points) {
+        const int64_t scene_point = MergeScene::RegionAPointOfMap2(query_point);
+        correct += scene_point >= 0 && scene_point == scene.RegionAPointOfMap1(match_point) ? 1 : 0;
+    }
+    EXPECT_GE(static_cast<double>(correct), 0.95 * static_cast<double>(merge.matched_points.size()));
+}
+
+TEST(LoopCloserMergeTest, MergeConfirmedThreeTimes) {
+    for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+        ExpectMergeAtThirdConfirmation(seed, MonoDrift(), /*binocular=*/false);
+        ExpectMergeAtThirdConfirmation(seed, StereoDrift(), /*binocular=*/true);
+    }
+}
+
+// Two mono maps have unrelated scales: the merge's similarity has a free
+// scale, recovered within 2 % of the true ratio between the maps (here 0.5
+// and 2).
+TEST(LoopCloserMergeTest, MonoMergeFreeScale) {
+    for (const double scale : {0.5, 2.0}) {
+        SCOPED_TRACE("scale " + std::to_string(scale));
+        Sim3 drift = MonoDrift();
+        drift.scale = scale;
+        for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+            ExpectMergeAtThirdConfirmation(seed, drift, /*binocular=*/false);
+        }
+    }
+}
+
+// The normal gate is for loops only (controller ruling 2026-10-10): a
+// merge's normals are in two unrelated worlds (each map's world is its first
+// Frame's camera). Map 2's world here is turned 120 deg against map 1's, so
+// every pair's normals are 120 deg apart in world coordinates (about 1.0 of
+// them disagree; the gate would reject at 0.5), yet the merge is true: it is
+// confirmed and published, mono and stereo.
+TEST(LoopCloserMergeTest, AcceptsMergeAcrossRotatedWorlds) {
+    for (const bool binocular : {false, true}) {
+        Sim3 drift = binocular ? StereoDrift() : MonoDrift();
+        drift.R = Eigen::AngleAxis<double>(120.0 * std::numbers::pi / 180.0, geometry::TVector3DF::UnitY())
+                      .toRotationMatrix() *
+                  drift.R;
+        for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+            ExpectMergeAtThirdConfirmation(seed, drift, binocular);
+        }
+    }
+}
+
+// Point ids restart per map, so a true merge pair may share its id: (map 2
+// point k, map 1 point k) is not a self-match. With map 1's region A at the
+// return points' ids (800..), every true pair collides; the published pairs,
+// as region A point pairs, are exactly those of the same scene without the
+// collision (the ids change nothing else), and each true pair has equal ids.
+TEST(LoopCloserMergeTest, KeepsPairsWithCollidingIds) {
+    using ScenePairs = std::set<std::pair<int64_t, int64_t>>;
+    const auto merge_pairs = [](uint32_t seed, uint32_t map1_region_a) {
+        Harness harness(MakeRegionVocabulary());
+        MergeScene scene(seed, MonoDrift(), /*binocular=*/false, map1_region_a);
+        std::vector<Loop> loops = scene.PublishUpTo(harness, 4, Sees::A);
+        ScenePairs pairs;
+        size_t equal_ids = 0;
+        EXPECT_EQ(loops.size(), 1u);
+        for (const Loop& loop : loops) {
+            for (const auto& [query_point, match_point] : loop.matched_points) {
+                pairs.emplace(MergeScene::RegionAPointOfMap2(query_point), scene.RegionAPointOfMap1(match_point));
+                equal_ids += query_point == match_point ? 1 : 0;
+            }
+        }
+        return std::pair{pairs, equal_ids};
+    };
+    for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+        SCOPED_TRACE("seed " + std::to_string(seed));
+        const auto [separate, separate_equal] = merge_pairs(seed, 0);
+        const auto [colliding, colliding_equal] = merge_pairs(seed, MergeScene::kReturnA);
+        EXPECT_EQ(separate_equal, 0u);
+        ASSERT_GE(separate.size(), 100u);
+        EXPECT_EQ(colliding, separate);
+        size_t true_pairs = 0;
+        for (const auto& [query_index, match_index] : colliding) {
+            true_pairs += query_index >= 0 && query_index == match_index ? 1 : 0;
+        }
+        EXPECT_EQ(colliding_equal, true_pairs);
+        EXPECT_GE(true_pairs, 100u);
+    }
+}
+
+// The loop and merge regions have their own pending states
+// (mnLoopNumCoincidences / mnMergeNumCoincidences and their not-found
+// counters): R0 and R1 see both regions (one confirmation each); R2 sees only
+// region A (the merge's second, the loop's first failure: kept), R3 only
+// region D (the loop's second, the merge's first failure: kept). Neither
+// resets the other, and nothing is published.
+TEST(LoopCloserMergeTest, LoopAndMergePendingIndependent) {
+    for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+        SCOPED_TRACE("seed " + std::to_string(seed));
+        Harness harness(MakeRegionVocabulary());
+        MergeScene scene(seed, MonoDrift(), /*binocular=*/false);
+        ASSERT_TRUE(scene.PublishUpTo(harness, 2, Sees::Both).empty());
+        const LoopCloser<Extractor>& loop_closer = harness.loop_closer();
+        EXPECT_EQ(loop_closer.num_coincidences(), 1u);
+        EXPECT_EQ(loop_closer.num_merge_coincidences(), 1u);
+
+        EXPECT_TRUE(scene.PublishReturn(harness, 2, Sees::A).empty());
+        EXPECT_EQ(loop_closer.num_coincidences(), 1u);
+        EXPECT_EQ(loop_closer.num_merge_coincidences(), 2u);
+
+        EXPECT_TRUE(scene.PublishReturn(harness, 3, Sees::D).empty());
+        EXPECT_EQ(loop_closer.num_coincidences(), 2u);
+        EXPECT_EQ(loop_closer.num_merge_coincidences(), 2u);
+    }
+}
+
+// A query that confirms the pending loop region still searches the merge
+// candidates (ORB-SLAM3 runs DetectCommonRegionsFromBoW for each kind not
+// confirmed in the query): R0 and R1 see only region D (a pending loop), R2
+// both regions: the loop's second confirmation, and the merge region found
+// (no covisible Frame of R2 sees region A: 0 confirmations). At R3 the loop's
+// third confirmation publishes it, and no search runs (ORB-SLAM3 returns
+// once a region is detected), so the merge region is left unconfirmed.
+TEST(LoopCloserMergeTest, SearchesMergeWhileLoopConfirms) {
+    for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+        SCOPED_TRACE("seed " + std::to_string(seed));
+        Harness harness(MakeRegionVocabulary());
+        MergeScene scene(seed, MonoDrift(), /*binocular=*/false);
+        ASSERT_TRUE(scene.PublishUpTo(harness, 2, Sees::D).empty());
+        const LoopCloser<Extractor>& loop_closer = harness.loop_closer();
+        ASSERT_EQ(loop_closer.num_coincidences(), 1u);
+
+        EXPECT_TRUE(scene.PublishReturn(harness, 2, Sees::Both).empty());
+        EXPECT_EQ(loop_closer.num_coincidences(), 2u);
+        const CommonRegionStats& merge_stats = loop_closer.last_merge_stats();
+        EXPECT_TRUE(std::any_of(merge_stats.candidates.begin(), merge_stats.candidates.end(), IsStartFrame));
+        EXPECT_GE(merge_stats.projection_matches, LoopCloserOptions{}.min_projection);
+
+        const std::vector<Loop> loops = scene.PublishReturn(harness, 3, Sees::Both);
+        ASSERT_EQ(loops.size(), 1u);
+        EXPECT_EQ(loops[0].match_map_id, MergeScene::kMap2);
+        EXPECT_EQ(loop_closer.num_coincidences(), 0u);
+        EXPECT_EQ(loop_closer.num_merge_coincidences(), 0u);
+    }
+}
+
+// A merge and a loop confirmed at the same query (R3, the third of both):
+// only the merge is published, and the loop's pending region is dropped
+// (ORB-SLAM3 handles mbMergeDetected first and resets the loop).
+TEST(LoopCloserMergeTest, MergeWinsOverLoop) {
+    for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+        SCOPED_TRACE("seed " + std::to_string(seed));
+        Harness harness(MakeRegionVocabulary());
+        MergeScene scene(seed, MonoDrift(), /*binocular=*/false);
+        ASSERT_TRUE(scene.PublishUpTo(harness, 3, Sees::Both).empty());
+        const LoopCloser<Extractor>& loop_closer = harness.loop_closer();
+        ASSERT_EQ(loop_closer.num_coincidences(), 2u);
+        ASSERT_EQ(loop_closer.num_merge_coincidences(), 2u);
+
+        const std::vector<Loop> loops = scene.PublishReturn(harness, 3, Sees::Both);
+        ASSERT_EQ(loops.size(), 1u);
+        EXPECT_EQ(loops[0].query_map_id, MergeScene::kMap2);
+        EXPECT_EQ(loops[0].match_map_id, MergeScene::kMap1);
+        EXPECT_TRUE(IsStartFrame(loops[0].match_frame));
+        EXPECT_EQ(loop_closer.num_coincidences(), 0u);
+        EXPECT_EQ(loop_closer.num_merge_coincidences(), 0u);
+    }
+}
+
+// The control of MergeWinsOverLoop: without map 1 (removed before map 2),
+// the same return Frames publish the loop at R3.
+TEST(LoopCloserMergeTest, LoopPublishedWithoutMerge) {
+    Harness harness(MakeRegionVocabulary());
+    MergeScene scene(1, MonoDrift(), /*binocular=*/false);
+    ASSERT_TRUE(scene.PublishMap1(harness).empty());
+    ASSERT_TRUE(harness.PublishEmpty(MergeScene::kMap1, std::nullopt, 0, {MergeScene::kMap1}).empty());
+    ASSERT_TRUE(scene.PublishMap2(harness).empty());
+    std::vector<Loop> loops;
+    for (size_t k = 0; k <= 3; ++k) {
+        for (Loop& loop : scene.PublishReturn(harness, k, Sees::Both)) loops.push_back(std::move(loop));
+    }
+    ASSERT_EQ(loops.size(), 1u);
+    EXPECT_EQ(loops[0].query_frame, MergeScene::ReturnId(3));
+    EXPECT_EQ(loops[0].match_map_id, MergeScene::kMap2);
+    EXPECT_TRUE(MergeScene::InMap2(loops[0].match_frame));
+}
+
+// A removed map (its id in removed_maps) is never matched: map 1, removed
+// while its merge region is pending (2 confirmations), drops that region, is
+// no longer a candidate, and no merge is published.
+TEST(LoopCloserMergeTest, NeverMatchesRemovedMap) {
+    for (uint32_t seed = 1; seed <= kSeeds; ++seed) {
+        SCOPED_TRACE("seed " + std::to_string(seed));
+        Harness harness(MakeRegionVocabulary());
+        MergeScene scene(seed, MonoDrift(), /*binocular=*/false);
+        ASSERT_TRUE(scene.PublishUpTo(harness, 3, Sees::A).empty());
+        const LoopCloser<Extractor>& loop_closer = harness.loop_closer();
+        ASSERT_EQ(loop_closer.num_merge_coincidences(), 2u);
+
+        EXPECT_TRUE(
+            harness.PublishEmpty(MergeScene::kMap2, MergeScene::kMap2, 0, {MergeScene::kMap1}).empty());
+        EXPECT_EQ(loop_closer.atlas().map(MergeScene::kMap1), nullptr);
+        EXPECT_EQ(loop_closer.num_merge_coincidences(), 0u);
+        for (size_t k = 3; k < kReturnFrames; ++k) {
+            EXPECT_TRUE(scene.PublishReturn(harness, k, Sees::A).empty()) << "R" << k;
+            EXPECT_EQ(loop_closer.num_merge_coincidences(), 0u) << "R" << k;
+            const CommonRegionStats& stats = loop_closer.last_merge_stats();
+            EXPECT_TRUE(std::none_of(stats.candidates.begin(), stats.candidates.end(), MergeScene::InMap1))
+                << "R" << k;
+        }
+    }
 }
 
 // The ORB-SLAM3 source values (LoopClosing.cc, KeyFrameDatabase.cc).

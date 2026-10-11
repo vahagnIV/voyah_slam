@@ -115,7 +115,7 @@ void BuildMap(TReplica& out_replica, const Scene& scene, const std::vector<Rigid
             events::NewFrame<Extractor>& added = event.added_frames.emplace_back();
             added.id = {static_cast<uint32_t>(k)};
             added.T_cw = map_poses[k];
-            added.measurement = Measure(scene, scene.poses[k], stereo);
+            added.measurement = test::Share(Measure(scene, scene.poses[k], stereo));
             if (k > 0) added.parent = map::FrameId{static_cast<uint32_t>(k - 1)};
             for (size_t i = 0; i < map_points.size(); ++i) {
                 added.observed_features.push_back(static_cast<uint32_t>(i));
@@ -155,8 +155,8 @@ TEST(GlobalBaProblemTest, IncludesEveryFrameAndObservedPoint) {
         events::NewFrame<Extractor>& added = event.added_frames.emplace_back();
         added.id = {100};
         added.T_cw = scene.poses[2];
-        added.measurement = features::TMonocularMeasurement<Extractor>(
-            MakeFeatures(geometry::TPoints2DF(2, 0)), test::TestIntrinsics(), nullptr, 0.0);
+        added.measurement = test::Share(features::TMonocularMeasurement<Extractor>(
+            MakeFeatures(geometry::TPoints2DF(2, 0)), test::TestIntrinsics(), nullptr, 0.0));
         event.new_points_start_id = {num_scene};
         event.ResizeNewPoints(2);
         for (Eigen::Index i = 0; i < 2; ++i) {
@@ -205,6 +205,27 @@ TEST(GlobalBaProblemTest, FixesFirstFrame) {
                                     [](const auto& entry) { return entry.first == map::FrameId{0}; });
     ASSERT_NE(fixed, solution->frame_poses.end());
     EXPECT_TRUE(SamePose(fixed->second, replica.keyframe({0})->T_cw));
+}
+
+// After a merge the absorbed map may hold ids older than the root: the root
+// (the oldest Frame without a parent) is the gauge, not the oldest Frame.
+TEST(GlobalBaProblemTest, FixesTreeRoot) {
+    const Scene scene = MakeScene();
+    TReplica replica;
+    BuildExactMap(replica, scene, /*stereo=*/true);
+    // The chain 0 <- 1 <- 2 <- ...: dropping Frame 1 leaves 2 a root; Frame 0
+    // then hangs from 2, so 2 is the one root and 0 the oldest Frame.
+    ApplyTransaction(replica, [](TTransaction& event) { event.removed_frames = {{1}}; });
+    ApplyTransaction(replica, [](TTransaction& event) { event.parent_changes = {{{0}, {2}}}; });
+    ASSERT_EQ(replica.parent({0}), map::FrameId{2});
+    ASSERT_FALSE(replica.parent({2}).has_value());
+
+    const std::optional<GlobalBaSolution> solution = RunGlobalBa(replica, GlobalBaOptions{}, kNeverStop);
+    ASSERT_TRUE(solution.has_value());
+    EXPECT_EQ(solution->fixed_frame, map::FrameId{2});
+    for (const auto& [id, pose] : solution->frame_poses) {
+        if (id == map::FrameId{2}) EXPECT_TRUE(SamePose(pose, replica.keyframe({2})->T_cw));
+    }
 }
 
 TEST(GlobalBaProblemTest, FixesOldestSurvivingFrame) {

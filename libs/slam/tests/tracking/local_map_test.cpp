@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -47,7 +48,8 @@ void CreateFrame(TReplica& out_replica, uint32_t frame, const std::vector<uint32
     events::NewFrame<Extractor>& added = event->added_frames.emplace_back();
     added.id = {frame};
     added.T_cw = geometry::RigidTransformation::Identity();
-    added.measurement = MakeMeasurement(static_cast<int>(points.size()));
+    added.measurement =
+        std::make_shared<const features::TMeasurement<Extractor>>(MakeMeasurement(static_cast<int>(points.size())));
     for (size_t i = 0; i < points.size(); ++i) {
         added.observed_features.push_back(static_cast<uint32_t>(i));
         added.observed_points.push_back({points[i]});

@@ -2,8 +2,10 @@
 #define VOYAHSLAM_MAPPING_MAPPER_H
 
 #include <atomic>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -60,6 +62,15 @@ struct LoopCorrectionOptions {
     int essential_iterations = 20;  // Levenberg-Marquardt iterations
 };
 
+// The Atlas (map-merging spec sections 1, 5). Values from ORB-SLAM3.
+struct AtlasOptions {
+    // Tracking: on a final loss, a map with fewer Frames is discarded
+    // (ResetActiveMap), a larger one kept inactive (CreateMapInAtlas).
+    size_t min_frames_to_keep = 10;
+    // LoopClosing::MergeLocal numTemporalKFs: the merge window (map merging).
+    size_t merge_window = 25;
+};
+
 struct MapperOptions {
     MapInitializerOptions initializer;
     KeyFrameOptions keyframe;            // when a tracked measurement becomes a Frame
@@ -71,6 +82,7 @@ struct MapperOptions {
     MapQualityOptions map_quality;       // fusion targets, recent-point culling, ...
     features::FuseOptions fuse;          // the fusion match gate
     LoopCorrectionOptions loop;          // LoopDetected
+    AtlasOptions atlas;                  // lost maps kept, merged
 };
 
 // What the local BA of the last created Frame did (spec section 5).
@@ -96,8 +108,11 @@ enum class MapperState : uint8_t {
     Mapping,       // extends the current map
 };
 
-// Owns the authoritative map and is its only writer. Builds the map from the
-// Tracker's InitializationMeasurements; then, per FrameTracked, decides
+// Owns the authoritative Atlas and is its only writer (map-merging spec
+// section 1): maps by id, at most one active, the current map below. The
+// others are inactive and frozen: no event changes them (a FrameTracked,
+// LoopDetected or GlobalBAFinished naming one is of "another map"). Builds
+// each map from the Tracker's InitializationMeasurements; then, per FrameTracked, decides
 // (ShouldCreateFrame) whether the tracked measurement becomes a Frame and
 // creates it with its tracked observations, stereo close points and points
 // triangulated against covisible Frames. Every FrameTracked of the current map,
@@ -109,9 +124,15 @@ enum class MapperState : uint8_t {
 // covisible Frames (spec sections 5, 4.2). Every change is published as one
 // MapTransaction: a new map with all its Frames and points, or, per created
 // Frame, transaction 1 (creation, culling, fusion) and transaction 2 (local
-// BA, Frame culling). A final TrackingLost of the current map discards it; a
-// non-final one (the Tracker is recently lost) is ignored. In a map with more
-// than relocalization_guard_min_frames Frames, no Frame is created from a
+// BA, Frame culling). Every transaction names the current map as the Atlas's
+// active_map. A final TrackingLost of the current map deactivates it
+// (ORB-SLAM3 Tracking): with fewer than atlas.min_frames_to_keep Frames it is
+// discarded (ResetActiveMap), published as one transaction with removed_maps
+// = {the map} and no active map; otherwise it is kept inactive
+// (CreateMapInAtlas), published as one transaction with no active map. The
+// next new map takes the next id. A non-final TrackingLost (the Tracker is
+// recently lost) is ignored. In a map with more than
+// relocalization_guard_min_frames Frames, no Frame is created from a
 // FrameTracked within relocalization_guard_seconds of the latest relocalized
 // one (stage Relocalization), that one included.
 // A LoopDetected of the current map is corrected in place of new-Frame work
@@ -120,7 +141,10 @@ enum class MapperState : uint8_t {
 // points are fused into it, the essential graph is optimized, and the query
 // and match Frames get a loop edge; all of it is one MapTransaction at the
 // next correction epoch. A LoopDetected of another map, naming a culled Frame
-// or a loop already closed is ignored. A FrameTracked of an older epoch (the
+// or a loop already closed is ignored. A LoopDetected across two maps is a
+// merge (OnMergeDetected, map-merging spec section 3): the active map is
+// absorbed by the inactive match map, which becomes active, as one
+// MapTransaction. A FrameTracked of an older epoch (the
 // Tracker had not seen the correction or the global-BA merge) creates no Frame; its points are
 // counted. A GlobalBAFinished of the current map at the current epoch is
 // merged (ORB-SLAM3's post-GBA block in LoopClosing::RunGlobalBundleAdjustment,
@@ -149,6 +173,7 @@ template <typename TFeatureExtractor>
 class Mapper : public events::EventNode {
 public:
     using TMeasurement = features::TMeasurement<TFeatureExtractor>;
+    using TSharedMeasurement = features::TSharedMeasurement<TFeatureExtractor>;
     using TKeyFrame = map::Frame<TFeatureExtractor, TMeasurement>;
     using TVocabulary = bow::Vocabulary<TFeatureExtractor>;
 
@@ -197,6 +222,18 @@ public:
     [[nodiscard]] size_t stale_epoch_skipped() const {
         return stale_epoch_skipped_.load(std::memory_order_acquire);
     }
+    // InitializationMeasurement events handled (tried, or ignored while a map
+    // is active), in total; each counted after the map it created, if any, is
+    // published.
+    [[nodiscard]] size_t num_initialization_measurements() const {
+        return num_initialization_measurements_.load(std::memory_order_acquire);
+    }
+    // FrameTracked events skipped, in total, because their map was not the
+    // active one: tracked in a map that a merge absorbed, or that was lost,
+    // while the event was in flight.
+    [[nodiscard]] size_t other_map_skipped() const {
+        return other_map_skipped_.load(std::memory_order_acquire);
+    }
     // GlobalBAFinished events merged, and ignored because they were of
     // another map or another correction epoch, or came with no map.
     [[nodiscard]] size_t num_global_ba_merges() const {
@@ -205,10 +242,12 @@ public:
     [[nodiscard]] size_t num_global_ba_rejected() const {
         return num_global_ba_rejected_.load(std::memory_order_acquire);
     }
+    // Merges applied (map merging).
+    [[nodiscard]] size_t num_merges() const { return num_merges_.load(std::memory_order_acquire); }
 
     // The current map's observations. Mapper thread (or a test driving
     // ProcessPending synchronously) only.
-    [[nodiscard]] const map::CovisibilityIndex& covisibility() const { return covisibility_; }
+    [[nodiscard]] const map::CovisibilityIndex& covisibility() const { return ActiveOrEmpty().covisibility; }
     // The current map's point `point`: its reference observation, nullopt if
     // the point is not alive; how many FrameTracked found it in their view
     // (visible) and matched it as an inlier (found), counting 1 each from its
@@ -225,6 +264,15 @@ public:
     // loop partners; none / empty if it is not in the map. Same thread rule.
     [[nodiscard]] std::optional<map::FrameId> Parent(map::FrameId frame) const;
     [[nodiscard]] std::set<map::FrameId> LoopEdges(map::FrameId frame) const;
+    // The current map's Frame `frame`; nullptr if it is not in the map. Same
+    // thread rule.
+    [[nodiscard]] const TKeyFrame* KeyFrame(map::FrameId frame) const { return FindKeyFrame(frame); }
+    // The Atlas: the live maps, ascending; the active one, none while
+    // Initializing; map `id`'s Frames (culled ones excluded), 0 if it is not
+    // live. Same thread rule.
+    [[nodiscard]] std::vector<map::MapId> map_ids() const;
+    [[nodiscard]] std::optional<map::MapId> active_map() const { return active_; }
+    [[nodiscard]] size_t num_keyframes(map::MapId id) const;
 
 private:
     friend struct MapperTestAccess;
@@ -248,6 +296,52 @@ private:
         bool stereo;  // created by a binocular Frame
     };
 
+    // One map of the Atlas: its Frames, points and graph. Point ids restart at
+    // 0 per map.
+    struct MapState {
+        uint32_t map_epoch = 0;  // the correction epoch
+        // Frame slots by id from `first_slot` (the lowest Frame id the map
+        // ever held); a culled Frame, or an id a merge did not bring, is
+        // empty. Map merging interleaves two maps' ids, so the first slot
+        // need not be the root. The root (the spanning tree's, the map's
+        // first Frame or the merge target's root) and the last slot (the
+        // newest Frame) are never culled.
+        std::vector<std::optional<KeyFrameRecord>> keyframes;
+        map::FrameId first_slot{};
+        map::FrameId root{};
+        map::MapPointStorage<TFeatureExtractor> map_points;
+        // Observations (Frame, left feature), indexed per point and per Frame.
+        // A binocular Frame's depth and right index of a feature are in its
+        // measurement.
+        map::CovisibilityIndex covisibility;
+        // Per point id: the reference observation (nullopt once removed) and
+        // the visible / found counters.
+        std::vector<std::optional<map::PointReference>> references;
+        std::vector<uint32_t> num_visible;
+        std::vector<uint32_t> num_found;
+        // Points created by the last recent_window Frames, oldest first.
+        std::vector<RecentPoint> recent_points;
+        // Timestamp of the map's latest FrameTracked with stage
+        // Relocalization, evaluated or skipped.
+        std::optional<double> relocalized_at;
+    };
+
+    // The active map; there must be one (state() == Mapping).
+    [[nodiscard]] MapState& Active() {
+        assert(active_state_ != nullptr);
+        return *active_state_;
+    }
+    [[nodiscard]] const MapState& Active() const {
+        assert(active_state_ != nullptr);
+        return *active_state_;
+    }
+    [[nodiscard]] bool IsActive(map::MapId id) const { return active_ == id; }
+    // The active map, or an empty one without: for the public accessors.
+    [[nodiscard]] const MapState& ActiveOrEmpty() const {
+        return active_state_ != nullptr ? *active_state_ : kEmptyMap;
+    }
+    inline static const MapState kEmptyMap;
+
     // Marks in superseded_ each FrameTracked of batch_ that is followed in the
     // batch by a FrameTracked or a final TrackingLost of the same map.
     void MarkSupersededFrameTracked();
@@ -266,18 +360,25 @@ private:
     void OnInitializationMeasurement(const events::InitializationMeasurement<TFeatureExtractor>& event);
     void OnFrameTracked(const events::FrameTracked<TFeatureExtractor>& event);
     void OnTrackingLost(const events::TrackingLost& event);
+    // A LoopDetected within one map (ApplyEvent sends one across two maps to
+    // OnMergeDetected).
     void OnLoopDetected(const events::LoopDetected& event);
     // Ignores a result of another map, of an older correction epoch, or
     // without a map; merges the others (MergeGlobalBa).
     void OnGlobalBaFinished(const events::GlobalBAFinished& event);
     void SetState(MapperState state);
-    // Empties the current map (Frames, points, observations).
-    void ClearMap();
+    // Creates map `id`, empty, and makes it the active one.
+    void ActivateNewMap(map::MapId id);
+    // Leaves no map active (the active one stays in maps_ unless erased).
+    void Deactivate();
 
     // Appends Frame `id` to the current map, with its bag of words when there
     // is a vocabulary; returns it.
     const TKeyFrame& AddKeyFrame(map::FrameId id, const geometry::RigidTransformation& pose,
-                                 TMeasurement&& measurement);
+                                 TSharedMeasurement measurement);
+    // Frame `id` of map `state` with its bag of words; nullptr if it is not in
+    // that map (or was culled).
+    [[nodiscard]] static const KeyFrameRecord* FindRecordIn(const MapState& state, map::FrameId id);
     // The current map's Frame `id` with its bag of words; nullptr if it is not
     // in the map (or was culled).
     [[nodiscard]] const KeyFrameRecord* FindRecord(map::FrameId id) const;
@@ -289,10 +390,11 @@ private:
     // The FeatureVector of the current map's Frame `id` for SearchByBoW;
     // nullptr without a vocabulary or if the Frame is not in the map.
     [[nodiscard]] const bow::FeatureVector* BowFeaturesOf(map::FrameId id) const;
-    // The current map's first Frame, never culled.
-    [[nodiscard]] const TKeyFrame& FirstKeyFrame() const { return keyframes_.front()->frame; }
+    // The current map's root Frame (its first, or after a merge the target's
+    // root), never culled: the gauge of local BA.
+    [[nodiscard]] const TKeyFrame& RootKeyFrame() const { return FindRecord(Active().root)->frame; }
     // The current map's newest Frame, never culled.
-    [[nodiscard]] const TKeyFrame& LastKeyFrame() const { return keyframes_.back()->frame; }
+    [[nodiscard]] const TKeyFrame& LastKeyFrame() const { return Active().keyframes.back()->frame; }
     // `point`'s observations as ORB-SLAM3 counts them for ref_points: 2 for a
     // stereo-matched one (right index >= 0), 1 otherwise. Unlike
     // CovisibilityIndex::NumObservations, which counts Frames.
@@ -479,7 +581,9 @@ private:
     // The Frames `frame` is connected to (ORB-SLAM3 UpdateConnections): those
     // sharing at least min_connection_weight points, by shared points, or else
     // its most covisible one.
-    [[nodiscard]] std::vector<map::FrameId> Connected(map::FrameId frame) const;
+    [[nodiscard]] std::vector<map::FrameId> Connected(map::FrameId frame) const { return Connected(Active(), frame); }
+    // The same in map `state`.
+    [[nodiscard]] std::vector<map::FrameId> Connected(const MapState& state, map::FrameId frame) const;
     // `frame` and its top num_covisibles covisible Frames (the LoopCloser's
     // window of a match).
     [[nodiscard]] std::vector<map::FrameId> MatchWindow(map::FrameId frame) const;
@@ -542,6 +646,48 @@ private:
     void MergeGlobalBa(const std::vector<std::pair<map::FrameId, geometry::RigidTransformation>>& frame_poses,
                        const std::vector<std::pair<map::MapPointId, geometry::TPoint3DF>>& point_positions);
 
+    // Map merging (mapper_merge.cpp; map-merging spec section 3, ORB-SLAM3
+    // LoopClosing::MergeLocal, visual). The absorbed map is moved into the
+    // target first (step 7's id rule, as every replica applies it), so the
+    // loop-correction steps then run on one map, the target made active.
+
+    // A LoopDetected of the active map (the query's) with an inactive one: the
+    // active map is merged into the inactive one, which survives and becomes
+    // active, as one MapTransaction (steps 1-8). Rejected (ignored) when the
+    // query map is not the active one, the match map is not an existing
+    // inactive map, the query or match Frame is no longer in its map, or the
+    // similarity is invalid.
+    void OnMergeDetected(const events::LoopDetected& event);
+    // Step 7, done first: moves every Frame (records, graph links), alive point
+    // (position, descriptor, normal, reference, counters) and observation of
+    // `source` into `target`, point old id p taking AbsorbedPointIds' new id,
+    // with the Mapper's bookkeeping (recent points remapped, the relocalization
+    // guard); `source` is left moved-from, for the caller to erase. Returns
+    // the new id per old id.
+    static std::vector<std::optional<map::MapPointId>> AbsorbMap(MapState& source, MapState& target);
+    // Step 1 (ORB-SLAM3 MergeLocal's windows), in map `state`: `frame`, its connected Frames
+    // up to atlas.merge_window (GetBestCovisibilityKeyFrames), then, while
+    // the window is smaller and for at most 5 rounds, each window Frame's
+    // connected Frames up to merge_window / 2. `frame` first.
+    [[nodiscard]] std::vector<map::FrameId> MergeWindowOf(const MapState& state, map::FrameId frame) const;
+    // Step 3: `query` becomes a child of `match` and the parent chain from the
+    // query to its old root is inverted (ORB-SLAM3's ChangeParent walk).
+    void ReRootTree(map::FrameId query, map::FrameId match, events::MapTransaction<TFeatureExtractor>& out_event);
+    // Step 5, the weld (ORB-SLAM3 LocalBundleAdjustment(current, current
+    // window, merge window)): BundleAdjust of the `free` and `fixed` Frames
+    // with every point they observe, through their observations only. Poses
+    // and points are applied; outlier observations are removed once the robust
+    // stage has finished, and their points appended to `out_changed`.
+    void WeldWindows(const std::vector<map::FrameId>& free, const std::vector<map::FrameId>& fixed,
+                     events::MapTransaction<TFeatureExtractor>& out_event, std::vector<map::MapPointId>& out_changed);
+    // Step 6: each Frame of `absorbed_frames` outside the window takes the
+    // merge similarity as CorrectWindow gives it, its points moving with their
+    // reference Frame; then the essential graph of the absorbed Frames (the
+    // window fixed at its welded poses; ORB-SLAM3's merge overload of
+    // OptimizeEssentialGraph) moves them and their points again.
+    void MoveRestOfMap(const WindowCorrection& correction, const std::vector<map::FrameId>& absorbed_frames,
+                       bool fix_scale);
+
     // `frame`'s side of a triangulation, with `has_point` per feature.
     [[nodiscard]] TriangulationView<TFeatureExtractor> ViewOf(const TKeyFrame& frame,
                                                               std::vector<bool> has_point) const;
@@ -574,39 +720,32 @@ private:
     std::vector<events::Event*> batch_;
     std::vector<bool> superseded_;
     size_t backlog_ = 0;  // FrameTracked skipped since the last evaluated one
-    // Timestamp of the current map's latest FrameTracked with stage
-    // Relocalization, evaluated or skipped; none since the map was cleared.
-    std::optional<double> relocalized_at_;
     std::atomic<size_t> num_frame_evaluations_{0};
     std::atomic<size_t> backlog_skipped_{0};
     std::atomic<size_t> stale_epoch_skipped_{0};
+    std::atomic<size_t> other_map_skipped_{0};
+    std::atomic<size_t> num_initialization_measurements_{0};
     std::atomic<size_t> num_global_ba_merges_{0};
     std::atomic<size_t> num_global_ba_rejected_{0};
+    std::atomic<size_t> num_merges_{0};
 
-    std::atomic<MapperState> state_{MapperState::Initializing};
+    std::atomic<MapperState> state_{MapperState::Initializing};  // Mapping iff a map is active
+    // The map last made active (0 before the first): the active one while
+    // Mapping (a merge's target after a merge); after a final loss, the lost
+    // map's until the next new map.
     std::atomic<map::MapId> current_map_id_{map::MapId{0}};
-    map::MapId next_map_id_{1};
+    map::MapId next_map_id_{1};      // never reused
     map::FrameId next_frame_id_{0};  // never reset: frame ids are unique across maps
-    uint32_t map_epoch_ = 0;         // the current map's correction epoch
-    // The current map's Frames by id from its first one; a culled Frame is
-    // empty. The first and the last one are never culled.
-    std::vector<std::optional<KeyFrameRecord>> keyframes_;
-    // Frames in the current map (culled ones excluded), readable from any thread.
+    // The Atlas: every live map by id, the inactive ones frozen; the active
+    // one, if any, and its state (cached: hot paths reach it per point;
+    // std::map nodes are stable).
+    std::map<map::MapId, MapState> maps_;
+    std::optional<map::MapId> active_;
+    MapState* active_state_ = nullptr;
+    // The active map's Frames (culled ones excluded) and points, 0 without
+    // one; readable from any thread.
     std::atomic<size_t> num_keyframes_{0};
-    // The current map's points; ids restart at 0 per map.
-    map::MapPointStorage<TFeatureExtractor> map_points_;
-    std::atomic<size_t> num_map_points_{0};  // map_points_.size(), readable from any thread
-    // The current map's observations (Frame, left feature), indexed per point
-    // and per Frame. A binocular Frame's depth and right index of a feature
-    // are in its measurement.
-    map::CovisibilityIndex covisibility_;
-    // Per point id of the current map: the reference observation (nullopt
-    // once removed) and the visible / found counters.
-    std::vector<std::optional<map::PointReference>> references_;
-    std::vector<uint32_t> num_visible_;
-    std::vector<uint32_t> num_found_;
-    // Points created by the last recent_window Frames, oldest first.
-    std::vector<RecentPoint> recent_points_;
+    std::atomic<size_t> num_map_points_{0};
     // Transaction 1 in progress: the (Frame, point) keys of the observations
     // it added; loser -> winner of each merge, and the losers in merge order;
     // the points whose observations changed.

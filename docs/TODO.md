@@ -382,10 +382,26 @@ Spec `docs/superpowers/specs/2026-10-09-loop-closing-design.md`; DESIGN
       ORB's `minFeat`), so the essential graph pulls the loop through one
       edge. ORB-SLAM3 behaves the same and relies on global BA (4c, done
       2026-10-10: DESIGN "Global BA").
-- [ ] **Map merging** (roadmap step 5): `LoopDetected` carries both map ids
-      and the correction steps take a window and a Sim3, but detection
-      searches only the current map and the Mapper rejects a loop across
-      maps.
+- [ ] **Merge weld cost (step 5):** `WeldWindows` optimizes every point the
+      two windows observe with up to 50 Frames and cannot be interrupted
+      (ORB passes a stop flag that is never set). Corridor1 (2026-10-11
+      smoke): 202–247 ms per merge (windows 25–30 / 26 Frames); a local BA
+      or a `FrameTracked` waits that long. Make it interruptible if merges
+      on larger windows take longer.
+- [ ] **Hypothesis-independent check for merges (step 6):** the normal gate
+      is not applied to merges (ruling 2026-10-10: the two maps' worlds are
+      related only by the merge hypothesis), so false-merge protection is
+      weaker than for loops. Candidates: a gravity / up-direction
+      consistency check (needs an IMU or a level prior), or verify-before-
+      publish (e.g. track the query's next Frames in the match map before
+      the merge is applied).
+- [ ] **Thin mono merge scale margin (step 6):** `LoopCloserMergeTest`
+      measured up to 1.34 % scale error against the 2 % bound (about 1.5x
+      margin; the loop tests have about 3x).
+- [ ] **Merge detection test gap (step 6):** a merge region confirmed by a query is
+      not searched again in that query (ORB `bMergeDetectedInKF`); no test
+      tells this from a re-search, since in the synthetic scene both give
+      the same confirmations (mutation M7 of Task 4 survives).
 - [ ] **Scale without IMU:** mono scale is corrected only at a loop (the
       essential graph spreads the loop's Sim3 scale over the graph, start
       included); between loops it drifts freely, and nothing makes the map
@@ -483,7 +499,10 @@ BA" (smoke table there).
       1.47 GB without and 2.24 / 2.38 GB with. Global BA adds another full
       replica plus the g2o problem of a full BA. Each replica holds every
       Frame's measurement; find what dominates (measurements, BoW,
-      per-replica copies, the BA problem) before trimming.
+      per-replica copies, the BA problem) before trimming. Since 2026-10-10
+      (map merging Task 1) the measurements are shared, not copied per
+      replica and event: the same run (default flags plus `--vocabulary`)
+      peaked at **1.21 GB** (1794 Frames, 114k points; 1.7 GB before).
 - [ ] **Global BA iteration or size cap:** on corridor1 (2026-10-10 smoke)
       a run took 3.3–28.2 s in mono and up to 82.5 / 85.2 s in stereo
       (1465 / 1654 Frames, 92k / 103k points), at 10 iterations; in mono
@@ -503,10 +522,6 @@ BA" (smoke table there).
 - [ ] **A dropped result is not retried:** when the `GlobalBAFinished` pool
       (2) is exhausted, the map keeps the essential-graph correction until
       the next loop (counted in `num_results_dropped`). ORB-SLAM3 has no pool.
-- [ ] **A lost map's run:** the GlobalBA is not wired to `TrackingLost`; a
-      run on a map the Tracker lost goes on until the next map's first
-      transaction, and the Mapper then rejects its result (not `Mapping`).
-      Wasted work only.
 - [ ] **The snapshot contract is enforced by documentation:**
       `ChangesDuringRunDoNotAffectResult` catches a `RunGlobalBa` that reads
       the replica after its first poll only when the data it reads changed.
@@ -525,6 +540,62 @@ BA" (smoke table there).
       as in ORB-SLAM3); `SkipsCulledAndFused` does not tell fused from culled
       points; the merge's uncorrected-subtree branch (neither the root nor an
       ancestor in the result) is untested.
+
+## Map merging follow-ups (roadmap step 5, 2026-10-11)
+
+DESIGN "Mapper" (merge), "Loop Closing" (merge detection, Tracker across a
+merge, map merging end to end); spec `2026-10-10-map-merging-design.md`.
+
+- [ ] **Inactive maps in the viewer:** `SceneState` keeps every live map but
+      shows only the active one.
+- [ ] **Separate merge edges:** a merge edge is stored as a loop edge
+      (ORB-SLAM3 keeps `mspMergeEdges` apart); it starts a global BA, and
+      `IsClosedLoop` treats it as a loop.
+- [ ] **One merge seam leaves the absorbed map's drift open:** the merged
+      map is linked at one seam; map 2's drift between its start and the seam
+      is not corrected until a later loop. `SlamTest.MonoMergesMaps` meets the
+      1.5x bar with the blackout at frames 140–165 (ratios up to 1.31 mono,
+      1.40 stereo) but not at 160–185 (mono 4.84 / 3.30, stereo 1.61; measured
+      once, not adopted). ORB-SLAM3 has the same structure; a loop between the
+      parts' ends would close it.
+- [ ] **Thin margins in the merge integration tests:** map 1 holds 10–11
+      Frames at the loss against `min_frames_to_keep` 10 (one Frame fewer and
+      it is discarded); stereo seed 2's error ratio is 1.33–1.40 against 1.5.
+- [ ] **The merge-overtakes-loss race is not reached end to end:** in the
+      integration runs the loss comes about 150 frames before the merge; the
+      re-announce is covered by `TrackerMergeTest.LostTrackerReannouncesLossAfterMerge`
+      and `MapperMergeTest.ReannouncedLossAfterMergeDeactivatesTarget` only.
+- [ ] **`LoopDetected` has no epoch:** a merge queued behind a loop
+      correction of M is accepted (ruling 2026-10-11: geometrically sound);
+      rejecting stale detections would need the detection epoch.
+- [ ] **Test gaps:** no merge test where the Tracker's reference Frame is
+      gone (the fallback is shared with the loop path); the weld's
+      reference-fix path (a point whose reference observation the weld
+      removes) is untested (Task 5 mutant survives); no test of the per-list
+      `num_candidates` cap or of one list starving the other;
+      `NeverMatchesRemovedMap` is partly vacuous; no death test for
+      `MapReplica`'s foreign-map assert.
+- [ ] **LoopCloser detection in a lost map:** until the Mapper's
+      deactivation transaction arrives, the LoopCloser may detect in the lost
+      map; the Mapper rejects the stale loop.
+- [ ] **`last_loop_epoch_` is shared by loops and merges** in the
+      LoopCloser (it decides `LoopDetected::priority`): check whether one
+      kind should affect the other's priority (Task 4 review).
+- [ ] **Small cleanups:** `mapper.cpp` copies the `InitializationMeasurement`
+      per initialization attempt; a repeated log string in
+      `TrackFromLastFrame`'s null guard; `MergeOwnFrame` depends implicitly on
+      the pointer and the matches; the GlobalBA snapshot comment should say
+      "may change or be destroyed"; an unused `tracking_lost.h` include and
+      include-order nits (Task 2).
+- [ ] **Flaky tests found during map merging:**
+      `GeometryTest.SquaredSampsonErrorScaleIndependent` uses an unseeded
+      random matrix (failed once); `GlobalBundleAdjusterTest.StopInterruptsRunningBa`
+      hung once for 2 h 45 min (main thread spinning on `while (!in_run)`,
+      worker parked in `WakeSignal::Wait`). Diagnosis: test-only. It
+      reproduces when the harness leaves `active_map` unset, so the run never
+      becomes pending and the worker parks. The real path was ruled out by a
+      stress run of 12 processes x 3000 repeats. Both spin-waits of the test
+      now have a 5 s deadline and fail instead of hanging.
 
 ## TUM-VI tuning (roadmap step 6)
 
@@ -565,9 +636,10 @@ BA" (smoke table there).
 Spec `docs/superpowers/specs/2026-10-07-relocalization-design.md`; DESIGN
 "Relocalization and Reference-Frame Tracking" (smoke table there).
 
-- [ ] **Relocalization into other maps** (roadmap step 5, multi-map Atlas):
-      today `RecentlyLost` searches only the current map, and `Lost` still
-      clears it.
+- [ ] **Relocalization into inactive maps** (after map merging, step 5):
+      `RecentlyLost` searches only the active map, as in ORB-SLAM3 (spec
+      scope A); a lost map is kept inactive and can only come back through a
+      merge.
 - [ ] **MLPnP** (Urban et al. 2016, ORB-SLAM3's PnP) as an alternative to
       Lambda Twist P3P + `OptimizePose`: it uses the bearing covariances and
       needs no minimal-solver disambiguation. Compare recall and time on

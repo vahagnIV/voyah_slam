@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Absolute trajectory error of a full_slam trajectory against TUM-VI mocap.
 
-Usage: tools/ate.py <trajectory> <groundtruth.csv> [--align sim3|se3] [--max_dt S]
+Usage: tools/ate.py <trajectory> <groundtruth.csv> [--align sim3|se3] [--max_dt S] [--map ID]
 
 <trajectory>: TUM lines `timestamp tx ty tz qx qy qz qw` (seconds,
 camera-to-world) as written by `--trajectory_out`; `# map <id>` lines start
-a map's section. Only the largest section is evaluated.
+a map's section (a map's sections are joined: after a merge the target map's
+poses before and after it are one section). Only the largest map is
+evaluated, or map ID with --map (e.g. the final map after merges).
 
 <groundtruth.csv>: TUM-VI mocap (`mav0/mocap0/data.csv`): `timestamp [ns],
 p_x, p_y, p_z, q_w, q_x, q_y, q_z`.
@@ -158,15 +160,21 @@ def main():
     parser.add_argument('groundtruth')
     parser.add_argument('--align', choices=['sim3', 'se3'], default='sim3')
     parser.add_argument('--max_dt', type=float, default=0.02, help='association window, s')
+    parser.add_argument('--map', type=int, default=None, help='map id to evaluate (default: the largest)')
     args = parser.parse_args()
 
     sections = read_trajectory(args.trajectory)
     if not sections:
         sys.exit('no poses in ' + args.trajectory)
     sizes = ', '.join('map %s: %d' % (m, len(p)) for m, p in sections.items())
-    map_id, poses = max(sections.items(), key=lambda item: len(item[1]))
+    if args.map is not None:
+        if args.map not in sections:
+            sys.exit('no map %d in %s' % (args.map, args.trajectory))
+        map_id, poses = args.map, sections[args.map]
+    else:
+        map_id, poses = max(sections.items(), key=lambda item: len(item[1]))
     pairs = associate(poses, read_mocap(args.groundtruth), args.max_dt)
-    print('sections: %s; largest: map %s' % (sizes, map_id))
+    print('sections: %s; evaluated: map %s' % (sizes, map_id))
     print('matched poses: %d of %d' % (len(pairs), len(poses)))
     if len(pairs) < 3:
         sys.exit('too few matched poses to align')

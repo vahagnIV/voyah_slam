@@ -278,6 +278,7 @@ TEST_F(RelocalizationTest, SkipsFrameRemovedMidRecovery) {
     // Tracker is RecentlyLost.
     auto* transaction = transaction_pool_.Create();
     transaction->map_id = map::MapId{1};
+    transaction->active_map = map::MapId{1};  // as the Mapper
     transaction->removed_frames = {first.frame};
     injector_.Notify(transaction);
     Drain();

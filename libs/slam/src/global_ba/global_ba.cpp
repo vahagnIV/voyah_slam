@@ -11,11 +11,20 @@ template <typename TFeatureExtractor>
 std::optional<GlobalBaSolution> RunGlobalBa(const tracking::MapReplica<TFeatureExtractor>& replica,
                                             const GlobalBaOptions& options,
                                             const std::function<bool()>& should_stop) {
-    // Frames in id order: the first is the oldest surviving one, the gauge
-    // (ORB-SLAM3 fixes the map's init keyframe).
+    // Frames in id order. The gauge (ORB-SLAM3 fixes the map's init
+    // keyframe) is the spanning tree's root: the oldest Frame without a
+    // parent, else the oldest surviving one. After a merge the root need not
+    // be the oldest Frame (the absorbed map may hold older ids).
     const std::vector<map::FrameId> frames = replica.keyframe_ids();
     if (frames.empty()) {
         return std::nullopt;
+    }
+    size_t gauge = 0;
+    for (size_t i = 0; i < frames.size(); ++i) {
+        if (!replica.parent(frames[i])) {
+            gauge = i;
+            break;
+        }
     }
     std::unordered_map<uint32_t, size_t> frame_index;
     optimization::BaProblem problem;
@@ -27,9 +36,9 @@ std::optional<GlobalBaSolution> RunGlobalBa(const tracking::MapReplica<TFeatureE
         const tracking::ReplicaKeyFrame<TFeatureExtractor>& keyframe = *replica.keyframe(frames[i]);
         frame_index.emplace(frames[i].value, i);
         problem.keyframe_poses.push_back(keyframe.T_cw);
-        problem.keyframe_fixed.push_back(i == 0);
-        problem.keyframe_cameras.push_back(features::LeftOf<TFeatureExtractor>(keyframe.measurement).camera());
-        problem.keyframe_stereo.push_back(mapping::detail::BaStereoOf<TFeatureExtractor>(keyframe.measurement));
+        problem.keyframe_fixed.push_back(i == gauge);
+        problem.keyframe_cameras.push_back(features::LeftOf<TFeatureExtractor>(keyframe.measurement()).camera());
+        problem.keyframe_stereo.push_back(mapping::detail::BaStereoOf<TFeatureExtractor>(keyframe.measurement()));
     }
 
     // Every alive point with an observation, with all its observations.
@@ -46,7 +55,7 @@ std::optional<GlobalBaSolution> RunGlobalBa(const tracking::MapReplica<TFeatureE
         for (const map::PointObservation& observation : replica.covisibility().Observations(points[p])) {
             const size_t k = frame_index.at(observation.frame.value);
             problem.observations.push_back(mapping::detail::BaObservationOf<TFeatureExtractor>(
-                replica.keyframe(observation.frame)->measurement, observation.feature, k, p,
+                replica.keyframe(observation.frame)->measurement(), observation.feature, k, p,
                 options.sigma_px, options.level_scale));
         }
     }
@@ -66,7 +75,7 @@ std::optional<GlobalBaSolution> RunGlobalBa(const tracking::MapReplica<TFeatureE
     }
 
     GlobalBaSolution solution;
-    solution.fixed_frame = frames.front();
+    solution.fixed_frame = frames[gauge];
     solution.frame_poses.reserve(frames.size());
     for (size_t i = 0; i < frames.size(); ++i) {
         solution.frame_poses.emplace_back(frames[i], result.keyframe_poses[i]);

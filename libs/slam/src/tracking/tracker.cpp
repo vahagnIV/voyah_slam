@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <unordered_map>
 #include <utility>
 #include <variant>
@@ -80,56 +81,89 @@ bool Tracker<TFeatureExtractor>::ProcessPending() {
     bool processed = false;
     while (events::Event* event = inbox_listener_.GetNextEvent()) {
         processed = true;
-        if (AdoptMapOf(*event)) {
-            ApplyEvent(*event);
-        }
+        ApplyEvent(*event);
     }
 
     TMeasurement measurement;
     if (measurements_.try_dequeue(measurement)) {
         processed = true;
         ProcessMeasurement(measurement);
+        num_processed_.fetch_add(1, std::memory_order_acq_rel);
     }
     return processed;
 }
 
 template <typename TFeatureExtractor>
-bool Tracker<TFeatureExtractor>::AdoptMapOf(const events::Event& event) {
-    if (event.map_id == map::MapId{0}) {
-        return true;
-    }
-    const map::MapId current = current_map_id();
-    if (event.map_id < current) {
-        return false;
-    }
-    if (event.map_id > current) {
-        // The first event of a newer map: the replica clears itself when it
-        // applies it; nothing tracked against the old map carries over.
-        log_->debug("Adopting map {} (was {})", event.map_id.value, current.value);
-        current_map_id_.store(event.map_id, std::memory_order_release);
-        last_frame_ = {};
-        velocity_.reset();
-        reference_frame_id_.reset();
-        tracked_frames_ = 0;
-    }
-    return true;
-}
-
-template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::ApplyEvent(const events::Event& event) {
+    // Only the Mapper's transactions build the Atlas.
     if (event.type != events::EventType::MapTransaction) {
-        replica_.Apply(event);
         return;
     }
     const auto& transaction = static_cast<const events::MapTransaction<TFeatureExtractor>&>(event);
-    // A loop correction: the anchors' poses before it, to follow after it.
-    const bool correction = !transaction.new_map && transaction.map_id == replica_.map_id() &&
-                            transaction.map_epoch > replica_.map_epoch();
+    // A loop correction of the active map, or a merge of the active map into
+    // another (map-merging spec section 4): the anchors' poses before it, to
+    // follow after it. A merged Frame keeps its id in the target map.
+    const std::optional<map::MapId> previous = atlas_.active_map();
+    const bool merge = previous && transaction.absorbed_map == previous && transaction.map_id != *previous;
+    const bool correction = merge || (!transaction.new_map && previous == transaction.map_id &&
+                                      transaction.map_epoch > replica().map_epoch());
     std::vector<FramePose> anchors;
     if (correction) anchors = AnchorsBeforeCorrection();
-    replica_.Apply(event);
+    if (!atlas_.Apply(transaction)) {
+        return;  // an unknown or removed map's
+    }
+    const std::optional<map::MapId> active = atlas_.active_map();
+    if (merge && active == transaction.map_id) {
+        FollowMerge(*previous);
+    } else if (active && active != previous) {
+        AdoptMap(*active);
+    } else if (merge) {
+        // A merge of the active map that leaves no map active (the Mapper
+        // never sends one): nothing is followed; the last frame's ids are M's,
+        // which is gone, so nothing tracked against it is kept.
+        AdoptMap(transaction.map_id);
+    }
+    if (active != transaction.map_id) {
+        return;  // not the active map's
+    }
     if (correction) FollowCorrection(anchors);
     OnMapTransaction(transaction);
+}
+
+template <typename TFeatureExtractor>
+void Tracker<TFeatureExtractor>::AdoptMap(map::MapId map_id) {
+    log_->debug("Adopting map {} (was {})", map_id.value, current_map_id().value);
+    current_map_id_.store(map_id, std::memory_order_release);
+    last_frame_ = {};
+    velocity_.reset();
+    reference_frame_id_.reset();
+    tracked_frames_ = 0;
+}
+
+template <typename TFeatureExtractor>
+void Tracker<TFeatureExtractor>::FollowMerge(map::MapId absorbed) {
+    const map::MapId target = *atlas_.active_map();
+    log_->info("Map {} merged into map {} ({})", absorbed.value, target.value, ToString(state()));
+    current_map_id_.store(target, std::memory_order_release);
+    size_t unmatched = 0;
+    for (int64_t& match : last_frame_.matches) {
+        if (match < 0) continue;
+        const std::optional<map::MapPointId> point =
+            atlas_.TranslatePoint(absorbed, map::MapPointId{static_cast<uint32_t>(match)});
+        match = point ? static_cast<int64_t>(point->value) : -1;
+        unmatched += point ? 0 : 1;
+    }
+    log_->debug("Map {} merged into map {}: last frame {} matches, {} unmatched", absorbed.value, target.value,
+                CountMatches(last_frame_.matches), unmatched);
+    if (state() == TrackerState::Lost) {
+        // The merge overtook the final TrackingLost of `absorbed` in the
+        // Mapper, which ignores that loss (the map is removed; had it read the
+        // loss first, it would have rejected the merge): the loss is
+        // announced again for the map followed now, or nothing would end it.
+        log_->info("Lost when map {} was merged into map {}: final loss announced again", absorbed.value,
+                   target.value);
+        PublishTrackingLost(final_lost_at_, /*final=*/true);
+    }
 }
 
 template <typename TFeatureExtractor>
@@ -139,13 +173,13 @@ auto Tracker<TFeatureExtractor>::AnchorsBeforeCorrection() const -> std::vector<
         return anchors;  // no last frame: nothing follows
     }
     if (reference_frame_id_) {
-        if (const auto* reference = replica_.keyframe(*reference_frame_id_)) {
+        if (const auto* reference = replica().keyframe(*reference_frame_id_)) {
             anchors.push_back({reference->id, reference->T_cw});
         }
     }
-    for (const auto& [frame, count] : detail::FramesObservingMatches(replica_, last_frame_.matches)) {
+    for (const auto& [frame, count] : detail::FramesObservingMatches(replica(), last_frame_.matches)) {
         if (!reference_frame_id_ || frame != *reference_frame_id_) {
-            anchors.push_back({frame, replica_.keyframe(frame)->T_cw});
+            anchors.push_back({frame, replica().keyframe(frame)->T_cw});
         }
     }
     return anchors;
@@ -154,18 +188,18 @@ auto Tracker<TFeatureExtractor>::AnchorsBeforeCorrection() const -> std::vector<
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::FollowCorrection(const std::vector<FramePose>& anchors) {
     for (const FramePose& anchor : anchors) {
-        if (const auto* frame = replica_.keyframe(anchor.frame)) {
+        if (const auto* frame = replica().keyframe(anchor.frame)) {
             // T_cw convention: T_last * T_ref^-1 (the last camera relative to
             // the reference) is unchanged.
             last_frame_.T_cw = last_frame_.T_cw * anchor.T_cw.Inverse() * frame->T_cw;
-            log_->debug("Loop correction (epoch {}): last frame follows Frame {}",
-                        replica_.map_epoch(), anchor.frame.value);
+            log_->debug("Correction (epoch {}): last frame follows Frame {}",
+                        replica().map_epoch(), anchor.frame.value);
             return;
         }
     }
     if (state() == TrackerState::Tracking) {
-        log_->warn("Loop correction (epoch {}): no Frame of the last frame left; last frame not moved",
-                   replica_.map_epoch());
+        log_->warn("Correction (epoch {}): no Frame of the last frame left; last frame not moved",
+                   replica().map_epoch());
     }
 }
 
@@ -198,7 +232,7 @@ void Tracker<TFeatureExtractor>::OnMapTransaction(
         }
         // The replica has dropped the removed points (and a winner removed in
         // the same transaction).
-        if (!replica_.IsAlive(map::MapPointId{static_cast<uint32_t>(match)})) match = -1;
+        if (!replica().IsAlive(map::MapPointId{static_cast<uint32_t>(match)})) match = -1;
     }
 }
 
@@ -206,10 +240,10 @@ template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::StartTracking(map::FrameId start_frame) {
     // The start Frame is the last frame; its observations are its matches.
     last_frame_ = {};
-    if (const auto* keyframe = replica_.keyframe(start_frame)) {
-        last_frame_.measurement = keyframe->measurement;
+    if (const auto* keyframe = replica().keyframe(start_frame)) {
+        last_frame_.measurement = keyframe->shared_measurement;
         last_frame_.T_cw = keyframe->T_cw;
-        last_frame_.matches.assign(static_cast<size_t>(LeftOf<TFeatureExtractor>(keyframe->measurement)
+        last_frame_.matches.assign(static_cast<size_t>(LeftOf<TFeatureExtractor>(keyframe->measurement())
                                                            .points()
                                                            .cols()),
                                    -1);
@@ -232,7 +266,7 @@ void Tracker<TFeatureExtractor>::StartTracking(map::FrameId start_frame) {
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::MergeOwnFrame(const events::NewFrame<TFeatureExtractor>& frame) {
     if (last_frame_.matches.empty() ||
-        TimestampOf(frame.measurement) != TimestampOf(last_frame_.measurement)) {
+        TimestampOf(*frame.measurement) != TimestampOf(*last_frame_.measurement)) {
         return;
     }
     const size_t num = std::min(frame.observed_features.size(), frame.observed_points.size());
@@ -279,7 +313,7 @@ void Tracker<TFeatureExtractor>::TrackMeasurement(TMeasurement& measurement) {
     const double timestamp = TimestampOf(measurement);
     // State first: whoever observes TrackingLost also observes the new state.
     if (vocabulary_ &&
-        replica_.num_keyframes() > options_.relocalization.min_map_frames_to_relocalize) {
+        replica().num_keyframes() > options_.relocalization.min_map_frames_to_relocalize) {
         recently_lost_since_ = timestamp;
         SetState(TrackerState::RecentlyLost);
         PublishTrackingLost(timestamp, /*final=*/false);
@@ -307,7 +341,8 @@ void Tracker<TFeatureExtractor>::ProcessRecentlyLost(TMeasurement& measurement) 
 
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::AcceptPose(TMeasurement& measurement, PoseResult pose) {
-    last_frame_.measurement = std::move(measurement);
+    // The tracked measurement becomes immutable and shared from here on.
+    last_frame_.measurement = std::make_shared<const TMeasurement>(std::move(measurement));
     last_frame_.T_cw = pose.T_cw;
     last_frame_.matches = std::move(pose.matches);
     if (pose.reference_frame_id) {
@@ -357,11 +392,16 @@ auto Tracker<TFeatureExtractor>::TrackFromLastFrame(const TMeasurement& measurem
     -> std::optional<PoseResult> {
     const TrackingOptions& tracking = options_.tracking;
     const char* step = ToString(stage);
+    if (last_frame_.measurement == nullptr) {
+        // No last frame (its start Frame was missing): nothing to match.
+        log_->debug("{} failed: 0 matches (< {})", step, tracking.min_motion_matches);
+        return std::nullopt;
+    }
     const auto& current = LeftOf<TFeatureExtractor>(measurement);
-    const auto& last = LeftOf<TFeatureExtractor>(last_frame_.measurement);
+    const auto& last = LeftOf<TFeatureExtractor>(*last_frame_.measurement);
     const auto search = [&](double radius_px) {
         return features::SearchFromLastFrame<TFeatureExtractor>(
-            current, predicted, last, last_frame_.matches, replica_, radius_px, options_.matcher);
+            current, predicted, last, last_frame_.matches, replica(), radius_px, options_.matcher);
     };
 
     std::vector<int64_t> matches = search(window_px);
@@ -394,13 +434,13 @@ auto Tracker<TFeatureExtractor>::TrackReferenceFrame(const TMeasurement& measure
     -> std::optional<PoseResult> {
     const TrackingOptions& tracking = options_.tracking;
     const auto* reference =
-        reference_frame_id_ ? replica_.keyframe(*reference_frame_id_) : nullptr;
+        reference_frame_id_ ? replica().keyframe(*reference_frame_id_) : nullptr;
     if (reference == nullptr) {
         log_->debug("reference Frame failed: no reference Frame");
         return std::nullopt;
     }
     const auto& current = LeftOf<TFeatureExtractor>(measurement);
-    const auto& frame = LeftOf<TFeatureExtractor>(reference->measurement);
+    const auto& frame = LeftOf<TFeatureExtractor>(reference->measurement());
     bow::BowVector current_bow;
     bow::FeatureVector current_features;
     // The Mapper's levels: the Frames' and the current frame's FeatureVectors
@@ -412,7 +452,7 @@ auto Tracker<TFeatureExtractor>::TrackReferenceFrame(const TMeasurement& measure
     std::vector<std::optional<map::MapPointId>> frame_points(
         static_cast<size_t>(frame.points().cols()));
     for (const auto& [feature, point] : reference->observations) {
-        if (feature < frame_points.size() && replica_.IsAlive(point)) {
+        if (feature < frame_points.size() && replica().IsAlive(point)) {
             frame_points[feature] = point;
         }
     }
@@ -452,7 +492,7 @@ auto Tracker<TFeatureExtractor>::TryRelocalize(const TMeasurement& measurement)
     if (!vocabulary_) {
         return std::nullopt;
     }
-    RelocalizationResult relocalized = Relocalize(replica_, measurement, *vocabulary_,
+    RelocalizationResult relocalized = Relocalize(replica(), measurement, *vocabulary_,
                                                   options_.relocalization, Refinement(), options_.matcher);
     if (!relocalized.success) {
         log_->debug("relocalization failed: {} candidates, {} with BoW matches, {} hypotheses, best {} inliers",
@@ -478,12 +518,12 @@ template <typename TFeatureExtractor>
 auto Tracker<TFeatureExtractor>::TrackLocalMap(const TMeasurement& measurement, PoseResult pose)
     -> std::optional<PoseResult> {
     const TrackingOptions& tracking = options_.tracking;
-    LocalMap local = BuildLocalMap(replica_, pose.matches, tracking.local_neighbours,
+    LocalMap local = BuildLocalMap(replica(), pose.matches, tracking.local_neighbours,
                                    tracking.max_local_frames);
     std::vector<map::MapPointId> visible;
     const size_t added = features::SearchFromLocalMap<TFeatureExtractor>(
         LeftOf<TFeatureExtractor>(measurement), pose.T_cw,
-        LocalPointSource<TFeatureExtractor>(replica_, local), pose.matches, tracking.local_map_th,
+        LocalPointSource<TFeatureExtractor>(replica(), local), pose.matches, tracking.local_map_th,
         options_.matcher, &visible);
     PoseResult result = OptimizeAndDropOutliers(measurement, pose.T_cw, std::move(pose.matches));
     // Stricter right after a relocalization, the relocalized measurement
@@ -505,7 +545,7 @@ auto Tracker<TFeatureExtractor>::TrackLocalMap(const TMeasurement& measurement, 
     result.stage = pose.stage;  // the initial pose's source
     result.local_frames = std::move(local.frames);
     result.visible_points = std::move(visible);
-    result.reference_frame_id = ReferenceFrame(replica_, result.matches);
+    result.reference_frame_id = ReferenceFrame(replica(), result.matches);
     return result;
 }
 
@@ -514,7 +554,7 @@ auto Tracker<TFeatureExtractor>::OptimizeAndDropOutliers(
     const TMeasurement& measurement, const geometry::RigidTransformation& initial_T_cw,
     std::vector<int64_t> matches) const -> PoseResult {
     MatchedPose optimized =
-        OptimizeMatchedPose(replica_, measurement, initial_T_cw, std::move(matches), Refinement());
+        OptimizeMatchedPose(replica(), measurement, initial_T_cw, std::move(matches), Refinement());
     PoseResult pose;
     pose.T_cw = optimized.T_cw;
     pose.matches = std::move(optimized.matches);
@@ -543,7 +583,7 @@ void Tracker<TFeatureExtractor>::PublishFrameTracked(const PoseResult& pose) {
     auto* event = frame_tracked_pool_.Create();
     event->map_id = current_map_id();
     event->priority = false;
-    event->timestamp = TimestampOf(last_frame_.measurement);
+    event->timestamp = TimestampOf(*last_frame_.measurement);
     event->pose = last_frame_.T_cw;
     event->measurement = last_frame_.measurement;
     for (size_t feature = 0; feature < last_frame_.matches.size(); ++feature) {
@@ -561,7 +601,7 @@ void Tracker<TFeatureExtractor>::PublishFrameTracked(const PoseResult& pose) {
     event->num_inliers = static_cast<uint32_t>(pose.num_inliers);
     event->urgent = options_.tracking.IsUrgent(pose.num_inliers);
     event->priority = event->urgent;
-    event->map_epoch = replica_.map_epoch();
+    event->map_epoch = replica().map_epoch();
     observable_.Notify(event);
 }
 
@@ -572,6 +612,7 @@ void Tracker<TFeatureExtractor>::PublishTrackingLost(double timestamp, bool fina
     event->priority = false;
     event->timestamp = timestamp;
     event->final = final;
+    if (final) final_lost_at_ = timestamp;
     observable_.Notify(event);
 }
 

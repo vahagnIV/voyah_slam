@@ -30,6 +30,7 @@
 #include <voyahslam/memory/object_pool.h>
 #include <voyahslam/optimization/pose_optimization.h>
 #include <voyahslam/tracking/local_map.h>
+#include <voyahslam/tracking/atlas_replica.h>
 #include <voyahslam/tracking/map_replica.h>
 #include <voyahslam/tracking/relocalizer.h>
 
@@ -124,7 +125,13 @@ struct TrackerOptions {
 // Lost at once (final = true). Lost, like WaitingForMap, forwards
 // measurements to the Mapper for a new map.
 //
-// MapTransactions. A new map starts tracking from its start Frame. An added
+// MapTransactions. They build the Tracker's AtlasReplica (the replica rule:
+// atlas_replica.h); the Tracker tracks and relocalizes only in the active map
+// (replica()). A change of the active map to another map resets the last
+// frame, the velocity and the reference Frame; current_map_id() is the last
+// active map (kept while none is active, after a final loss). Only a
+// transaction of the active map acts on the Tracker's state below. A new map
+// starts tracking from its start Frame. An added
 // Frame whose measurement is the last tracked one (same timestamp) merges its
 // observations into the last frame's matches, so the next motion-model search
 // uses the Mapper's new points at once. Then the last frame's matches follow
@@ -137,12 +144,26 @@ struct TrackerOptions {
 // relative and unchanged. While RecentlyLost or Lost there is no last frame:
 // relocalization and a new map use the corrected replica. FrameTracked
 // carries the replica's epoch.
+//
+// Map merging (map-merging spec section 4). A transaction merging the active
+// map M into map N (absorbed_map M, active_map N) switches the Tracker to N
+// without a reset: its state, velocity and reference Frame are kept (Frames
+// keep their ids in N). While Tracking, the last frame follows its reference
+// Frame (or another Frame of its matches) as through a loop correction; its
+// matches take their ids in N by the merge's id rule and fusions
+// (AtlasReplica::TranslatePoint), and one that has none becomes unmatched.
+// While RecentlyLost or Lost there is no last frame: relocalization searches
+// N. FrameTracked then carries N and N's epoch. A merge landing while Lost
+// overtook the Tracker's final TrackingLost(M) in the Mapper, which ignores
+// that loss as stale: the Tracker publishes a final TrackingLost(N) (with the
+// first one's timestamp), and the Mapper handles it as any final loss.
 template <typename TFeatureExtractor>
 class Tracker : public events::EventNode {
 public:
     using TMonocularMeasurement = features::TMonocularMeasurement<TFeatureExtractor>;
     using TBinocularMeasurement = features::TBinocularMeasurement<TFeatureExtractor>;
     using TMeasurement = features::TMeasurement<TFeatureExtractor>;
+    using TSharedMeasurement = features::TSharedMeasurement<TFeatureExtractor>;
 
     // `vocabulary` (may be null) is immutable and shared read-only with the
     // Mapper.
@@ -176,17 +197,25 @@ public:
 
     // Approximate number of measurements waiting to be tracked.
     [[nodiscard]] size_t pending_measurements() const { return measurements_.size_approx(); }
+    // Measurements processed (tracked, lost or forwarded to the Mapper), in
+    // total; each counted after whatever it published.
+    [[nodiscard]] size_t num_processed() const { return num_processed_.load(std::memory_order_acquire); }
 
     // Tracker-thread state, for tests that drive ProcessPending()
     // synchronously: never read while the worker runs.
-    [[nodiscard]] const MapReplica<TFeatureExtractor>& replica() const { return replica_; }
+    [[nodiscard]] const AtlasReplica<TFeatureExtractor>& atlas() const { return atlas_; }
+    // The active map, which the Tracker tracks and relocalizes in; empty if
+    // there is none.
+    [[nodiscard]] const MapReplica<TFeatureExtractor>& replica() const { return atlas_.active_or_empty(); }
     // The last tracked frame's inlier matches: per (left) feature, the
     // MapPointId value or -1.
     [[nodiscard]] const std::vector<int64_t>& last_matches() const { return last_frame_.matches; }
 
 private:
     struct LastFrame {
-        TMeasurement measurement;
+        // Null when there is no last frame. A tracked frame's measurement is
+        // created here (AcceptPose), once, and shared by its FrameTracked.
+        TSharedMeasurement measurement;
         geometry::RigidTransformation T_cw;
         std::vector<int64_t> matches;  // per (left) feature: MapPointId value or -1
     };
@@ -204,21 +233,35 @@ private:
         std::optional<map::FrameId> reference_frame_id;
     };
 
-    // Applies the consumer rule; returns false if the event is stale.
-    bool AdoptMapOf(const events::Event& event);
+    // Applies a transaction to the Atlas (the replica rule). A merge of the
+    // active map into the map it makes active is followed (FollowMerge); any
+    // other change of the active map adopts the new one (AdoptMap), and a
+    // merge of the active map that leaves none active resets as AdoptMap of
+    // the target. A merge that does not absorb the active map leaves the
+    // Tracker alone; one into the active map is a correction of it (its
+    // epoch rises; the active map's Frames and points keep their ids).
     void ApplyEvent(const events::Event& event);
+    // The active map became `map_id`: nothing tracked against the previous
+    // one carries over.
+    void AdoptMap(map::MapId map_id);
+    // The active map `absorbed` was merged into the new active map (already
+    // applied): the Tracker switches to it, keeping its state, and
+    // last_frame_'s points take their ids in it
+    // (AtlasReplica::TranslatePoint); a point without one becomes unmatched.
+    // While Lost, the final loss is published again for the new map.
+    void FollowMerge(map::MapId absorbed);
     void OnMapTransaction(const events::MapTransaction<TFeatureExtractor>& transaction);
     // A Frame's pose before a loop correction is applied.
     struct FramePose {
         map::FrameId frame;
         geometry::RigidTransformation T_cw;
     };
-    // The Frames last_frame_ may follow through a loop correction, with their
-    // current poses: the reference Frame first, then the Frames observing its
-    // matches, most matches first. Empty unless Tracking.
+    // The Frames last_frame_ may follow through a loop correction or a merge,
+    // with their current poses: the reference Frame first, then the Frames
+    // observing its matches, most matches first. Empty unless Tracking.
     [[nodiscard]] std::vector<FramePose> AnchorsBeforeCorrection() const;
-    // After the correction: last_frame_ keeps its pose relative to the first
-    // anchor still in the replica; unchanged if none is.
+    // After the correction or merge: last_frame_ keeps its pose relative to
+    // the first anchor still in the (new) active map; unchanged if none is.
     void FollowCorrection(const std::vector<FramePose>& anchors);
     // Makes the replica's Frame `start_frame` the last frame and starts tracking.
     void StartTracking(map::FrameId start_frame);
@@ -270,14 +313,16 @@ private:
 
     std::atomic<TrackerState> state_{TrackerState::WaitingForMap};
     std::atomic<map::MapId> current_map_id_{map::MapId{0}};
+    std::atomic<size_t> num_processed_{0};
 
     // Tracker-thread state.
-    MapReplica<TFeatureExtractor> replica_;
+    AtlasReplica<TFeatureExtractor> atlas_;
     LastFrame last_frame_;
     std::optional<geometry::RigidTransformation> velocity_;  // T_cur_last
     // The last FrameTracked's reference Frame (the start Frame of a new map).
     std::optional<map::FrameId> reference_frame_id_;
     double recently_lost_since_ = 0.0;  // timestamp of the measurement that failed
+    double final_lost_at_ = 0.0;  // timestamp of the last final TrackingLost
     // Timestamp of the last relocalized measurement in the current map.
     std::optional<double> relocalized_at_;
     size_t tracked_frames_ = 0;  // in the current map

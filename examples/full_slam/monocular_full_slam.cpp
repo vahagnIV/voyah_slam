@@ -135,6 +135,7 @@ int main(int argc, char** argv) {
                   << "mapper state: " << full_slam::StateName(slam.mapper().state()) << "\n"
                   << "map: " << slam.mapper().num_keyframes() << " Frames, " << slam.mapper().num_map_points()
                   << " points\n";
+        full_slam::PrintAtlas(slam.mapper(), std::cout);
         std::cout << "viewer: " << viewer.events_processed() << " events processed\n";
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";
