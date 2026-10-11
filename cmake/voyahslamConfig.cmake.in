@@ -1,0 +1,20 @@
+# voyahslam CMake package config: targets voyahslam::voyah_common,
+# voyahslam::voyah_events, voyahslam::voyah_algs, voyahslam::voyah_slam and the
+# umbrella voyahslam::voyahslam.
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+# PUBLIC dependencies: their headers appear in ours.
+find_dependency(Eigen3)
+find_dependency(spdlog)
+find_dependency(concurrentqueue)
+
+# PRIVATE g2o: a static voyah_algs needs its libraries at link time only
+# (exported as $<LINK_ONLY:g2o::...>; no include paths or flags reach consumers).
+if(@VOYAHSLAM_STATIC@)
+    find_dependency(g2o)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/voyahslamTargets.cmake")
+check_required_components(voyahslam)

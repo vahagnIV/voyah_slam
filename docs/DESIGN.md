@@ -2754,8 +2754,50 @@ libs/
   test_support/             voyah_test_support (STATIC, links voyah_common only):
                             utils_test.*, support/*.h
 cmake/VoyahTests.cmake      voyah_add_test_binary, voyah_optimize_target, check / check_all
+cmake/voyahslamConfig.cmake.in  installed CMake package config (find_dependency)
 vizualization/              voyahviz (+ voyahviz_tests)
+conanfile.py                package recipe voyahslam/0.1.0 (also the dev installs)
+test_package/               conan create's consumer test (links voyahslam::voyahslam)
+profiles/                   linux-gcc13 (default + gnu20), android-arm64,
+                            settings_user.yml (clang 21)
 ```
+
+**Build options and packaging (2026-10-11):**
+- CMake options `VOYAHSLAM_BUILD_TESTS` (tests, benchmarks,
+  `voyah_test_support`, `check` / `check_all`; GTest, OpenCV) and
+  `VOYAHSLAM_BUILD_EXAMPLES` (apps, `voyahviz`, `tools/`; OpenCV, Pangolin,
+  yaml-cpp), both OFF by default. With both OFF configuring needs only Eigen,
+  spdlog/fmt, concurrentqueue, g2o and stb. The dev trees turn both ON through
+  the recipe's `with_tests` / `with_examples` options (cache variables in the
+  Conan preset; README "Build and test").
+- The four libraries follow `BUILD_SHARED_LIBS` (Conan `shared`, default
+  static). `install()` puts them, the umbrella and the merged
+  `include/voyahslam/` tree in the prefix, exported as `voyahslam::<target>`
+  with `voyahslamConfig.cmake` (`find_dependency` Eigen3, spdlog,
+  concurrentqueue; g2o only for a static build, whose `voyah_algs` exports g2o
+  as `$<LINK_ONLY:...>`). stb is linked `$<BUILD_INTERFACE:...>` (header-only,
+  never exported). `voyah_common` carries `cxx_std_20` as a PUBLIC compile
+  feature.
+- Conan consumers use the recipe's components (`cmake_target_name` =
+  `voyahslam::voyah_common` ... `voyahslam::voyah_slam`); the package-level
+  target is the umbrella `voyahslam::voyahslam` (a component of that name
+  would collide with it). The package drops `lib/cmake`. PUBLIC deps are
+  `transitive_headers` (spdlog also `transitive_libs`); g2o and stb are not
+  (g2o's libraries still reach static consumers' link lines, never its
+  include paths). `shared=True` also makes spdlog and fmt shared; shared
+  libraries get `VERSION` / `SOVERSION` (0.1) and an `$ORIGIN` install
+  runpath (not on Apple).
+- `validate()` requires `compiler.cppstd` >= 20 (public headers are C++20;
+  `profiles/linux-gcc13` = default + `gnu20` + Release, used by the dev
+  installs), and rejects `shared=True` on Windows (no export macros) and with
+  `compiler.libcxx=c++_static` (the NDK one-shared-library rule).
+- Android arm64: `profiles/android-arm64` (API 24, clang 21 from NDK r30,
+  `c++_static`); `voyah_algs` builds the NEON FAST kernel there. An app's
+  CMake (NDK toolchain) finds the CMakeDeps folder through
+  `CMAKE_FIND_ROOT_PATH` (the toolchain's `FIND_ROOT_PATH_MODE_PACKAGE=ONLY`
+  re-roots `CMAKE_PREFIX_PATH`) and needs
+  `CMAKE_MAP_IMPORTED_CONFIG_DEBUG=Release` for Gradle's debug variant
+  (README "Using the package from an Android app").
 
 - **Dependency rule:** a target's include path holds only its own root and
   the roots of the libraries it depends on, so a lower layer that includes an
@@ -2808,8 +2850,10 @@ vizualization/              voyahviz (+ voyahviz_tests)
   `libs/slam/tests/integration/`.
 
 **Build & test (Conan 2 + CMake):**
-- Dependencies (`conanfile.txt`): gtest, eigen, stb, spdlog, concurrentqueue,
-  yaml-cpp (examples only), g2o (local package, see below).
+- Dependencies (`conanfile.py`; was `conanfile.txt` until 2026-10-11): eigen,
+  stb, spdlog, concurrentqueue, g2o (local package, see below); gtest with
+  `with_tests`, yaml-cpp with `with_examples` (see "Build options and
+  packaging").
 - **OpenCV is not from Conan:** OpenCV **5.x** built from source and installed
   in `/usr/local` (`find_package(OpenCV 5 ... core imgproc features highgui)`,
   config in `/usr/local/lib/cmake/opencv5`). Every dev machine needs it.
@@ -2822,7 +2866,7 @@ vizualization/              voyahviz (+ voyahviz_tests)
   `cv::FAST` reference). No `voyah_*` library links OpenCV (2026-10-11).
 - **g2o is a local Conan package:** vendored in `third_party/g2o/` and built with
   `conan create third_party/g2o --build=missing -s build_type=Debug|Release` once per
-  machine, before the project's `conan install` (`conanfile.txt` requires
+  machine, before the project's `conan install` (`conanfile.py` requires
   `g2o/20241228.1@voyah/stable`). Step-by-step build instructions: `README.md`
   (checked on a fresh `CONAN_HOME` on 2026-10-05).
 - Debug: `cmake --build cmake-build-debug/build/Debug -j8`.
@@ -3046,6 +3090,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-11 | **FAST SIMD paths: scalar, SSE2, AVX2 (run-time), NEON.** Each path is OpenCV's algorithm for its width and all are tested against live `cv::FAST`. x86-64: SSE2 baseline; AVX2 in its own file built with `-mavx2`, chosen by `__builtin_cpu_supports` (no `-march`, still runs without AVX2). arm64: NEON baseline. `FastSimd` lets tests and the benchmark force a path. Speed (user decision: at least as fast as `cv::FAST`, single thread): 0.90–0.97 of OpenCV's time per whole level (0.94 overall), 0.57 on the extractor's per-cell workload. NEON verified only under SIMDe emulation (TODO: arm64 hardware). | OpenCV here runs its AVX2 dispatch for FAST, so SSE2 alone (~1.1×) is not enough; run-time dispatch keeps one binary portable. NEON for the Android app. |
 | 2026-10-11 | **SIFT extractor removed** (user decision): header, source, tests, the `INSTANTIATE_CLASS` entry and every explicit instantiation; `Slam<SIFT>` in `SlamTest.TrackEnqueuesMonocularAndBinocularMeasurements` became `OrbSlam`. Supersedes the SIFT parts of the 2026-10-04 level / `max_distance` rows and the 2026-10-07 `Vocabulary<FE>` row (ruling A now covers ORB only). | It was the last OpenCV user in the library, had no vocabulary, and doubled every template's instantiation. |
 | 2026-10-11 | **The `voyah_*` libraries are OpenCV-free.** `voyah_algs` no longer links OpenCV (`opencv_bindings.h` and the include in `orb/extract_node.h` deleted); targets that compare with OpenCV (`voyah_algs_tests`, `voyah_algs_dataset_tests`, `fast_benchmark`, `voyah_common_tests`) link it themselves; `voyahviz` keeps it `PRIVATE`. New integration binary `voyah_algs_dataset_tests` for the corridor1 tests (skip without the dataset); `fast_benchmark` is built with `all` but is not in `check` / `check_all`. | Completes the 2026-10-03 goal "drop the OpenCV dependency" for the library; a package export no longer needs `find_dependency(OpenCV)`. |
+| 2026-10-11 | **Conan package `voyahslam/0.1.0` (`conanfile.py`, replaces `conanfile.txt`), build options and install/export.** `VOYAHSLAM_BUILD_TESTS` / `VOYAHSLAM_BUILD_EXAMPLES` (OFF by default; the dev installs pass `-o with_tests=True -o with_examples=True`); the four libraries and the umbrella are installed and exported as `voyahslam::*`; Conan components with matching target names, the package target being the umbrella; PUBLIC deps (Eigen, spdlog/fmt, concurrentqueue) propagate headers, PRIVATE g2o and stb do not (g2o's libraries reach static consumers at link time only); `validate()` requires C++20, so the dev installs use `profiles/linux-gcc13` (default + `gnu20`), and rejects `shared=True` with `c++_static` and on Windows; `shared=True` makes spdlog/fmt shared. Android: `profiles/android-arm64`, API 24, clang 21 (NDK r30; `profiles/settings_user.yml` adds it to Conan 2.18's settings), **`compiler.libcxx=c++_static` (user decision)**: the app has a single JNI `.so` that links the static voyahslam libraries and is built with `ANDROID_STL=c++_static`. NDK rule: `c++_static` is safe only while the app has exactly one shared library containing C++; if more are ever added, everything must switch to `c++_shared`. | The library is consumed from an Android app (Kotlin + JNI, Gradle/CMake via the NDK) and from desktop. A package build must not need the dev tools (GTest, OpenCV, Pangolin, yaml-cpp). One C++ `.so` with a static STL is the smallest, simplest APK; a second C++ `.so` with its own static libc++ would split heaps, globals, exceptions and RTTI. |
 
 ## 9. Open Questions
 

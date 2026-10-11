@@ -1,6 +1,6 @@
 # voyah_common: the bottom layer. Data types, ids, storage, camera models and
 # the extractor class declarations (their implementations live higher up).
-add_library(voyah_common STATIC
+add_library(voyah_common
     src/algebra/algebra.cpp
     src/geometry/camera.cpp
     src/geometry/distortion_models/brown_conrady_distortion_model.cpp
@@ -13,12 +13,18 @@ add_library(voyah_common STATIC
 voyah_optimize_target(voyah_common)
 
 target_include_directories(voyah_common
-    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+           $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
+
+# Public headers are C++20: consumers of the installed package get it too.
+target_compile_features(voyah_common PUBLIC cxx_std_20)
 
 target_link_libraries(voyah_common
     PUBLIC Eigen3::Eigen
     PUBLIC spdlog::spdlog
 )
 
-add_subdirectory(tests)
+if(VOYAHSLAM_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()

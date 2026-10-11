@@ -31,3 +31,7 @@ Build and test (`cmake` from the CLion bundle or any CMake >= 3.23):
   (764 tests, labels `unit` + `integration`). Both run in the Debug tree with `VOYAHSLAM_OPTIMIZE_TESTS=ON`
   (default: `-O2 -g`, asserts on); turn it off to step through code in a debugger.
 - Release: `cmake --build build/build/Release -j8` (apps in `examples/full_slam/`).
+- Tests, apps and tools are built only with `VOYAHSLAM_BUILD_TESTS` / `VOYAHSLAM_BUILD_EXAMPLES`
+  (OFF by default; the package build needs neither). The dev trees get them from
+  `conan install … -pr profiles/linux-gcc13 -o with_tests=True -o with_examples=True` (README
+  "Build"). If `check` / `check_all` are missing, re-run that install and `cmake --preset`.

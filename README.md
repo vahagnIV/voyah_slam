@@ -74,11 +74,12 @@ whose version became `20241228.1` (2026-10-10). A machine with only the old
 Debug (tree `cmake-build-debug/build/Debug`):
 
 ```
-conan install . --output-folder=cmake-build-debug --build=missing -s build_type=Debug
+conan install . --output-folder=cmake-build-debug --build=missing -pr profiles/linux-gcc13 \
+      -s build_type=Debug -o with_tests=True -o with_examples=True
 cmake --preset conan-debug
 cmake --build cmake-build-debug/build/Debug -j"$(nproc)"
-cmake --build cmake-build-debug/build/Debug --target check       # unit tests (633, ~5.5 s)
-cmake --build cmake-build-debug/build/Debug --target check_all   # every test (649, 17-25 s)
+cmake --build cmake-build-debug/build/Debug --target check       # unit tests (739, ~10 s)
+cmake --build cmake-build-debug/build/Debug --target check_all   # every test (764, ~30 s)
 ```
 
 `check` runs `ctest -L unit`, `check_all` runs every label (`unit`, `integration`, `vocabulary`); both build the
@@ -91,7 +92,8 @@ has its own test binary (`voyah_<lib>_tests`, plus `voyah_integration_tests`,
 Release (tree `build/build/Release`):
 
 ```
-conan install . --output-folder=build --build=missing -s build_type=Release
+conan install . --output-folder=build --build=missing -pr profiles/linux-gcc13 \
+      -o with_tests=True -o with_examples=True
 cmake --preset conan-release
 cmake --build build/build/Release -j"$(nproc)"
 ctest --test-dir build/build/Release -j8 --timeout 120 --output-on-failure
@@ -100,6 +102,160 @@ ctest --test-dir build/build/Release -j8 --timeout 120 --output-on-failure
 The library, tests, examples and the visualization library build in one CMake tree.
 The presets come from the Conan-generated `CMakePresets.json`, which `CMakeUserPresets.json`
 includes (so the `conan install` must run first).
+
+**Build options.** `conanfile.py` (the package recipe, also used for these dev installs) has
+the options `with_tests` and `with_examples` (both False by default). They set the CMake
+options `VOYAHSLAM_BUILD_TESTS` and `VOYAHSLAM_BUILD_EXAMPLES` (cache variables in the
+generated preset) and add the matching Conan dependencies (gtest; yaml-cpp). With both OFF
+only the four libraries are configured, needing just Eigen, spdlog/fmt, concurrentqueue, g2o
+and stb:
+
+- `VOYAHSLAM_BUILD_TESTS`: the tests, `voyah_test_support`, the benchmarks, the `check` /
+  `check_all` targets; needs GTest and OpenCV.
+- `VOYAHSLAM_BUILD_EXAMPLES`: the apps, `voyahviz`, `tools/convert_vocabulary`; needs OpenCV,
+  Pangolin and yaml-cpp.
+
+**C++20.** The recipe's `validate()` requires `compiler.cppstd` >= 20 (the public headers
+are C++20); the default profile's `gnu17` is rejected. `profiles/linux-gcc13` is the default
+profile plus `compiler.cppstd=gnu20` and `build_type=Release` (override with `-s
+build_type=Debug`); passing `-s compiler.cppstd=gnu20` with the default profile is
+equivalent. Dependencies built for `gnu17` are reused (Conan's cppstd compatibility).
+
+## Install locally (Conan package)
+
+The package is `voyahslam/0.1.0` (options `shared`, default False, and `fPIC`). g2o first
+(once per profile and build type; see "One-time: package g2o with Conan"):
+
+```
+conan create third_party/g2o --build=missing -pr profiles/linux-gcc13
+conan create . --build=missing -pr profiles/linux-gcc13
+```
+
+`conan create` builds the four libraries (no tests, no apps) and runs `test_package/`, which
+links `voyahslam::voyahslam`, projects through a Brown-Conrady camera and runs a pose
+optimization. With `-o shared=True` the libraries are shared, and spdlog and fmt are made
+shared too (both are PUBLIC: static copies would end up in `libvoyah_common.so` and in the
+consumer). `shared=True` is rejected on Windows (no export macros) and together with
+`compiler.libcxx=c++_static` (see "Android"); shared libraries get versioned sonames
+(`libvoyah_slam.so.0.1`) and an `$ORIGIN` runpath.
+
+A consumer (`conanfile.txt` with `[requires] voyahslam/0.1.0`, generators `CMakeDeps` and
+`CMakeToolchain`) must also build with C++20: install its dependencies with
+`-pr profiles/linux-gcc13` (or `-s compiler.cppstd=gnu20`, or a profile of its own that sets
+`compiler.cppstd` to 20 / gnu20), otherwise `validate()` rejects the package:
+
+```cmake
+find_package(voyahslam REQUIRED CONFIG)
+target_link_libraries(app PRIVATE voyahslam::voyahslam)   # or voyahslam::voyah_slam, ...
+target_compile_features(app PRIVATE cxx_std_20)
+```
+
+Targets: `voyahslam::voyah_common`, `voyahslam::voyah_events`, `voyahslam::voyah_algs`,
+`voyahslam::voyah_slam` and the umbrella `voyahslam::voyahslam`. Only the PUBLIC
+dependencies' include paths reach the consumer (Eigen, spdlog/fmt, concurrentqueue); g2o and
+stb are private (a static consumer links g2o's libraries, without its headers).
+
+Without Conan, `cmake --install` of a build tree installs the same targets with a CMake
+package config (`lib/cmake/voyahslam`), which finds Eigen3, spdlog, concurrentqueue and, for
+a static build, g2o with `find_dependency`. (The Conan package drops these files: Conan's
+CMakeDeps generates the config from the recipe's components.)
+
+## Android (arm64-v8a)
+
+Cross-build with the NDK (r30 tested, at `~/Android/Sdk/ndk/30.0.16248370`; set
+`ANDROID_NDK_HOME` to use another) using `profiles/android-arm64` as the host profile. Conan
+2.18 does not know clang 21 (NDK r30's), so install `profiles/settings_user.yml` once.
+`conan config install` **replaces** an existing `~/.conan2/settings_user.yml` (it does not
+merge); if you already have one, add `"21"` to its `compiler.clang.version` list by hand
+instead:
+
+```
+conan config install profiles/settings_user.yml
+conan create third_party/g2o --build=missing -pr:h profiles/android-arm64 -pr:b default
+conan create .               --build=missing -pr:h profiles/android-arm64 -pr:b default
+```
+
+The profile: `os=Android`, `os.api_level=24`, `arch=armv8`, `compiler=clang` 21,
+`compiler.libcxx=c++_static`, `compiler.cppstd=20`, `build_type=Release`, and
+`tools.android:ndk_path`. All dependencies (Conan Center's eigen, spdlog, fmt,
+concurrentqueue, stb; our g2o) build unpatched. `test_package` is cross-built but not run
+(`can_run` is false). `voyah_algs` compiles the NEON FAST kernel
+(`CMAKE_SYSTEM_PROCESSOR` is `aarch64`); no x86 code is built.
+
+- **API level 24** (Android 7.0): the default minSdk of new Android Studio projects and above
+  NDK r30's minimum (21); the library needs nothing newer. The app's `minSdkVersion` must be
+  >= the profile's `os.api_level`; change both together.
+- **`c++_static` (user decision, 2026-10-11).** The app has a single JNI `.so`, which links
+  the static voyahslam libraries and is built with `ANDROID_STL=c++_static`. NDK rule:
+  `c++_static` is safe only while the app has **exactly one** shared library containing C++.
+  If a second one is ever added (another JNI library, a prebuilt C++ `.so`), every library
+  and the package must switch to `c++_shared` (`compiler.libcxx=c++_shared`, and package
+  `libc++_shared.so` in the APK); otherwise each `.so` has its own copy of libc++ (separate
+  heaps for `new`/`delete` across the boundary, duplicated globals, broken exceptions and
+  RTTI between them).
+
+### Using the package from an Android app (Gradle + CMake)
+
+1. Install the Android dependencies into a folder the app's CMake will read (once, and again
+   after `conan create` of a new voyahslam version). From this repository:
+
+   ```
+   conan install --requires=voyahslam/0.1.0 -g CMakeDeps \
+         -pr:h profiles/android-arm64 -pr:b default \
+         --output-folder=<app>/app/src/main/cpp/voyahslam-deps
+   ```
+
+2. The app's `app/src/main/cpp/CMakeLists.txt`:
+
+   ```cmake
+   cmake_minimum_required(VERSION 3.22.1)
+   project(app_jni CXX)
+   find_package(voyahslam REQUIRED CONFIG)
+   add_library(app_jni SHARED jni.cpp)
+   target_compile_features(app_jni PRIVATE cxx_std_20)
+   target_link_libraries(app_jni PRIVATE voyahslam::voyahslam android log)
+   ```
+
+3. `app/build.gradle.kts`:
+
+   ```kotlin
+   android {
+       ndkVersion = "30.0.16248370"
+       defaultConfig {
+           minSdk = 24                       // >= the profile's os.api_level
+           ndk { abiFilters += "arm64-v8a" }
+           externalNativeBuild {
+               cmake {
+                   val deps = file("src/main/cpp/voyahslam-deps").absolutePath
+                   arguments += listOf(
+                       "-DANDROID_STL=c++_static",
+                       "-DCMAKE_FIND_ROOT_PATH=$deps",
+                       "-DCMAKE_MAP_IMPORTED_CONFIG_DEBUG=Release",
+                   )
+               }
+           }
+       }
+       externalNativeBuild {
+           cmake { path = file("src/main/cpp/CMakeLists.txt") }
+       }
+   }
+   ```
+
+- **`CMAKE_FIND_ROOT_PATH`, not `CMAKE_PREFIX_PATH`:** the NDK toolchain sets
+  `CMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY`, which re-roots every search path under the
+  sysroot, so a deps folder on `CMAKE_PREFIX_PATH` is not found ("Could not find a package
+  configuration file provided by voyahslam").
+- **`CMAKE_MAP_IMPORTED_CONFIG_DEBUG=Release`:** the package and its dependencies are built
+  Release only; Gradle's debug variant configures with `CMAKE_BUILD_TYPE=Debug`, and
+  CMakeDeps' targets then carry no include directories or libraries for that configuration
+  (`'voyahslam/geometry/camera.h' file not found`). The map makes Debug use the Release
+  binaries.
+
+Checked on 2026-10-11 with the NDK's `build/cmake/android.toolchain.cmake` (CMake 4.0.3,
+Ninja, `ANDROID_ABI=arm64-v8a`, `ANDROID_PLATFORM=24`): a JNI `.so` calling `OptimizePose`
+links for Debug and Release, with no `libc++_shared.so` dependency. Without either flag it
+fails as described. Gradle's own CMake (Android SDK `cmake;3.22.1`) and an APK build were not
+run.
 
 ## Running the apps
 

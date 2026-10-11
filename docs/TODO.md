@@ -45,7 +45,8 @@ as soon as they come up.
       cell borders. Changes the extractor's output: re-record the golden
       digests (`VOYAHSLAM_RECORD_ORB_GOLDEN=1`).
 - [ ] **Run the FAST NEON path on arm64** (`fast_neon.cpp`): it has only
-      been compiled and run on x86-64 through SIMDe's NEON emulation. Build
+      been compiled and run on x86-64 through SIMDe's NEON emulation (and,
+      since 2026-10-11, cross-compiled by the Android package build). Build
       `voyah_algs_tests` (`FastTest.*`) for arm64 (Android NDK or an arm64
       Linux box), run it, and run `voyah_algs_dataset_tests`
       (`FastCorridor1Test`) there with the corridor1 frames; then time it with
@@ -981,22 +982,35 @@ Deferred minor findings from the per-task reviews.
       longer declares `OrbFeatureExtractor` (its
       definition is in `voyah_algs`; code linking only common that calls
       `DetectAndExtract` gets a link error, not a compile error).
-- [ ] **Conan packaging of the separate libraries:** `install()` / package
-      export per library (`voyah_common`, `voyah_events`, `voyah_algs`,
-      `voyah_slam`, umbrella `voyahslam`). Since 2026-10-11 none of the four
-      links OpenCV, so their package configs need no
-      `find_dependency(OpenCV)` (only a `voyahviz` export would) (DESIGN §7).
-      - **Build options (user decision, 2026-10-11):** add
-        `VOYAHSLAM_BUILD_TESTS` and `VOYAHSLAM_BUILD_EXAMPLES`, both OFF by
-        default.
-        - Only when one is ON are the `tests/` directories added and
-          `find_package(OpenCV … highgui)` called.
-        - The library is OpenCV-free (FAST ported, SIFT removed,
-          2026-10-11); tests and benchmarks keep using OpenCV as a
-          reference and link it themselves (`voyah_algs_tests`,
-          `voyah_algs_dataset_tests`, `voyah_common_tests`,
-          `fast_benchmark`), so the option must also gate
-          `libs/algs/benchmarks`.
+- [ ] **Package follow-ups (Conan package done 2026-10-11, DESIGN §7
+      "Build options and packaging"):**
+      - Run `test_package` (or the app) on an arm64 Android device; the
+        Android `conan create` only cross-builds it.
+      - The recipe's `license` is a placeholder (`proprietary`); set the real
+        licence (and package a LICENSE file) once decided.
+      - `with_tests=True` only adds gtest; OpenCV and Pangolin still come from
+        `/usr/local`, so the tests cannot be built in the Conan cache
+        (`conan create -o with_tests=True`) on a machine without them.
+      - A `voyahviz` export (it would need `find_dependency(OpenCV)` and
+        Pangolin) is not provided: it is a dev tool.
+      - **Logs do not reach Android logcat:** the logger
+        (`libs/common/src/logging/logger.cpp`) defaults to a stdout sink,
+        which Android discards (an app can already pass its own sinks to
+        `Logger::Initialize`). Make the default a
+        `spdlog::sinks::android_sink_mt` behind `#ifdef __ANDROID__`; `package_info` then needs
+        `system_libs = ["log"]` for `voyah_common` on Android.
+      - **Symbol visibility for shared builds:** the `.so`s export
+        everything (about 7000 spdlog/fmt symbols among them). Build with
+        `-fvisibility=hidden` / `CXX_VISIBILITY_PRESET hidden` and export
+        macros (`GenerateExportHeader`); that would also allow `shared` on
+        Windows, which `validate()` rejects today.
+      - **Empty `$<LINK_ONLY:>` in the exported `voyah_algs` link
+        interface** (`voyahslamTargets.cmake`): left by stb's
+        `$<BUILD_INTERFACE:stb::stb>`. Harmless but noisy; link stb in a way
+        that leaves no entry (e.g. only its include directories, or an
+        internal INTERFACE target that is not exported).
+      - The Android consumer steps were checked with CMake 4.0.3 and the
+        NDK toolchain file, not with Gradle's CMake 3.22.1 or a real APK.
 - [ ] **`libs/test_support/support/synthetic_sequence.h` needs algs**
       (`features/stereo_matcher.h`) but sits in the common-level support root
       (`voyah_test_support` links only `voyah_common`). Only a compile failure in
@@ -1015,8 +1029,8 @@ Deferred minor findings from the per-task reviews.
 
 ## Environment
 
-- [ ] g2o build under a clang/libc++ profile and an Android NDK profile (only gcc 13
-      is checked today). Expose more g2o libraries in the recipe only when needed.
+- [ ] g2o build under a desktop clang/libc++ profile (gcc 13 and the Android NDK
+      profile, clang 21 + c++_static, are checked; 2026-10-11). Expose more g2o libraries in the recipe only when needed.
 - [ ] Local and global bundle adjustment reusing `optimization::BundleAdjust`
       (Mapper keyframe insertion / loop closing; needs a windowed `BaProblem`
       builder with fixed keyframes).
@@ -1036,5 +1050,5 @@ Deferred minor findings from the per-task reviews.
 - [ ] Recurring: syntax-check all sources with clang-18 + libc++ (clean on
       2026-10-06, 92 sources + 82 public headers; 2026-10-07 each library's
       public headers with only its own and its dependencies' include roots:
-      common 37, events 17, algs 23, slam 8, viz 6, clean); later add an Android NDK
-      arm64 cross-build.
+      common 37, events 17, algs 23, slam 8, viz 6, clean). The Android NDK arm64
+      cross-build of the package exists since 2026-10-11 (README "Android").

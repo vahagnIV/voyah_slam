@@ -12,4 +12,6 @@ target_link_libraries(voyahslam_dataset_reader
     PRIVATE yaml-cpp::yaml-cpp
 )
 
-add_subdirectory(tests)
+if(VOYAHSLAM_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()
