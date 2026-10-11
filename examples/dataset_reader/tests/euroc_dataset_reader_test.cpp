@@ -1,6 +1,7 @@
 #include <dataset_reader/euroc_dataset_reader.h>
 
 #include <gtest/gtest.h>
+#include <voyahslam/geometry/distortion_models/brown_conrady_distortion_model.h>
 
 #define STB_IMAGE_WRITE_IMPLEMENTATION
 #include <stb_image_write.h>
@@ -165,17 +166,73 @@ distortion_coefficients: [0.0, 0.0, 0.0, 0.0]
     EXPECT_DOUBLE_EQ(reader.camera(0).T_cam_imu(0, 3), -0.5);
 }
 
-TEST(EurocDatasetReaderTest, RejectsUnsupportedDistortionModel) {
-    SyntheticDataset dataset;
+// A monocular EuRoC sensor.yaml with the given distortion model and coefficients.
+void WriteEurocSensor(SyntheticDataset& dataset, const std::string& model, const std::string& coefficients) {
     dataset.AddCamera(0, {1000000000}, 10);
     dataset.WriteFile("mav0/cam0/sensor.yaml", R"(T_BS:
   data: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
 resolution: [8, 6]
 intrinsics: [458.6, 457.3, 4.0, 3.0]
-distortion_model: radial-tangential
-distortion_coefficients: [-0.28, 0.07, 0.0002, 0.00002]
-)");
-    EXPECT_THROW(EurocDatasetReader reader(dataset.root()), std::runtime_error);
+distortion_model: )" + model + R"(
+distortion_coefficients: )" + coefficients + "\n");
+}
+
+// Runs the reader and returns the exception message ("" if it succeeded).
+std::string ReaderError(const SyntheticDataset& dataset) {
+    try {
+        EurocDatasetReader reader(dataset.root());
+    } catch (const std::runtime_error& error) {
+        return error.what();
+    }
+    return "";
+}
+
+TEST(EurocDatasetReaderTest, RejectsUnsupportedDistortionModel) {
+    SyntheticDataset dataset;
+    WriteEurocSensor(dataset, "fov", "[0.9]");
+    EXPECT_NE(ReaderError(dataset).find("unsupported distortion model 'fov'"), std::string::npos);
+}
+
+TEST(EurocDatasetReaderTest, ReadsBrownConradyUnderEveryName) {
+    // EuRoC, Kalibr and ROS names of the same model.
+    for (const std::string name : {"radial-tangential", "radtan", "plumb_bob"}) {
+        SyntheticDataset dataset;
+        WriteEurocSensor(dataset, name, "[-0.28, 0.07, 0.0002, 0.00002]");
+        EurocDatasetReader reader(dataset.root());
+        const auto* model = dynamic_cast<const geometry::distortion_models::BrownConradyDistortionModel*>(
+            reader.camera(0).distortion);
+        ASSERT_NE(model, nullptr) << name;
+        const std::array<precision_t, 5> expected{-0.28, 0.07, 0.0002, 0.00002, 0.0};
+        EXPECT_EQ(model->GetCoefficients(), expected) << name;
+    }
+}
+
+TEST(EurocDatasetReaderTest, ReadsBrownConradyWithK3) {
+    SyntheticDataset dataset;
+    WriteEurocSensor(dataset, "plumb_bob", "[-0.28, 0.07, 0.0002, 0.00002, 0.01]");
+    EurocDatasetReader reader(dataset.root());
+    const auto* model = dynamic_cast<const geometry::distortion_models::BrownConradyDistortionModel*>(
+        reader.camera(0).distortion);
+    ASSERT_NE(model, nullptr);
+    const std::array<precision_t, 5> expected{-0.28, 0.07, 0.0002, 0.00002, 0.01};
+    EXPECT_EQ(model->GetCoefficients(), expected);
+}
+
+TEST(EurocDatasetReaderTest, RejectsBrownConradyWithWrongCoefficientCount) {
+    for (const std::string coefficients : {"[]", "[-0.28, 0.07, 0.0002]",
+                                           "[-0.28, 0.07, 0.0002, 0.00002, 0.01, 0.0, 0.0, 0.0]"}) {
+        SyntheticDataset dataset;
+        WriteEurocSensor(dataset, "radtan", coefficients);
+        EXPECT_NE(ReaderError(dataset).find("distortion model 'radtan' needs 4 or 5 coefficients"), std::string::npos)
+            << coefficients << ": " << ReaderError(dataset);
+    }
+}
+
+TEST(EurocDatasetReaderTest, ReadsUndistortedCameraWithModelNone) {
+    SyntheticDataset dataset;
+    WriteEurocSensor(dataset, "none", "[]");
+    EurocDatasetReader reader(dataset.root());
+    EXPECT_EQ(reader.camera(0).distortion, nullptr);
 }
 
 TEST(EurocDatasetReaderTest, RejectsUnsynchronizedCameras) {

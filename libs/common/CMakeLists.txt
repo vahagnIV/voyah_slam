@@ -3,6 +3,7 @@
 add_library(voyah_common STATIC
     src/algebra/algebra.cpp
     src/geometry/camera.cpp
+    src/geometry/distortion_models/brown_conrady_distortion_model.cpp
     src/geometry/distortion_models/dummy_distortion_model.cpp
     src/geometry/distortion_models/kannala_brandt_distortion_model.cpp
     src/logging/logger.cpp

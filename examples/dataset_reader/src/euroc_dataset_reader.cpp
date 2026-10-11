@@ -3,6 +3,7 @@
 #include <fstream>
 #include <sstream>
 #include <stdexcept>
+#include <voyahslam/geometry/distortion_models/brown_conrady_distortion_model.h>
 #include <voyahslam/geometry/distortion_models/kannala_brandt_distortion_model.h>
 #include <voyahslam/io/read_image.h>
 #include <yaml-cpp/yaml.h>
@@ -17,6 +18,11 @@ constexpr int kMaxCameras = 2;
 
 [[noreturn]] void Fail(const std::string& message) {
     throw std::runtime_error("EurocDatasetReader: " + message);
+}
+
+// Brown-Conrady under its EuRoC, Kalibr and ROS names.
+bool IsBrownConrady(const std::string& model) {
+    return model == "radial-tangential" || model == "radtan" || model == "plumb_bob";
 }
 
 // Parses data.csv: "#timestamp [ns],filename" header (or any '#' lines).
@@ -162,6 +168,16 @@ void EurocDatasetReader::LoadCalibration(const fs::path& root) {
             auto model = std::make_unique<geometry::distortion_models::KannalaBrandtDistortionModel>(
                 raw.distortion_coeffs);
             model->PrecomputeInitialGuessLookup(camera.K, camera.width, camera.height);
+            camera.distortion = model.get();
+            distortion_models_.push_back(std::move(model));
+        } else if (IsBrownConrady(raw.distortion_model)) {
+            const std::vector<double>& c = raw.distortion_coeffs;
+            if (c.size() != 4 && c.size() != 5) {
+                Fail("distortion model '" + raw.distortion_model +
+                     "' needs 4 or 5 coefficients [k1, k2, p1, p2(, k3)], got " + std::to_string(c.size()));
+            }
+            auto model = std::make_unique<geometry::distortion_models::BrownConradyDistortionModel>(
+                c[0], c[1], c[2], c[3], c.size() == 5 ? c[4] : 0.0);
             camera.distortion = model.get();
             distortion_models_.push_back(std::move(model));
         } else if (raw.distortion_model != "none") {

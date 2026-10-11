@@ -100,7 +100,10 @@ includes (so the `conan install` must run first).
 
 ## Running the apps
 
-Datasets are TUM-VI style directories (e.g. `dataset-corridor1_1024_16`).
+Datasets are EuRoC-layout directories (TUM-VI, e.g. `dataset-corridor1_1024_16`, or EuRoC MAV).
+Supported camera distortion models: `equidistant` (Kannala-Brandt fisheye), Brown-Conrady
+(`radial-tangential` / `radtan` / `plumb_bob`, 4 or 5 coefficients) and `none`. EuRoC MAV has
+not yet been run end to end (see `docs/TODO.md`).
 
 ```
 build/build/Release/examples/full_slam/monocular_full_slam <dataset_root> [options]
