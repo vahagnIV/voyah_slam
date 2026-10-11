@@ -92,7 +92,6 @@ std::optional<GlobalBaSolution> RunGlobalBa(const tracking::MapReplica<TFeatureE
                                                              const GlobalBaOptions&,                       \
                                                              const std::function<bool()>&);
 
-INSTANTIATE_RUN_GLOBAL_BA(features::SIFTFeatureExtractor)
 INSTANTIATE_RUN_GLOBAL_BA(features::OrbFeatureExtractor)
 
 #undef INSTANTIATE_RUN_GLOBAL_BA

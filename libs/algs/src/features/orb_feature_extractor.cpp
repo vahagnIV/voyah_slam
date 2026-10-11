@@ -1,10 +1,11 @@
 #include "voyahslam/features/orb_feature_extractor.h"
-#include "opencv_bindings/opencv_bindings.h"
+#include "voyahslam/features/fast.h"
 #include "voyahslam/images/filter.h"
 #include "voyahslam/images/gaussian_blur.h"
 #include "orb/extract_node.h"
 #include "orb/quad_tree_distributor.h"
 
+#include <cstddef>
 #include <numeric>
 #if defined(AVX2) || defined(__AVX2__)
 #include <immintrin.h>
@@ -539,72 +540,67 @@ OrbFeatureExtractor::ComputePointsPerLevel(size_t level, int n_features) const {
 
   constexpr int W = 35;
 
-  cv::Mat image =
-      ImageTypeConverter<images::TWorkingImage>::ConvertToCvMatUint8Gray(
-          pyramid_[level]);
+  const images::TWorkingImage &image = pyramid_[level];
+  const int image_cols = static_cast<int>(image.Width());
+  const int image_rows = static_cast<int>(image.Height());
+  const uint8_t *image_data = &image.At(0, 0, 0);
+  const std::ptrdiff_t stride = image.Stride();
 
-  const int n_cols = (image.cols - PATCH_SIZE) / W;
+  const int n_cols = (image_cols - PATCH_SIZE) / W;
   assert(n_cols > 0);
-  const int n_rows = (image.rows - PATCH_SIZE) / W;
+  const int n_rows = (image_rows - PATCH_SIZE) / W;
   assert(n_rows > 0);
 
-  const int cell_width = std::ceil((image.cols - PATCH_SIZE) / n_cols);
-  const int cell_height = std::ceil((image.rows - PATCH_SIZE) / n_rows);
+  const int cell_width = std::ceil((image_cols - PATCH_SIZE) / n_cols);
+  const int cell_height = std::ceil((image_rows - PATCH_SIZE) / n_rows);
 
-  std::vector<std::vector<cv::KeyPoint>> all_cells_keypoints;
+  // FAST per grid cell (a stride-aware sub-view, no copy), retried with the
+  // lower threshold when a cell has no corner; positions back in level pixels.
+  std::vector<FastCorner> level_corners;
+  std::vector<FastCorner> cell_corners;
 
   for (int i = 0; i < n_rows; ++i) {
     int cell_begin_y = i * cell_height + HALF_PATCH_SIZE;
-    int cell_end_y = std::min(cell_begin_y + cell_height, image.rows);
+    int cell_end_y = std::min(cell_begin_y + cell_height, image_rows);
 
     for (int j = 0; j < n_cols; ++j) {
       int cell_begin_x = j * cell_width + HALF_PATCH_SIZE;
-      int cell_end_x = std::min(cell_begin_x + cell_width, image.cols);
+      int cell_end_x = std::min(cell_begin_x + cell_width, image_cols);
 
-      std::vector<cv::KeyPoint> key_points_in_cell;
+      const uint8_t *cell_data =
+          image_data + cell_begin_y * stride + cell_begin_x;
+      const int cell_cols = cell_end_x - cell_begin_x;
+      const int cell_rows = cell_end_y - cell_begin_y;
 
-      auto cell_image = image.rowRange(cell_begin_y, cell_end_y)
-                            .colRange(cell_begin_x, cell_end_x);
-      double min_val, max_val;
-      cv::minMaxLoc(cell_image, &min_val, &max_val);
+      DetectFast(cell_data, cell_cols, cell_rows, stride, init_threshold_FAST_,
+                 true, cell_corners);
 
-      cv::FAST(cell_image, key_points_in_cell, init_threshold_FAST_, true);
-
-      if (key_points_in_cell.empty()) {
-        cv::FAST(cell_image, key_points_in_cell, min_threshold_FAST_, true);
+      if (cell_corners.empty()) {
+        DetectFast(cell_data, cell_cols, cell_rows, stride,
+                   min_threshold_FAST_, true, cell_corners);
       }
-      for (auto &vit : key_points_in_cell) {
-        vit.pt.x += static_cast<decltype(vit.pt.x)>(cell_begin_x);
-        vit.pt.y += static_cast<decltype(vit.pt.y)>(cell_begin_y);
-        vit.size = scale_factors_[level];
+      for (const auto &corner : cell_corners) {
+        level_corners.push_back({corner.x + cell_begin_x,
+                                 corner.y + cell_begin_y, corner.response});
       }
-      all_cells_keypoints.emplace_back(std::move(key_points_in_cell));
     }
   }
 
-  size_t total_keypoint_count = std::accumulate(
-      all_cells_keypoints.begin(), all_cells_keypoints.end(), size_t(0),
-      [](int value, const std::vector<cv::KeyPoint> &key_points) {
-        return value + key_points.size();
-      });
+  const size_t total_keypoint_count = level_corners.size();
 
   geometry::TPoints2DF points;
   geometry::TRowVectorF strengths;
   points.resize(2, total_keypoint_count);
   strengths.resize(total_keypoint_count);
-  size_t i = 0;
-  for (const auto &cell_keypoints : all_cells_keypoints) {
-    for (auto cv_keypoint : cell_keypoints) {
-      points(0, i) = cv_keypoint.pt.x;
-      points(1, i) = cv_keypoint.pt.y;
-      strengths(i) = cv_keypoint.response;
-      ++i;
-    }
+  for (size_t i = 0; i < total_keypoint_count; ++i) {
+    points(0, i) = static_cast<float>(level_corners[i].x);
+    points(1, i) = static_cast<float>(level_corners[i].y);
+    strengths(i) = static_cast<float>(level_corners[i].response);
   }
 
   std::vector<size_t> distributed_indices;
   orb::QuadTreeDistributor::DistributeOctTree(
-      points, strengths, 0, image.cols, 0, image.rows, n_features,
+      points, strengths, 0, image_cols, 0, image_rows, n_features,
       distributed_indices);
 
   geometry::TPoints2DF r_points;

@@ -3,7 +3,9 @@
 
 #include "voyahslam/geometry/geometry.h"
 
-#include <opencv2/opencv.hpp>
+#include <cstddef>
+#include <list>
+#include <vector>
 
 namespace voyahslam::features::orb {
 

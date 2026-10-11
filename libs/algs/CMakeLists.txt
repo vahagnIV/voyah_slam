@@ -1,6 +1,7 @@
 # voyah_algs: stateless algorithms over common types (estimators, two-view
 # geometry, image filters, feature extraction and matching, triangulation,
-# optimization). OpenCV, stb and g2o are implementation details (PRIVATE).
+# optimization). stb and g2o are implementation details (PRIVATE). No OpenCV:
+# only the tests and benchmarks link it, as a reference.
 find_package(g2o REQUIRED)
 
 add_library(voyah_algs STATIC
@@ -13,7 +14,6 @@ add_library(voyah_algs STATIC
     src/features/orb/image_pyramid.cpp
     src/features/orb/quad_tree_distributor.cpp
     src/features/orb_feature_extractor.cpp
-    src/features/sift_feature_extractor.cpp
     src/geometry/geometry.cpp
     src/geometry/pnp.cpp
     src/geometry/sim3_solver.cpp
@@ -57,10 +57,8 @@ target_include_directories(voyah_algs
 target_link_libraries(voyah_algs
     PUBLIC voyah_common
     PRIVATE stb::stb
-    PRIVATE opencv_core
-    PRIVATE opencv_imgproc
-    PRIVATE opencv_features
     PRIVATE g2o::core g2o::stuff g2o::types_sba g2o::types_sim3 g2o::types_slam3d g2o::solver_eigen
 )
 
 add_subdirectory(tests)
+add_subdirectory(benchmarks)

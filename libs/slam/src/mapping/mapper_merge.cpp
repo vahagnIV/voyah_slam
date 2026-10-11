@@ -496,7 +496,6 @@ void Mapper<TFeatureExtractor>::MoveRestOfMap(const WindowCorrection& correction
                                           events::MapTransaction<FE>&, std::vector<map::MapPointId>&);     \
     template void Mapper<FE>::MoveRestOfMap(const WindowCorrection&, const std::vector<map::FrameId>&, bool);
 
-INSTANTIATE_MAPPER_MERGE(features::SIFTFeatureExtractor)
 INSTANTIATE_MAPPER_MERGE(features::OrbFeatureExtractor)
 
 } // namespace voyahslam::mapping

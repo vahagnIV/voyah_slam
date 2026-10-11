@@ -391,7 +391,6 @@ void Mapper<TFeatureExtractor>::FinishCorrection(events::MapTransaction<TFeature
                                             events::MapTransaction<FE>&);                                 \
     template void Mapper<FE>::FinishCorrection(events::MapTransaction<FE>&);
 
-INSTANTIATE_MAPPER_LOOP(features::SIFTFeatureExtractor)
 INSTANTIATE_MAPPER_LOOP(features::OrbFeatureExtractor)
 
 } // namespace voyahslam::mapping
