@@ -993,8 +993,24 @@ Deferred minor findings from the per-task reviews.
         (`conan create -o with_tests=True`) on a machine without them.
       - A `voyahviz` export (it would need `find_dependency(OpenCV)` and
         Pangolin) is not provided: it is a dev tool.
-      - The dev installs need `-s compiler.cppstd=gnu20` (`validate()`); a
-        repo profile could carry it instead of the flag.
+      - **Logs do not reach Android logcat:** the logger
+        (`libs/common/src/logging/logger.cpp`) defaults to a stdout sink,
+        which Android discards (an app can already pass its own sinks to
+        `Logger::Initialize`). Make the default a
+        `spdlog::sinks::android_sink_mt` behind `#ifdef __ANDROID__`; `package_info` then needs
+        `system_libs = ["log"]` for `voyah_common` on Android.
+      - **Symbol visibility for shared builds:** the `.so`s export
+        everything (about 7000 spdlog/fmt symbols among them). Build with
+        `-fvisibility=hidden` / `CXX_VISIBILITY_PRESET hidden` and export
+        macros (`GenerateExportHeader`); that would also allow `shared` on
+        Windows, which `validate()` rejects today.
+      - **Empty `$<LINK_ONLY:>` in the exported `voyah_algs` link
+        interface** (`voyahslamTargets.cmake`): left by stb's
+        `$<BUILD_INTERFACE:stb::stb>`. Harmless but noisy; link stb in a way
+        that leaves no entry (e.g. only its include directories, or an
+        internal INTERFACE target that is not exported).
+      - The Android consumer steps were checked with CMake 4.0.3 and the
+        NDK toolchain file, not with Gradle's CMake 3.22.1 or a real APK.
 - [ ] **`libs/test_support/support/synthetic_sequence.h` needs algs**
       (`features/stereo_matcher.h`) but sits in the common-level support root
       (`voyah_test_support` links only `voyah_common`). Only a compile failure in
