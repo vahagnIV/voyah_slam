@@ -14,7 +14,7 @@ namespace voyahslam::features {
 
 struct InitializationMatcherOptions {
     double window_px = 100.0;     // square half-size around the last matched position (raw px)
-    double max_distance = 50.0;   // descriptor distance threshold (double so SIFT's float L2 fits)
+    double max_distance = 50.0;   // descriptor distance threshold (double so a float-distance extractor fits)
     double nn_ratio = 0.9;        // best < nn_ratio * second best
     bool check_orientation = true;
     size_t histogram_bins = 12;   // 12 bins of 30° — ORB-SLAM3's effective resolution (HISTO_LENGTH = 30 applied as 1/30 per degree)

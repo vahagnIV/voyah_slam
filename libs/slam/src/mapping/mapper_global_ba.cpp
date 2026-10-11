@@ -143,7 +143,6 @@ void Mapper<TFeatureExtractor>::MergeGlobalBa(
         const std::vector<std::pair<map::FrameId, geometry::RigidTransformation>>&,                   \
         const std::vector<std::pair<map::MapPointId, geometry::TPoint3DF>>&);
 
-INSTANTIATE_MAPPER_GLOBAL_BA(features::SIFTFeatureExtractor)
 INSTANTIATE_MAPPER_GLOBAL_BA(features::OrbFeatureExtractor)
 
 } // namespace voyahslam::mapping

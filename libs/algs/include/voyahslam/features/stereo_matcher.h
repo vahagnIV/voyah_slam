@@ -16,7 +16,7 @@ namespace voyahslam::features {
 struct StereoMatcherOptions {
     double nn_ratio = 0.7;
     double sigma_px = 1.0;              // level-0 keypoint noise (raw px)
-    double level_scale = 1.2;           // σ_level = sigma_px · level_scale^level (ORB; SIFT: 2^(1/3))
+    double level_scale = 1.2;           // σ_level = sigma_px · level_scale^level (ORB)
     double max_chi2 = 5.991;            // per-image reprojection test, 2 dof
     double max_parallax_cos = 0.99998;  // rays more parallel than this → rejected
 };

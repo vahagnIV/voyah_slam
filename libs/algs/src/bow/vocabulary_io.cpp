@@ -1,7 +1,6 @@
 // Vocabulary file IO: the DBoW2 / ORB-SLAM text loader and our checksummed binary format.
 #include <voyahslam/bow/vocabulary.h>
 #include <voyahslam/features/orb_feature_extractor.h>
-#include <voyahslam/features/sift_feature_extractor.h>
 #include <voyahslam/logging/logger.h>
 
 #include <bit>
@@ -319,6 +318,5 @@ std::optional<Vocabulary<TFeatureExtractor>> Vocabulary<TFeatureExtractor>::Load
 }
 
 template class Vocabulary<features::OrbFeatureExtractor>;
-template class Vocabulary<features::SIFTFeatureExtractor>;
 
 }  // namespace voyahslam::bow

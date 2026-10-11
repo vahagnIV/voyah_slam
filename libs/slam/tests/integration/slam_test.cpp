@@ -5,7 +5,6 @@
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
 #include <voyahslam/features/orb_feature_extractor.h>
-#include <voyahslam/features/sift_feature_extractor.h>
 #include <voyahslam/slam/slam.h>
 #include <voyahslam/tracking/atlas_replica.h>
 #include <voyahslam/tracking/map_replica.h>
@@ -75,8 +74,8 @@ TEST(SlamTest, StartStopAndDestroy) {
 }
 
 TEST(SlamTest, TrackEnqueuesMonocularAndBinocularMeasurements) {
-    using TTracker = Slam<features::SIFTFeatureExtractor>::TTracker;
-    Slam<features::SIFTFeatureExtractor> slam;
+    using TTracker = OrbSlam::TTracker;
+    OrbSlam slam;
     EXPECT_EQ(slam.tracker().pending_measurements(), 0u);
 
     slam.tracker().Track(TTracker::TMonocularMeasurement{});

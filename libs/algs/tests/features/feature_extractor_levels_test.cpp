@@ -6,7 +6,6 @@
 #include <vector>
 
 #include "voyahslam/features/orb_feature_extractor.h"
-#include "voyahslam/features/sift_feature_extractor.h"
 #include "voyahslam/images/filter.h"
 #include "voyahslam/images/gaussian_blur.h"
 
@@ -51,37 +50,6 @@ TEST(OrbLevelsTest, LevelsInRangeAndScaleFactor) {
     EXPECT_GE(distinct.size(), 2u);
     EXPECT_DOUBLE_EQ(extractor.ScaleFactor(0), 1.0);
     EXPECT_NEAR(extractor.ScaleFactor(3), std::pow(1.2, 3), 1e-12);
-}
-
-TEST(SiftLevelsTest, LevelFromOctave) {
-    auto pack = [](int octave, int layer) { return (layer << 8) | (octave & 0xFF); };
-    EXPECT_EQ(SIFTFeatureExtractor::LevelFromOctave(pack(-1, 1)), 1);
-    EXPECT_EQ(SIFTFeatureExtractor::LevelFromOctave(pack(0, 2)), 5);
-    EXPECT_EQ(SIFTFeatureExtractor::LevelFromOctave(pack(2, 3)), 12);
-
-    SIFTFeatureExtractor extractor;
-    EXPECT_DOUBLE_EQ(extractor.ScaleFactor(0), 0.5);
-    EXPECT_DOUBLE_EQ(extractor.ScaleFactor(3), 1.0);
-    EXPECT_DOUBLE_EQ(extractor.ScaleFactor(6), 2.0);
-}
-
-TEST(SiftLevelsTest, DetectAndExtractRespectsCountAndRadians) {
-    SIFTFeatureExtractor extractor;
-    auto image = MakeNoiseImage(512);
-    constexpr size_t kRequested = 50;
-    auto features = extractor.DetectAndExtract(image, kRequested);
-
-    // The image yields far more than 50 keypoints, so exactly 50 are kept.
-    ASSERT_EQ(features.points().cols(), static_cast<Eigen::Index>(kRequested));
-    EXPECT_EQ(features.strengths().cols(), static_cast<Eigen::Index>(kRequested));
-    EXPECT_EQ(features.angles().cols(), static_cast<Eigen::Index>(kRequested));
-    EXPECT_EQ(features.descriptors().cols(), static_cast<Eigen::Index>(kRequested));
-    EXPECT_EQ(features.levels().cols(), static_cast<Eigen::Index>(kRequested));
-    for (Eigen::Index i = 0; i < features.angles().cols(); ++i) {
-        EXPECT_GE(features.angles()(i), 0.0F);
-        EXPECT_LT(features.angles()(i), 2.0F * static_cast<float>(M_PI));
-        if (i > 0) EXPECT_LE(features.strengths()(i), features.strengths()(i - 1));
-    }
 }
 
 // ORB-SLAM3 rounds the rotated BRIEF offsets (cvRound); truncation picks other

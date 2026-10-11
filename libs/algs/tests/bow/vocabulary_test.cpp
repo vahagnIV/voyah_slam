@@ -1,15 +1,14 @@
 #include <gtest/gtest.h>
 #include <support/test_measurements.h>
 #include <voyahslam/bow/vocabulary.h>
-#include <voyahslam/features/sift_feature_extractor.h>
+#include <voyahslam/features/orb_feature_extractor.h>
 
 #include <initializer_list>
 #include <utility>
 #include <vector>
 
-// Every member must compile for both extractors the Mapper is instantiated for.
+// Every member must compile for the extractor the Mapper is instantiated for.
 template class voyahslam::bow::Vocabulary<voyahslam::features::OrbFeatureExtractor>;
-template class voyahslam::bow::Vocabulary<voyahslam::features::SIFTFeatureExtractor>;
 
 namespace voyahslam::bow {
 namespace {

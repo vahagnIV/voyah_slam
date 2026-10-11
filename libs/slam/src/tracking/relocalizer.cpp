@@ -302,7 +302,6 @@ RelocalizationResult Relocalize(const MapReplica<TFeatureExtractor>& replica,
                                                  const bow::Vocabulary<FE>&, const RelocalizationOptions&, \
                                                  const PoseRefinement&, const features::ProjectionMatcherOptions&);
 
-INSTANTIATE_RELOCALIZER(features::SIFTFeatureExtractor)
 INSTANTIATE_RELOCALIZER(features::OrbFeatureExtractor)
 
 #undef INSTANTIATE_RELOCALIZER

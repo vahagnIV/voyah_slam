@@ -627,7 +627,6 @@ void Mapper<TFeatureExtractor>::FinishRefinement(
     template void Mapper<FE>::FinishRefinement(std::vector<map::MapPointId>,                       \
                                                events::MapTransaction<FE>&);
 
-INSTANTIATE_MAPPER_QUALITY(features::SIFTFeatureExtractor)
 INSTANTIATE_MAPPER_QUALITY(features::OrbFeatureExtractor)
 
 } // namespace voyahslam::mapping

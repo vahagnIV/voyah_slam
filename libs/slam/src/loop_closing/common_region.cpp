@@ -581,7 +581,6 @@ std::optional<CommonRegion> RefineCommonRegion(const tracking::MapReplica<TFeatu
                                                                 const geometry::Sim3&, const LoopCloserOptions&, \
                                                                 CommonRegionStats*);
 
-INSTANTIATE_COMMON_REGION(features::SIFTFeatureExtractor)
 INSTANTIATE_COMMON_REGION(features::OrbFeatureExtractor)
 
 #undef INSTANTIATE_COMMON_REGION

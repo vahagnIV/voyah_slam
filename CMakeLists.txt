@@ -9,6 +9,8 @@ find_package(GTest REQUIRED)
 find_package(Eigen3 REQUIRED)
 find_package(stb REQUIRED)
 # OpenCV comes from a system install (built from source, /usr/local), not Conan.
+# Only tests, benchmarks and the visualization tool link it; the voyah_*
+# libraries do not use OpenCV.
 find_package(OpenCV 5 REQUIRED COMPONENTS core imgproc features highgui)
 find_package(spdlog REQUIRED)
 find_package(fmt REQUIRED)

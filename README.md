@@ -9,7 +9,7 @@ Architecture and conventions: `docs/DESIGN.md`; pending work: `docs/TODO.md`.
 |---|---|---|---|
 | `voyah_common` | `libs/common` | ids, geometry types, cameras and distortion models, memory pools, logging, image and feature/measurement data types, map storage | Eigen, spdlog |
 | `voyah_events` | `libs/events` | event types, pub/sub (`Observable`, `AsyncObserver`, `WorkerThread`) | common, concurrentqueue |
-| `voyah_algs` | `libs/algs` | geometry algorithms, estimators, feature extractors and matchers, triangulation, optimization | common (OpenCV, stb, g2o private) |
+| `voyah_algs` | `libs/algs` | geometry algorithms, estimators, feature extractors and matchers, triangulation, optimization | common (stb, g2o private; no OpenCV) |
 | `voyah_slam` | `libs/slam` | Tracker, Mapper, LoopCloser, `Slam` | common, events, algs |
 | `voyahslam` | `libs` | umbrella (INTERFACE) linking all four; what apps link | all of the above |
 | `voyahviz` | `vizualization` | map viewer and image windows (dev tool) | common, events (OpenCV, Pangolin private) |
@@ -27,6 +27,9 @@ its dependencies' roots, so a lower layer cannot include an upper one.
   wayland-protocols`), `pkg-config`, `git`.
 
 ### OpenCV 5.1 and Pangolin 0.9.3 (not from Conan; built from source into `/usr/local`)
+
+The `voyah_*` libraries do not use OpenCV (since 2026-10-11); it is needed only by the
+tests and benchmarks (as a reference) and by `voyahviz`, which the `full_slam` apps use.
 
 The exact configure flags used on the development machine were not recorded; only
 `WITH_GTK=ON` is (DESIGN.md section 7). The following is the minimal set this project

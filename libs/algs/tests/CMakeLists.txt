@@ -7,6 +7,7 @@ voyah_add_test_binary(voyah_algs_tests
         estimators/essential_estimator_test.cpp
         estimators/homography_estimator_test.cpp
         estimators/ransac_test.cpp
+        features/fast_test.cpp
         features/feature_extractor_levels_test.cpp
         features/bow_matcher_test.cpp
         features/feature_grid_test.cpp
@@ -36,6 +37,9 @@ voyah_add_test_binary(voyah_algs_tests
     LIBS
         voyah_algs
         voyah_test_support
+        # Test reference only (FastTest compares with cv::FAST).
+        opencv_core
+        opencv_features
 )
 
 # Private sources root, for tests of private headers (optimization/projection.h).
@@ -59,4 +63,22 @@ voyah_add_test_binary(voyah_vocabulary_tests
 )
 target_compile_definitions(voyah_vocabulary_tests
     PRIVATE VOYAH_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/bow/data"
+)
+
+# Real-data feature tests on TUM-VI corridor1 ($VOYAHSLAM_CORRIDOR1, else
+# ~/Downloads/dataset-corridor1_1024_16; skip when missing): the ORB extractor
+# golden regression and the FAST port against live cv::FAST. OpenCV is linked
+# here as a test reference only, never by voyah_algs.
+voyah_add_test_binary(voyah_algs_dataset_tests
+    LABEL integration
+    SOURCES
+        features/fast_corridor1_test.cpp
+        features/orb_extractor_golden_test.cpp
+    LIBS
+        voyah_algs
+        opencv_core
+        opencv_features
+)
+target_compile_definitions(voyah_algs_dataset_tests
+    PRIVATE VOYAH_FEATURES_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/features/data"
 )
