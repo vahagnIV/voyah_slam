@@ -52,11 +52,18 @@ conan create third_party/g2o --build=missing -s build_type=Debug
 conan create third_party/g2o --build=missing -s build_type=Release
 ```
 
+Android arm64 (`profiles/android-arm64`, NDK r30 clang 21, `c++_static`) builds with the
+recipe unchanged (2026-10-11; README "Android"):
+
+```
+conan create third_party/g2o --build=missing -pr:h profiles/android-arm64 -pr:b default
+```
+
 `test_package` builds a Levenberg-Marquardt optimizer with `BlockSolver_6_3` +
 `LinearSolverEigen` and runs `initializeOptimization()` on a one-edge graph.
 
 ### Updating
 
 Replace `third_party/g2o/src/` with the new upstream tag (no `.git`), bump `version` in
-`conanfile.py`, update the tag/commit above (and `conanfile.txt` of the project), re-check the
+`conanfile.py`, update the tag/commit above (and `conanfile.py` of the project), re-check the
 option names and library names, then re-run both `conan create` commands.
