@@ -1,0 +1,9 @@
+# Desktop host profile: the default profile (gcc 13, x86_64) with C++20, which
+# conanfile.py's validate() requires, and Release unless overridden.
+#   conan create . --build=missing -pr profiles/linux-gcc13
+#   conan create . --build=missing -pr profiles/linux-gcc13 -s build_type=Debug
+include(default)
+
+[settings]
+compiler.cppstd=gnu20
+build_type=Release

@@ -81,6 +81,17 @@ class VoyahSlamConan(ConanFile):
     def validate(self):
         # Public headers use C++20, so the consumer must compile with it too.
         check_min_cppstd(self, 20)
+        if self.options.shared and self.settings.os == "Windows":
+            raise ConanInvalidConfiguration(
+                "voyahslam: shared=True is not supported on Windows (no symbol "
+                "export macros); use shared=False")
+        if self.options.shared and self.settings.get_safe("compiler.libcxx") == "c++_static":
+            raise ConanInvalidConfiguration(
+                "voyahslam: shared=True with compiler.libcxx=c++_static would put "
+                "several shared libraries containing C++ into the app, each with its "
+                "own libc++. The NDK allows c++_static only when the app has exactly "
+                "one such shared library: use shared=False (link the static libraries "
+                "into the app's single JNI .so) or compiler.libcxx=c++_shared")
         minimum = {"gcc": "11", "clang": "14", "apple-clang": "15"}
         compiler = str(self.settings.compiler)
         if compiler in minimum and Version(self.settings.compiler.version) < minimum[compiler]:

@@ -25,6 +25,15 @@ target_link_libraries(voyahslam
 include(CMakePackageConfigHelpers)
 
 set(VOYAHSLAM_LIBRARIES voyah_common voyah_events voyah_algs voyah_slam)
+# Shared builds: versioned sonames, and the installed libraries find each other
+# next to themselves (libvoyah_slam.so -> libvoyah_algs.so ...).
+set_target_properties(${VOYAHSLAM_LIBRARIES} PROPERTIES
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
+)
+if(NOT APPLE)
+    set_target_properties(${VOYAHSLAM_LIBRARIES} PROPERTIES INSTALL_RPATH "$ORIGIN")
+endif()
 install(TARGETS ${VOYAHSLAM_LIBRARIES} voyahslam
     EXPORT voyahslamTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
