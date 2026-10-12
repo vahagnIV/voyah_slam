@@ -922,6 +922,52 @@ Quality" (smoke table there).
       memory. Same class of hazard as the distortion-model pointers removed on
       2026-10-12: a disconnect (RAII connection handle) or shared ownership.
 
+## Ownership audit (voyah_jni, 2026-10-12)
+
+Audit of the public API's ownership and lifetime contracts, written while
+building the Java/JNI binding: `../voyah_jni/docs/voyah_slam_ownership_audit.md`.
+Target principle: a type owns, or shares ownership of, everything it points to
+after a call returns; required orderings are removed or enforced (assert or
+error), not just documented. Planned as roadmap step "API hardening" (before
+step 6). Each item: its own branch, a DESIGN decisions-log entry, `check_all`,
+a minor version bump and `conan create` for linux-gcc13 (static and shared)
+and android-arm64; tell the voyah_jni session the new version.
+
+- [x] ~~#1 Distortion model held by raw pointer~~ (done 2026-10-12, 0.2.0).
+- [x] ~~#4 Pool exhaustion aborts~~ (done 2026-10-12, 0.3.0; see "Map & events").
+- [ ] **#3 Pooled events point back to a possibly destroyed pool**
+      (`Recyclable::object_pool_` is a raw `ObjectPool*`): pools shared by the
+      events handed out, a debug assert in `~ObjectPool` that every slot came
+      back, then drop the `global_ba_` ordering invariant in `slam.h` and the
+      apps' `StopAll` guard. Same item as "Event pool lifetime" (OQ 25) under
+      "Event system". Next, designed together with #2.
+- [ ] **#2 Observer registration by raw pointer, no disconnect, wiring rules
+      unenforced:** an RAII subscription returned by `AddObserver` (or
+      observers held by `shared_ptr`); connecting or disconnecting while the
+      component runs fails loudly. Same item as "Subscriber lifetime" under
+      "Event system".
+- [ ] **#5 Thread-affinity accessors enforced only by comments**
+      (`Mapper` "Mapper thread only", `Tracker::atlas()` / `map_replica()` /
+      `last_matches()`): move them behind test access or assert the thread,
+      and give apps a supported way to read the map from their own thread (a
+      map follower consuming `MapTransaction` into its own replica; the core
+      of a planned `voyahslam::Session` facade for JNI).
+- [ ] **#6 Lifecycle rules unenforced:** a Created → Running → Stopped state
+      machine with asserts or errors on invalid transitions (`AddObserver`
+      while running, `Start` twice, `Track()` before `Start()`); decide and
+      document whether `Stop()` then `Start()` is supported.
+- [ ] **#7 `OrbFeatureExtractor::DetectAndExtract` is `const` but not
+      thread-safe** (`mutable` pyramid): make it non-const or use a per-call /
+      caller-provided workspace.
+- [ ] **#8 Logger global state depends on initialization order:**
+      `Logger::Initialize` should also replace the sinks of loggers already
+      created, and `sinks_` must be protected (see the logcat item under
+      "Environment").
+- [ ] **#9 `images::Image` correctness:** a default-constructed image has
+      uninitialized members; `Convert()`, `operator*=` / `operator*` ignore
+      `offset_` / `stride_` of sub-image views; `Set()` is `const` but writes
+      the shared buffer.
+
 ## Review follow-ups (tracking states, 2026-10-03)
 
 Deferred minor findings from the per-task and final reviews.

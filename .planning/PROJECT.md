@@ -25,7 +25,7 @@ Recorded baselines (corridor1, Release, from `docs/ROADMAP.md`). The two sets us
 | Stereo, first 1000 frames, no loop closing | SE3 0.036-0.037 m (0.0349-0.0369 m with vocabulary + relocalization) | step 1, step 3 |
 | Mono, full sequence, no loop closing | Sim3 0.341 / 0.500 m (two runs) | step 4a+4b |
 | Stereo, full sequence, no loop closing | SE3 0.098 / 0.138 m (two runs) | step 4a+4b |
-| Mono / stereo, full sequence, WITH loop closing (today, opt-in) | Sim3 0.679 / 0.669 m; SE3 1.295 / 18.16 m (worse: the case Phase 1 must fix) | step 4a+4b |
+| Mono / stereo, full sequence, WITH loop closing (today, opt-in) | Sim3 0.679 / 0.669 m; SE3 1.295 / 18.16 m (worse: the case Phase 2 must fix) | step 4a+4b |
 
 No new numeric bars are invented in this planning set. Where a source states no acceptance bar, the requirement says "to be specced" and the bar is set with the user when that phase is specced.
 
@@ -57,12 +57,13 @@ Shipped, with their acceptance results recorded in `docs/DESIGN.md` section 8 an
 
 The 20 pending requirements, all mapped to phases in `.planning/ROADMAP.md`. Full text with sources and acceptance in `.planning/REQUIREMENTS.md`.
 
-- [ ] Reject loop-closing look-alikes and false merges so loop closing and merging can be enabled on corridor1 (LOOP-01..04, MERGE-01) - Phase 1
-- [ ] Bound global BA time and memory; relocalize into inactive maps (GBA-01, ATLAS-01) - Phase 2
-- [ ] ORB extractor rework, geometry robustness, descriptor-traits layering, own vocabulary (EXTR-01, GEOM-01, LAYR-01, VOCAB-01) - Phase 3
-- [ ] Lossy observer delivery, storage and pool sizing, Tracker measurement policy, platform validation (EVT-01, MEM-01, TRKR-01, PLAT-01) - Phase 4
-- [ ] Remote visualization and serialization, component late joining, mixed mono/stereo maps (REMOTE-01, LATE-01, MIXED-01) - Phase 5
-- [ ] TUM-VI tuning and dataset validation (TUNE-01, DATA-01) - Phase 6
+- [ ] Finish the voyah_jni ownership audit: shared pool ownership, RAII observer subscriptions, thread affinity, lifecycle, extractor, logger, image (OWN-01..07) - Phase 1
+- [ ] Reject loop-closing look-alikes and false merges so loop closing and merging can be enabled on corridor1 (LOOP-01..04, MERGE-01) - Phase 2
+- [ ] Bound global BA time and memory; relocalize into inactive maps (GBA-01, ATLAS-01) - Phase 3
+- [ ] ORB extractor rework, geometry robustness, descriptor-traits layering, own vocabulary (EXTR-01, GEOM-01, LAYR-01, VOCAB-01) - Phase 4
+- [ ] Lossy observer delivery, storage and pool sizing, Tracker measurement policy, platform validation (EVT-01, MEM-01, TRKR-01, PLAT-01) - Phase 5
+- [ ] Remote visualization and serialization, component late joining, mixed mono/stereo maps (REMOTE-01, LATE-01, MIXED-01) - Phase 6
+- [ ] TUM-VI tuning and dataset validation (TUNE-01, DATA-01) - Phase 7
 
 ### Out of Scope
 
@@ -75,12 +76,12 @@ The 20 pending requirements, all mapped to phases in `.planning/ROADMAP.md`. Ful
 
 ## Context
 
-- **Source of truth.** `docs/DESIGN.md` (architecture, principles, decisions log, open questions; wins over any older spec), `docs/ROADMAP.md` (order of upcoming work) and `docs/TODO.md` (pending and deferred items, about 193 open) remain the project's own documents. `.planning/ROADMAP.md` is derived from `docs/ROADMAP.md` (step 6, split across Phase 1 and Phase 6) plus the strategic open items of `docs/TODO.md` (Phases 2-5). **It must be kept in sync with `docs/ROADMAP.md`**: when a step is added, reordered, finished or dropped there, update `.planning/ROADMAP.md` (and `.planning/REQUIREMENTS.md` traceability) in the same change, and the other way round. Deferred work still goes to `docs/TODO.md`; design decisions still go to the DESIGN decisions log in the same change.
+- **Source of truth.** `docs/DESIGN.md` (architecture, principles, decisions log, open questions; wins over any older spec), `docs/ROADMAP.md` (order of upcoming work) and `docs/TODO.md` (pending and deferred items, about 193 open) remain the project's own documents. `.planning/ROADMAP.md` is derived from `docs/ROADMAP.md` ("API hardening" is Phase 1; step 6 is split across Phase 2 and Phase 7) plus the strategic open items of `docs/TODO.md` (Phases 3-6). **It must be kept in sync with `docs/ROADMAP.md`**: when a step is added, reordered, finished or dropped there, update `.planning/ROADMAP.md` (and `.planning/REQUIREMENTS.md` traceability) in the same change, and the other way round. Deferred work still goes to `docs/TODO.md`; design decisions still go to the DESIGN decisions log in the same change.
 - **Status.** Done and merged (steps 0-5): restructure, map quality, own DBoW2, relocalization, loop detection and correction (opt-in), global BA, map merging. Remaining: ROADMAP step 6, "TUM-VI tuning", whose first item is loop-closing look-alike rejection. Loop closing, global BA and merging are opt-in (`--loop_closing`) and stay off by default until look-alikes are rejected.
 - **Reference data.** TUM-VI `dataset-corridor1_1024_16` (20 Hz stereo, 1024 x 1024, equidistant fisheye, baseline about 0.101 m) with a mocap room at the start and end, so end-of-run ATE measures loop-closing quality. Tuning is specified on `dataset-corridor1_512_16`. EuRoC (Brown-Conrady) has never been run on real images.
 - **Look-alike diagnosis.** Same-heading corridor look-alikes 7-30 m apart pass every ORB-SLAM3 visual gate and the added normal-consistency gate; a diagnosis document is cited in TODO (`.superpowers/sdd/2026-10-09-loop-closing/false-loop-diagnosis.md`) but is git-excluded and not present in the working tree.
-- **Open design questions** (DESIGN section 9): OQ 1 id width, 2 storage growth, 9 culling propagation, 10 IMU, 14 pool sizing, 17 mixed mono/binocular, 19 Tracker measurement policy, 21 ORB extraction speed, 22 fisheye rays beyond 90 degrees, 25 event pool lifetime. Those still pending are mapped to Phases 3-5.
-- **Parallel workstream outside the docs.** The user's project memory records an in-flight `voyah_jni` ownership audit (`/home/vahagn/git/voyah_jni/docs/voyah_slam_ownership_audit.md`): items #1 and #4 are done (0.2.0, 0.3.0); #3 (pooled events hold a raw back-pointer to their pool) with #2 (RAII subscriptions from `AddObserver`), then #5 (map follower, core of a planned `voyahslam::Session` facade) and #6-#9 are next. These items are not in `docs/TODO.md` or `docs/ROADMAP.md`, so they are not requirements here. They overlap Phase 4 (event pool lifetime, observer disconnect, lossy delivery). Add them to `docs/TODO.md` first if they should become planned work.
+- **Open design questions** (DESIGN section 9): OQ 1 id width, 2 storage growth, 9 culling propagation, 10 IMU, 14 pool sizing, 17 mixed mono/binocular, 19 Tracker measurement policy, 21 ORB extraction speed, 22 fisheye rays beyond 90 degrees, 25 event pool lifetime. Those still pending are mapped to Phases 4-6 (OQ 25: Phase 1).
+- **Ownership audit (Phase 1).** The `voyah_jni` ownership audit (`../voyah_jni/docs/voyah_slam_ownership_audit.md`) is planned work since 2026-10-12 (user decision): items #1 and #4 are done (0.2.0, 0.3.0); #3 with #2, then #5-#9 are Phase 1 (OWN-01..07), recorded in `docs/TODO.md` "Ownership audit" and `docs/ROADMAP.md` "API hardening".
 - **Stale items to prune** (see `.planning/INGEST-CONFLICTS.md`, INFO): TODO items about `MapCreated` / the old `map_id` consumer rule, the done "immutable shared measurement" item and the decided Faiss-vs-DBoW2 spike; DESIGN.md's "Last updated: 2026-10-08" header and the "merge pending" lines in section 10.
 - **Codebase map.** `.planning/codebase/` (ARCHITECTURE, CONCERNS, CONVENTIONS, INTEGRATIONS, STACK, STRUCTURE, TESTING; mapped at b0e957c).
 
@@ -124,7 +125,7 @@ status: LOCKED. There are no ADRs; the effective locked set is `docs/DESIGN.md` 
 - DEC-2026-10-05-2 g2o is vendored pristine, packaged as a local Conan recipe, linked PRIVATE.
 
 **User decisions (locked)** - each is an explicit `[USER DECISION]` in the DESIGN log
-- DEC-2026-10-10-1 Loop closing is opt-in and off by default (`LoopCloserOptions::enabled` false; apps `--loop_closing`). Do not flip the default without the user's explicit approval, even after Phase 1.
+- DEC-2026-10-10-1 Loop closing is opt-in and off by default (`LoopCloserOptions::enabled` false; apps `--loop_closing`). Do not flip the default without the user's explicit approval, even after Phase 2.
 - DEC-2026-10-09-15 Normal-consistency gate in the LoopCloser (a deliberate deviation from ORB-SLAM3); verify-before-publish was rejected for that first round.
 - DEC-2026-10-10-8 GlobalBA owns a replica fed from the start; no late joining: a component either exists from the start or not at all. (LATE-01 would amend this; see below.)
 - DEC-2026-10-10-9 Components stay pluggable through gRPC later: GlobalBA and LoopCloser talk to the Mapper only through events of plain data.
@@ -139,15 +140,15 @@ status: LOCKED. There are no ADRs; the effective locked set is `docs/DESIGN.md` 
 
 **Superseded - do not treat as current**: pool `Create()` aborting on exhaustion (now grows); "newest map id wins" and the `map_id` ignore-older/adopt-newer consumer rule (now the replica rule); Tracker decides keyframes; `ObservationStorage<Stereo>` in the Mapper (now `CovisibilityIndex` only); Mapper-only BoW (BoW travels in transactions, Tracker keeps a `FrameDatabase`); normalized-plane BA residuals; loop closing on by default and `--no_loop_closing`; raw distortion pointer rule; Conan 0.1.0 and 0.2.0; SIFT and OpenCV-linked `voyah_algs`.
 
-**Amendments that later phases would need** - LATE-01 (Phase 5) contradicts DEC-2026-10-10-8 as written; MIXED-01 (Phase 5) builds on the locked long-term goal DEC-2026-10-02-12 (binding decided later, OQ 17); LOOP-03 (Phase 1) reopens an option DEC-2026-10-09-15 rejected "for the first round". Each needs an explicit user decision in that phase's discuss step.
+**Amendments that later phases would need** - LATE-01 (Phase 6) contradicts DEC-2026-10-10-8 as written; MIXED-01 (Phase 6) builds on the locked long-term goal DEC-2026-10-02-12 (binding decided later, OQ 17); LOOP-03 (Phase 2) reopens an option DEC-2026-10-09-15 rejected "for the first round". Each needs an explicit user decision in that phase's discuss step.
 </decisions>
 
 | Decision | Rationale | Outcome |
 |----------|-----------|---------|
-| Look-alike rejection mechanism for loops: drift-bound gate (LOOP-02), verify-before-publish (LOOP-03), or both; the 2026-10-11 user decision favours a drift-consistency check (LOOP-04) but does not say whether it replaces LOOP-02 or whether LOOP-03 is added | `docs/TODO.md` "TUM-VI tuning" says "compare on corridor1 and decide with the user"; merges cannot use a drift check (two maps share no world) and need verify-before-publish | — Pending: OPEN, decide in `/gsd-discuss-phase 1` |
+| Look-alike rejection mechanism for loops: drift-bound gate (LOOP-02), verify-before-publish (LOOP-03), or both; the 2026-10-11 user decision favours a drift-consistency check (LOOP-04) but does not say whether it replaces LOOP-02 or whether LOOP-03 is added | `docs/TODO.md` "TUM-VI tuning" says "compare on corridor1 and decide with the user"; merges cannot use a drift check (two maps share no world) and need verify-before-publish | — Pending: OPEN, decide in `/gsd-discuss-phase 2` |
 | Brownfield intake: shipped capabilities are Validated, only pending items are phased | Guidance for this ingest; keeps the roadmap about what is left | ✓ Good |
-| Step 6 is split: look-alike rejection is Phase 1, the remaining tuning is the last phase | ROADMAP says tuning is "at the very end" and look-alike rejection is its first item; tuned thresholds depend on the extractor, geometry and Tracker work in Phases 3-4 | — Pending user review of the ordering |
-| Phases 2-5 are groupings of open `docs/TODO.md` items, ordered by dependency and theme | `docs/ROADMAP.md` has no steps after 6; order is a planning proposal, not a user decision | — Pending user review |
+| Step 6 is split: look-alike rejection is Phase 2, the remaining tuning is the last phase | ROADMAP says tuning is "at the very end" and look-alike rejection is its first item; tuned thresholds depend on the extractor, geometry and Tracker work in Phases 4-5 | — Pending user review of the ordering |
+| Phases 3-6 are groupings of open `docs/TODO.md` items, ordered by dependency and theme | `docs/ROADMAP.md` has no steps after 6; order is a planning proposal, not a user decision | — Pending user review |
 | `.planning/` mirrors, and never replaces, `docs/ROADMAP.md` and `docs/TODO.md` | The project's workflow and CLAUDE.md name those files as the source of truth | ✓ Good |
 | Defaults assumed because no `.planning/config.json` existed: standard granularity, sequential phase ids | Roadmapper defaults | — Pending config |
 
