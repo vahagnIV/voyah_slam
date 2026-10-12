@@ -2,6 +2,8 @@
 
 #include <gtest/gtest.h>
 
+#include <memory>
+
 #include <voyahslam/geometry/distortion_models/kannala_brandt_distortion_model.h>
 
 namespace voyahviz {
@@ -75,21 +77,21 @@ TEST(KeypointDrawingTest, DrawsOrientationTick) {
 
 TEST(KeypointDrawingTest, ProjectToImageRecoversRawFisheyePixels) {
     // TUM-VI cam0 Kannala-Brandt calibration.
-    geometry::distortion_models::KannalaBrandtDistortionModel model(
+    const auto model = std::make_shared<geometry::distortion_models::KannalaBrandtDistortionModel>(
         0.010171079892421483, -0.010816440029919381, 0.005942781769412756, -0.001662284667857643);
     geometry::TMatrix33F K;
     K << 380.81, 0, 510.29, 0, 380.81, 514.33, 0, 0, 1;
-    model.PrecomputeInitialGuessLookup(K, 1024, 1024);
+    model->PrecomputeInitialGuessLookup(K, 1024, 1024);
 
     geometry::TPoints2DF raw(2, 3);
     raw << 510.0, 900.0, 100.0,
            514.0, 300.0, 850.0;
-    TMeasurement measurement(MakeFeatures(raw), K, &model, 0.0);
+    TMeasurement measurement(MakeFeatures(raw), K, model, 0.0);
     ASSERT_EQ(measurement.points().cols(), 3);
     // points() are undistorted and far from the raw pixels near the border...
     EXPECT_GT((measurement.points().col(1) - raw.col(1)).norm(), 10.0);
     // ... ProjectToImage maps them back.
-    geometry::TPoints2DF projected = ProjectToImage(measurement, &model);
+    geometry::TPoints2DF projected = ProjectToImage(measurement, model.get());
     EXPECT_TRUE(projected.isApprox(raw, 1e-6)) << projected;
 }
 

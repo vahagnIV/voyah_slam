@@ -4,8 +4,10 @@
 #include <cmath>
 #include <cstddef>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <random>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -32,17 +34,17 @@ constexpr double kSigma = 1.0;     // px
 Camera PinholeCamera() { return Camera{test::SyntheticStereoIntrinsics(), nullptr}; }
 
 // TUM-VI cam0 (equidistant fisheye).
-geometry::distortion_models::KannalaBrandtDistortionModel TumViModel() {
-    return geometry::distortion_models::KannalaBrandtDistortionModel(
+geometry::distortion_models::TDistortionModelPtr TumViModel() {
+    return std::make_shared<const geometry::distortion_models::KannalaBrandtDistortionModel>(
         0.010171079892421483, -0.010816440029919381, 0.005942781769412756, -0.001662284667857643);
 }
 
-Camera TumViCamera(const geometry::distortion_models::DistortionModel* model) {
+Camera TumViCamera(geometry::distortion_models::TDistortionModelPtr model) {
     Camera camera;
     camera.K << 380.81042871360756, 0.0, 510.29465304840727,
                 0.0, 380.81194179427075, 514.3304630538506,
                 0.0, 0.0, 1.0;
-    camera.distortion = model;
+    camera.distortion = std::move(model);
     return camera;
 }
 
@@ -286,7 +288,7 @@ TEST(PoseOptimizationTest, PinholeInvariance) {
 /// num_points world points whose left-camera rays are up to 80 degrees off-axis (4-8 m away),
 /// projected noise-free through the TUM-VI Kannala-Brandt cameras; with stereo, right
 /// observations through a 5 degree yaw, 0.11 m rig (kept when in front of the right camera).
-Scene MakeFisheyeScene(const geometry::distortion_models::DistortionModel* model,
+Scene MakeFisheyeScene(const geometry::distortion_models::TDistortionModelPtr& model,
                        size_t num_points, bool stereo, uint32_t seed) {
     std::mt19937 rng(seed);
     std::uniform_real_distribution<double> unit(-1.0, 1.0);
@@ -326,7 +328,7 @@ Scene MakeFisheyeScene(const geometry::distortion_models::DistortionModel* model
 
 TEST(PoseOptimizationTest, FisheyeMonoRecoversPose) {
     const auto model = TumViModel();
-    const Scene scene = MakeFisheyeScene(&model, 100, false, 9);
+    const Scene scene = MakeFisheyeScene(model, 100, false, 9);
     const PoseOptimizationResult result =
         OptimizePose(scene.initial_T_cw, scene.camera, std::nullopt, scene.observations, {});
     ASSERT_TRUE(result.success);
@@ -337,7 +339,7 @@ TEST(PoseOptimizationTest, FisheyeMonoRecoversPose) {
 
 TEST(PoseOptimizationTest, FisheyeStereoRecoversPose) {
     const auto model = TumViModel();
-    const Scene scene = MakeFisheyeScene(&model, 100, true, 10);
+    const Scene scene = MakeFisheyeScene(model, 100, true, 10);
     const PoseOptimizationResult result =
         OptimizePose(scene.initial_T_cw, scene.camera, scene.stereo, scene.observations, {});
     ASSERT_TRUE(result.success);

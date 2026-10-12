@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <numbers>
 #include <random>
 #include <tuple>
@@ -33,9 +34,10 @@ geometry::TMatrix33F TumViIntrinsics() {
     return K;
 }
 
-const geometry::distortion_models::KannalaBrandtDistortionModel& TumViModel() {
-    static const geometry::distortion_models::KannalaBrandtDistortionModel model(
-        0.010171079892421483, -0.010816440029919381, 0.005942781769412756, -0.001662284667857643);
+const geometry::distortion_models::TDistortionModelPtr& TumViModel() {
+    static const geometry::distortion_models::TDistortionModelPtr model =
+        std::make_shared<const geometry::distortion_models::KannalaBrandtDistortionModel>(
+            0.010171079892421483, -0.010816440029919381, 0.005942781769412756, -0.001662284667857643);
     return model;
 }
 
@@ -132,7 +134,7 @@ TEST(TriangulationTest, PinholeRecoversPoints) {
 }
 
 TEST(TriangulationTest, FisheyePeripheralPointsRecovered) {
-    const geometry::Camera camera{TumViIntrinsics(), &TumViModel()};
+    const geometry::Camera camera{TumViIntrinsics(), TumViModel()};
     // Rays 60..80 degrees off a's axis, at 1..2 m; b sits 0.5 m behind a so the
     // rays stay inside the 85 degree cut in b.
     std::mt19937 rng(3);

@@ -10,7 +10,7 @@ namespace voyahslam::geometry {
 // The pixel is K * [distorted normalized; 1], i.e. raw (distorted) pixels.
 struct Camera {
     TMatrix33F K;
-    const distortion_models::DistortionModel* distortion = nullptr;  // null = pinhole; must outlive every Camera copy
+    distortion_models::TDistortionModelPtr distortion;  // null = pinhole; shared by every Camera copy
 
     // Camera-frame point -> raw (distorted) pixel. Precondition: Xc.z() > 0.
     [[nodiscard]] TPoint2DF Project(const TPoint3DF& Xc) const;

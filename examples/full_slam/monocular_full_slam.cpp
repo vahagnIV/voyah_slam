@@ -101,7 +101,7 @@ int main(int argc, char** argv) {
             size_t num_features = static_cast<size_t>(measurement.points().cols());
             if (window) {
                 window->Show(voyahviz::DrawMeasurement(frame.image, measurement,
-                                                       camera.distortion));
+                                                       camera.distortion.get()));
             }
             slam.tracker().Track(std::move(measurement));
             if (trajectory) trajectory->Poll();

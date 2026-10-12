@@ -108,8 +108,8 @@ int main(int argc, char** argv) {
                                                       measurement.right().points().cols());
             if (window) {
                 window->Show(voyahviz::HorizontalConcat(
-                    voyahviz::DrawMeasurement(frame.left, measurement.left(), rig.distortion_left),
-                    voyahviz::DrawMeasurement(frame.right, measurement.right(), rig.distortion_right)));
+                    voyahviz::DrawMeasurement(frame.left, measurement.left(), rig.distortion_left.get()),
+                    voyahviz::DrawMeasurement(frame.right, measurement.right(), rig.distortion_right.get())));
             }
             slam.tracker().Track(std::move(measurement));
             if (trajectory) trajectory->Poll();

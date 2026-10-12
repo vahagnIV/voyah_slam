@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <iostream>
+#include <memory>
 #include <numbers>
 #include <random>
 #include <vector>
@@ -85,8 +86,8 @@ geometry::TMatrix33F TumViIntrinsics() {
     return K;
 }
 
-geometry::distortion_models::KannalaBrandtDistortionModel TumViModel() {
-    return geometry::distortion_models::KannalaBrandtDistortionModel(
+geometry::distortion_models::TDistortionModelPtr TumViModel() {
+    return std::make_shared<const geometry::distortion_models::KannalaBrandtDistortionModel>(
         0.010171079892421483, -0.010816440029919381, 0.005942781769412756, -0.001662284667857643);
 }
 
@@ -309,11 +310,11 @@ TEST(StereoMatcherTest, FisheyePeripheralPairsAccepted) {
         .K_right = TumViIntrinsics(),
         .T_rl = geometry::RigidTransformation(geometry::TMatrix33F::Identity(), geometry::TVector3DF(-0.1, 0.0, 0.0)),
         .baseline = 0.1,
-        .distortion_left = &model,
-        .distortion_right = &model,
+        .distortion_left = model,
+        .distortion_right = model,
     };
-    const geometry::Camera left_camera{rig.K_left, &model};
-    const geometry::Camera right_camera{rig.K_right, &model};
+    const geometry::Camera left_camera{rig.K_left, model};
+    const geometry::Camera right_camera{rig.K_right, model};
     constexpr double kDeg = std::numbers::pi / 180.0;
     constexpr int kNumPoints = 12;
     // 0.5 px in golden-angle directions: deterministic across standard libraries.

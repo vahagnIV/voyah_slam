@@ -3,7 +3,9 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <random>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -25,17 +27,17 @@ using geometry::TPoint3DF;
 using geometry::TVector3DF;
 
 // TUM-VI cam0 (equidistant fisheye).
-geometry::distortion_models::KannalaBrandtDistortionModel TumViModel() {
-    return geometry::distortion_models::KannalaBrandtDistortionModel(
+geometry::distortion_models::TDistortionModelPtr TumViModel() {
+    return std::make_shared<const geometry::distortion_models::KannalaBrandtDistortionModel>(
         0.010171079892421483, -0.010816440029919381, 0.005942781769412756, -0.001662284667857643);
 }
 
-Camera TumViCamera(const geometry::distortion_models::DistortionModel* model) {
+Camera TumViCamera(geometry::distortion_models::TDistortionModelPtr model) {
     Camera camera;
     camera.K << 380.81042871360756, 0.0, 510.29465304840727,
                 0.0, 380.81194179427075, 514.3304630538506,
                 0.0, 0.0, 1.0;
-    camera.distortion = model;
+    camera.distortion = std::move(model);
     return camera;
 }
 
@@ -125,7 +127,7 @@ double RelativeError(const TMatrix& analytic, const TMatrix& numeric) {
 // verbatim; the vertex update is g2o's left exp(delta) ∘ S.
 TEST(Sim3OptimizationTest, JacobianMatchesFiniteDifference) {
     const auto model = TumViModel();
-    const Camera fisheye = TumViCamera(&model);
+    const Camera fisheye = TumViCamera(model);
     const Camera pinhole = PinholeCamera();
     std::mt19937 rng(11);
     const double h = 1e-6;
@@ -160,7 +162,7 @@ TEST(Sim3OptimizationTest, JacobianMatchesFiniteDifference) {
 // 10 % in scale off: every seed of the range recovers S_12 to numerical precision.
 TEST(Sim3OptimizationTest, RecoversPerturbedSim3) {
     const auto model = TumViModel();
-    const Camera camera1 = TumViCamera(&model);
+    const Camera camera1 = TumViCamera(model);
     const Camera camera2 = PinholeCamera();
     for (uint32_t seed = 0; seed < 20; ++seed) {
         std::mt19937 rng(seed);
@@ -180,7 +182,7 @@ TEST(Sim3OptimizationTest, RecoversPerturbedSim3) {
 // with a true scale of 1 the rotation and translation are recovered.
 TEST(Sim3OptimizationTest, FixScaleKeepsScale) {
     const auto model = TumViModel();
-    const Camera camera = TumViCamera(&model);
+    const Camera camera = TumViCamera(model);
     for (uint32_t seed = 0; seed < 10; ++seed) {
         std::mt19937 rng(seed);
         const Scene metric = MakeScene(camera, camera, RandomSim3(rng, 1.0), 60, 0.0, rng);
@@ -205,7 +207,7 @@ TEST(Sim3OptimizationTest, FixScaleKeepsScale) {
 // and 0.02 degrees over the range).
 TEST(Sim3OptimizationTest, RejectsOutliers) {
     const auto model = TumViModel();
-    const Camera camera1 = TumViCamera(&model);
+    const Camera camera1 = TumViCamera(model);
     const Camera camera2 = PinholeCamera();
     size_t true_inliers = 0;
     size_t kept_inliers = 0;

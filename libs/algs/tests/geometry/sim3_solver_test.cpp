@@ -3,8 +3,10 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <random>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -24,17 +26,17 @@ constexpr double kDeg = M_PI / 180.0;
 constexpr double kNoisePx = M_SQRT1_2;
 
 // TUM-VI cam0 (equidistant fisheye, 1024x1024).
-distortion_models::KannalaBrandtDistortionModel TumViModel() {
-    return distortion_models::KannalaBrandtDistortionModel(0.010171079892421483, -0.010816440029919381,
+distortion_models::TDistortionModelPtr TumViModel() {
+    return std::make_shared<const distortion_models::KannalaBrandtDistortionModel>(0.010171079892421483, -0.010816440029919381,
                                                            0.005942781769412756, -0.001662284667857643);
 }
 
-Camera TumViCamera(const distortion_models::DistortionModel* model) {
+Camera TumViCamera(distortion_models::TDistortionModelPtr model) {
     Camera camera;
     camera.K << 380.81042871360756, 0.0, 510.29465304840727,
                 0.0, 380.81194179427075, 514.3304630538506,
                 0.0, 0.0, 1.0;
-    camera.distortion = model;
+    camera.distortion = std::move(model);
     return camera;
 }
 
@@ -168,7 +170,7 @@ TEST(Sim3Test, HornRecoversNoiseFree) {
 // pixels and on points) even the true S_12 flags >= 40 of the 50 inliers in only 181/200.
 TEST(Sim3Test, RansacHalfOutliers) {
     const auto model = TumViModel();
-    const Camera camera = TumViCamera(&model);
+    const Camera camera = TumViCamera(model);
     constexpr uint64_t kScenes = 200;
     size_t mask_ok = 0;
     size_t accurate = 0;
@@ -222,7 +224,7 @@ TEST(Sim3Test, FixScaleKeepsUnitScale) {
         EXPECT_LT((S->R - truth.R).norm(), 1e-9);  // the rotation does not depend on the scale
     }
     const auto model = TumViModel();
-    const Camera camera = TumViCamera(&model);
+    const Camera camera = TumViCamera(model);
     for (uint64_t seed = 0; seed < 50; ++seed) {
         std::mt19937 rng(static_cast<std::mt19937::result_type>(seed));
         Sim3Scene scene = RandomSim3Scene(rng, camera, 100, 1.0, kNoisePx);
@@ -246,7 +248,7 @@ void ExpectCleanFailure(const Sim3RansacResult& result) {
 // Every data-dependent case runs over seeds 0..49 (not hand-picked).
 TEST(Sim3Test, DegenerateFailsCleanly) {
     const auto model = TumViModel();
-    const Camera camera = TumViCamera(&model);
+    const Camera camera = TumViCamera(model);
 
     {  // Fewer than 3 pairs, and mismatched sizes.
         std::mt19937 rng(0);

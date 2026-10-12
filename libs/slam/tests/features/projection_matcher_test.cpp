@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <numbers>
 #include <optional>
 #include <random>
@@ -80,8 +81,8 @@ geometry::TMatrix33F TumViIntrinsics() {
     return K;
 }
 
-geometry::distortion_models::KannalaBrandtDistortionModel TumViModel() {
-    return geometry::distortion_models::KannalaBrandtDistortionModel(
+geometry::distortion_models::TDistortionModelPtr TumViModel() {
+    return std::make_shared<const geometry::distortion_models::KannalaBrandtDistortionModel>(
         0.010171079892421483, -0.010816440029919381, 0.005942781769412756, -0.001662284667857643);
 }
 
@@ -91,7 +92,7 @@ Measurement MakeMeasurement(std::vector<Feature> features,
                             const std::vector<geometry::TPoint2DF>& stretch = {{0.0, 0.0},
                                                                                {640.0, 480.0}},
                             const geometry::TMatrix33F& K = Intrinsics(),
-                            const geometry::distortion_models::DistortionModel* distortion = nullptr) {
+                            const geometry::distortion_models::TDistortionModelPtr& distortion = nullptr) {
     int seed = 5000;
     for (const geometry::TPoint2DF& pixel : stretch) {
         features.push_back({pixel, MakeDescriptor(seed++), 0, 0.0});
@@ -520,7 +521,7 @@ TEST(ProjectionMatcherTest, FisheyePeripheralPointsMatch) {
     // from the true projection: inside the 2.5 px window in raw pixels, but
     // the undistortion magnifies the offset beyond it.
     const auto model = TumViModel();
-    const geometry::Camera camera{TumViIntrinsics(), &model};
+    const geometry::Camera camera{TumViIntrinsics(), model};
     constexpr double kDeg = std::numbers::pi / 180.0;
     constexpr int kNumPoints = 8;
     TReplica replica;
@@ -547,7 +548,7 @@ TEST(ProjectionMatcherTest, FisheyePeripheralPointsMatch) {
     const std::vector<geometry::TPoint2DF> stretch = {
         camera.Project({sin84, 0.0, cos84}), camera.Project({-sin84, 0.0, cos84}),
         camera.Project({0.0, sin84, cos84}), camera.Project({0.0, -sin84, cos84})};
-    const Measurement current = MakeMeasurement(features, stretch, TumViIntrinsics(), &model);
+    const Measurement current = MakeMeasurement(features, stretch, TumViIntrinsics(), model);
 
     // Scene check: in undistorted px every keypoint is outside the 2.5 px window.
     constexpr double kWindow = 2.5;  // th = 1, cos > 0.998, level 0; radius_px below

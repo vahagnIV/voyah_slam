@@ -6,8 +6,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <random>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -24,17 +26,17 @@ namespace {
 constexpr double kDeg = M_PI / 180.0;
 
 // TUM-VI cam0 (equidistant fisheye, 1024x1024).
-distortion_models::KannalaBrandtDistortionModel TumViModel() {
-    return distortion_models::KannalaBrandtDistortionModel(0.010171079892421483, -0.010816440029919381,
+distortion_models::TDistortionModelPtr TumViModel() {
+    return std::make_shared<const distortion_models::KannalaBrandtDistortionModel>(0.010171079892421483, -0.010816440029919381,
                                                            0.005942781769412756, -0.001662284667857643);
 }
 
-Camera TumViCamera(const distortion_models::DistortionModel* model) {
+Camera TumViCamera(distortion_models::TDistortionModelPtr model) {
     Camera camera;
     camera.K << 380.81042871360756, 0.0, 510.29465304840727,
                 0.0, 380.81194179427075, 514.3304630538506,
                 0.0, 0.0, 1.0;
-    camera.distortion = model;
+    camera.distortion = std::move(model);
     return camera;
 }
 
@@ -146,7 +148,7 @@ TEST(PnpTest, P3PAllSolutionsReproject) {
 // the adaptive stop at the first all-inlier hypothesis, whatever its sample's conditioning.
 TEST(PnpTest, RansacFisheyeNoiseFree) {
     const auto model = TumViModel();
-    const Camera camera = TumViCamera(&model);
+    const Camera camera = TumViCamera(model);
     for (uint64_t seed = 0; seed < 50; ++seed) {
         std::mt19937 rng(static_cast<std::mt19937::result_type>(seed));
         const PnpScene scene = RandomPnpScene(rng, camera, 100, 80.0 * kDeg, 0.0);
@@ -167,7 +169,7 @@ TEST(PnpTest, RansacFisheyeNoiseFree) {
 // within 1 cm / 0.5°.
 TEST(PnpTest, RansacHalfOutliers) {
     const auto model = TumViModel();
-    const Camera camera = TumViCamera(&model);
+    const Camera camera = TumViCamera(model);
     constexpr uint64_t kScenes = 200;
     size_t mask_ok = 0;
     size_t refined_ok = 0;
@@ -211,7 +213,7 @@ void ExpectCleanFailure(const PnpResult& result) {
 
 TEST(PnpTest, DegenerateInputFailsCleanly) {
     const auto model = TumViModel();
-    const Camera camera = TumViCamera(&model);
+    const Camera camera = TumViCamera(model);
     std::mt19937 rng(5);
 
     // Seed 5 is representative: the size checks do not depend on the data, and in a 300-seed
