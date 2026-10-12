@@ -83,6 +83,10 @@ struct MapperOptions {
     features::FuseOptions fuse;          // the fusion match gate
     LoopCorrectionOptions loop;          // LoopDetected
     AtlasOptions atlas;                  // lost maps kept, merged
+    // Initial size of the MapTransaction pool. It grows (logged) when an
+    // observer falls this many transactions behind; a MapTransaction is never
+    // dropped. Raise it to pre-allocate for a known backlog.
+    size_t transaction_pool_size = 256;
 };
 
 // What the local BA of the last created Frame did (spec section 5).
@@ -216,6 +220,11 @@ public:
     // drained batch.
     [[nodiscard]] size_t backlog_skipped() const {
         return backlog_skipped_.load(std::memory_order_acquire);
+    }
+    // MapTransactions constructed beyond MapperOptions::transaction_pool_size
+    // because an observer fell that far behind. Any thread.
+    [[nodiscard]] uint64_t transaction_pool_overflow() const {
+        return transaction_pool_.num_overflow_created();
     }
     // FrameTracked events of the current map skipped, in total, because they
     // were tracked before a loop correction (an older map epoch).
@@ -757,7 +766,7 @@ private:
     MapInitializer<TFeatureExtractor> initializer_;
 
     memory::ObjectPool<events::MapTransaction<TFeatureExtractor>, memory::ThreadSafePolicy>
-        transaction_pool_{256};
+        transaction_pool_{options_.transaction_pool_size, "MapTransaction"};
 
     CLASS_LOGGER(Mapper);
 
