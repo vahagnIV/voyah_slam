@@ -37,6 +37,11 @@ RigidTransformation FromSE3Quat(const g2o::SE3Quat& pose) {
     return RigidTransformation(pose.rotation().toRotationMatrix(), pose.translation());
 }
 
+/// Edges refer to their cameras, never copy them: a Camera holds a shared_ptr to its distortion
+/// model, so a copy per edge would cost two contended atomic operations. The cameras live in the
+/// caller's const BaProblem (keyframe_cameras, keyframe_stereo): not modified, so not reallocated,
+/// while the optimizer and its edges (locals of BundleAdjust) exist.
+
 /// Raw-pixel reprojection error of a world point (vertex 0) seen by a T_cw pose (vertex 1)
 /// through the keyframe's camera: e = camera.Project(R X + t) - measurement.
 class EdgePixelProjection
@@ -67,7 +72,7 @@ private:
         return FromSE3Quat(vertexXn<1>()->estimate());
     }
 
-    Camera camera_;
+    const Camera& camera_;
 };
 
 /// Stereo error of a world point (vertex 0) seen by a T_cw pose (vertex 1): the rows of
@@ -103,8 +108,8 @@ private:
         return FromSE3Quat(vertexXn<1>()->estimate());
     }
 
-    Camera left_;
-    Camera right_;
+    const Camera& left_;
+    const Camera& right_;
     RigidTransformation T_rl_;
 };
 

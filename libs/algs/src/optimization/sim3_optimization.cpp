@@ -41,6 +41,10 @@ Sim3 FromG2o(const g2o::Sim3& S) {
 
 bool IsFinite(const Sim3& S) { return std::isfinite(S.scale) && S.R.allFinite() && S.t.allFinite(); }
 
+/// Edges refer to their cameras, never copy them: a Camera holds a shared_ptr to its distortion
+/// model, so a copy per edge would cost two contended atomic operations. The cameras are the const
+/// arguments of OptimizeSim3 (camera1, camera2), which outlive the optimizer and its edges.
+
 /// Frame-1 raw-pixel error of the fixed camera-2 point X2 (ORB-SLAM3 EdgeSim3ProjectXYZ):
 /// e = camera1.Project(S_12 X2) - pixel1.
 class EdgeSim3Pixel : public g2o::BaseUnaryEdge<2, Eigen::Vector2d, g2o::VertexSim3Expmap> {
@@ -78,7 +82,7 @@ private:
     [[nodiscard]] Sim3 S12() const { return FromG2o(vertexXn<0>()->estimate()); }
 
     TPoint3DF X2_;
-    Camera camera1_;
+    const Camera& camera1_;
 };
 
 /// Frame-2 raw-pixel error of the fixed camera-1 point X1 (ORB-SLAM3
@@ -120,7 +124,7 @@ private:
     [[nodiscard]] Sim3 S12() const { return FromG2o(vertexXn<0>()->estimate()); }
 
     TPoint3DF X1_;
-    Camera camera2_;
+    const Camera& camera2_;
 };
 
 bool IsValid(const Camera& camera1, const Camera& camera2, const std::vector<Sim3Match>& matches,

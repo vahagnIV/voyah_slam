@@ -37,6 +37,10 @@ bool IsFinite(const RigidTransformation& pose) {
     return pose.rotation().allFinite() && pose.translation().allFinite();
 }
 
+/// Edges refer to their cameras, never copy them: a Camera holds a shared_ptr to its distortion
+/// model, so a copy per edge would cost two contended atomic operations. The cameras are the const
+/// arguments of OptimizePose (left, *stereo), which outlive the optimizer and its edges.
+
 /// Left-camera raw-pixel reprojection error of a fixed world point seen by the T_cw pose
 /// vertex: e = left.Project(T_cw X) - left measurement.
 class EdgeMonoPose : public g2o::BaseUnaryEdge<2, Eigen::Vector2d, g2o::VertexSE3Expmap> {
@@ -66,7 +70,7 @@ private:
     }
 
     TPoint3DF point_;
-    Camera camera_;
+    const Camera& camera_;
 };
 
 /// Stereo error of a fixed world point: the left rows of EdgeMonoPose stacked over the
@@ -110,8 +114,8 @@ private:
     }
 
     TPoint3DF point_;
-    Camera left_;
-    Camera right_;
+    const Camera& left_;
+    const Camera& right_;
     RigidTransformation T_rl_;
 };
 

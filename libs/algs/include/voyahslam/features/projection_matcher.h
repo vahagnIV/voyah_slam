@@ -49,6 +49,9 @@ namespace detail {
 
 // Raw pixel of camera point Xc, or nullopt when Xc is behind the camera,
 // beyond the ray-angle limit or outside the current raw points' bounding box.
+// Refers to `camera` (no shared_ptr copy of its distortion model): every gate
+// is a local of a search (here and in FuseMatches) whose measurement argument
+// owns the camera, so the camera outlives it.
 class ProjectionGate {
 public:
     ProjectionGate(const geometry::Camera& camera, const geometry::TPoints2DF& points,
@@ -63,6 +66,9 @@ public:
         }
     }
 
+    // A temporary camera would dangle.
+    ProjectionGate(geometry::Camera&&, const geometry::TPoints2DF&, double) = delete;
+
     [[nodiscard]] std::optional<geometry::TPoint2DF> Project(const geometry::TPoint3DF& Xc) const {
         if (Xc.z() <= 0.0 || Xc.z() < min_cos_ray_ * Xc.norm()) {
             return std::nullopt;
@@ -75,7 +81,7 @@ public:
     }
 
 private:
-    geometry::Camera camera_;
+    const geometry::Camera& camera_;
     double min_cos_ray_;
     geometry::TPoint2DF min_;
     geometry::TPoint2DF max_;
