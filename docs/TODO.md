@@ -210,6 +210,18 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
       decide whether/when to compact (a compaction would need an id remap
       event for the replicas).
 - [ ] Size event pools per event type. (OQ 14)
+- [ ] **Lossy delivery for display-only observers** (deferred 2026-10-12,
+      ownership audit item 4). Since 0.3.0 a stuck async observer makes the
+      Tracker's and Mapper's pools grow (no abort, nothing dropped), so a
+      viewer stalled for minutes holds memory proportional to the backlog. Give
+      observers a delivery mode, e.g. `AddObserver(o, Delivery::Lossy)` with a
+      bounded queue that drops (and releases) the oldest events, for consumers
+      that only display. Never for `MapTransaction` replicas or the Mapper's
+      `FrameTracked` input.
+- [x] ~~Ownership audit item 4: pool exhaustion aborts the process~~ (done
+      2026-10-12, 0.3.0): `ObjectPool::Create()` grows on overflow (logged,
+      counted); Tracker / Mapper pool sizes are options. See DESIGN §6.1 and
+      the decisions log.
 - [ ] Immutable shared measurement in events (`shared_ptr<const>`):
       `FrameTracked`, `MapTransaction` and `InitializationMeasurement` copy
       the measurement (about 80 KB per frame).
@@ -314,10 +326,6 @@ Spec `docs/superpowers/specs/2026-10-06-keyframes-design.md`; DESIGN
   - Comments at `tracking/local_map.h` (`ReferenceFrame`) and `tracker.h`
     say the reference Frame is chosen among K1 / local Frames; Ruling L
     chooses among all observing Frames. Fix the comments.
-  - `ObjectPool::Create()` aborts when the 256 `FrameTracked` slots are
-    exhausted; a Mapper blocked in long `CreateFrame` calls (30 mono
-    neighbours, Debug) could reach it. Bound in-flight events or degrade
-    (drop) instead of aborting.
   - No test that the replica and the Mapper agree after a map switch
     (removing either `covisibility_.Clear()` fails nothing).
   - The zero-motion fallback re-centres on the last pose with a 28 px window,

@@ -329,7 +329,7 @@ Detailed spec: `docs/superpowers/specs/2026-09-30-core-slam-data-structures-desi
 
 | Component | Header | Summary |
 |---|---|---|
-| `ObjectPool<T, SyncPolicy>` | `memory/object_pool.h` | Pre-allocated slab, intrusive free-list, asserts on exhaustion. |
+| `ObjectPool<T, SyncPolicy>` | `memory/object_pool.h` | Pre-allocated slab, index free-list; `Create()` grows the pool (doubling, logged) when exhausted, `TryCreate()` returns null. |
 | `Recyclable<T, SyncPolicy>` | `memory/recyclable.h` | CRTP atomic ref count (acq_rel); returns object to its pool at 0. `SetRefCount(n)` for fan-out. |
 | `ThreadSafePolicy` / `NoSyncPolicy` | `memory/sync_policy.h` | Pool free-list mode: lock-free CAS / single-thread. |
 | `ColumnBuffer<TScalar, Rows>` | `memory/column_buffer.h` | Grow-only `Rows × N` Eigen buffer; `Resize(n)` allocates only beyond capacity. |
@@ -465,16 +465,41 @@ allocations per event).
 
 **The building blocks (`libs/common/include/voyahslam/memory/`):**
 
-- `ObjectPool<T, SyncPolicy>` — one contiguous slab of `max_count` slots
-  allocated once in the constructor. Free slots form a stack of slot indices
-  whose links live in a separate `atomic<uint32_t>` array, so slot memory is
-  never read by the allocator and is not touched (or committed by the OS) until
-  first use. `Create()` pops a slot (asserts when exhausted); `TryCreate()`
-  returns `nullptr` instead. The first time a slot is used its `T` is
-  default-constructed; on every later reuse the pool resets the ref count to 1
-  and calls `T::Reset()` if `T` defines one. `Recycle(T*)` just pushes the slot
-  back — **the object is not destroyed**, so vectors and Eigen buffers inside it
-  keep their allocations. Objects are destroyed only in `~ObjectPool`. All O(1).
+- `ObjectPool<T, SyncPolicy>` — slots in chunks; chunk 0 is one contiguous
+  slab of `initial_capacity` slots allocated in the constructor. Free slots form
+  a stack of global slot indices whose links live in per-chunk
+  `atomic<uint32_t>` arrays, so slot memory is never read by the allocator and
+  is not touched (or committed by the OS) until first use. `TryCreate()` pops a
+  slot or returns `nullptr`; it **never grows**. `Create()` **never fails**
+  (since 2026-10-12, version 0.3.0; it used to `abort()`): when no slot is free
+  it adds chunk k ≥ 1 of `initial << (k - 1)` slots (doubling the capacity),
+  pushes them onto the free list as one chain and pops again. Each growth logs
+  one warning (logger `ObjectPool`, naming the pool, e.g. `FrameTracked`), so a
+  backlog of n overflow objects logs O(log n) lines, never one per event.
+  `num_overflow_created()` counts objects constructed beyond the initial
+  capacity; `capacity()` is the current slot count. The first time a slot is
+  used its `T` is default-constructed; on every later reuse the pool resets the
+  ref count to 1 and calls `T::Reset()` if `T` defines one. `Recycle(T*)` finds
+  the slot's chunk (a scan of at most 33 chunk pointers, chunk 0 first) and
+  pushes the slot back — **the object is not destroyed**, so vectors and Eigen
+  buffers inside it keep their allocations. Objects (overflow ones included) are
+  destroyed only in `~ObjectPool`. O(1) except the rare growth.
+  - **Overflow objects are kept, not freed.** A recycled overflow object goes
+    back on the free list like any other, so the pool keeps its peak size and a
+    later backlog of the same height allocates nothing (steady state stays
+    allocation-free after a spike). Freeing them on recycle would need a
+    per-object "overflow" mark and a heap free on the consumer's thread, and a
+    lock-free stack of individually allocated nodes reintroduces ABA on node
+    reuse; chunked indices keep the one tagged-index Treiber stack. The cost is
+    memory held after a spike, at most twice the peak backlog.
+  - **Growth is lock-free.** A chunk is published by a CAS of its (null)
+    pointer (acq_rel; its link array is written before), then its slots are
+    pushed with the usual release CAS on the head, so a thread that pops one of
+    them (acquire) sees the chunk. A creator that loses the CAS frees its chunk
+    and retries; under concurrent creators the pool may grow one chunk more
+    than strictly needed. Chunks are freed only in the destructor, so the stale
+    index a losing pop reads is always a valid slot. After 2^32 - 1 slot
+    indices `Create()` still aborts (a leak, not a backlog).
 - `ColumnBuffer<TScalar, Rows>` — grow-only `Rows × N` Eigen buffer used for
   event payloads. `Resize(n)` sets the visible column count and reallocates
   (geometrically, preserving data) only when `n` exceeds capacity; `matrix()`
@@ -528,8 +553,12 @@ pointer returned by `GetNextEvent()` is a **borrow**, valid until the next
    concurrently by all N consumers, so moving data *out* of an event (e.g.
    `std::move(e->positions)`) is a data race.
 3. Don't sit on events: until every consumer has acknowledged, the slot is not
-   back in the pool. A stalled consumer drains the pool and the producer's
-   next `Create()` asserts. Pool sizes must cover the worst-case backlog.
+   back in the pool. A stalled consumer drains the pool; the producer's next
+   `Create()` then grows it (logged, counted; since 0.3.0, before that it
+   aborted), and a `TryCreate()` producer drops the event. The Tracker's
+   (`TrackerOptions::event_pool_size`) and the Mapper's
+   (`MapperOptions::transaction_pool_size`) pool sizes default to 256; raise
+   them to pre-allocate for a known backlog.
 4. A `Listener` is move-only; moving it transfers the borrowed event, so it is
    acknowledged exactly once.
 
@@ -692,8 +721,9 @@ Specs: `docs/superpowers/specs/2026-10-04-pangolin-viewer-design.md`
   the producers' pools. Construct the viewer before other threads start.
 - **Ordering:** connect with `AddObserver(viewer.inbox())` before the producers
   start; stop `Slam` before the viewer.
-- Pools feeding the viewer must cover the backlog published between two ticks
-  (about 33 ms at 30 fps) - relevant to OQ 14.
+- Pools feeding the viewer should cover the backlog published between two
+  ticks (about 33 ms at 30 fps) - relevant to OQ 14; a longer stall grows the
+  Tracker's and Mapper's pools (logged) instead of aborting.
 - **Pangolin is a private dependency:** linked `PRIVATE` via `pango_display`
   (installed in `/usr/local`, 0.9); no Pangolin types in public headers
   (principle 8).
@@ -2763,7 +2793,7 @@ libs/
 cmake/VoyahTests.cmake      voyah_add_test_binary, voyah_optimize_target, check / check_all
 cmake/voyahslamConfig.cmake.in  installed CMake package config (find_dependency)
 vizualization/              voyahviz (+ voyahviz_tests)
-conanfile.py                package recipe voyahslam/0.2.0 (also the dev installs)
+conanfile.py                package recipe voyahslam/0.3.0 (also the dev installs)
 test_package/               conan create's consumer test (links voyahslam::voyahslam)
 profiles/                   linux-gcc13 (default + gnu20), android-arm64,
                             settings_user.yml (clang 21)
@@ -2792,7 +2822,7 @@ profiles/                   linux-gcc13 (default + gnu20), android-arm64,
   `transitive_headers` (spdlog also `transitive_libs`); g2o and stb are not
   (g2o's libraries still reach static consumers' link lines, never its
   include paths). `shared=True` also makes spdlog and fmt shared; shared
-  libraries get `VERSION` / `SOVERSION` (0.2) and an `$ORIGIN` install
+  libraries get `VERSION` / `SOVERSION` (0.3) and an `$ORIGIN` install
   runpath (not on Apple).
 - `validate()` requires `compiler.cppstd` >= 20 (public headers are C++20;
   `profiles/linux-gcc13` = default + `gnu20` + Release, used by the dev
@@ -3100,6 +3130,8 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-11 | **Conan package `voyahslam/0.1.0` (`conanfile.py`, replaces `conanfile.txt`), build options and install/export.** `VOYAHSLAM_BUILD_TESTS` / `VOYAHSLAM_BUILD_EXAMPLES` (OFF by default; the dev installs pass `-o with_tests=True -o with_examples=True`); the four libraries and the umbrella are installed and exported as `voyahslam::*`; Conan components with matching target names, the package target being the umbrella; PUBLIC deps (Eigen, spdlog/fmt, concurrentqueue) propagate headers, PRIVATE g2o and stb do not (g2o's libraries reach static consumers at link time only); `validate()` requires C++20, so the dev installs use `profiles/linux-gcc13` (default + `gnu20`), and rejects `shared=True` with `c++_static` and on Windows; `shared=True` makes spdlog/fmt shared. Android: `profiles/android-arm64`, API 24, clang 21 (NDK r30; `profiles/settings_user.yml` adds it to Conan 2.18's settings), **`compiler.libcxx=c++_static` (user decision)**: the app has a single JNI `.so` that links the static voyahslam libraries and is built with `ANDROID_STL=c++_static`. NDK rule: `c++_static` is safe only while the app has exactly one shared library containing C++; if more are ever added, everything must switch to `c++_shared`. | The library is consumed from an Android app (Kotlin + JNI, Gradle/CMake via the NDK) and from desktop. A package build must not need the dev tools (GTest, OpenCV, Pangolin, yaml-cpp). One C++ `.so` with a static STL is the smallest, simplest APK; a second C++ `.so` with its own static libc++ would split heaps, globals, exceptions and RTTI. |
 | 2026-10-12 | **Distortion models are shared, immutable: `TDistortionModelPtr = std::shared_ptr<const DistortionModel>`** (user decision; `distortion_model.h`) in `geometry::Camera::distortion`, `StereoRig::distortion_left` / `distortion_right`, `MonocularMeasurement`'s constructor (hence `BinocularMeasurement`) and the example `EurocDatasetReader` (`CameraCalibration::distortion`; its `unique_ptr` store is gone). Null still means pinhole. Functions that only use a model during a call keep `const DistortionModel*` / `&` (`DropFeaturesBeyondMaxRayAngle`, `voyahviz::ProjectToImage` / `DrawMeasurement`). Hot paths do not copy a `Camera`: the g2o edges of `BundleAdjust`, `OptimizePose` and `OptimizeSim3` hold `const Camera&` into the call's const arguments (`BaProblem::keyframe_cameras` / `keyframe_stereo` is not modified, hence not reallocated, while the edges exist), and `detail::ProjectionGate` holds `const Camera&` (always a local of a search whose measurement argument owns the camera; its rvalue constructor is deleted). Measured (Release, scratch benchmark, TUM-VI KB model set; medians of 30 BA / 300 pose runs, 3 interleaved rounds): local BA (10 keyframes, 1500 points, 7500 observations, half stereo) 44.8 / 45.6 / 45.5 ms raw pointer, 44.6 / 43.9 / 44.9 ms shared_ptr with reference edges (shared_ptr with copying edges: 44.2 / 45.0 / 48.4); pose optimization (400 observations, half stereo) 2.76 / 2.77 ms vs 2.78 / 2.76 / 2.80 ms; 4 threads concurrently 0.96-1.16 vs 0.95-1.17 ms per call: all within noise. Remaining copies on the Tracker's path per frame: the app's measurement construction (mono 1; stereo 4: the rig copy and each side's camera), and in stereo one per `OptimizeMatchedPose` call (`StereoCameras{right().camera(), T_rl}`, 2 per normally tracked frame); mono 0. | Raw pointers that "must outlive every Camera copy" were unmanageable for a library consumer (e.g. an Android JNI app) whose objects die in their own order: cameras are copied into measurements, events, every thread's replica, BA problems and edges. Shared ownership ends that; the per-copy atomic cost is kept off inner loops by references. |
 | 2026-10-12 | **Package version 0.2.0** (`conanfile.py`, `project()`; SOVERSION 0.2): the shared distortion models change the public `Camera`, `StereoRig` and measurement constructors, an API break while the version is 0.x. 0.1.0 stays in the local cache. | Consumers (the Android app) pin the version; an API change gets a new minor version. |
+| 2026-10-12 | **The object pool grows on overflow; a `MapTransaction` must never be dropped; lossy delivery for display-only observers is deferred** (ownership audit item 4). `ObjectPool::Create()` no longer aborts when every slot is in use: it adds a chunk doubling the capacity, logs one warning per growth and counts `num_overflow_created()`; recycled overflow objects stay on the free list (the pool keeps its peak size). `TryCreate()` keeps its meaning (null, never grows): the LoopCloser and GlobalBA still drop on purpose. The Tracker's three event pools and the Mapper's `MapTransaction` pool are sized by `TrackerOptions::event_pool_size` / `MapperOptions::transaction_pool_size` (default 256); `Tracker::event_pool_overflow()` / `Mapper::transaction_pool_overflow()` expose the counts. | An async observer 256 events behind (a stuck Java listener, a breakpoint, a rarely polled observer) aborted the app. Dropping is wrong for `MapTransaction` (every replica must apply every transaction) and for `FrameTracked` (the Mapper's input); growing costs memory only while a consumer is behind. Keeping overflow objects (not freeing them) keeps the lock-free index free list and steady-state allocation at zero. A per-observer lossy mode for display-only consumers is in TODO. |
+| 2026-10-12 | **Package version 0.3.0** (`conanfile.py`, `project()`; SOVERSION 0.3): `ObjectPool`'s constructor gains a name, its `Create()` semantics change (grows instead of aborting), and `TrackerOptions` / `MapperOptions` gain pool-size fields. | A public behaviour and API change gets a new minor version while 0.x. |
 
 ## 9. Open Questions
 
@@ -3216,9 +3248,11 @@ branch → review → merge to `master`. Update this document at the end.
 13. ~~Ownership in `Notify()` depends on wiring~~ — resolved 2026-10-02
     (`Notify()` always takes ownership).
 14. **Pool sizing.** Slot memory is now only committed on first use, but the
-    index array (4 B/slot) is written up front, and the default `max_count` is
-    still 1,000,000. Pools should be sized per event type from the worst-case
-    backlog (consumer rule 3 in §6.1).
+    index array (4 B/slot) is written up front, and the default
+    `initial_capacity` is still 1,000,000. Pools should be sized per event type
+    from the worst-case backlog (consumer rule 3 in §6.1). Since 0.3.0 an
+    undersized `Create()` pool grows instead of aborting, so sizing is a
+    memory / first-spike-latency question, not a crash.
 25. **Event pool lifetime.** Components own the pools of the events they
     publish, but consumers (e.g. the `MapViewer` inbox) can still hold those
     events. The apps declare the viewer before `slam`, so on exception unwinding
