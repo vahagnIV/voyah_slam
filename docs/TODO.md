@@ -185,6 +185,11 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
       coefficients (k1 < 0, small k2): Distort(tan 85°) can land anywhere, so
       the test may keep or drop the wrong features. Harmless for EuRoC (no
       feature is near 85°); a per-model "valid region" would be cleaner.
+- [ ] `optimization::StereoCameras` holds the right `Camera` by value, so
+      `OptimizeMatchedPose` copies it (one shared_ptr increment / decrement of
+      the distortion model) per stereo pose optimization, 2 per tracked frame.
+      Unmeasurable today (2026-10-12 decisions row); if it ever shows, pass the
+      right camera by reference.
 
 ## Stereo (2026-10-04)
 
@@ -889,6 +894,13 @@ Quality" (smoke table there).
       recycles into freed pools. The apps now guard against it (a guard after
       `slam` runs `slam.Stop(); viewer.Stop()` on every exit path), but the
       library still needs pools that outlive all producers and consumers.
+- [ ] **Subscriber lifetime (raw pointers, no disconnect).**
+      `Observable::ConnectAsync` stores `AsyncObserver*` and `ConnectSync` a
+      raw `void* ctx`, with no way to disconnect; `AsyncObserver::SetWakeSignal`
+      stores a raw `WakeSignal*`. A subscriber (e.g. an app's viewer or a JNI
+      bridge) that dies before its publisher leaves `Notify` pushing into freed
+      memory. Same class of hazard as the distortion-model pointers removed on
+      2026-10-12: a disconnect (RAII connection handle) or shared ownership.
 
 ## Review follow-ups (tracking states, 2026-10-03)
 
