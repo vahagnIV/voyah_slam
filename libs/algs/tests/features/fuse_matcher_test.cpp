@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <memory>
 #include <numbers>
 #include <optional>
 #include <random>
@@ -56,14 +57,14 @@ geometry::TMatrix33F FisheyeK() {
     return K;
 }
 
-const geometry::distortion_models::KannalaBrandtDistortionModel kFisheyeModel(
+const geometry::distortion_models::TDistortionModelPtr kFisheyeModel = std::make_shared<const geometry::distortion_models::KannalaBrandtDistortionModel>(
     0.010171079892421483, -0.010816440029919381, 0.005942781769412756, -0.001662284667857643);
 
 enum class Lens { kPinhole, kFisheye };
 
 geometry::Camera MakeCamera(Lens lens) {
     return lens == Lens::kPinhole ? geometry::Camera{PinholeK(), nullptr}
-                                  : geometry::Camera{FisheyeK(), &kFisheyeModel};
+                                  : geometry::Camera{FisheyeK(), kFisheyeModel};
 }
 
 // Camera-frame point at ray angle `theta_deg` off the optical axis, azimuth

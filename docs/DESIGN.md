@@ -390,17 +390,20 @@ Rules:
   `KeyFrameCreated`, `MapCreated`, `MapPointsUpdated` / `MapPointsRemoved` and
   `KeyFramePoseUpdated`; read them as the corresponding `MapTransaction`
   parts (added Frame, `new_map`, updated / removed points, updated poses).
-- **Pointer rule:** an event may point only at data that never changes and lives
-  for the whole run (calibration and configuration, e.g. a `DistortionModel` or
-  `StereoRig`). Measurements and every `geometry::Camera` copy hold the
-  app-owned `DistortionModel` pointer, so the model must outlive every
-  measurement, event and `Camera` copy (the app's calibration objects live for
-  the whole run). A serializer turns such references into values (inline, or sent
-  once and referenced). Everything mutable or short-lived travels by value —
-  e.g. a pointer to a reused Tracker buffer is never allowed. The one shared
-  payload (since 2026-10-10) is a Frame's measurement: immutable after the
-  Tracker creates it, it travels as `shared_ptr<const ...>` (owning, so it lives
-  as long as any holder), and a serializer sends it by value.
+- **Pointer rule:** an event may point only at data that never changes. Raw
+  pointers are allowed only to data that lives for the whole run
+  (configuration); immutable data that may die earlier is shared-owned. A
+  serializer turns such references into values (inline, or sent once and
+  referenced). Everything mutable or short-lived travels by value — e.g. a
+  pointer to a reused Tracker buffer is never allowed. Two payloads are shared,
+  immutable and owned by `shared_ptr<const ...>`, so they live as long as any
+  holder and a serializer sends them by value:
+  - a Frame's measurement (since 2026-10-10): immutable after the Tracker
+    creates it;
+  - a `DistortionModel` (since 2026-10-12): `TDistortionModelPtr` in every
+    `geometry::Camera`, `StereoRig` and measurement, so the app need not keep
+    its calibration objects alive. Code that only uses a model during a call
+    takes `const DistortionModel*` / `&`.
 - **Measurement variant (resolves OQ 24).** `features/measurement.h` defines
   `TMonocularMeasurement<FE>`, `TBinocularMeasurement<FE>` and
   `TMeasurement<FE> = std::variant<mono, binocular>`, so mono and stereo
@@ -806,7 +809,7 @@ every reprojection residual and gate after them is in raw pixels.
 
 | Component | Header | Summary |
 |---|---|---|
-| `Camera` | `geometry/camera.h` | K + `const DistortionModel*` (null = pinhole); `Project` (camera point → raw pixel), `ProjectJacobian` (2×3), `Unproject` (raw pixel → z = 1 ray). See "Camera Model and Raw-Pixel Residuals". |
+| `Camera` | `geometry/camera.h` | K + `TDistortionModelPtr` (`shared_ptr<const DistortionModel>`, null = pinhole); `Project` (camera point → raw pixel), `ProjectJacobian` (2×3), `Unproject` (raw pixel → z = 1 ray). See "Camera Model and Raw-Pixel Residuals". |
 | `DistortionModel` (+ Dummy, Kannala-Brandt, Brown-Conrady) | `geometry/distortion_models/*.h` | `Distort` / `Undistort` on normalized points, analytic `DistortJacobian`. Forwarding headers at `features/distortion_models/`. |
 | `RigidTransformation` | `geometry/rigid_transformation.h` | Value type, hidden representation (R, t now). `T_ab` maps frame b to frame a: `p_a = T_ab * p_b`, `T_ac = T_ab * T_bc`. `Inverse()`, `Transform()`, `ToMatrix34/44()`. |
 | `TwoViewCorrespondences` | `geometry/two_view_correspondences.h` | `x1`, `x2` (2xN normalized) + `sigma`. |
@@ -889,8 +892,12 @@ test work on undistorted normalized points (z = 1) as before.
 
 **`geometry::Camera`** (`geometry/camera.h`, approach A: a small value type,
 not camera-model classes and not free functions):
-- `K` plus `const distortion_models::DistortionModel* distortion` (null =
-  pinhole).
+- `K` plus `distortion_models::TDistortionModelPtr distortion`
+  (`std::shared_ptr<const DistortionModel>`, null = pinhole; shared by every
+  copy, since 2026-10-12). A copy costs one atomic increment and decrement
+  when a model is set, so hot loops take `const Camera&`: the g2o edges
+  (BA, pose and Sim3 optimization) and the projection matcher's
+  `ProjectionGate` refer to a camera owned by the call's arguments.
 - `Project(Xc)`: camera-frame point → raw pixel, `K · [Distort(Xc.xy / Xc.z); 1]`.
   Precondition `Xc.z() > 0`.
 - `ProjectJacobian(Xc)` (2×3): `K₂ₓ₂ · DistortJacobian(Xc.xy / Xc.z) ·
@@ -948,14 +955,14 @@ distortion. It only happens far outside the calibrated field of view (for
 EuRoC cam0 the whole 752×480 image inverts to 1e-10), so it is accepted;
 a per-point validity flag is a TODO.
 
-**Measurements keep both** the distortion model pointer and the raw keypoints:
+**Measurements keep both** the distortion model (shared) and the raw keypoints:
 `MonocularMeasurement::distorted_points()` are the keypoints as passed to the
 constructor (compacted with every other array when features beyond 85° are
 dropped), and `camera()` returns `{K, distortion_model}`. `points()`
 (undistorted pixels) and `normalized_points()` are unchanged.
 `BinocularMeasurement` uses `left().camera()`, `right().camera()` and
-`rig().T_rl`. The pointer rule (§6) covers the model: it must outlive every
-measurement, event and `Camera` copy.
+`rig().T_rl`. Each measurement shares ownership of its model (§6 pointer rule),
+so it may outlive the app's calibration objects.
 
 **The five consumers** (all in raw pixels):
 1. Projection matcher: projects with `current.camera().Project(Xc)`; the
@@ -2756,7 +2763,7 @@ libs/
 cmake/VoyahTests.cmake      voyah_add_test_binary, voyah_optimize_target, check / check_all
 cmake/voyahslamConfig.cmake.in  installed CMake package config (find_dependency)
 vizualization/              voyahviz (+ voyahviz_tests)
-conanfile.py                package recipe voyahslam/0.1.0 (also the dev installs)
+conanfile.py                package recipe voyahslam/0.2.0 (also the dev installs)
 test_package/               conan create's consumer test (links voyahslam::voyahslam)
 profiles/                   linux-gcc13 (default + gnu20), android-arm64,
                             settings_user.yml (clang 21)
@@ -2785,7 +2792,7 @@ profiles/                   linux-gcc13 (default + gnu20), android-arm64,
   `transitive_headers` (spdlog also `transitive_libs`); g2o and stb are not
   (g2o's libraries still reach static consumers' link lines, never its
   include paths). `shared=True` also makes spdlog and fmt shared; shared
-  libraries get `VERSION` / `SOVERSION` (0.1) and an `$ORIGIN` install
+  libraries get `VERSION` / `SOVERSION` (0.2) and an `$ORIGIN` install
   runpath (not on Apple).
 - `validate()` requires `compiler.cppstd` >= 20 (public headers are C++20;
   `profiles/linux-gcc13` = default + `gnu20` + Release, used by the dev
@@ -2977,7 +2984,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-05 | BoW-less fallback: a wide-window (x4) zero-motion projection search replaces `TrackReferenceKeyFrame`. | No vocabulary yet; relocalization / place recognition is sub-project 4. |
 | 2026-10-05 | Camera model, approach A: a `geometry::Camera{K, distortion}` value type (`Project`, `ProjectJacobian`, `Unproject`); not camera-model classes (approach B, TODO if ever needed) and not free functions. | Smallest change that gives every consumer one projection; ORB-SLAM3's `GeometricCamera` hierarchy is not needed for one lens model. |
 | 2026-10-05 | All five consumers (projection matcher, `OptimizePose`, `BundleAdjust`, stereo matcher gate, initialization matcher windows) compare **raw (distorted) pixels** with σ = `sigma_px · 1.2^level` px; χ² thresholds unchanged (5.991 / 9.488). Rays stay rays (two-view RANSAC, triangulation, the 85° test). Replaces the normalized-plane residual space of the BA row, (S) and the stereo gate (their schedules and thresholds stand). | Spikes on corridor1 (mono, 400 frames, tracked / re-initializations): baseline 32 / 7; KB window + σ 53 / 5; + local-map gate 20 108 / 5; angle-only allowance σ·1.5·(1 + r²) with window ×(1 + r²) 85 tracked, 99 with gate 20; uniform σ 3 effectively disables outlier rejection. One noise model for the library, as ORB-SLAM3. |
-| 2026-10-05 | Measurements keep both the distortion model pointer (`camera()`) and the raw keypoints (`distorted_points()`). The model is app-owned and must outlive every measurement, event and `Camera` copy (pointer rule, §6). | Consumers need raw pixels and the model; recomputing raw pixels from undistorted ones would lose precision and cost a `Distort` per use. |
+| 2026-10-05 | Measurements keep both the distortion model pointer (`camera()`) and the raw keypoints (`distorted_points()`). The model is app-owned and must outlive every measurement, event and `Camera` copy (pointer rule, §6; ownership superseded 2026-10-12). | Consumers need raw pixels and the model; recomputing raw pixels from undistorted ones would lose precision and cost a `Distort` per use. |
 | 2026-10-05 | `DistortionModel` (Dummy, Kannala-Brandt) moved from `features/distortion_models/` to `geometry/distortion_models/` (namespace `geometry::distortion_models`); forwarding headers (with a namespace alias) remain at the old path. | `geometry::Camera` needs the model and `geometry` must stay at the bottom of the dependency stack. |
 | 2026-10-05 | (U) `DistortJacobian` for Kannala-Brandt: J = (d/r)·I + (d′(θ)·θ′(r) − d/r)·p̂p̂ᵀ, θ′(r) = 1/(1 + r²), identity for r < 1e-8. | Analytic; verified against central finite differences (the spec draft had an extra 1/r). |
 | 2026-10-05 | (V) Pinhole invariance with the old normalized code holds exactly (1e-9) only for fx = fy. `OptimizePose`, `BundleAdjust` and the stereo gate now weight x and y separately in pixels, so χ² changes slightly on fx ≠ fy rigs (e.g. EuRoC). | The old code divided σ by one f; per-axis pixel weighting is the intended behaviour. |
@@ -3091,6 +3098,8 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-11 | **SIFT extractor removed** (user decision): header, source, tests, the `INSTANTIATE_CLASS` entry and every explicit instantiation; `Slam<SIFT>` in `SlamTest.TrackEnqueuesMonocularAndBinocularMeasurements` became `OrbSlam`. Supersedes the SIFT parts of the 2026-10-04 level / `max_distance` rows and the 2026-10-07 `Vocabulary<FE>` row (ruling A now covers ORB only). | It was the last OpenCV user in the library, had no vocabulary, and doubled every template's instantiation. |
 | 2026-10-11 | **The `voyah_*` libraries are OpenCV-free.** `voyah_algs` no longer links OpenCV (`opencv_bindings.h` and the include in `orb/extract_node.h` deleted); targets that compare with OpenCV (`voyah_algs_tests`, `voyah_algs_dataset_tests`, `fast_benchmark`, `voyah_common_tests`) link it themselves; `voyahviz` keeps it `PRIVATE`. New integration binary `voyah_algs_dataset_tests` for the corridor1 tests (skip without the dataset); `fast_benchmark` is built with `all` but is not in `check` / `check_all`. | Completes the 2026-10-03 goal "drop the OpenCV dependency" for the library; a package export no longer needs `find_dependency(OpenCV)`. |
 | 2026-10-11 | **Conan package `voyahslam/0.1.0` (`conanfile.py`, replaces `conanfile.txt`), build options and install/export.** `VOYAHSLAM_BUILD_TESTS` / `VOYAHSLAM_BUILD_EXAMPLES` (OFF by default; the dev installs pass `-o with_tests=True -o with_examples=True`); the four libraries and the umbrella are installed and exported as `voyahslam::*`; Conan components with matching target names, the package target being the umbrella; PUBLIC deps (Eigen, spdlog/fmt, concurrentqueue) propagate headers, PRIVATE g2o and stb do not (g2o's libraries reach static consumers at link time only); `validate()` requires C++20, so the dev installs use `profiles/linux-gcc13` (default + `gnu20`), and rejects `shared=True` with `c++_static` and on Windows; `shared=True` makes spdlog/fmt shared. Android: `profiles/android-arm64`, API 24, clang 21 (NDK r30; `profiles/settings_user.yml` adds it to Conan 2.18's settings), **`compiler.libcxx=c++_static` (user decision)**: the app has a single JNI `.so` that links the static voyahslam libraries and is built with `ANDROID_STL=c++_static`. NDK rule: `c++_static` is safe only while the app has exactly one shared library containing C++; if more are ever added, everything must switch to `c++_shared`. | The library is consumed from an Android app (Kotlin + JNI, Gradle/CMake via the NDK) and from desktop. A package build must not need the dev tools (GTest, OpenCV, Pangolin, yaml-cpp). One C++ `.so` with a static STL is the smallest, simplest APK; a second C++ `.so` with its own static libc++ would split heaps, globals, exceptions and RTTI. |
+| 2026-10-12 | **Distortion models are shared, immutable: `TDistortionModelPtr = std::shared_ptr<const DistortionModel>`** (user decision; `distortion_model.h`) in `geometry::Camera::distortion`, `StereoRig::distortion_left` / `distortion_right`, `MonocularMeasurement`'s constructor (hence `BinocularMeasurement`) and the example `EurocDatasetReader` (`CameraCalibration::distortion`; its `unique_ptr` store is gone). Null still means pinhole. Functions that only use a model during a call keep `const DistortionModel*` / `&` (`DropFeaturesBeyondMaxRayAngle`, `voyahviz::ProjectToImage` / `DrawMeasurement`). Hot paths do not copy a `Camera`: the g2o edges of `BundleAdjust`, `OptimizePose` and `OptimizeSim3` hold `const Camera&` into the call's const arguments (`BaProblem::keyframe_cameras` / `keyframe_stereo` is not modified, hence not reallocated, while the edges exist), and `detail::ProjectionGate` holds `const Camera&` (always a local of a search whose measurement argument owns the camera; its rvalue constructor is deleted). Measured (Release, scratch benchmark, TUM-VI KB model set; medians of 30 BA / 300 pose runs, 3 interleaved rounds): local BA (10 keyframes, 1500 points, 7500 observations, half stereo) 44.8 / 45.6 / 45.5 ms raw pointer, 44.6 / 43.9 / 44.9 ms shared_ptr with reference edges (shared_ptr with copying edges: 44.2 / 45.0 / 48.4); pose optimization (400 observations, half stereo) 2.76 / 2.77 ms vs 2.78 / 2.76 / 2.80 ms; 4 threads concurrently 0.96-1.16 vs 0.95-1.17 ms per call: all within noise. Remaining copies on the Tracker's path per frame: the app's measurement construction (mono 1; stereo 4: the rig copy and each side's camera), and in stereo one per `OptimizeMatchedPose` call (`StereoCameras{right().camera(), T_rl}`, 2 per normally tracked frame); mono 0. | Raw pointers that "must outlive every Camera copy" were unmanageable for a library consumer (e.g. an Android JNI app) whose objects die in their own order: cameras are copied into measurements, events, every thread's replica, BA problems and edges. Shared ownership ends that; the per-copy atomic cost is kept off inner loops by references. |
+| 2026-10-12 | **Package version 0.2.0** (`conanfile.py`, `project()`; SOVERSION 0.2): the shared distortion models change the public `Camera`, `StereoRig` and measurement constructors, an API break while the version is 0.x. 0.1.0 stays in the local cache. | Consumers (the Android app) pin the version; an API change gets a new minor version. |
 
 ## 9. Open Questions
 

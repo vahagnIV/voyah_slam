@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <cmath>
 #include <iostream>
+#include <memory>
 #include <numbers>
 #include <random>
 #include <vector>
@@ -52,15 +53,15 @@ geometry::TMatrix33F TumViIntrinsics() {
     return K;
 }
 
-geometry::distortion_models::KannalaBrandtDistortionModel TumViModel() {
-    return geometry::distortion_models::KannalaBrandtDistortionModel(
+geometry::distortion_models::TDistortionModelPtr TumViModel() {
+    return std::make_shared<const geometry::distortion_models::KannalaBrandtDistortionModel>(
         0.010171079892421483, -0.010816440029919381, 0.005942781769412756, -0.001662284667857643);
 }
 
 // Specs are raw pixels.
 Measurement Make(const std::vector<Spec>& specs,
                  const geometry::TMatrix33F& K = voyahslam::test::SyntheticIntrinsics(),
-                 const geometry::distortion_models::DistortionModel* distortion = nullptr) {
+                 const geometry::distortion_models::TDistortionModelPtr& distortion = nullptr) {
     const auto n = static_cast<Eigen::Index>(specs.size());
     geometry::TPoints2DF points(2, n);
     geometry::TRowVectorF angles(n);
@@ -227,8 +228,8 @@ TEST(InitializationMatcherTest, UsesRawPixels) {
         ref_specs.push_back({.x = x, .y = y, .seed = i});
         cur_specs.push_back({.x = x + 30.0, .y = y - 10.0, .seed = i});
     }
-    const Measurement ref = Make(ref_specs, TumViIntrinsics(), &model);
-    const Measurement cur = Make(cur_specs, TumViIntrinsics(), &model);
+    const Measurement ref = Make(ref_specs, TumViIntrinsics(), model);
+    const Measurement cur = Make(cur_specs, TumViIntrinsics(), model);
     ASSERT_EQ(ref.points().cols(), kNumFeatures);
     ASSERT_EQ(cur.points().cols(), kNumFeatures);
 

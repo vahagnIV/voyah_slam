@@ -3,6 +3,7 @@
 
 #include <cmath>
 #include <numbers>
+#include <utility>
 #include <vector>
 #include <voyahslam/geometry/camera.h>
 #include <voyahslam/geometry/distortion_models/distortion_model.h>
@@ -23,7 +24,7 @@ public:
     MonocularMeasurement() = default;
     MonocularMeasurement(ImageFeatures<TScalar, Length>&& features,
                          const geometry::TMatrix33F& K,
-                         const geometry::distortion_models::DistortionModel* distortion_model,
+                         geometry::distortion_models::TDistortionModelPtr distortion_model,
                          double timestamp);
 
     MonocularMeasurement(const MonocularMeasurement&) = default;
@@ -57,15 +58,16 @@ template <typename TScalar, unsigned int Length>
 MonocularMeasurement<TScalar, Length>::MonocularMeasurement(
     ImageFeatures<TScalar, Length>&& features,
     const geometry::TMatrix33F& K,
-    const geometry::distortion_models::DistortionModel* distortion_model,
+    geometry::distortion_models::TDistortionModelPtr distortion_model,
     double timestamp)
-    : ImageFeatures<TScalar, Length>(std::move(features)), K_(K), camera_{K, distortion_model}, distorted_points_(this->points_),
-      timestamp_(timestamp) {
+    : ImageFeatures<TScalar, Length>(std::move(features)), K_(K), camera_{K, std::move(distortion_model)},
+      distorted_points_(this->points_), timestamp_(timestamp) {
+    const geometry::distortion_models::DistortionModel* model = camera_.distortion.get();
     geometry::THomogenousPointsF homogeneous_points = this->points_.colwise().homogeneous();
     normalized_points_ = K_.inverse() * homogeneous_points;
-    DropFeaturesBeyondMaxRayAngle(distortion_model);
-    if (distortion_model != nullptr) {
-        distortion_model->Undistort(normalized_points_);
+    DropFeaturesBeyondMaxRayAngle(model);
+    if (model != nullptr) {
+        model->Undistort(normalized_points_);
         this->points_ = (K_ * normalized_points_).colwise().hnormalized();
     }
 }

@@ -165,21 +165,18 @@ void EurocDatasetReader::LoadCalibration(const fs::path& root) {
         camera.T_cam_imu = raw.T_cam_imu;
 
         if (raw.distortion_model == "equidistant") {
-            auto model = std::make_unique<geometry::distortion_models::KannalaBrandtDistortionModel>(
+            auto model = std::make_shared<geometry::distortion_models::KannalaBrandtDistortionModel>(
                 raw.distortion_coeffs);
             model->PrecomputeInitialGuessLookup(camera.K, camera.width, camera.height);
-            camera.distortion = model.get();
-            distortion_models_.push_back(std::move(model));
+            camera.distortion = std::move(model);
         } else if (IsBrownConrady(raw.distortion_model)) {
             const std::vector<double>& c = raw.distortion_coeffs;
             if (c.size() != 4 && c.size() != 5) {
                 Fail("distortion model '" + raw.distortion_model +
                      "' needs 4 or 5 coefficients [k1, k2, p1, p2(, k3)], got " + std::to_string(c.size()));
             }
-            auto model = std::make_unique<geometry::distortion_models::BrownConradyDistortionModel>(
+            camera.distortion = std::make_shared<geometry::distortion_models::BrownConradyDistortionModel>(
                 c[0], c[1], c[2], c[3], c.size() == 5 ? c[4] : 0.0);
-            camera.distortion = model.get();
-            distortion_models_.push_back(std::move(model));
         } else if (raw.distortion_model != "none") {
             Fail("unsupported distortion model '" + raw.distortion_model + "'");
         }

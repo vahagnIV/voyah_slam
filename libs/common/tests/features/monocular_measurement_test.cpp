@@ -53,13 +53,13 @@ TEST_F(MonocularMeasurementTest, ConstructorAndGetters) {
     );
 
     // Create undistorted features
-    DummyDistortionModel dummy_model;
+    const auto dummy_model = std::make_shared<DummyDistortionModel>();
 
     // Create frame features
     MonocularMeasurement measurement(
         std::move(original_features),
         K_,
-        &dummy_model,
+        dummy_model,
         12.5
     );
 
@@ -92,13 +92,13 @@ TEST_F(MonocularMeasurementTest, MoveSemantics) {
     );
 
     // Create undistorted features
-    DummyDistortionModel dummy_model;
+    const auto dummy_model = std::make_shared<DummyDistortionModel>();
 
     // Create frame features
     MonocularMeasurement measurement1(
         std::move(original_features),
         K_,
-        &dummy_model,
+        dummy_model,
         0.0
     );
 
@@ -156,16 +156,16 @@ TTestFeatures MakeFeaturesAt(const TPoints2DF& points) {
 } // namespace
 
 TEST(MonocularMeasurementRayAngleTest, DropsFisheyeFeaturesBeyondMaxRayAngle) {
-    KannalaBrandtDistortionModel model(kKB[0], kKB[1], kKB[2], kKB[3]);
+    const auto model = std::make_shared<KannalaBrandtDistortionModel>(kKB[0], kKB[1], kKB[2], kKB[3]);
     TMatrix33F K = TumViK();
-    model.PrecomputeInitialGuessLookup(K, 1024, 1024);
+    model->PrecomputeInitialGuessLookup(K, 1024, 1024);
 
     // Rays at 30, 100, 80, 86 and 89 degrees; only 30 and 80 survive.
     const precision_t thetas[] = {30 * kDeg, 100 * kDeg, 80 * kDeg, 86 * kDeg, 89 * kDeg};
     TPoints2DF pixels(2, 5);
     for (int i = 0; i < 5; ++i) pixels.col(i) = ProjectKB(K, thetas[i], 0.7 * i);
 
-    MonocularMeasurement<uint8_t, 32> measurement(MakeFeaturesAt(pixels), K, &model, 0.0);
+    MonocularMeasurement<uint8_t, 32> measurement(MakeFeaturesAt(pixels), K, model, 0.0);
 
     ASSERT_EQ(measurement.points().cols(), 2);
     ASSERT_EQ(measurement.normalized_points().cols(), 2);
@@ -218,29 +218,29 @@ TEST_F(MonocularMeasurementTest, DropKeepsLevelsAligned) {
 }
 
 TEST_F(MonocularMeasurementTest, DistortedPointsAndCamera) {
-    KannalaBrandtDistortionModel model(kKB[0], kKB[1], kKB[2], kKB[3]);
+    const auto model = std::make_shared<KannalaBrandtDistortionModel>(kKB[0], kKB[1], kKB[2], kKB[3]);
     TMatrix33F K = TumViK();
-    model.PrecomputeInitialGuessLookup(K, 1024, 1024);
+    model->PrecomputeInitialGuessLookup(K, 1024, 1024);
     TPoints2DF pixels(2, 3);
     for (int i = 0; i < 3; ++i) pixels.col(i) = ProjectKB(K, (20 + 15 * i) * kDeg, 0.9 * i);
 
-    MonocularMeasurement<uint8_t, 32> measurement(MakeFeaturesAt(pixels), K, &model, 0.0);
+    MonocularMeasurement<uint8_t, 32> measurement(MakeFeaturesAt(pixels), K, model, 0.0);
 
     ASSERT_EQ(measurement.distorted_points().cols(), 3);
     EXPECT_TRUE(measurement.distorted_points().isApprox(pixels, 1e-12));
     EXPECT_TRUE(measurement.camera().K.isApprox(K));
-    EXPECT_EQ(measurement.camera().distortion, &model);
+    EXPECT_EQ(measurement.camera().distortion, model);
 }
 
 TEST_F(MonocularMeasurementTest, DistortedPointsCompactedWithDrop) {
-    KannalaBrandtDistortionModel model(kKB[0], kKB[1], kKB[2], kKB[3]);
+    const auto model = std::make_shared<KannalaBrandtDistortionModel>(kKB[0], kKB[1], kKB[2], kKB[3]);
     TMatrix33F K = TumViK();
-    model.PrecomputeInitialGuessLookup(K, 1024, 1024);
+    model->PrecomputeInitialGuessLookup(K, 1024, 1024);
     const precision_t thetas[] = {30 * kDeg, 100 * kDeg, 80 * kDeg, 86 * kDeg, 50 * kDeg};
     TPoints2DF pixels(2, 5);
     for (int i = 0; i < 5; ++i) pixels.col(i) = ProjectKB(K, thetas[i], 0.7 * i);
 
-    MonocularMeasurement<uint8_t, 32> measurement(MakeFeaturesAt(pixels), K, &model, 0.0);
+    MonocularMeasurement<uint8_t, 32> measurement(MakeFeaturesAt(pixels), K, model, 0.0);
 
     ASSERT_EQ(measurement.points().cols(), 3);
     ASSERT_EQ(measurement.distorted_points().cols(), 3);

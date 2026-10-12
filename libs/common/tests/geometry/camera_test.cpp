@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 #include <cmath>
+#include <memory>
+#include <utility>
 #include "voyahslam/defs.h"
 #include "voyahslam/geometry/camera.h"
 #include "voyahslam/geometry/distortion_models/brown_conrady_distortion_model.h"
@@ -15,15 +17,15 @@ namespace {
 constexpr precision_t kDeg = 3.14159265358979323846 / 180.0;
 
 // TUM-VI cam0 (equidistant fisheye, 1024x1024).
-Camera TumViCamera(const KannalaBrandtDistortionModel* model) {
+Camera TumViCamera(distortion_models::TDistortionModelPtr model) {
     Camera camera;
     camera.K << 380.81, 0, 510.29, 0, 380.81, 514.33, 0, 0, 1;
-    camera.distortion = model;
+    camera.distortion = std::move(model);
     return camera;
 }
 
-KannalaBrandtDistortionModel TumViModel() {
-    return KannalaBrandtDistortionModel(0.010171079892421483, -0.010816440029919381, 0.005942781769412756,
+distortion_models::TDistortionModelPtr TumViModel() {
+    return std::make_shared<const KannalaBrandtDistortionModel>(0.010171079892421483, -0.010816440029919381, 0.005942781769412756,
                                         -0.001662284667857643);
 }
 
@@ -38,7 +40,7 @@ TEST(CameraTest, PinholeCameraProjects) {
 
 TEST(CameraTest, ProjectUnprojectRoundTripKB) {
     const auto model = TumViModel();
-    const Camera camera = TumViCamera(&model);
+    const Camera camera = TumViCamera(model);
     std::vector<precision_t> thetas;
     for (int d = 0; d <= 80; d += 10) thetas.push_back(d * kDeg);
     thetas.push_back(85 * kDeg);
@@ -55,7 +57,7 @@ TEST(CameraTest, ProjectUnprojectRoundTripKB) {
 
 TEST(CameraTest, ProjectJacobianMatchesFiniteDifferences) {
     const auto model = TumViModel();
-    for (const KannalaBrandtDistortionModel* m : {&model, static_cast<const KannalaBrandtDistortionModel*>(nullptr)}) {
+    for (const distortion_models::TDistortionModelPtr& m : {model, distortion_models::TDistortionModelPtr()}) {
         const Camera camera = TumViCamera(m);
         for (int i = 0; i < 10; ++i) {
             const precision_t theta = (0.5 + 79.5 * (i / 9.0)) * kDeg;
@@ -81,10 +83,10 @@ TEST(CameraTest, ProjectJacobianMatchesFiniteDifferences) {
 // to a ray that projects back onto it, and the projection Jacobian matches
 // finite differences.
 TEST(CameraTest, ProjectUnprojectRoundTripBrownConrady) {
-    const BrownConradyDistortionModel model(-0.28340811, 0.07395907, 0.00019359, 1.76187114e-05);
     Camera camera;
     camera.K << 458.654880721, 0, 367.215803962, 0, 457.296696463, 248.375340610, 0, 0, 1;
-    camera.distortion = &model;
+    camera.distortion =
+        std::make_shared<BrownConradyDistortionModel>(-0.28340811, 0.07395907, 0.00019359, 1.76187114e-05);
     for (int u = 0; u <= 752; u += 47) {
         for (int v = 0; v <= 480; v += 40) {
             const TPoint2DF pixel(u, v);

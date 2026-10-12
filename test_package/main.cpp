@@ -2,6 +2,7 @@
 // optimization (voyah_algs, so g2o must link) and the umbrella's version.
 #include <cmath>
 #include <cstdio>
+#include <memory>
 #include <vector>
 
 #include <voyahslam/geometry/camera.h>
@@ -12,11 +13,10 @@
 
 int main() {
     using namespace voyahslam;
-    const geometry::distortion_models::BrownConradyDistortionModel distortion(
-        -0.28, 0.07, 0.0002, 0.00002);
     geometry::Camera camera;
     camera.K << 458.0, 0.0, 367.0, 0.0, 457.0, 248.0, 0.0, 0.0, 1.0;
-    camera.distortion = &distortion;
+    camera.distortion = std::make_shared<geometry::distortion_models::BrownConradyDistortionModel>(
+        -0.28, 0.07, 0.0002, 0.00002);
 
     const geometry::TPoint3DF Xc(0.3, -0.2, 2.0);
     const geometry::TPoint2DF pixel = camera.Project(Xc);

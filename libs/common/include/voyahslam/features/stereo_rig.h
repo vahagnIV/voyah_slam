@@ -12,8 +12,8 @@ struct StereoRig {
     geometry::TMatrix33F K_right;
     geometry::RigidTransformation T_rl;  // left camera -> right camera: p_r = T_rl * p_l
     precision_t baseline = 0.0;         // ‖T_rl.translation()‖
-    const geometry::distortion_models::DistortionModel* distortion_left = nullptr;
-    const geometry::distortion_models::DistortionModel* distortion_right = nullptr;
+    geometry::distortion_models::TDistortionModelPtr distortion_left;   // null = pinhole
+    geometry::distortion_models::TDistortionModelPtr distortion_right;  // null = pinhole
 };
 
 } // namespace voyahslam::features

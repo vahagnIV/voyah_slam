@@ -4,8 +4,10 @@
 #include <cmath>
 #include <functional>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <random>
+#include <utility>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -34,17 +36,17 @@ using geometry::TVector3DF;
 const Camera kNormalizedCamera{TMatrix33F::Identity(), nullptr};
 
 // TUM-VI cam0 (equidistant fisheye).
-geometry::distortion_models::KannalaBrandtDistortionModel TumViModel() {
-    return geometry::distortion_models::KannalaBrandtDistortionModel(
+geometry::distortion_models::TDistortionModelPtr TumViModel() {
+    return std::make_shared<const geometry::distortion_models::KannalaBrandtDistortionModel>(
         0.010171079892421483, -0.010816440029919381, 0.005942781769412756, -0.001662284667857643);
 }
 
-Camera TumViCamera(const geometry::distortion_models::DistortionModel* model) {
+Camera TumViCamera(geometry::distortion_models::TDistortionModelPtr model) {
     Camera camera;
     camera.K << 380.81042871360756, 0.0, 510.29465304840727,
                 0.0, 380.81194179427075, 514.3304630538506,
                 0.0, 0.0, 1.0;
-    camera.distortion = model;
+    camera.distortion = std::move(model);
     return camera;
 }
 
@@ -374,7 +376,7 @@ test::TwoViewScene MakeFisheyeScene(size_t num_points, uint32_t seed) {
 
 TEST(BundleAdjustTest, FisheyeRecoversPerturbedNoiseFree) {
     const auto model = TumViModel();
-    const Camera camera = TumViCamera(&model);
+    const Camera camera = TumViCamera(model);
     const test::TwoViewScene scene = MakeFisheyeScene(200, 21);
     BaProblem problem = MakePerturbedStart(scene, 11);
     problem.keyframe_cameras = {camera, camera};
@@ -414,8 +416,8 @@ double RelativeError(const TMatrix& analytic, const TMatrix& numeric) {
 // The stereo edge's residual and Jacobians are StereoPixel / StereoPixelJacobians verbatim.
 TEST(BundleAdjustTest, StereoEdgeJacobianMatchesFiniteDifference) {
     const auto model = TumViModel();
-    const Camera left = TumViCamera(&model);
-    const Camera right = TumViCamera(&model);
+    const Camera left = TumViCamera(model);
+    const Camera right = TumViCamera(model);
     // A rig with a 5 degree yaw between the cameras and a 0.11 m baseline.
     const RigidTransformation T_rl(
         TMatrix33F(Eigen::AngleAxisd(5.0 * M_PI / 180.0, Eigen::Vector3d::UnitY())),

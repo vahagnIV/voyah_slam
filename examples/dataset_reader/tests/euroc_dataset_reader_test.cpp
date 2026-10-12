@@ -200,7 +200,7 @@ TEST(EurocDatasetReaderTest, ReadsBrownConradyUnderEveryName) {
         WriteEurocSensor(dataset, name, "[-0.28, 0.07, 0.0002, 0.00002]");
         EurocDatasetReader reader(dataset.root());
         const auto* model = dynamic_cast<const geometry::distortion_models::BrownConradyDistortionModel*>(
-            reader.camera(0).distortion);
+            reader.camera(0).distortion.get());
         ASSERT_NE(model, nullptr) << name;
         const std::array<precision_t, 5> expected{-0.28, 0.07, 0.0002, 0.00002, 0.0};
         EXPECT_EQ(model->GetCoefficients(), expected) << name;
@@ -212,7 +212,7 @@ TEST(EurocDatasetReaderTest, ReadsBrownConradyWithK3) {
     WriteEurocSensor(dataset, "plumb_bob", "[-0.28, 0.07, 0.0002, 0.00002, 0.01]");
     EurocDatasetReader reader(dataset.root());
     const auto* model = dynamic_cast<const geometry::distortion_models::BrownConradyDistortionModel*>(
-        reader.camera(0).distortion);
+        reader.camera(0).distortion.get());
     ASSERT_NE(model, nullptr);
     const std::array<precision_t, 5> expected{-0.28, 0.07, 0.0002, 0.00002, 0.01};
     EXPECT_EQ(model->GetCoefficients(), expected);

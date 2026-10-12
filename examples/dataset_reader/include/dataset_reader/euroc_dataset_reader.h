@@ -17,8 +17,9 @@ namespace voyahslam::dataset_reader {
 // Calibration of one camera of the dataset.
 struct CameraCalibration {
     geometry::TMatrix33F K;
-    // Owned by the reader; nullptr means the images are already undistorted.
-    const geometry::distortion_models::DistortionModel* distortion = nullptr;
+    // Shared with every Camera / StereoRig built from it; nullptr means the
+    // images are already undistorted.
+    geometry::distortion_models::TDistortionModelPtr distortion;
     unsigned width = 0;
     unsigned height = 0;
     // Transforms points from the IMU (body) frame into this camera's frame.
@@ -59,8 +60,8 @@ public:
     [[nodiscard]] bool has_stereo() const { return cameras_.size() > 1; }
     [[nodiscard]] double timestamp(size_t idx) const;
     [[nodiscard]] const CameraCalibration& camera(size_t camera_idx) const;
-    // cam0 = left, cam1 = right. Distortion pointers stay valid while the
-    // reader is alive. Requires has_stereo().
+    // cam0 = left, cam1 = right; shares the cameras' distortion models (they
+    // outlive the reader). Requires has_stereo().
     [[nodiscard]] const features::StereoRig& stereo_rig() const;
 
     [[nodiscard]] MonocularFrame LoadMonocular(size_t idx) const;
@@ -76,7 +77,6 @@ private:
     std::filesystem::path mav_dir_;
     std::vector<Entry> entries_;  // cam0; cam1 is verified to match
     std::vector<CameraCalibration> cameras_;
-    std::vector<std::unique_ptr<geometry::distortion_models::DistortionModel>> distortion_models_;
     features::StereoRig stereo_rig_;
 
     void LoadCalibration(const std::filesystem::path& root);

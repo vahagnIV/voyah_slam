@@ -2,6 +2,7 @@
 
 #include <Eigen/Dense>
 #include <cmath>
+#include <memory>
 #include <random>
 #include <utility>
 
@@ -19,17 +20,17 @@ using geometry::TPoint3DF;
 using geometry::TVector3DF;
 
 // TUM-VI cam0 (equidistant fisheye).
-geometry::distortion_models::KannalaBrandtDistortionModel TumViModel() {
-    return geometry::distortion_models::KannalaBrandtDistortionModel(
+geometry::distortion_models::TDistortionModelPtr TumViModel() {
+    return std::make_shared<const geometry::distortion_models::KannalaBrandtDistortionModel>(
         0.010171079892421483, -0.010816440029919381, 0.005942781769412756, -0.001662284667857643);
 }
 
-geometry::Camera TumViCamera(const geometry::distortion_models::DistortionModel* model) {
+geometry::Camera TumViCamera(geometry::distortion_models::TDistortionModelPtr model) {
     geometry::Camera camera;
     camera.K << 380.81042871360756, 0.0, 510.29465304840727,
                 0.0, 380.81194179427075, 514.3304630538506,
                 0.0, 0.0, 1.0;
-    camera.distortion = model;
+    camera.distortion = std::move(model);
     return camera;
 }
 
@@ -66,7 +67,7 @@ double RelativeError(const TMatrix& analytic, const TMatrix& numeric) {
 
 TEST(ProjectionTest, ProjectPixelGoesThroughTheCamera) {
     const auto model = TumViModel();
-    const geometry::Camera camera = TumViCamera(&model);
+    const geometry::Camera camera = TumViCamera(model);
     TMatrix33F rotation;
     rotation << 0, -1, 0, 1, 0, 0, 0, 0, 1;
     const RigidTransformation pose(rotation, TVector3DF(1.0, 1.0, 1.0));
@@ -83,7 +84,7 @@ TEST(ProjectionTest, ProjectPixelGoesThroughTheCamera) {
 
 TEST(ProjectionTest, PixelJacobiansMatchFiniteDifferences) {
     const auto model = TumViModel();
-    const geometry::Camera camera = TumViCamera(&model);
+    const geometry::Camera camera = TumViCamera(model);
     std::mt19937 rng(42);
     const double h = 1e-6;
 
@@ -118,7 +119,7 @@ TEST(ProjectionTest, PixelJacobiansMatchFiniteDifferences) {
 
 TEST(ProjectionTest, PixelJacobianRightMatchesFiniteDifferences) {
     const auto model = TumViModel();
-    const geometry::Camera camera = TumViCamera(&model);
+    const geometry::Camera camera = TumViCamera(model);
     std::mt19937 rng(7);
     const double h = 1e-6;
     // A rig with a 5 degree yaw between the cameras and a 0.11 m baseline.
