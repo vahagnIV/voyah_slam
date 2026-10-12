@@ -25,6 +25,12 @@ target_include_directories(voyah_slam
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
+# version_major() / version_minor() report project(VERSION).
+target_compile_definitions(voyah_slam PRIVATE
+    VOYAHSLAM_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    VOYAHSLAM_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+)
+
 target_link_libraries(voyah_slam
     PUBLIC voyah_common
     PUBLIC voyah_events
