@@ -1,0 +1,210 @@
+# Phase 1: API Ownership and Lifetime Contracts - Context
+
+**Gathered:** 2026-10-12
+**Status:** Ready for planning
+
+<domain>
+## Phase Boundary
+
+Finish the voyah_jni ownership audit (`../voyah_jni/docs/voyah_slam_ownership_audit.md`) so that
+no library consumer (the Java/JNI binding, whose objects die in any order, or a C++ app) can
+crash the library through declaration order, destruction order or calls from the wrong
+thread. Target principle: a type owns, or shares ownership of, everything it points to after a
+call returns; every required ordering is removed or enforced (an error), not just documented.
+
+In scope: audit items #3 (pool lifetime), #2 (observer subscriptions), #5 (thread-affinity
+accessors and a supported map read path), #6 (lifecycle state machine), #7 (extractor thread
+safety), #8 (logger initialization order), #9 (`images::Image` correctness). Requirements
+OWN-01..07. Items #1 and #4 are already merged (0.2.0, 0.3.0).
+
+Not in scope: lossy observer delivery (EVT-01, Phase 5), the Android logcat sink (PLAT-01,
+Phase 5), a `voyahslam::Session` facade, moving voyahviz onto the new map follower.
+
+</domain>
+
+<decisions>
+## Implementation Decisions
+
+### Pool lifetime (#3, OWN-01)
+- **D-01:** `ObjectPool` becomes a handle to a heap-allocated pool **core** (chunks, free list,
+  counters). The core keeps an **intrusive atomic count**: 1 for the owner plus 1 per slot
+  handed out (one atomic add in `Create`/`TryCreate`, one subtract in `Recycle`; no allocation
+  per event). `~ObjectPool` drops the owner's count; whichever `Recycle` brings it to 0 frees the
+  core. `Recyclable` keeps its raw back-pointer, now to the core, valid by construction. Chosen
+  over a `shared_ptr<PoolCore>` member per event (the same cost, a redundant second refcount, and a
+  self-destruction trap in `Recycle`) and over static/global pools (memory never freed, shared
+  across `Slam` instances, an exit-order problem). — **Reversibility:** costly — the pool and
+  `Recyclable` internals are used by every event type and pool test.
+- **D-02:** Returning an event after its producer is destroyed is **legal**. Leak reporting:
+  when the owner leaves with slots still out, log the outstanding count once; expose
+  `num_outstanding()` on the pool; add a test check that every pool reaches 0 outstanding at
+  the end of the Slam / integration tests. The audit's literal "`~ObjectPool` asserts every slot
+  came back" is **not** adopted (it would fire on legitimate late returns).
+- **D-03:** When the last event returns after the owner is gone, the pool is freed **on that
+  consumer's thread** (viewer, JNI or GC thread). Record a DESIGN rule: pooled types' destructors
+  must not depend on the destroying thread.
+- **D-04:** Afterwards remove the `global_ba_` ordering invariant (`slam.h`, DESIGN) and the
+  apps' `StopAll` teardown guard (`examples/full_slam/*_full_slam.cpp`). This closes OQ 25.
+
+### Subscription API (#2, OWN-02)
+- **D-05:** Connecting and disconnecting are allowed **only while the producer is stopped**
+  (Created or Stopped). Disconnecting while it runs, without locks, was offered and declined.
+- **D-06:** `AddObserver` and `AddSyncObserver` return a `[[nodiscard]]`, move-only RAII
+  **`Subscription`**; its destructor or `reset()` disconnects. This covers `ConnectAsync`, the
+  `ConnectSync` `void* ctx`, and the raw `WakeSignal*` of `SetWakeSignal` where it crosses
+  object boundaries. Observers held by `shared_ptr` were declined. — **Reversibility:** one-way
+  — the public wiring API of every component and of the voyah_jni binding changes.
+- **D-07:** Misuse while running: an explicit `reset()`/disconnect, or an `AddObserver`, while
+  the producer runs **throws** (the usage error of D-09). A `Subscription` **destroyed** while
+  its producer runs **logs and calls `std::terminate`** in every build (destructors cannot
+  throw; this gives a defined, loud failure instead of a later use-after-free).
+- **D-08:** On disconnect, or when an `AsyncObserver` is destroyed, the events still queued are
+  **drained and released** (this closes TODO "AsyncObserver destruction doesn't acknowledge
+  events"); safe even after the producer is gone, because of D-01.
+
+### Misuse errors and lifecycle (#6, OWN-04)
+- **D-09:** Invalid lifecycle calls **throw a `std::logic_error` subclass** (e.g.
+  `voyahslam::UsageError`) in every build; the binding maps it to `IllegalStateException`.
+  This is the library's first exception policy, so record it in DESIGN (decisions log and
+  conventions). It is introduced with the #3+#2 release, because D-07 needs it.
+- **D-10:** The state machine is Created → Running → Stopped, and **Stopped is terminal**:
+  `Start` after `Stop` throws, `Start` twice throws, and `Stop` is idempotent (destructors call it).
+  A new session means a new `Slam`. Applies to `Slam` and its components (Tracker, Mapper,
+  LoopCloser, GlobalBA, `WorkerThread` users).
+- **D-11:** `Start`/`Stop` are safe **from any thread**, serialized by an atomic state CAS (a
+  losing `Start` throws, `Stop` is idempotent). This replaces "must be called from one
+  controlling thread", because a Java `close()` or GC cleaner may stop or destroy from another thread.
+- **D-12:** `Track()` **before `Start()` keeps queuing** (today's behaviour); `Track()` **after
+  `Stop()` throws**.
+
+### Map read path and thread-affinity accessors (#5, OWN-03)
+- **D-13:** A library **`MapFollower`** owns an inbox and an `AtlasReplica`. The app subscribes
+  it to the Mapper's `MapTransaction`s, calls `Update()` on its own thread (which applies pending
+  transactions) and reads the replica on that thread. It can also produce an immutable
+  **`std::shared_ptr<const MapSnapshot>`** (points, keyframe poses, map ids; exact contents set
+  at planning) for other threads or for Java. Snapshot cost is O(map) per call, paid only
+  on request.
+- **D-14:** The "Mapper thread only" accessors (`Mapper::covisibility()`, `Reference()`,
+  `NumVisible()`, `NumFound()`, `last_local_ba()`, `BowVectorOf()`, `Parent()`, `LoopEdges()`,
+  `KeyFrame()`, `map_ids()`, `active_map()`, `num_keyframes()`) and the "never while running"
+  ones (`Tracker::atlas()`, `map_replica()`, `last_matches()`) become **private behind friend
+  `*TestAccess` structs** (the `MapperTestAccess` pattern), so misuse fails at compile time.
+  Tests and tools move to the access structs.
+
+### Extractor thread safety (#7, OWN-05)
+- **D-15:** The **caller provides the workspace**:
+  `DetectAndExtract(image, n, Workspace&) const`. The extractor becomes immutable and
+  shareable, and the pyramid moves into the workspace (no per-frame allocation when the
+  workspace is reused). Chosen over making the call non-const or using thread-local storage.
+  — **Reversibility:** costly — every caller (apps, tests, benchmarks, voyah_jni) changes.
+- **D-16:** A convenience **allocating overload `DetectAndExtract(image, n) const` stays**. It
+  builds a temporary workspace per call, which is fine for tests and one-offs; document that a
+  loop should reuse a workspace.
+- **D-17:** The caller owns the workspaces, **one per extraction thread** (stereo: two if left
+  and right are extracted in parallel). The workspace type is documented as not thread-safe.
+
+### Logger (#8, OWN-06)
+- **D-18:** Every logger gets **one shared spdlog `dist_sink_mt`**. `Logger::Initialize()` swaps
+  its child sinks, so creation order stops mattering by construction, and `Initialize` may be
+  called again at any time. `SetLevel` applies to every registered logger, not only to later
+  ones. The cost is one extra indirection per log call.
+- **D-19:** The Android logcat default sink stays in Phase 5 (PLAT-01). The binding can already
+  pass spdlog's `android_sink` to `Initialize()`.
+
+### Image (#9, OWN-07)
+- **D-20:** **Fix in place**, with no separate `ImageView` type:
+  - default-initialize every member (an empty image);
+  - make `Convert()`, `operator*=` and `operator*` row-wise, honouring `offset_` / `stride_`;
+  - make `Set()` non-const;
+  - document that views alias the parent's buffer.
+
+### Releases
+- **D-21:** **#3 and #2 ship together** as one branch and one minor version bump (they are designed
+  together and both reshape the event API). Then #5, #6, #7, #8 and #9 each get **their own
+  branch, minor bump and release**, as #1 and #4 did. Each release:
+  - a review, then a merge only on the user's explicit "merge and push";
+  - a DESIGN decisions-log entry and `check_all`;
+  - ThreadSanitizer on the event and Slam tests (#3+#2 and #6 at least);
+  - `conan create` for linux-gcc13 (static and shared) and android-arm64;
+  - the voyah_jni session is told the new version (every item is an API break for it).
+
+### Claude's Discretion
+- The internal layout of the pool core (cache-line placement of the counter, how `NoSyncPolicy`
+  pools count), as long as D-01..D-03 hold.
+- The exact `Subscription` type (one type for sync and async, or two) and how components track
+  the "stopped" state used by D-05 (`WorkerThread::running()` exists).
+- The `UsageError` name and header location (lowest layer that needs it, likely `voyah_common`).
+- `MapSnapshot` contents and the `MapFollower` API details beyond D-13.
+- The name and contents of the extractor `Workspace`.
+
+</decisions>
+
+<canonical_refs>
+## Canonical References
+
+**Downstream agents MUST read these before planning or implementing.**
+
+### Audit (source of this phase)
+- `../voyah_jni/docs/voyah_slam_ownership_audit.md` (absolute path `/home/vahagn/git/voyah_jni/docs/voyah_slam_ownership_audit.md`) — the item list, failure cases, proposed fixes and coordination with voyah_jni; the decisions above override its proposals where they differ (e.g. D-02 instead of the `~ObjectPool` assert).
+- `../voyah_jni/native/src/slam_session.h` / `slam_session.cpp` — the binding's current workarounds (declaration order, stop before drain), which this phase should make unnecessary.
+
+### Project rules and design
+- `CLAUDE.md` — build, test targets, naming conventions, the "record decisions in DESIGN" rule.
+- `docs/DESIGN.md` §2 "Core Principles" (no locks on map data), §6 "Events" and §6.1 "Event Lifecycle: Pooled, Reference-Counted, Acknowledged" (pointer rule, `Notify()` ownership), §7 "Coding Conventions", §8 "Decisions Log" (2026-10-12 entries for #1 and #4), §9 OQ 25 "Event pool lifetime".
+- `docs/TODO.md` "Ownership audit (voyah_jni, 2026-10-12)", "Event system" (subscriber lifetime, pool lifetime, AsyncObserver drain) and "Map & events" (lossy delivery, deferred).
+- `docs/ROADMAP.md` "API hardening for library consumers".
+- `.planning/REQUIREMENTS.md` OWN-01..07; `.planning/ROADMAP.md` Phase 1 success criteria.
+
+</canonical_refs>
+
+<code_context>
+## Existing Code Insights
+
+### Reusable Assets
+- `libs/common/include/voyahslam/memory/object_pool.h`: a lock-free pool that grows in chunks (0.3.0); `Create`/`TryCreate`/`Recycle`, overflow counters. It becomes the pool core.
+- `libs/common/include/voyahslam/memory/recyclable.h`: the intrusive event refcount and the raw `object_pool_` back-pointer (D-01 retargets it to the core).
+- `libs/events/include/voyahslam/events/worker_thread.h`: `running()`, usable for the stopped check (D-05, D-10).
+- `libs/slam/include/voyahslam/tracking/atlas_replica.h`, `map_replica.h`: the replica that `MapFollower` wraps (D-13).
+- `MapperTestAccess` (`libs/slam/include/voyahslam/mapping/mapper.h`): the pattern for D-14.
+
+### Established Patterns
+- Events are pooled and intrusively refcounted, and `Notify()` always takes ownership (DESIGN §6.1).
+- Components own their pools as members: Tracker (3), Mapper (`MapTransaction`), LoopCloser and GlobalBA use `TryCreate` (they drop on purpose). All production pools use `ThreadSafePolicy`.
+- Shared immutable data via `shared_ptr<const T>` (vocabulary, `TSharedMeasurement`, `TDistortionModelPtr`): the model for `MapSnapshot`.
+- The library throws almost nowhere today (only `io/read_image.cpp`); D-09 introduces a policy.
+
+### Integration Points
+- `libs/events/include/voyahslam/events/observable.h` (`ConnectAsync`, `ConnectSync`, `Notify`), `event_node.h` (`AddObserver`, `AddSyncObserver`, `inbox_.SetWakeSignal`), `async_observer.h`, `listener.h` (`current_` is recycled in its destructor).
+- `libs/slam/include/voyahslam/slam/slam.h` (wiring, the `global_ba_` invariant), and `tracker.h`, `mapper.h`, `loop_closer.h`, `global_bundle_adjuster.h` (pools, accessors, Start/Stop).
+- `libs/common/include/voyahslam/features/orb_feature_extractor.h` and `libs/algs/src/features/orb_feature_extractor.cpp` (D-15); the callers in `examples/full_slam/*`, tests and benchmarks.
+- `libs/common/include/voyahslam/logging/logger.h` and `libs/common/src/logging/logger.cpp` (D-18).
+- `libs/common/include/voyahslam/images/image.h` (D-20).
+- `vizualization/` (voyahviz `MapViewer`): it uses `AddObserver(viewer.inbox())` and must adopt `Subscription`s; its threading comments change with D-11.
+- `examples/full_slam/{monocular,binocular}_full_slam.cpp` and `full_slam_common.h`: the `StopAll` guard to remove, and the wiring to update.
+- `test_package/` and `conanfile.py`: the version bump and package recreation per release.
+
+</code_context>
+
+<specifics>
+## Specific Ideas
+
+- The user's concern is that pools exist to avoid per-event allocation, so any lifetime scheme must keep steady-state event publishing allocation-free (D-01 does: the count lives in the pool core).
+- The binding's main case is a GC or `close()` on another thread. D-11 makes Start/Stop safe there. Disconnecting while running stays a loud failure (D-07) by the user's choice, so the binding must still stop `Slam` before closing listeners. That is now an enforced rule rather than a silent crash.
+
+</specifics>
+
+<deferred>
+## Deferred Ideas
+
+- **Disconnect while running (lock-free):** a shared queue core plus a "closed" flag, with the producer skipping closed observers. Declined for this phase in favour of "only while stopped". Revisit if the binding finds the stop-first rule too restrictive.
+- **`voyahslam::Session` facade** (`Slam` plus `MapFollower` in one object for JNI): design it after the binding uses `MapFollower`, in the library or in voyah_jni.
+- **voyahviz `SceneState` on `MapFollower`:** dogfood the follower in the viewer later.
+- **Android logcat default sink:** stays in PLAT-01 (Phase 5).
+- **Lossy delivery for display-only observers:** stays in EVT-01 (Phase 5); it builds on D-01 and D-06.
+
+</deferred>
+
+---
+
+*Phase: 01-api-ownership-and-lifetime-contracts*
+*Context gathered: 2026-10-12*
