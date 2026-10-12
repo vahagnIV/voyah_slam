@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/.superpowers/spikes/2026-10-07-stereo-drift.md",
+  "type": "DOC",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "Spike: stereo ATE regression with the BoW vocabulary (corridor1)",
+  "summary": "Investigates stereo tracking regression root cause: weak motion-model inlier gating. Proposes fix requiring 30+ inliers for motion-model results with measured improvements.",
+  "scope": ["stereo tracking", "motion model", "inlier gating", "bag-of-words vocabulary", "ATE regression", "corridor1", "local bundle adjustment"],
+  "cross_refs": ["docs/DESIGN.md", "libs/slam/include/voyahslam/tracking/tracker.h", "libs/slam/src/tracking/tracker.cpp", "tools/ate.py", "docs/TODO.md"],
+  "locked": false,
+  "precedence": null,
+  "notes": "Spike report documenting a technical investigation with recommended fix. Contains design rationale and implementation guidance, but lacks formal ADR structure (status field, numbered naming, Context/Decision/Consequences sections). Classified as DOC rather than ADR due to format and lack of Status field."
+}

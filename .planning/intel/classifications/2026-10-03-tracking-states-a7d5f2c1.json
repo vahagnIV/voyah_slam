@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/plans/2026-10-03-tracking-states.md",
+  "type": "DOC",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "Tracker/Mapper State Machines Implementation Plan",
+  "summary": "Implementation plan for tracker/mapper state machines, worker threads, and map initialization protocol across 8 tasks.",
+  "scope": ["Tracker", "Mapper", "State Machines", "WakeSignal", "WorkerThread", "Events", "Map initialization", "Lock-free", "C++20"],
+  "cross_refs": ["docs/superpowers/specs/2026-10-03-tracking-states-design.md", "docs/DESIGN.md", "docs/TODO.md"],
+  "locked": false,
+  "precedence": null,
+  "notes": "Procedural implementation plan with 8 sequential tasks and checkpoints. Not a decision record, requirements document, or specification — rather a runbook that references a separate spec document for design details."
+}

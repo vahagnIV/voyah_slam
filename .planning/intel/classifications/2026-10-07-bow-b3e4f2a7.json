@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/plans/2026-10-07-bow.md",
+  "type": "DOC",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "Bag of Words without OpenCV Implementation Plan",
+  "summary": "Implementation plan for BoW feature with 7 tasks covering vocabulary tree, I/O, ORB rounding, DBoW2 equivalence, triangulation, wiring, and documentation.",
+  "scope": ["Bag of Words", "DBoW2", "Vocabulary", "ORB-SLAM3", "implementation plan"],
+  "cross_refs": ["docs/superpowers/specs/2026-10-07-bow-design.md"],
+  "locked": false,
+  "precedence": null,
+  "notes": "Plan document providing structured guidance for implementation tasks. Contains 7 tasks with checkboxes and step-by-step instructions. References separate technical spec. Structured as a guide/roadmap for agentic workers rather than a decision or requirement. Medium confidence: while technically detailed, the primary signals are instructional prose and task planning, characteristic of DOC class."
+}

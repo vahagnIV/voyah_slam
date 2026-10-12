@@ -1,0 +1,42 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-09-30-core-slam-data-structures-design.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Core SLAM Data Structures — Design Spec",
+  "summary": "Defines core data structures, memory infrastructure, and event system for lock-free, event-driven SLAM library with thread ownership semantics.",
+  "scope": [
+    "MapPointStorage",
+    "Frame",
+    "BinocularCameraFrame",
+    "StereoRig",
+    "ObservationStorage",
+    "Observable",
+    "AsyncObserver",
+    "Listener",
+    "ObjectPool",
+    "Recyclable",
+    "Event system",
+    "Memory infrastructure",
+    "Thread ownership"
+  ],
+  "cross_refs": [
+    "include/voyahslam/memory/object_pool.h",
+    "include/voyahslam/memory/recyclable.h",
+    "include/voyahslam/memory/sync_policy.h",
+    "include/voyahslam/events/observable.h",
+    "include/voyahslam/events/async_observer.h",
+    "include/voyahslam/events/listener.h",
+    "include/voyahslam/events/event_types.h",
+    "include/voyahslam/events/map_events.h",
+    "include/voyahslam/map/map_point_id.h",
+    "include/voyahslam/map/frame_id.h",
+    "include/voyahslam/map/map_point_storage.h",
+    "include/voyahslam/map/frame.h",
+    "include/voyahslam/features/stereo_rig.h",
+    "include/voyahslam/features/binocular_camera_frame.h",
+    "include/voyahslam/map/observation_storage.h"
+  ],
+  "locked": false,
+  "precedence": null
+}

@@ -1,0 +1,26 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/plans/2026-10-05-tracking.md",
+  "type": "SPEC",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "Tracking Against the Map (Sub-project 1) Implementation Plan",
+  "summary": "Task-based implementation specification for frame-to-map tracking with interfaces, tests, and global constraints for MapReplica, pose optimization, projection matching, and Tracker.",
+  "scope": [
+    "frame-to-map tracking",
+    "MapReplica",
+    "pose optimization",
+    "projection matching",
+    "Tracker",
+    "ORB-SLAM3",
+    "mono and stereo",
+    "g2o",
+    "motion model",
+    "local map"
+  ],
+  "cross_refs": [
+    "docs/superpowers/specs/2026-10-05-tracking-design.md"
+  ],
+  "locked": false,
+  "precedence": null,
+  "notes": "Hybrid plan+spec: task-based implementation roadmap with embedded interface specifications, test requirements, and global constraints. Defines APIs (MapReplica, OptimizePose, ProjectionMatcher), test precision bounds, architecture rules, and coordinate conventions. References external design spec for rationale. Medium confidence: spec-like content (interfaces, behaviors, constraints) presented in task/plan format rather than pure API documentation."
+}

@@ -1,0 +1,32 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/ROADMAP.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Roadmap",
+  "summary": "Project roadmap documenting completed milestones, work in progress, and next steps with performance results.",
+  "scope": [
+    "roadmap",
+    "project milestones",
+    "SLAM library",
+    "tracking",
+    "loop closing",
+    "map merging",
+    "relocalization",
+    "global BA"
+  ],
+  "cross_refs": [
+    "docs/superpowers/specs/2026-10-07-restructure-design.md",
+    "docs/superpowers/specs/2026-10-07-map-quality-design.md",
+    "docs/superpowers/specs/2026-10-07-bow-design.md",
+    "docs/superpowers/specs/2026-10-07-relocalization-design.md",
+    "docs/superpowers/specs/2026-10-09-loop-closing-design.md",
+    "docs/superpowers/specs/2026-10-10-global-ba-design.md",
+    "docs/superpowers/specs/2026-10-10-map-merging-design.md",
+    "tools/ate.py",
+    "tools/convert_vocabulary",
+    "DESIGN"
+  ],
+  "locked": false,
+  "precedence": null
+}

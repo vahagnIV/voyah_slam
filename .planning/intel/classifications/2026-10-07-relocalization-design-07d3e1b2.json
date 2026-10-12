@@ -1,0 +1,28 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-10-07-relocalization-design.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Relocalization and Reference-Frame Tracking — Design Spec",
+  "summary": "Technical specification for tracking loss recovery via reference-frame tracking and BoW-based relocalization with PnP RANSAC.",
+  "scope": [
+    "Tracker",
+    "Relocalization",
+    "Reference-frame tracking",
+    "Bag of Words",
+    "PnP RANSAC",
+    "Frame database",
+    "Motion model",
+    "Pose optimization",
+    "SearchByBoW",
+    "SolvePnPRansac"
+  ],
+  "cross_refs": [
+    "docs/ROADMAP.md",
+    ".superpowers/spikes/2026-10-07-stereo-drift.md",
+    "DESIGN.md",
+    "TODO.md"
+  ],
+  "locked": false,
+  "precedence": null
+}

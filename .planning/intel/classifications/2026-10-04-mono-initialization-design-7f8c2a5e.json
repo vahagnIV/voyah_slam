@@ -1,0 +1,29 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-10-04-mono-initialization-design.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Monocular Map Initialization — Design Spec (Monocular Initialization, Parts B + C)",
+  "summary": "Technical specification for monocular map initialization covering feature matching, keyframe reconstruction, map point generation, and mapper publication.",
+  "scope": [
+    "monocular initialization",
+    "map initialization",
+    "feature matching",
+    "ImageFeatures",
+    "FeatureGrid",
+    "InitializationMatcher",
+    "MapInitializer",
+    "Mapper",
+    "RigidTransformation",
+    "keyframe creation",
+    "map points",
+    "observations"
+  ],
+  "cross_refs": [
+    "docs/superpowers/specs/2026-10-04-two-view-geometry-design.md",
+    "DESIGN.md",
+    "TODO.md"
+  ],
+  "locked": false,
+  "precedence": null
+}

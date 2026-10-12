@@ -1,0 +1,12 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-10-04-pangolin-viewer-design.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Pangolin Map Viewer — Design Spec",
+  "summary": "Design and implementation specification for a 3D map viewer using Pangolin, with SceneState, renderer, and run modes.",
+  "scope": ["SceneState", "MapViewer", "Pangolin renderer", "3D map viewer", "map points", "keyframes", "camera frustum", "trajectory", "window lifecycle", "multi-map rule"],
+  "cross_refs": ["2026-10-03-map-viewer-design.md", "TODO.md", "DESIGN.md"],
+  "locked": false,
+  "precedence": null
+}

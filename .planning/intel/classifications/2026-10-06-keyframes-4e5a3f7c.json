@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/plans/2026-10-06-keyframes.md",
+  "type": "DOC",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "Keyframes and Map Growth Implementation Plan",
+  "summary": "Step-by-step implementation plan for keyframe creation and map growth during tracking, with 8 tasks covering events, decision rules, triangulation, and end-to-end verification.",
+  "scope": ["keyframes", "map growth", "tracking", "mapper", "triangulation", "map points", "reference frame", "local map", "viewer", "implementation tasks", "tests"],
+  "cross_refs": ["docs/superpowers/specs/2026-10-06-keyframes-design.md"],
+  "locked": false,
+  "precedence": null,
+  "notes": "Classified as DOC (implementation plan/runbook). The document is procedurally structured with step-by-step tasks, test specifications, and file lists rather than purely prose-based documentation. It provides guidance for implementation but does not itself make architectural decisions—those reside in the referenced spec document. The task-oriented nature with checkboxes and detailed interface definitions distinguishes it from standard explanatory DOC content, but these characteristics best fit the 'runbook' and 'guide' aspects of the DOC category."
+}

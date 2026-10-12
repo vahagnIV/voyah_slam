@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-10-05-init-bundle-adjustment-design.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Bundle Adjustment After Monocular Initialization (g2o) — Design Spec",
+  "summary": "Technical specification for g2o-based bundle adjustment after monocular initialization: vendoring g2o, optimization API, integration, and test contracts.",
+  "scope": ["bundle adjustment", "g2o optimization library", "monocular initialization", "Eigen API", "normalization plane projection", "Huber kernel", "outlier removal", "two-stage optimization", "Levenberg-Marquardt solver"],
+  "cross_refs": ["docs/superpowers/specs/2026-10-04-mono-initialization-design.md", "docs/TODO.md", "docs/DESIGN.md", "README.md"],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

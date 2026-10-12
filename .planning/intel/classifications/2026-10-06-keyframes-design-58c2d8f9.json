@@ -1,0 +1,12 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-10-06-keyframes-design.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Keyframes and Map Growth (Tracking Sub-project 2) — Design Spec",
+  "summary": "Technical specification for keyframe creation, map growth via stereo close points and triangulation, and tracker-mapper coordination in SLAM.",
+  "scope": ["keyframes", "Frame", "map growth", "Mapper", "Tracker", "triangulation", "observations", "local maps", "covisibility", "FrameTracked", "KeyFrameCreated"],
+  "cross_refs": ["docs/DESIGN.md", "docs/TODO.md"],
+  "locked": false,
+  "precedence": null
+}

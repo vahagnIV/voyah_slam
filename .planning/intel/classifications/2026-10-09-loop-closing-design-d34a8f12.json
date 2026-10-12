@@ -1,0 +1,28 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-10-09-loop-closing-design.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Loop Closing: Detection and Correction — Design Spec",
+  "summary": "Technical specification for loop closing with Sim3 matching, essential graph optimization, and mapper correction.",
+  "scope": [
+    "Loop Closing",
+    "LoopCloser",
+    "loop detection",
+    "Sim3 matching",
+    "essential graph optimization",
+    "mapper correction",
+    "pose correction",
+    "drift correction",
+    "frame database",
+    "covisibility"
+  ],
+  "cross_refs": [
+    "docs/ROADMAP.md",
+    "docs/TODO.md",
+    "DESIGN.md"
+  ],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

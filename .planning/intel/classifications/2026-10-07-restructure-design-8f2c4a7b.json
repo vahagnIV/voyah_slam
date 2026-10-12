@@ -1,0 +1,12 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-10-07-restructure-design.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Restructure into Four Libraries and a Fast Test Loop — Design Spec",
+  "summary": "Technical specification for restructuring voyahslam into four libraries with enforced layer boundaries and a fast test loop.",
+  "scope": ["voyahslam", "library restructuring", "voyah_common", "voyah_events", "voyah_algs", "voyah_slam", "CMake targets", "test binaries", "layer boundaries", "VOYAHSLAM_OPTIMIZE_TESTS"],
+  "cross_refs": ["docs/ROADMAP.md", "docs/DESIGN.md", "docs/TODO.md", "CLAUDE.md", "README.md"],
+  "locked": false,
+  "precedence": null
+}

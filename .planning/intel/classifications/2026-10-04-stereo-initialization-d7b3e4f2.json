@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/plans/2026-10-04-stereo-initialization.md",
+  "type": "DOC",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "Stereo Map Initialization Implementation Plan",
+  "summary": "Implementation plan for stereo map initialization with 6 sequential tasks covering rig setup, synthetic test support, matching, tracking, initialization, and smoke testing.",
+  "scope": ["stereo initialization", "map initialization", "stereo matching", "rig geometry", "tracking", "mapper", "feature matching", "test support"],
+  "cross_refs": ["docs/superpowers/specs/2026-10-04-stereo-initialization-design.md", "docs/DESIGN.md", "docs/TODO.md"],
+  "locked": false,
+  "precedence": null,
+  "notes": "Implementation runbook with task breakdown, checkboxes, and detailed step-by-step guidance. Classified as DOC (supporting guidance for workers) rather than ADR/PRD/SPEC. References related design spec for detailed architecture."
+}

@@ -1,0 +1,29 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/DESIGN.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "voyahslam — Living Design Document",
+  "summary": "Comprehensive design document covering architecture, threading model, data structures, and event-driven communication for a lock-free SLAM library.",
+  "scope": ["SLAM", "architecture", "lock-free design", "threading", "map replication", "events", "concurrent systems", "ORB-SLAM3"],
+  "cross_refs": [
+    "docs/superpowers/specs/2026-10-03-tracking-states-design.md",
+    "docs/superpowers/specs/2026-09-30-core-slam-data-structures-design.md",
+    "docs/superpowers/specs/2026-10-03-map-viewer-design.md",
+    "docs/superpowers/specs/2026-10-04-pangolin-viewer-design.md",
+    "docs/superpowers/specs/2026-10-04-two-view-geometry-design.md",
+    "docs/superpowers/specs/2026-10-05-camera-model-design.md",
+    "docs/superpowers/specs/2026-10-05-init-bundle-adjustment-design.md",
+    "docs/superpowers/specs/2026-10-04-mono-initialization-design.md",
+    "docs/superpowers/specs/2026-10-04-stereo-initialization-design.md",
+    "docs/superpowers/specs/2026-10-05-tracking-design.md",
+    "docs/superpowers/specs/2026-10-06-keyframes-design.md",
+    "docs/superpowers/specs/2026-10-07-map-quality-design.md",
+    "docs/superpowers/plans/2026-10-07-map-quality.md",
+    "docs/TODO.md",
+    "docs/ROADMAP.md"
+  ],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

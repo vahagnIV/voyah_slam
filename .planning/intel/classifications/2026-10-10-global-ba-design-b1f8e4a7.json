@@ -1,0 +1,24 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-10-10-global-ba-design.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Global Bundle Adjustment After Loop Correction — Design Spec",
+  "summary": "Specifies the global bundle adjustment algorithm after loop correction, including component architecture, optimization, map merge, and testing criteria.",
+  "scope": [
+    "GlobalBundleAdjuster",
+    "loop closing",
+    "bundle adjustment",
+    "map transaction",
+    "keyframes",
+    "optimization",
+    "Mapper merge"
+  ],
+  "cross_refs": [
+    "docs/ROADMAP.md",
+    "docs/DESIGN.md",
+    "docs/TODO.md"
+  ],
+  "locked": false,
+  "precedence": null
+}

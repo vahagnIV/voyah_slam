@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/plans/2026-10-07-restructure.md",
+  "type": "DOC",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "Restructure into Four Libraries Implementation Plan",
+  "summary": "Eight-task plan to split voyahslam into four libraries with separate include roots, test binaries, and build targets.",
+  "scope": ["voyah_common", "voyah_events", "voyah_algs", "voyah_slam", "CMake", "libraries", "refactoring", "test infrastructure"],
+  "cross_refs": ["docs/superpowers/specs/2026-10-07-restructure-design.md", "docs/DESIGN.md", "CLAUDE.md", "README.md", "docs/ROADMAP.md", "docs/TODO.md"],
+  "locked": false,
+  "precedence": null,
+  "notes": "Procedural implementation plan with step-by-step tasks and checkboxes. References separate spec document. Contains no decision record format, requirements, or technical specifications—functions as a runbook/guide for executing an architectural restructure."
+}

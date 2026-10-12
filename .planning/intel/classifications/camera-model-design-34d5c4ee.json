@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-10-05-camera-model-design.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Camera Model: Residuals and Gates in Raw-Pixel Space — Design Spec",
+  "summary": "Technical specification for camera model refactoring: move distortion models to geometry/, add ProjectJacobian, modify five consumers to use raw-pixel residuals with success criteria.",
+  "scope": ["camera models", "distortion models", "projection", "residuals", "Kannala-Brandt", "raw pixels", "feature matching", "pose optimization", "bundle adjustment", "measurement"],
+  "cross_refs": ["docs/DESIGN.md", "docs/TODO.md"],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

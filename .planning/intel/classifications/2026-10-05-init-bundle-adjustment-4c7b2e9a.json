@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/plans/2026-10-05-init-bundle-adjustment.md",
+  "type": "DOC",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "Bundle Adjustment After Monocular Initialization Implementation Plan",
+  "summary": "Implementation plan for adding g2o-based bundle adjustment to monocular initialization, with detailed task breakdown covering vendoring, integration, optimization API, and testing.",
+  "scope": ["bundle adjustment", "g2o optimization", "monocular initialization", "C++20", "API design", "unit testing", "Conan packaging"],
+  "cross_refs": ["docs/superpowers/specs/2026-10-05-init-bundle-adjustment-design.md"],
+  "locked": false,
+  "precedence": null,
+  "notes": "Implementation plan document with step-by-step task breakdown and acceptance criteria. References a separate design specification. Structured as working guidance with executable tasks rather than a formal ADR decision or SPEC contract."
+}

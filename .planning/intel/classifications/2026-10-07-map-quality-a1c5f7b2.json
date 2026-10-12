@@ -1,0 +1,29 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/plans/2026-10-07-map-quality.md",
+  "type": "DOC",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "Map Quality Implementation Plan",
+  "summary": "Task-by-task implementation plan for Mapper map quality: fusion, culling, local BA, and interruptible transaction architecture.",
+  "scope": [
+    "Map quality",
+    "Mapper",
+    "MapTransaction",
+    "fusion",
+    "culling",
+    "local BA",
+    "bundle adjustment",
+    "interruption",
+    "events",
+    "C++20"
+  ],
+  "cross_refs": [
+    "docs/superpowers/specs/2026-10-07-map-quality-design.md",
+    "docs/DESIGN.md",
+    "docs/TODO.md",
+    "docs/ROADMAP.md"
+  ],
+  "locked": false,
+  "precedence": null,
+  "notes": "Implementation plan document with detailed C++ interface specifications and task breakdown. Explicitly defers to a separate specification document at docs/superpowers/specs/2026-10-07-map-quality-design.md. Guides developers through 8 implementation tasks with step-by-step guidance, not defining requirements or architecture decisions themselves."
+}

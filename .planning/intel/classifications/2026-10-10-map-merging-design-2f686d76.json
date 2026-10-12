@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-10-10-map-merging-design.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Map Merging (Multi-Map Atlas) — Design Spec",
+  "summary": "Specifies multi-map atlas design with merge detection, merging algorithm, and replica synchronization.",
+  "scope": ["Map merging", "Multi-map Atlas", "Mapper", "LoopCloser", "Merge detection", "Window-based merging", "Replica synchronization", "Point ID management"],
+  "cross_refs": ["docs/ROADMAP.md", "docs/DESIGN.md", "docs/TODO.md"],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

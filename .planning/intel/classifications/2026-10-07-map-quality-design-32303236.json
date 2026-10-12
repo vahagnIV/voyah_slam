@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-10-07-map-quality-design.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Map Quality: Fusion, Culling, Local BA — Design Spec",
+  "summary": "Technical specification for map quality improvements via point fusion, frame culling, and local bundle adjustment.",
+  "scope": ["Map", "Frame", "MapPoint", "Fusion", "Culling", "Local BA", "Bundle Adjustment", "MapTransaction", "Mapper", "Tracker", "Observations", "Stereo"],
+  "cross_refs": ["docs/ROADMAP.md", "docs/TODO.md", "DESIGN.md"],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

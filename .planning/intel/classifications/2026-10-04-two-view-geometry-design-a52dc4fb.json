@@ -1,0 +1,27 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-10-04-two-view-geometry-design.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Two-View Geometry Toolkit — Design Spec (Monocular Initialization, Part A)",
+  "summary": "Technical specification for two-view geometry reconstruction toolkit with RANSAC estimators, pose decomposition, triangulation-based selection, and test strategy.",
+  "scope": [
+    "RigidTransformation",
+    "TwoViewCorrespondences",
+    "HomographyEstimator",
+    "EssentialEstimator",
+    "RANSAC",
+    "essential matrix",
+    "homography",
+    "pose decomposition",
+    "triangulation",
+    "Levenberg-Marquardt refinement",
+    "two-view reconstruction"
+  ],
+  "cross_refs": [
+    "DESIGN.md",
+    "TODO.md"
+  ],
+  "locked": false,
+  "precedence": null
+}

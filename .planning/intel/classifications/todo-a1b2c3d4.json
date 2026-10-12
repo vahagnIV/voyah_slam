@@ -1,0 +1,37 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/TODO.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "TODO",
+  "summary": "Pending work items and tasks for the voyahslam SLAM library, organized by subsystem.",
+  "scope": [
+    "performance tuning",
+    "ORB extractor",
+    "camera models",
+    "stereo tracking",
+    "loop closing",
+    "relocalization",
+    "map merging",
+    "initialization",
+    "geometry",
+    "bag of words",
+    "global bundle adjustment",
+    "test coverage"
+  ],
+  "cross_refs": [
+    "docs/DESIGN.md",
+    "docs/superpowers/specs/2026-10-06-keyframes-design.md",
+    "docs/superpowers/specs/2026-10-07-bow-design.md",
+    "docs/superpowers/specs/2026-10-07-relocalization-design.md",
+    "docs/superpowers/specs/2026-10-07-map-quality-design.md",
+    "docs/superpowers/specs/2026-10-09-loop-closing-design.md",
+    "docs/superpowers/specs/2026-10-10-global-ba-design.md",
+    "docs/superpowers/specs/2026-10-10-map-merging-design.md",
+    "tools/ate.py",
+    "tools/dbow2_reference/README.md",
+    ".superpowers/sdd/2026-10-09-loop-closing/false-loop-diagnosis.md"
+  ],
+  "locked": false,
+  "precedence": null
+}

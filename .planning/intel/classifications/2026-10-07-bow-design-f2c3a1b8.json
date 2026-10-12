@@ -1,0 +1,30 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-10-07-bow-design.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Bag of Words without OpenCV — Design Spec",
+  "summary": "Technical specification for OpenCV-free Bag of Words vocabulary module with transform, scoring, file formats, and integration.",
+  "scope": [
+    "Bag of Words",
+    "vocabulary",
+    "OpenCV-free implementation",
+    "DBoW2 port",
+    "ORB descriptors",
+    "place recognition",
+    "TF-IDF scoring",
+    "L1 normalization",
+    "triangulation search",
+    "binary file format",
+    "text file format"
+  ],
+  "cross_refs": [
+    "docs/ROADMAP.md",
+    "DESIGN.md",
+    "TODO.md",
+    "README.md"
+  ],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

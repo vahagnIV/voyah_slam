@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-10-07-restructure-timings.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Restructure baseline test timings",
+  "summary": "Baseline test timings and performance target specifications measured with ctest; integration test organization.",
+  "scope": ["test timings", "performance SLOs", "ctest", "Debug build", "optimization flags", "integration tests", "unit tests", "VOYAHSLAM_OPTIMIZE_TESTS"],
+  "cross_refs": [],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

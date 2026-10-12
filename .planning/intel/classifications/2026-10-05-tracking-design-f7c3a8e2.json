@@ -1,0 +1,16 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-10-05-tracking-design.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Tracking Against the Map (Sub-project 1) — Design Spec",
+  "summary": "Specifies frame-to-map tracking implementation with MapReplica, projection matching, pose optimization, and testing contracts.",
+  "scope": ["Tracking", "MapReplica", "ProjectionMatcher", "OptimizePose", "frame-to-map tracking", "pose estimation", "stereo residuals", "motion model"],
+  "cross_refs": [
+    "docs/DESIGN.md",
+    "docs/TODO.md"
+  ],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

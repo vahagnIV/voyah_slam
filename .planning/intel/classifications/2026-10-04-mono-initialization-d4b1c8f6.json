@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/plans/2026-10-04-mono-initialization.md",
+  "type": "DOC",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "Monocular Map Initialization Implementation Plan",
+  "summary": "Task-by-task implementation plan for monocular map initialization, covering feature pyramids, reconstruction, and map publication.",
+  "scope": ["monocular initialization", "map initialization", "feature matching", "map points", "keyframes", "ORB-SLAM3", "initialization matcher", "median-depth scaling"],
+  "cross_refs": ["docs/superpowers/specs/2026-10-04-mono-initialization-design.md", "docs/DESIGN.md", "docs/TODO.md"],
+  "locked": false,
+  "precedence": null,
+  "notes": "Plan document with embedded API specifications (Interfaces sections). References separate design spec as authority. Structure is tutorial-like steps; purpose is to guide implementation, not to be a formal specification itself."
+}

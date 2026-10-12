@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/plans/2026-10-10-global-ba.md",
+  "type": "SPEC",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "Global BA After Loop Correction Implementation Plan",
+  "summary": "Specification for implementing ORB-SLAM3 global bundle adjustment after loop correction with detailed task breakdown.",
+  "scope": ["GlobalBundleAdjuster", "bundle adjustment", "loop correction", "map replica", "ORB-SLAM3"],
+  "cross_refs": ["docs/superpowers/specs/2026-10-10-global-ba-design.md"],
+  "locked": false,
+  "precedence": null,
+  "notes": "Document is organized as implementation plan (tasks, steps, checkboxes) but content is primarily technical specification: APIs with function signatures and return types, data structures with field types, non-functional constraints in 'Global Constraints' section. Strong SPEC signals dominate; planning structure is organizational, not definitional."
+}

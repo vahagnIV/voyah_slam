@@ -1,0 +1,29 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/plans/2026-09-30-core-slam-data-structures.md",
+  "type": "DOC",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "Core SLAM Data Structures Implementation Plan",
+  "summary": "Implementation work plan for core SLAM data layer: ObjectPool, MapPointStorage, StereoRig, BinocularCameraFrame, Frame, and event system.",
+  "scope": [
+    "ObjectPool",
+    "MapPointStorage",
+    "StereoRig",
+    "BinocularCameraFrame",
+    "Frame",
+    "ObservationStorage",
+    "Event system",
+    "Observable",
+    "AsyncObserver",
+    "Listener",
+    "moodycamel::ConcurrentQueue",
+    "lock-free architecture",
+    "Structure-of-Arrays storage"
+  ],
+  "cross_refs": [
+    "docs/superpowers/specs/2026-09-30-core-slam-data-structures-design.md"
+  ],
+  "locked": false,
+  "precedence": null,
+  "notes": "Execution-focused work plan with 8 tasks, each broken into checkboxed sub-steps. References a separate specification document; this doc is the implementation roadmap/guide, not the spec itself. Contains technical details (function signatures, class layouts) but presented in task-execution context. Medium confidence due to spec-adjacent technical content, but dominant signal is operational guidance rather than specification."
+}

@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/plans/2026-10-10-map-merging.md",
+  "type": "SPEC",
+  "confidence": "medium",
+  "manifest_override": false,
+  "title": "Map Merging (Multi-Map Atlas) Implementation Plan",
+  "summary": "Technical specification for implementing map merging (ORB-SLAM3 Atlas), detailing APIs, data structures, merge detection logic, and transaction formats across seven development tasks.",
+  "scope": ["map merging", "atlas", "shared measurements", "map transactions", "merge detection", "loop closing", "ORB-SLAM3", "MapReplica", "AtlasReplica", "point ID translation", "frame tracking"],
+  "cross_refs": ["docs/superpowers/specs/2026-10-10-map-merging-design.md", "docs/DESIGN.md", "docs/TODO.md", "docs/ROADMAP.md"],
+  "locked": false,
+  "precedence": null,
+  "notes": "Document structured as implementation plan (7 tasks with steps) but content is primarily technical specification: detailed interface definitions (APIs, type signatures, class methods), data structure specifications (MapTransaction fields, AtlasReplica, MapState), and non-functional constraints (id rules, gates, ORB-SLAM3 values). Planning structure is organizational, not definitional. Precedent: 2026-10-10-global-ba with similar structure classified as SPEC."
+}

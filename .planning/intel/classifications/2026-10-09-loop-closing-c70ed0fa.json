@@ -1,0 +1,13 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/plans/2026-10-09-loop-closing.md",
+  "type": "DOC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Loop Closing (Detection and Correction) Implementation Plan",
+  "summary": "8-task implementation plan for loop detection and correction in SLAM, with architecture, test strategies, and build instructions.",
+  "scope": ["loop closing", "loop detection", "loop correction", "ORB-SLAM3", "Sim3 RANSAC", "essential graph", "LoopCloser", "Mapper", "Tracker", "map graph", "frame graph"],
+  "cross_refs": ["docs/superpowers/specs/2026-10-09-loop-closing-design.md", "https://github.com/UZ-SLAMLab/ORB_SLAM3"],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

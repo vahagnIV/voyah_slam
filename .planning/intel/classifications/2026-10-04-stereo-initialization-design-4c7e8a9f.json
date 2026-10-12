@@ -1,0 +1,27 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-10-04-stereo-initialization-design.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Stereo (Binocular) Map Initialization — Design Spec",
+  "summary": "Technical specification for stereo matching, binocular map initialization, mapper/tracker integration, and test requirements.",
+  "scope": [
+    "Stereo matching",
+    "BinocularMeasurement",
+    "StereoRig",
+    "StereoMatches",
+    "MapInitializer",
+    "Tracker",
+    "Mapper",
+    "synthetic stereo support",
+    "test specifications"
+  ],
+  "cross_refs": [
+    "2026-10-04-mono-initialization-design.md",
+    "DESIGN.md",
+    "TODO.md"
+  ],
+  "locked": false,
+  "precedence": null,
+  "notes": ""
+}

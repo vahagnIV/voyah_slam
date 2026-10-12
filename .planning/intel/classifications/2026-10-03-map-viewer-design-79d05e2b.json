@@ -1,0 +1,12 @@
+{
+  "source_path": "/home/vahagn/git/voyah_slam/docs/superpowers/specs/2026-10-03-map-viewer-design.md",
+  "type": "SPEC",
+  "confidence": "high",
+  "manifest_override": false,
+  "title": "Map Viewer — Design Spec",
+  "summary": "Technical specification for MapViewer component consuming events to build scene state for visualization.",
+  "scope": ["MapViewer", "SceneState", "visualization", "events", "scene state", "AsyncObserver", "thread lifecycle", "Pangolin"],
+  "cross_refs": ["DESIGN.md", "TODO.md", "examples/full_slam/"],
+  "locked": false,
+  "precedence": null
+}
