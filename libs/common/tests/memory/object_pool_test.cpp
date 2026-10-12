@@ -337,15 +337,14 @@ TEST(ObjectPoolTest, OverflowWarningIsRateLimited) {
     logger->sinks().pop_back();
 }
 
-// A producer creates far beyond capacity while consumers on other threads
-// recycle concurrently. Run under TSan and ASan (DESIGN "Object pools").
-TEST(ObjectPoolTest, ConcurrentOverflowCreateAndRecycleIsSafe) {
+// A producer creates `num_events` objects (value = event index) from `pool`
+// and hands event i to consumer i % kConsumers through a single-producer /
+// single-consumer ring; each consumer checks that its values are its own
+// (i % kConsumers == c) and strictly increasing, so an object handed out twice
+// shows up, then recycles it. Returns the number of violations.
+template <typename TPool>
+int RunProducerAndRecyclingConsumers(TPool& pool, int num_events) {
     constexpr int kConsumers = 3;
-    constexpr int kEvents = 200'000;
-    constexpr size_t kSlots = 4;
-    ObjectPool<ThreadSafeTestObject, ThreadSafePolicy> pool(kSlots);
-
-    // Single-producer / single-consumer rings, one per consumer.
     constexpr size_t kRing = 4096;
     struct Ring {
         std::array<std::atomic<ThreadSafeTestObject*>, kRing> cells{};
@@ -359,6 +358,7 @@ TEST(ObjectPoolTest, ConcurrentOverflowCreateAndRecycleIsSafe) {
     auto consumer = [&](int c) {
         Ring& ring = rings[c];
         size_t tail = 0;
+        int last = -1;
         while (true) {
             size_t head = ring.head.load(std::memory_order_acquire);
             if (tail == head) {
@@ -368,7 +368,11 @@ TEST(ObjectPoolTest, ConcurrentOverflowCreateAndRecycleIsSafe) {
                 continue;
             }
             auto* obj = ring.cells[tail % kRing].load(std::memory_order_relaxed);
-            if (obj->value < 0) bad.fetch_add(1, std::memory_order_relaxed);
+            const int value = obj->value;
+            if (value < 0 || value % kConsumers != c || value <= last) {
+                bad.fetch_add(1, std::memory_order_relaxed);
+            }
+            last = value;
             obj->value = -1;  // write to the object before recycling it
             ++tail;
             ring.tail.store(tail, std::memory_order_release);
@@ -379,7 +383,7 @@ TEST(ObjectPoolTest, ConcurrentOverflowCreateAndRecycleIsSafe) {
     for (int c = 0; c < kConsumers; ++c) threads.emplace_back(consumer, c);
 
     std::vector<size_t> heads(kConsumers, 0);
-    for (int i = 0; i < kEvents; ++i) {
+    for (int i = 0; i < num_events; ++i) {
         int c = i % kConsumers;
         Ring& ring = rings[c];
         while (heads[c] - ring.tail.load(std::memory_order_acquire) >= kRing) {
@@ -392,16 +396,39 @@ TEST(ObjectPoolTest, ConcurrentOverflowCreateAndRecycleIsSafe) {
     }
     done.store(true, std::memory_order_release);
     for (auto& t : threads) t.join();
+    return bad.load();
+}
 
-    EXPECT_EQ(bad.load(), 0);
-    EXPECT_GT(pool.num_overflow_created(), 0u);
-    // Every object is back: exactly capacity() objects can be taken without growing.
+// Every object is back: exactly capacity() distinct objects can be taken
+// without growing.
+template <typename TPool>
+void ExpectAllSlotsFree(TPool& pool) {
     std::vector<ThreadSafeTestObject*> all;
     while (auto* obj = pool.TryCreate()) all.push_back(obj);
     EXPECT_EQ(all.size(), pool.capacity());
     std::sort(all.begin(), all.end());
     EXPECT_EQ(std::adjacent_find(all.begin(), all.end()), all.end());
     for (auto* obj : all) obj->Recycle();
+}
+
+// A producer creates far beyond capacity while consumers on other threads
+// recycle concurrently. Run under TSan and ASan (DESIGN "Object pools").
+TEST(ObjectPoolTest, ConcurrentOverflowCreateAndRecycleIsSafe) {
+    ObjectPool<ThreadSafeTestObject, ThreadSafePolicy> pool(4);
+    EXPECT_EQ(RunProducerAndRecyclingConsumers(pool, 200'000), 0);
+    EXPECT_GT(pool.num_overflow_created(), 0u);
+    ExpectAllSlotsFree(pool);
+}
+
+// Growth racing recycling, many times: each round starts from a one-slot pool,
+// so every round grows the pool repeatedly while consumers recycle into it.
+TEST(ObjectPoolTest, RepeatedGrowthRacesRecycling) {
+    for (int round = 0; round < 100; ++round) {
+        ObjectPool<ThreadSafeTestObject, ThreadSafePolicy> pool(1);
+        ASSERT_EQ(RunProducerAndRecyclingConsumers(pool, 3000), 0) << "round " << round;
+        EXPECT_GT(pool.capacity(), 1u);
+        ExpectAllSlotsFree(pool);
+    }
 }
 
 // Several threads Create() concurrently on an exhausted pool, so they race to grow it.
@@ -436,6 +463,7 @@ TEST(ObjectPoolTest, ConcurrentCreatorsGrowSafely) {
     EXPECT_EQ(std::adjacent_find(all.begin(), all.end()), all.end());
     EXPECT_LE(all.size(), pool.capacity());
     for (auto* obj : all) obj->Recycle();
+    ExpectAllSlotsFree(pool);
 }
 
 } // namespace

@@ -210,6 +210,15 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
       decide whether/when to compact (a compaction would need an id remap
       event for the replicas).
 - [ ] Size event pools per event type. (OQ 14)
+- [ ] **ASan runs abort in g2o (pre-existing, 2026-10-12):** "attempting
+      free on address which was not malloc()-ed" from `g2o::Solver::~Solver`
+      (e.g. via `OptimizePose`). An ODR mix: Eigen 3.4 disables
+      `EIGEN_GLIBC_MALLOC_ALREADY_ALIGNED` under `__SANITIZE_ADDRESS__`, so our
+      ASan-compiled code uses Eigen's `handmade_aligned_malloc` while the
+      non-ASan g2o frees with its own `aligned_free` (plain `free`), or vice
+      versa. Fix: build g2o with `-fsanitize=address` for ASan runs, or define
+      `EIGEN_MALLOC_ALREADY_ALIGNED=0` consistently (ours and g2o) in that
+      configuration.
 - [ ] **Lossy delivery for display-only observers** (deferred 2026-10-12,
       ownership audit item 4). Since 0.3.0 a stuck async observer makes the
       Tracker's and Mapper's pools grow (no abort, nothing dropped), so a
@@ -810,6 +819,9 @@ Quality" (smoke table there).
       was run 100 times (4 parallel processes × `--gtest_repeat=25`, both
       trees' runs concurrently, 16 processes) on master (d182865) and on the
       branch (ebdd88b):
+  - `SlamTest.StereoMapGrowsWhileLeavingInitialView` (added 2026-10-12,
+    `fix/pool-overflow` review): fails 2 / 60 runs under parallel load on
+    master too; failed once in a `check_all` on the branch.
   - `SlamTest.DuplicatesFusedInLongSequence`: master 2 / 100, branch
     2 / 100. Failures: a `TrackingLost` during the run (`tracking_lost`
     not empty, and once the alive-point count no longer matching), or one

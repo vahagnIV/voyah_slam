@@ -498,8 +498,16 @@ allocations per event).
     them (acquire) sees the chunk. A creator that loses the CAS frees its chunk
     and retries; under concurrent creators the pool may grow one chunk more
     than strictly needed. Chunks are freed only in the destructor, so the stale
-    index a losing pop reads is always a valid slot. After 2^32 - 1 slot
-    indices `Create()` still aborts (a leak, not a backlog).
+    index a losing pop reads is always a valid slot. `Create()` passes the
+    count of completed growths it saw before its pop, so a creator that fails
+    after another finished growing retries instead of growing again; only one
+    that fails while another is between its chunk CAS and its push grows an
+    extra chunk (waiting would not be lock-free).
+  - **Limits.** Slot indices are 32-bit, so the capacity stops at the largest
+    `initial << k` ≤ 2^32 − 1 (between 2^31 and 2^32 − 1 slots); past it
+    `Create()` aborts. In practice memory runs out first: a `std::bad_alloc`
+    from a growth propagates out of `Create()` on the producer's thread (the
+    Tracker's or Mapper's worker thread).
 - `ColumnBuffer<TScalar, Rows>` — grow-only `Rows × N` Eigen buffer used for
   event payloads. `Resize(n)` sets the visible column count and reallocates
   (geometrically, preserving data) only when `n` exceeds capacity; `matrix()`

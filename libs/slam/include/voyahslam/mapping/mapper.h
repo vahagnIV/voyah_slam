@@ -226,6 +226,11 @@ public:
     [[nodiscard]] uint64_t transaction_pool_overflow() const {
         return transaction_pool_.num_overflow_created();
     }
+    // MapTransactions built (CreateTransaction), in total; every one is
+    // published. Any thread.
+    [[nodiscard]] uint64_t num_transactions_built() const {
+        return num_transactions_built_.load(std::memory_order_acquire);
+    }
     // FrameTracked events of the current map skipped, in total, because they
     // were tracked before a loop correction (an older map epoch).
     [[nodiscard]] size_t stale_epoch_skipped() const {
@@ -755,6 +760,7 @@ private:
     // one; readable from any thread.
     std::atomic<size_t> num_keyframes_{0};
     std::atomic<size_t> num_map_points_{0};
+    std::atomic<uint64_t> num_transactions_built_{0};
     // Transaction 1 in progress: the (Frame, point) keys of the observations
     // it added; loser -> winner of each merge, and the losers in merge order;
     // the points whose observations changed.

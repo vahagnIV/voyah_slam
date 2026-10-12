@@ -48,8 +48,18 @@ void LogPoolGrowth(const char* pool_name, size_t old_capacity, size_t new_capaci
 // stack; the head packs (tag << 32 | index) and the tag is bumped on every
 // operation to prevent ABA. Growth is lock-free too: a chunk is published by a
 // CAS on its (null) chunk pointer and its slots are pushed as one chain; a
-// creator that loses the race simply retries. Chunks are freed only by the
+// creator that loses the race simply retries. A creator whose pop failed
+// before another creator finished a growth retries instead of growing again
+// (Grow() takes the growth count seen before the pop); only a creator that
+// fails while another is between its chunk CAS and its push grows one more
+// chunk (waiting there would not be lock-free). Chunks are freed only by the
 // pool's destructor, so a stale index read by a losing CAS is always valid.
+//
+// Limits: the slot count stays below 2^32 - 1 (indices are 32-bit), so the
+// largest capacity is the largest initial << k <= 2^32 - 1, between 2^31 and
+// 2^32 - 1 slots; past it Create() aborts. In practice memory runs out first:
+// a std::bad_alloc from a growth propagates out of Create() on the producer's
+// thread (for the Tracker and Mapper, their worker threads).
 template <typename T, typename SyncPolicy = NoSyncPolicy>
 class ObjectPool {
 public:
@@ -58,7 +68,8 @@ public:
     ObjectPool& operator=(const ObjectPool&) = delete;
     ~ObjectPool();
 
-    // Never fails: when no slot is free the pool grows (see the class comment).
+    // When no slot is free the pool grows (see the class comment); throws
+    // std::bad_alloc if the growth cannot be allocated.
     T* Create();
     // Returns nullptr if no slot is free; never grows the pool.
     T* TryCreate();
@@ -80,10 +91,11 @@ private:
     static_assert(std::atomic<uint64_t>::is_always_lock_free);
 
     struct Chunk {
+        // `storage` is allocated last, so a std::bad_alloc leaks nothing.
         Chunk(uint32_t begin_index, size_t count) :
-            storage(static_cast<std::byte*>(::operator new(count * kSize, std::align_val_t(kAlign)))),
             next(std::make_unique<std::atomic<uint32_t>[]>(count)),
             constructed(std::make_unique<bool[]>(count)),
+            storage(static_cast<std::byte*>(::operator new(count * kSize, std::align_val_t(kAlign)))),
             begin(begin_index),
             size(count) {}
         ~Chunk() {
@@ -97,10 +109,10 @@ private:
         Chunk(const Chunk&) = delete;
         Chunk& operator=(const Chunk&) = delete;
 
-        std::byte* storage;
         std::unique_ptr<std::atomic<uint32_t>[]> next;
         // Written only by the thread that currently owns the slot; read in ~Chunk.
         std::unique_ptr<bool[]> constructed;
+        std::byte* storage;
         uint32_t begin;  // global index of the first slot
         size_t size;
     };
@@ -109,6 +121,8 @@ private:
     std::atomic<uint64_t> head_{0};
     std::atomic<size_t> capacity_{0};
     std::atomic<uint64_t> num_overflow_created_{0};
+    // Completed growths (chunk pushed); Grow() skips if it changed since a pop.
+    std::atomic<uint64_t> num_growths_{0};
     size_t initial_capacity_ = 0;
     std::string name_;
 
@@ -128,8 +142,9 @@ private:
     uint32_t PopSlot();
     // Pushes the chain first -> ... -> last (already linked) onto the free list.
     void PushChain(uint32_t first, uint32_t last);
-    // Adds the next chunk. Returns after this or another thread has grown the pool.
-    void Grow();
+    // Adds the next chunk, unless a growth completed since `seen_growths`
+    // (the caller then retries its pop).
+    void Grow(uint64_t seen_growths);
     std::atomic<uint32_t>& NextOf(uint32_t index) const;
     T* SlotAt(uint32_t index) const;
     bool& ConstructedAt(uint32_t index) const;
@@ -162,10 +177,11 @@ ObjectPool<T, SyncPolicy>::~ObjectPool() {
 template <typename T, typename SyncPolicy>
 T* ObjectPool<T, SyncPolicy>::Create() {
     while (true) {
+        const uint64_t seen_growths = num_growths_.load(std::memory_order_acquire);
         if (T* obj = TryCreate()) {
             return obj;
         }
-        Grow();
+        Grow(seen_growths);
     }
 }
 
@@ -202,7 +218,10 @@ void ObjectPool<T, SyncPolicy>::Recycle(T* obj) {
 }
 
 template <typename T, typename SyncPolicy>
-void ObjectPool<T, SyncPolicy>::Grow() {
+void ObjectPool<T, SyncPolicy>::Grow(uint64_t seen_growths) {
+    if (num_growths_.load(std::memory_order_acquire) != seen_growths) {
+        return;  // slots were added after the failed pop: retry it
+    }
     for (size_t k = 1; k < kMaxChunks; ++k) {
         if (ChunkAt(k) != nullptr) {
             continue;
@@ -226,11 +245,13 @@ void ObjectPool<T, SyncPolicy>::Grow() {
         const size_t old_capacity = capacity_.load(std::memory_order_relaxed);
         capacity_.fetch_add(count, std::memory_order_relaxed);
         PushChain(static_cast<uint32_t>(begin), static_cast<uint32_t>(begin + count - 1));
+        num_growths_.fetch_add(1, std::memory_order_release);
         detail::LogPoolGrowth(name_.c_str(), old_capacity, old_capacity + count,
                               num_overflow_created_.load(std::memory_order_relaxed));
         return;
     }
-    // 2^32 - 1 slot indices in use: not a backlog any more but a leak.
+    // The next doubling would pass 2^32 - 1 slots (indices are 32-bit): not a
+    // backlog any more but a leak.
     std::fputs("ObjectPool: slot index space exhausted\n", stderr);
     std::abort();
 }

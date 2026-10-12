@@ -1716,11 +1716,17 @@ public:
     events::AsyncObserver& observer() { return observer_; }
     size_t pending() { return observer_.queue().size_approx(); }
     // Pops and releases every held event; call while the producers' pools live.
-    void Release() {
+    // `inspect` sees each event first.
+    template <typename TInspect>
+    void Release(TInspect inspect) {
         events::Event* event = nullptr;
         while (observer_.TryPop(event)) {
+            inspect(*event);
             event->recycle_(event);
         }
+    }
+    void Release() {
+        Release([](const events::Event&) {});
     }
 
 private:
@@ -1788,10 +1794,30 @@ TEST(SlamTest, StuckObserverOverflowsMapTransactionPoolWithoutDropping) {
     recorder.Poll();
     EXPECT_GT(slam.mapper().transaction_pool_overflow(), 0u);
     EXPECT_GT(slam.tracker().event_pool_overflow(), 0u);
-    // Nothing dropped: the stuck observer holds every transaction the
-    // recorder received.
-    EXPECT_EQ(stuck_mapper.pending(), recorder.transaction_new_points.size());
-    stuck_mapper.Release();
+    // Nothing dropped: the stuck observer holds every transaction the Mapper
+    // built (a Mapper-side count, not the delivered stream). And within each
+    // map, point ids are append-only and every transaction's new points start
+    // where the previous one's ended, so a dropped transaction that added
+    // points leaves a gap.
+    EXPECT_EQ(stuck_mapper.pending(), slam.mapper().num_transactions_built());
+    std::map<uint32_t, uint64_t> next_point_id;  // per map
+    size_t num_transactions = 0;
+    size_t num_with_points = 0;
+    stuck_mapper.Release([&](const events::Event& event) {
+        if (event.type != events::EventType::MapTransaction) return;
+        const auto& transaction =
+            static_cast<const events::MapTransaction<features::OrbFeatureExtractor>&>(event);
+        ++num_transactions;
+        if (transaction.num_new_points() == 0) return;
+        ++num_with_points;
+        const uint32_t map = event.map_id.value;
+        const uint64_t start = transaction.new_points_start_id.value;
+        const auto it = next_point_id.find(map);
+        EXPECT_EQ(start, it == next_point_id.end() ? 0u : it->second)
+            << "map " << map << ", transaction " << num_transactions;
+        next_point_id[map] = start + transaction.num_new_points();
+    });
+    EXPECT_GT(num_with_points, 2u);
     stuck_tracker.Release();
 }
 
