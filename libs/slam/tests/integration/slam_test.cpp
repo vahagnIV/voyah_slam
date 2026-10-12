@@ -1709,5 +1709,117 @@ TEST(SlamTest, StereoMergesMaps) {
     }
 }
 
+// An observer that never pops (a stuck listener, a breakpoint): it holds every
+// event pushed to it until Release().
+class StuckObserver {
+public:
+    events::AsyncObserver& observer() { return observer_; }
+    size_t pending() { return observer_.queue().size_approx(); }
+    // Pops and releases every held event; call while the producers' pools live.
+    // `inspect` sees each event first.
+    template <typename TInspect>
+    void Release(TInspect inspect) {
+        events::Event* event = nullptr;
+        while (observer_.TryPop(event)) {
+            inspect(*event);
+            event->recycle_(event);
+        }
+    }
+    void Release() {
+        Release([](const events::Event&) {});
+    }
+
+private:
+    events::AsyncObserver observer_;
+};
+
+// Polls `condition` every millisecond until it holds or `timeout` passes.
+template <typename TCondition>
+bool WaitUntil(TCondition condition, std::chrono::milliseconds timeout = std::chrono::seconds(60)) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (!condition()) {
+        if (std::chrono::steady_clock::now() >= deadline) return false;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return true;
+}
+
+// Audit item 4: an async observer more than 256 events behind used to abort
+// the app (ObjectPool::Create). Now the Tracker's event pools grow: the run
+// completes and the overflow is counted. A static camera never initializes,
+// so every measurement publishes an InitializationMeasurement.
+TEST(SlamTest, StuckObserverOverflowsTrackerPoolsWithoutAborting) {
+    test::SyntheticSequenceOptions options;
+    options.num_frames = 300;  // > the default pool size, 256
+    options.step = 0.0;
+    options.yaw_step_deg = 0.0;
+    const test::SyntheticSequence sequence = test::MakeSyntheticSequence(options);
+
+    StuckObserver stuck;
+    OrbSlam slam;
+    ASSERT_EQ(tracking::TrackerOptions{}.event_pool_size, 256u);
+    slam.tracker().AddObserver(stuck.observer());
+    slam.Start();
+    for (const auto& frame : sequence.frames) slam.tracker().Track(frame.measurement);
+    EXPECT_TRUE(WaitUntil([&] { return stuck.pending() >= sequence.frames.size(); }));
+    slam.Stop();
+    EXPECT_GT(slam.tracker().event_pool_overflow(), 0u);
+    stuck.Release();
+}
+
+// The Mapper's MapTransaction pool grows too: a transaction is never dropped
+// (the Tracker and LoopCloser replicas need every one). A small pool makes a
+// short stereo run overflow it.
+TEST(SlamTest, StuckObserverOverflowsMapTransactionPoolWithoutDropping) {
+    test::SyntheticStereoSequenceOptions options;
+    options.trajectory.num_points = 600;  // a stereo map needs > 500 left features
+    const test::SyntheticStereoSequence sequence = test::MakeSyntheticStereoSequence(options);
+    mapping::MapperOptions mapper_options;
+    mapper_options.transaction_pool_size = 2;
+    tracking::TrackerOptions tracker_options;
+    tracker_options.event_pool_size = 4;
+
+    StuckObserver stuck_mapper;
+    StuckObserver stuck_tracker;
+    ProtocolRecorder recorder;
+    OrbSlam slam(mapper_options, tracker_options);
+    recorder.Attach(slam);
+    slam.mapper().AddObserver(stuck_mapper.observer());
+    slam.tracker().AddObserver(stuck_tracker.observer());
+    slam.Start();
+    for (const auto& frame : sequence.frames) slam.tracker().Track(frame.measurement);
+    EXPECT_TRUE(WaitUntil([&] { return stuck_tracker.pending() >= sequence.frames.size(); }));
+    EXPECT_TRUE(recorder.WaitFor([&] { return stuck_mapper.pending() > 2; }));
+    slam.Stop();
+    recorder.Poll();
+    EXPECT_GT(slam.mapper().transaction_pool_overflow(), 0u);
+    EXPECT_GT(slam.tracker().event_pool_overflow(), 0u);
+    // Nothing dropped: the stuck observer holds every transaction the Mapper
+    // built (a Mapper-side count, not the delivered stream). And within each
+    // map, point ids are append-only and every transaction's new points start
+    // where the previous one's ended, so a dropped transaction that added
+    // points leaves a gap.
+    EXPECT_EQ(stuck_mapper.pending(), slam.mapper().num_transactions_built());
+    std::map<uint32_t, uint64_t> next_point_id;  // per map
+    size_t num_transactions = 0;
+    size_t num_with_points = 0;
+    stuck_mapper.Release([&](const events::Event& event) {
+        if (event.type != events::EventType::MapTransaction) return;
+        const auto& transaction =
+            static_cast<const events::MapTransaction<features::OrbFeatureExtractor>&>(event);
+        ++num_transactions;
+        if (transaction.num_new_points() == 0) return;
+        ++num_with_points;
+        const uint32_t map = event.map_id.value;
+        const uint64_t start = transaction.new_points_start_id.value;
+        const auto it = next_point_id.find(map);
+        EXPECT_EQ(start, it == next_point_id.end() ? 0u : it->second)
+            << "map " << map << ", transaction " << num_transactions;
+        next_point_id[map] = start + transaction.num_new_points();
+    });
+    EXPECT_GT(num_with_points, 2u);
+    stuck_tracker.Release();
+}
+
 } // namespace
 } // namespace voyahslam::slam

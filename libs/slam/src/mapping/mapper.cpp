@@ -408,6 +408,7 @@ std::set<map::FrameId> Mapper<TFeatureExtractor>::LoopEdges(map::FrameId frame) 
 template <typename TFeatureExtractor>
 auto Mapper<TFeatureExtractor>::CreateTransaction() -> events::MapTransaction<TFeatureExtractor>* {
     auto* transaction = transaction_pool_.Create();
+    num_transactions_built_.fetch_add(1, std::memory_order_release);
     transaction->map_id = *active_;
     transaction->priority = false;
     transaction->map_epoch = Active().map_epoch;
