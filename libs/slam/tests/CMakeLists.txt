@@ -43,3 +43,8 @@ voyah_add_test_binary(voyah_integration_tests
 target_include_directories(voyah_integration_tests
     PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 )
+
+target_compile_definitions(voyah_slam_tests PRIVATE
+    VOYAHSLAM_TEST_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    VOYAHSLAM_TEST_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+)
