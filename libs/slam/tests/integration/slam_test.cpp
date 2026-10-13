@@ -2,6 +2,7 @@
 #include <support/test_measurements.h>
 #include <support/trajectory_error.h>
 #include <voyahslam/bow/vocabulary.h>
+#include <voyahslam/errors.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
 #include <voyahslam/features/orb_feature_extractor.h>
@@ -22,6 +23,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -56,11 +58,13 @@ TEST(SlamTest, WiresComponentsAsynchronously) {
 }
 
 TEST(SlamTest, ExternalObserversCanBeAddedToEveryComponent) {
+    // Declared before the Slam: the Subscriptions are destroyed after it has stopped.
+    std::vector<events::Subscription> subscriptions;
     OrbSlam slam;
     events::AsyncObserver visualizer;
-    slam.tracker().AddObserver(visualizer);
-    slam.mapper().AddObserver(visualizer);
-    slam.loop_closer().AddObserver(visualizer);
+    subscriptions.push_back(slam.tracker().AddObserver(visualizer));
+    subscriptions.push_back(slam.mapper().AddObserver(visualizer));
+    subscriptions.push_back(slam.loop_closer().AddObserver(visualizer));
 
     EXPECT_EQ(slam.tracker().async_observer_count(), 2u);
     EXPECT_EQ(slam.mapper().async_observer_count(), 3u);
@@ -110,24 +114,25 @@ struct MergeRecord {
 
 // Records the map ids of the protocol events published by the Mapper and the
 // Tracker, and the LoopCloser's loops, read through external observers, and
-// keeps a replica of the Mapper's Atlas.
+// keeps a replica of the Mapper's Atlas. It holds the Subscriptions it makes, so
+// declare it before the Slam it is attached to (D-23).
 class ProtocolRecorder {
 public:
     // Before slam.Start().
     void Attach(OrbSlam& slam) {
-        slam.mapper().AddObserver(mapper_events_);
-        slam.tracker().AddObserver(tracker_events_);
-        slam.loop_closer().AddObserver(loop_closer_events_);
+        subscriptions_.push_back(slam.mapper().AddObserver(mapper_events_));
+        subscriptions_.push_back(slam.tracker().AddObserver(tracker_events_));
+        subscriptions_.push_back(slam.loop_closer().AddObserver(loop_closer_events_));
     }
 
     // Reads every pending event; call only from the test thread.
     void Poll() {
-        while (events::Event* event = mapper_listener_.GetNextEvent()) {
+        while (events::EventPtr event = mapper_listener_.GetNextEvent()) {
             if (event->type != events::EventType::MapTransaction) {
                 continue;
             }
             const auto& transaction =
-                *static_cast<events::MapTransaction<features::OrbFeatureExtractor>*>(event);
+                static_cast<const events::MapTransaction<features::OrbFeatureExtractor>&>(*event);
             atlas.Apply(transaction);
             const uint32_t map = event->map_id.value;
             if (transaction.absorbed_map) {
@@ -159,25 +164,25 @@ public:
                 new_points_not_after_new_map.push_back(!announced);
             }
         }
-        while (events::Event* event = tracker_listener_.GetNextEvent()) {
+        while (events::EventPtr event = tracker_listener_.GetNextEvent()) {
             if (event->type == events::EventType::FrameTracked) {
                 const auto& tracked =
-                    *static_cast<events::FrameTracked<features::OrbFeatureExtractor>*>(event);
+                    static_cast<const events::FrameTracked<features::OrbFeatureExtractor>&>(*event);
                 frame_tracked.push_back(event->map_id.value);
                 positions.push_back(
                     {event->map_id.value, tracked.pose, tracked.timestamp, tracked.stage});
             } else if (event->type == events::EventType::InitializationMeasurement) {
                 ++initialization_measurements;
             } else if (event->type == events::EventType::TrackingLost) {
-                const auto& lost = *static_cast<const events::TrackingLost*>(event);
+                const auto& lost = static_cast<const events::TrackingLost&>(*event);
                 tracking_lost.push_back(event->map_id.value);
                 tracking_lost_final.push_back(lost.final);
                 tracking_lost_at.push_back(lost.timestamp);
             }
         }
-        while (events::Event* event = loop_closer_listener_.GetNextEvent()) {
+        while (events::EventPtr event = loop_closer_listener_.GetNextEvent()) {
             if (event->type == events::EventType::LoopDetected) {
-                loops.emplace_back(*static_cast<const events::LoopDetected*>(event));
+                loops.emplace_back(static_cast<const events::LoopDetected&>(*event));
             }
         }
     }
@@ -222,7 +227,7 @@ public:
         const auto* found = atlas.map(map::MapId{id});
         return found != nullptr ? *found : kEmpty;
     }
-    // The LoopCloser's LoopDetected, copied (not pooled).
+    // The LoopCloser's LoopDetected, copied.
     std::vector<LoopRecord> loops;
     // The latest transaction's map epoch; per loop correction or global BA
     // merge (a transaction with a new epoch), the number of Frames added
@@ -237,6 +242,9 @@ public:
     size_t num_refinements = 0;
 
 private:
+    // Subscriptions first: declared before the observers they refer to; the Slam
+    // they connect to is declared before the recorder by the caller.
+    std::vector<events::Subscription> subscriptions_;
     // Listeners after their observers: destroyed first, releasing the
     // event they hold.
     events::AsyncObserver mapper_events_;
@@ -328,10 +336,9 @@ TEST(SlamTest, EndToEndInitializeTrackLoseReinitialize) {
     mapping::MapperOptions mapper_options;
     mapper_options.initializer.reconstruction.min_parallax_deg = 4.0;
 
-    // Lifetimes: the recorder outlives the Slam (nothing is published into a
-    // destroyed queue), and `stop_and_drain` stops the Slam and releases every
-    // queued event before the Slam's pools are destroyed, also when an
-    // assertion returns early.
+    // Lifetimes: the recorder, which holds the Subscriptions, outlives the Slam
+    // (D-23), and `stop_and_drain` stops the Slam and releases every queued
+    // event also when an assertion returns early.
     ProtocolRecorder recorder;
     OrbSlam slam(mapper_options);
     recorder.Attach(slam);
@@ -540,7 +547,6 @@ struct RunCounts {
     // The GlobalBundleAdjuster's, if any.
     size_t global_ba_runs_started = 0;
     size_t global_ba_runs_interrupted = 0;
-    size_t global_ba_results_dropped = 0;
     // The Mapper's GlobalBAFinished, merged and rejected.
     size_t global_ba_merges = 0;
     size_t global_ba_rejected = 0;
@@ -626,7 +632,7 @@ void RunSequence(const TSequence& sequence, size_t init_frames,
     };
     // With global BA: until the latest loop correction's run is merged (a
     // merge raises the epoch again), at most 60 s. A rejected result (the
-    // Mapper's count grows) or a timeout (e.g. a dropped result) ends the
+    // Mapper's count grows) or a timeout (e.g. a result that never arrives) ends the
     // wait for that correction for good: it fails the test with the counts
     // after the Slam stopped, rather than waiting 60 s per later frame.
     std::optional<size_t> given_up_correction;  // its index in out_recorder.corrections
@@ -690,13 +696,12 @@ void RunSequence(const TSequence& sequence, size_t init_frames,
         out_counts.has_global_ba = true;
         out_counts.global_ba_runs_started = global_ba->num_runs_started();
         out_counts.global_ba_runs_interrupted = global_ba->num_runs_interrupted();
-        out_counts.global_ba_results_dropped = global_ba->num_results_dropped();
     }
     if (given_up_correction) {
         ADD_FAILURE() << "Global BA of loop correction " << *given_up_correction + 1 << " not merged: "
                       << given_up_reason << " (runs started " << out_counts.global_ba_runs_started
-                      << ", interrupted " << out_counts.global_ba_runs_interrupted << ", results dropped "
-                      << out_counts.global_ba_results_dropped << "; merged " << out_counts.global_ba_merges
+                      << ", interrupted " << out_counts.global_ba_runs_interrupted << "; merged "
+                      << out_counts.global_ba_merges
                       << ", rejected " << out_counts.global_ba_rejected << ")";
     }
 }
@@ -1345,7 +1350,6 @@ double ExpectGlobalBaRefinesLoop(const TSequence& sequence, uint32_t seed, size_
     record("loops_global_ba", refined.num_loops);
     record("global_ba_runs_started", refined.counts.global_ba_runs_started);
     record("global_ba_runs_interrupted", refined.counts.global_ba_runs_interrupted);
-    record("global_ba_results_dropped", refined.counts.global_ba_results_dropped);
     record("global_ba_merges", refined.counts.global_ba_merges);
     record("global_ba_rejected", refined.counts.global_ba_rejected);
     return essential.points_rms > 0.0 ? refined.points_rms / essential.points_rms : 0.0;
@@ -1714,23 +1718,23 @@ TEST(SlamTest, StereoMergesMaps) {
 class StuckObserver {
 public:
     events::AsyncObserver& observer() { return observer_; }
-    size_t pending() { return observer_.queue().size_approx(); }
-    // Pops and releases every held event; call while the producers' pools live.
-    // `inspect` sees each event first.
+    size_t pending() { return observer_.size_approx(); }
+    // Pops and releases every held event; may be called after the Slam is gone,
+    // the events own their memory. `inspect` sees each event first.
     template <typename TInspect>
     void Release(TInspect inspect) {
-        events::Event* event = nullptr;
+        events::EventPtr event;
         while (observer_.TryPop(event)) {
             inspect(*event);
-            event->recycle_(event);
         }
+        event.reset();
     }
     void Release() {
         Release([](const events::Event&) {});
     }
 
 private:
-    events::AsyncObserver observer_;
+    events::AsyncObserver observer_{"StuckObserver"};
 };
 
 // Polls `condition` every millisecond until it holds or `timeout` passes.
@@ -1745,69 +1749,74 @@ bool WaitUntil(TCondition condition, std::chrono::milliseconds timeout = std::ch
 }
 
 // Audit item 4: an async observer more than 256 events behind used to abort
-// the app (ObjectPool::Create). Now the Tracker's event pools grow: the run
-// completes and the overflow is counted. A static camera never initializes,
-// so every measurement publishes an InitializationMeasurement.
-TEST(SlamTest, StuckObserverOverflowsTrackerPoolsWithoutAborting) {
+// the app (ObjectPool::Create). With self-owning events nothing is bounded: the
+// run completes and the observer holds one event per frame. A static camera
+// never initializes, so every measurement publishes an InitializationMeasurement.
+TEST(SlamTest, StuckObserverHoldsEveryTrackerEvent) {
     test::SyntheticSequenceOptions options;
-    options.num_frames = 300;  // > the default pool size, 256
+    options.num_frames = 300;  // more than the old pool size, 256
     options.step = 0.0;
     options.yaw_step_deg = 0.0;
     const test::SyntheticSequence sequence = test::MakeSyntheticSequence(options);
 
     StuckObserver stuck;
+    std::vector<events::Subscription> subscriptions;
     OrbSlam slam;
-    ASSERT_EQ(tracking::TrackerOptions{}.event_pool_size, 256u);
-    slam.tracker().AddObserver(stuck.observer());
+    subscriptions.push_back(slam.tracker().AddObserver(stuck.observer()));
     slam.Start();
     for (const auto& frame : sequence.frames) slam.tracker().Track(frame.measurement);
     EXPECT_TRUE(WaitUntil([&] { return stuck.pending() >= sequence.frames.size(); }));
     slam.Stop();
-    EXPECT_GT(slam.tracker().event_pool_overflow(), 0u);
+    EXPECT_GE(stuck.pending(), sequence.frames.size());
     stuck.Release();
 }
 
-// The Mapper's MapTransaction pool grows too: a transaction is never dropped
-// (the Tracker and LoopCloser replicas need every one). A small pool makes a
-// short stereo run overflow it.
-TEST(SlamTest, StuckObserverOverflowsMapTransactionPoolWithoutDropping) {
+// OWN-01: events outlive the Slam. A transaction is never dropped (the Tracker
+// and LoopCloser replicas need every one) and a consumer may keep holding
+// events after the Slam that produced them is destroyed: each is still
+// readable, and the count read before the destruction matches.
+TEST(SlamTest, EventsOutliveSlam) {
     test::SyntheticStereoSequenceOptions options;
     options.trajectory.num_points = 600;  // a stereo map needs > 500 left features
     const test::SyntheticStereoSequence sequence = test::MakeSyntheticStereoSequence(options);
-    mapping::MapperOptions mapper_options;
-    mapper_options.transaction_pool_size = 2;
-    tracking::TrackerOptions tracker_options;
-    tracker_options.event_pool_size = 4;
 
     StuckObserver stuck_mapper;
     StuckObserver stuck_tracker;
-    ProtocolRecorder recorder;
-    OrbSlam slam(mapper_options, tracker_options);
-    recorder.Attach(slam);
-    slam.mapper().AddObserver(stuck_mapper.observer());
-    slam.tracker().AddObserver(stuck_tracker.observer());
-    slam.Start();
-    for (const auto& frame : sequence.frames) slam.tracker().Track(frame.measurement);
-    EXPECT_TRUE(WaitUntil([&] { return stuck_tracker.pending() >= sequence.frames.size(); }));
-    EXPECT_TRUE(recorder.WaitFor([&] { return stuck_mapper.pending() > 2; }));
-    slam.Stop();
-    recorder.Poll();
-    EXPECT_GT(slam.mapper().transaction_pool_overflow(), 0u);
-    EXPECT_GT(slam.tracker().event_pool_overflow(), 0u);
+    // Declared before the Slam, destroyed after it (D-23).
+    std::vector<events::Subscription> subscriptions;
+    size_t built = 0;
+    {
+        OrbSlam slam;
+        subscriptions.push_back(slam.mapper().AddObserver(stuck_mapper.observer()));
+        subscriptions.push_back(slam.tracker().AddObserver(stuck_tracker.observer()));
+        slam.Start();
+        for (const auto& frame : sequence.frames) slam.tracker().Track(frame.measurement);
+        EXPECT_TRUE(WaitUntil([&] { return stuck_tracker.pending() >= sequence.frames.size(); }));
+        EXPECT_TRUE(WaitUntil([&] { return stuck_mapper.pending() > 2; }));
+        slam.Stop();
+        built = slam.mapper().num_transactions_built();
+    }  // the Slam, its Mapper and Tracker are gone; the observers still hold events
+
     // Nothing dropped: the stuck observer holds every transaction the Mapper
     // built (a Mapper-side count, not the delivered stream). And within each
     // map, point ids are append-only and every transaction's new points start
     // where the previous one's ended, so a dropped transaction that added
     // points leaves a gap.
-    EXPECT_EQ(stuck_mapper.pending(), slam.mapper().num_transactions_built());
+    EXPECT_EQ(stuck_mapper.pending(), built);
     std::map<uint32_t, uint64_t> next_point_id;  // per map
     size_t num_transactions = 0;
     size_t num_with_points = 0;
+    double last_timestamp = 0.0;
     stuck_mapper.Release([&](const events::Event& event) {
         if (event.type != events::EventType::MapTransaction) return;
         const auto& transaction =
             static_cast<const events::MapTransaction<features::OrbFeatureExtractor>&>(event);
         ++num_transactions;
+        // The shared measurements outlive the Slam too.
+        for (const auto& frame : transaction.added_frames) {
+            last_timestamp =
+                std::visit([](const auto& measurement) { return measurement.timestamp(); }, *frame.measurement);
+        }
         if (transaction.num_new_points() == 0) return;
         ++num_with_points;
         const uint32_t map = event.map_id.value;
@@ -1817,8 +1826,86 @@ TEST(SlamTest, StuckObserverOverflowsMapTransactionPoolWithoutDropping) {
             << "map " << map << ", transaction " << num_transactions;
         next_point_id[map] = start + transaction.num_new_points();
     });
+    EXPECT_EQ(num_transactions, built);
+    EXPECT_TRUE(std::isfinite(last_timestamp));
     EXPECT_GT(num_with_points, 2u);
     stuck_tracker.Release();
+}
+
+// OWN-02: an observer destroyed while its producer runs is never notified
+// again. A second observer on the same Tracker sees the run continue, and every
+// event the destroyed observer still held was released (not leaked).
+TEST(SlamTest, ObserverDestroyedWhileSlamRunsIsSafe) {
+    test::SyntheticSequenceOptions options;
+    options.num_frames = 120;
+    options.step = 0.0;
+    options.yaw_step_deg = 0.0;
+    const test::SyntheticSequence sequence = test::MakeSyntheticSequence(options);
+    constexpr size_t kBeforeReset = 40;
+
+    events::AsyncObserver witness{"Witness"};
+    std::vector<events::Subscription> subscriptions;
+    std::vector<std::weak_ptr<const events::Event>> seen;
+    const auto drain_witness = [&] {
+        events::EventPtr event;
+        while (witness.TryPop(event)) seen.push_back(event);
+        event.reset();
+    };
+    {
+        OrbSlam slam;
+        auto doomed = std::make_unique<events::AsyncObserver>("Doomed");
+        subscriptions.push_back(slam.tracker().AddObserver(witness));
+        subscriptions.push_back(slam.tracker().AddObserver(*doomed));
+        slam.Start();
+        for (size_t i = 0; i < kBeforeReset; ++i) slam.tracker().Track(sequence.frames[i].measurement);
+        EXPECT_TRUE(WaitUntil([&] { return doomed->size_approx() >= kBeforeReset; }));
+        doomed.reset();  // destroyed while the Tracker runs, with events queued
+        for (size_t i = kBeforeReset; i < sequence.frames.size(); ++i) {
+            slam.tracker().Track(sequence.frames[i].measurement);
+        }
+        EXPECT_TRUE(WaitUntil([&] {
+            drain_witness();
+            return seen.size() >= sequence.frames.size();
+        }));
+        slam.Stop();
+        drain_witness();
+    }
+    EXPECT_GE(seen.size(), sequence.frames.size());
+    // No event is kept alive by the destroyed observer or anything else.
+    const size_t num_alive = static_cast<size_t>(std::count_if(
+        seen.begin(), seen.end(), [](const auto& weak) { return !weak.expired(); }));
+    EXPECT_EQ(num_alive, 0u);
+}
+
+// D-23: an exception leaving the scope after Start() unwinds through the Slam
+// (which stops itself first) before the Subscription holder declared ahead of
+// it, so no Subscription is destroyed while its producer runs (that would
+// terminate).
+TEST(SlamTest, UnwindPastSubscriptionHolderDoesNotTerminate) {
+    bool caught = false;
+    try {
+        events::AsyncObserver observer;
+        std::vector<events::Subscription> subscriptions;
+        OrbSlam slam;
+        subscriptions.push_back(slam.tracker().AddObserver(observer));
+        slam.Start();
+        throw std::runtime_error("unwind");
+    } catch (const std::runtime_error&) {
+        caught = true;
+    }
+    EXPECT_TRUE(caught);
+}
+
+// D-05: connecting while the Slam runs is a usage error; after Stop() it works.
+TEST(SlamTest, AddObserverWhileRunningThrows) {
+    events::AsyncObserver observer;
+    std::vector<events::Subscription> subscriptions;
+    OrbSlam slam;
+    slam.Start();
+    EXPECT_THROW(static_cast<void>(slam.tracker().AddObserver(observer)), UsageError);
+    slam.Stop();
+    EXPECT_NO_THROW(subscriptions.push_back(slam.tracker().AddObserver(observer)));
+    EXPECT_EQ(slam.tracker().async_observer_count(), 2u);  // the Mapper edge and `observer`
 }
 
 } // namespace
