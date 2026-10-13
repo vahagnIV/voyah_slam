@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: API Ownership and Lifetime Contracts
 status: executing
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-10-13T13:56:48.536Z"
+stopped_at: Completed 01-02-PLAN.md
+last_updated: "2026-10-13T14:03:16.884Z"
 last_activity: 2026-10-13
 last_activity_desc: Phase 01 execution started
-state_head: 9c937560ddc0960fe47f894cc4d07ac7cef42a12
+state_head: 83e821bf0c994f6b6fb0387f9ff0fdffe8f61fc5
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 20
-  completed_plans: 1
+  completed_plans: 2
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 ## Current Position
 
 Phase: 01 (API Ownership and Lifetime Contracts) — EXECUTING
-Plan: 2 of 20
+Plan: 3 of 20
 Status: Ready to execute
 Last activity: 2026-10-13 — Phase 01 execution started
 
@@ -57,6 +57,7 @@ Progress: [░░░░░░░░░░] 0%
 | Plan | Duration | Tasks | Files |
 |------|----------|-------|-------|
 | Phase 01 P01 | 6 min | 2 tasks | 20 files |
+| Phase 01 P02 | 5 min | 3 tasks | 22 files |
 
 ## Accumulated Context
 
@@ -72,6 +73,8 @@ Recent decisions affecting current work:
 - [Roadmap]: Step 6 split: look-alike rejection is Phase 2, remaining TUM-VI tuning is Phase 7 (last).
 - [Phase 01]: 01-01: ~Observable stores RunState::Stopped so a Subscription outliving a producer is always a no-op
 - [Phase 01]: 01-01: tests push through Observable::Notify (AsyncObserver has no Push); negative compile checks use concepts, not bare requires
+- [Phase 01]: Slam::subscriptions_ is the last member and the apps' Subscription vector is declared before slam; ~Slam stops every producer first, so StopAll is not needed (D-04, D-23)
+- [Phase 01]: Mapper::CreateTransaction() returns shared_ptr<MapTransaction>; LoopDetected and GlobalBAFinished are published unbounded, max_events_in_flight removed (D-02, D-25)
 
 ### Pending Todos
 
@@ -99,6 +102,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-13T13:56:48.516Z
-Stopped at: Completed 01-01-PLAN.md
+Last session: 2026-10-13T14:03:16.862Z
+Stopped at: Completed 01-02-PLAN.md
 Resume file: None
