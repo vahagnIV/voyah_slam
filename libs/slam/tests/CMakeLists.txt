@@ -7,6 +7,7 @@ voyah_add_test_binary(voyah_slam_tests
         global_ba/global_ba_test.cpp
         global_ba/global_bundle_adjuster_test.cpp
         loop_closing/loop_closer_test.cpp
+        mapping/map_follower_test.cpp
         mapping/map_initializer_test.cpp
         mapping/mapper_test.cpp
         mapping/paired_inliers_test.cpp
