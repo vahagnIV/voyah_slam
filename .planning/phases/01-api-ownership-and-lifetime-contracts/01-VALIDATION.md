@@ -44,9 +44,13 @@ Filled by the planner per task; requirement → test map (from RESEARCH.md "Vali
 
 | Requirement | Behavior | Test Type | Automated Command | File Exists |
 |-------------|----------|-----------|-------------------|-------------|
-| OWN-01 | Event returned after its pool owner died recycles safely; `num_outstanding()` | unit | `voyah_common_tests --gtest_filter='ObjectPoolTest.*'` | extend `libs/common/tests/memory/object_pool_test.cpp` |
-| OWN-01 | Listener / AsyncObserver outlive producer; Slam destroyed in any order | unit + integration | `voyah_events_tests --gtest_filter='*Outlive*'`, `voyah_integration_tests --gtest_filter='SlamTest.*'` | ❌ W0 |
-| OWN-02 | Observer destroyed before producer never notified; all destruction orders; misuse fails loudly | unit + death | `voyah_events_tests --gtest_filter='Subscription*'` | ❌ W0 `libs/events/tests/events/subscription_test.cpp` |
+| OWN-01 | Received event immutable by type; `Notify` rejects an lvalue | compile-time | build of `voyah_events_tests` (`static_assert`) | ❌ W0 `libs/events/tests/events/event_lifetime_test.cpp` |
+| OWN-01 | Event held by a consumer outlives producer and observer; freed exactly once, on the last drop's thread | unit + ASan/TSan | `voyah_events_tests --gtest_filter='EventLifetimeTest.*'` | ❌ W0 (same file) |
+| OWN-01 | Slam destroyed while an observer still holds events: events valid, nothing dropped | integration | `voyah_integration_tests --gtest_filter='SlamTest.EventsOutliveSlam*'` | extend `slam_test.cpp` |
+| OWN-01 | No `ObjectPool`, `Recyclable`, `StopAll`, pool-size options or overflow counters left | review | `grep -rn` over `libs/ examples/ vizualization/` returns nothing | n/a |
+| OWN-02 | All 24 destruction orders of {producer, subscription, observer, listener} safe; every event freed once | unit + ASan/TSan | `voyah_events_tests --gtest_filter='DestructionOrderTest/*'` | ❌ W0 `libs/events/tests/events/subscription_test.cpp` |
+| OWN-02 | Observer destroyed first never notified; `~AsyncObserver` releases queued events | unit | `--gtest_filter='SubscriptionTest.*:AsyncObserverTest.*'` | ❌ W0 (same file) |
+| OWN-02 | Connect/`reset()` while running throws; Subscription destroyed while running terminates | unit + death | `--gtest_filter='SubscriptionDeathTest.*'` (not under TSan) | ❌ W0 (same file) |
 | OWN-03 | Restricted accessors only through `*TestAccess`; `MapFollower` mirrors the Mapper map | compile + unit + TSan | `voyah_slam_tests --gtest_filter='MapFollowerTest.*'` | ❌ W0 `libs/slam/tests/mapping/map_follower_test.cpp` |
 | OWN-04 | Invalid transitions throw/assert; concurrent `Stop` joins | unit + TSan | `--gtest_filter='LifecycleTest.*:SlamTest.*Lifecycle*'` | ❌ W0 `libs/events/tests/events/lifecycle_test.cpp` |
 | OWN-05 | Concurrent `DetectAndExtract` equals single-thread result; goldens unchanged | unit + TSan | `voyah_algs_tests --gtest_filter='*OrbExtractor*:*Workspace*'` | ❌ W0 |
@@ -59,7 +63,9 @@ Filled by the planner per task; requirement → test map (from RESEARCH.md "Vali
 
 ## Wave 0 Requirements
 
-- [ ] `libs/events/tests/events/subscription_test.cpp` — OWN-02
+- [ ] `libs/events/tests/events/subscription_test.cpp` — OWN-02 (`DestructionOrderTest`, `SubscriptionTest`, `SubscriptionDeathTest`)
+- [ ] `libs/events/tests/events/event_lifetime_test.cpp` — OWN-01
+- [ ] Test-only live-counting event (`Probe`) in a shared test header — OWN-01/02
 - [ ] `libs/events/tests/events/lifecycle_test.cpp` — OWN-04
 - [ ] `libs/common/tests/images/image_test.cpp` — OWN-07
 - [ ] `libs/common/tests/logging/logger_test.cpp` — OWN-06
