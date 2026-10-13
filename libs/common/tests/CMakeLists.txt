@@ -21,7 +21,6 @@ voyah_add_test_binary(voyah_common_tests
         map/map_point_storage_test.cpp
         map/observation_storage_test.cpp
         memory/column_buffer_test.cpp
-        memory/object_pool_test.cpp
         support/two_view_scene_test.cpp
     LIBS
         voyah_common

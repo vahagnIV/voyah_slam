@@ -1749,9 +1749,10 @@ bool WaitUntil(TCondition condition, std::chrono::milliseconds timeout = std::ch
 }
 
 // Audit item 4: an async observer more than 256 events behind used to abort
-// the app (ObjectPool::Create). With self-owning events nothing is bounded: the
-// run completes and the observer holds one event per frame. A static camera
-// never initializes, so every measurement publishes an InitializationMeasurement.
+// the app (a bounded event pool ran dry). With self-owning events nothing is
+// bounded: the run completes and the observer holds one event per frame. A
+// static camera never initializes, so every measurement publishes an
+// InitializationMeasurement.
 TEST(SlamTest, StuckObserverHoldsEveryTrackerEvent) {
     test::SyntheticSequenceOptions options;
     options.num_frames = 300;  // more than the old pool size, 256

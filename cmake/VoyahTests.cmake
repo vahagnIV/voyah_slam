@@ -30,6 +30,10 @@ function(voyah_add_test_binary name)
     endif()
     add_executable(${name} ${ARG_SOURCES})
     voyah_optimize_target(${name})
+    # A discarded [[nodiscard]] events::Subscription disconnects at once, so
+    # ignoring one is an error here, not a warning (01-RESEARCH Pitfall 6).
+    target_compile_options(${name} PRIVATE
+        $<$<CXX_COMPILER_ID:GNU,Clang>:-Werror=unused-result>)
     target_link_libraries(${name} PRIVATE ${ARG_LIBS} GTest::gtest_main)
     gtest_discover_tests(${name} PROPERTIES LABELS ${ARG_LABEL} DISCOVERY_TIMEOUT 60)
     set_property(GLOBAL APPEND PROPERTY VOYAH_TEST_BINARIES ${name})
