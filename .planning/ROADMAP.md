@@ -54,7 +54,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   5. Two threads may call `DetectAndExtract` concurrently, or the API makes that impossible to do by mistake; `Logger::Initialize` also re-targets loggers created before it; a default-constructed `Image` is empty and view operations honour `offset_` / `stride_`.
   6. Each item has a DESIGN decisions-log entry, `check_all` is green, ThreadSanitizer is clean on the event and Slam tests, and the Conan packages (linux-gcc13 static and shared, android-arm64) are recreated with a version the voyah_jni session is told about.
 
-**Plans**: 4/20 plans executed (six releases, sequential; each release ends with the user's "merge and push")
+**Plans**: 5/20 plans executed (six releases, sequential; each release ends with the user's "merge and push")
 
 Plans:
 **Wave 1**
@@ -70,7 +70,7 @@ Plans:
 - [x] 01-04-PLAN.md — R1: LoopCloser, GlobalBA, replica, matcher and voyahviz test migration; delivery-while-held tests
 
 **Wave 5** *(blocked on Wave 4 completion)*
-- [ ] 01-05-PLAN.md — R1: slam_test migration, Slam-level lifetime/wiring tests, pools deleted, -Werror=unused-result, check_all
+- [x] 01-05-PLAN.md — R1: slam_test migration, Slam-level lifetime/wiring tests, pools deleted, -Werror=unused-result, check_all
 
 **Wave 6** *(blocked on Wave 5 completion)*
 - [ ] 01-06-PLAN.md — R1: DESIGN §6.1 rewrite, exception policy, TODO/ROADMAP/README, version 0.4.0
@@ -218,7 +218,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 (decimal 
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. API Ownership and Lifetime Contracts | 4/20 | In Progress (audit #1, #4 merged before GSD) | - |
+| 1. API Ownership and Lifetime Contracts | 5/20 | In Progress (audit #1, #4 merged before GSD) | - |
 | 2. Loop-Closing False-Positive Rejection | 0/TBD | Not started | - |
 | 3. Multi-Map and Global BA Hardening | 0/TBD | Not started | - |
 | 4. Feature Front-End and Geometry Robustness | 0/TBD | Not started | - |
