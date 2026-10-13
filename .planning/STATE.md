@@ -2,17 +2,17 @@
 gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: API Ownership and Lifetime Contracts
-status: planning
-stopped_at: Phase 1 context gathered
-last_updated: "2026-10-13T12:30:21.126Z"
-last_activity: 2026-10-12
-last_activity_desc: Roadmap created from the brownfield ingest (41 documents, 20 pending requirements mapped to 6 phases)
-state_head: 645fa3210f786281b5ffa8d04b3970928a2491ce
+status: executing
+stopped_at: Completed 01-01-PLAN.md
+last_updated: "2026-10-13T13:56:48.536Z"
+last_activity: 2026-10-13
+last_activity_desc: Phase 01 execution started
+state_head: 9c937560ddc0960fe47f894cc4d07ac7cef42a12
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 20
-  completed_plans: 0
+  completed_plans: 1
   percent: 0
 ---
 
@@ -23,14 +23,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-10-12)
 
 **Core value:** ORB-SLAM3-class accuracy on real sequences (TUM-VI corridor, mono and stereo) delivered through a lock-free, replica-per-thread, event-only architecture.
-**Current focus:** Phase 1 - API Ownership and Lifetime Contracts (voyah_jni ownership audit; next items #3 with #2)
+**Current focus:** Phase 01 — API Ownership and Lifetime Contracts
 
 ## Current Position
 
-Phase: 01 (API Ownership and Lifetime Contracts) — READY TO EXECUTE
-Plan: 0 of TBD in current phase
-Status: Ready to discuss (audit #1 and #4 merged before GSD as 0.2.0 / 0.3.0; #3 with #2 next)
-Last activity: 2026-10-12 - Roadmap created from the brownfield ingest (41 documents, 20 pending requirements mapped to 6 phases)
+Phase: 01 (API Ownership and Lifetime Contracts) — EXECUTING
+Plan: 2 of 20
+Status: Ready to execute
+Last activity: 2026-10-13 — Phase 01 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
@@ -52,6 +52,11 @@ Progress: [░░░░░░░░░░] 0%
 - Trend: -
 
 *Updated after each plan completion*
+**Per-Plan Metrics:**
+
+| Plan | Duration | Tasks | Files |
+|------|----------|-------|-------|
+| Phase 01 P01 | 6 min | 2 tasks | 20 files |
 
 ## Accumulated Context
 
@@ -65,6 +70,8 @@ Recent decisions affecting current work:
 - [2026-10-12]: Object pools grow on overflow (0.3.0); `MapTransaction` must never be dropped.
 - [2026-10-12]: The voyah_jni ownership audit is Phase 1 (user decision); loop-closing look-alike rejection moved to Phase 2, later phases renumbered.
 - [Roadmap]: Step 6 split: look-alike rejection is Phase 2, remaining TUM-VI tuning is Phase 7 (last).
+- [Phase 01]: 01-01: ~Observable stores RunState::Stopped so a Subscription outliving a producer is always a no-op
+- [Phase 01]: 01-01: tests push through Observable::Notify (AsyncObserver has no Push); negative compile checks use concepts, not bare requires
 
 ### Pending Todos
 
@@ -92,6 +99,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-12T13:20:01.991Z
-Stopped at: Phase 1 context gathered
-Resume file: .planning/phases/01-api-ownership-and-lifetime-contracts/01-CONTEXT.md
+Last session: 2026-10-13T13:56:48.516Z
+Stopped at: Completed 01-01-PLAN.md
+Resume file: None
