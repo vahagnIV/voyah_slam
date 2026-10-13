@@ -37,7 +37,6 @@
 #include <voyahslam/mapping/map_initializer.h>
 #include <voyahslam/mapping/map_quality.h>
 #include <voyahslam/mapping/triangulation.h>
-#include <voyahslam/memory/object_pool.h>
 
 namespace voyahslam::mapping {
 
@@ -83,10 +82,6 @@ struct MapperOptions {
     features::FuseOptions fuse;          // the fusion match gate
     LoopCorrectionOptions loop;          // LoopDetected
     AtlasOptions atlas;                  // lost maps kept, merged
-    // Initial size of the MapTransaction pool. It grows (logged) when an
-    // observer falls this many transactions behind; a MapTransaction is never
-    // dropped. Raise it to pre-allocate for a known backlog.
-    size_t transaction_pool_size = 256;
 };
 
 // What the local BA of the last created Frame did (spec section 5).
@@ -220,11 +215,6 @@ public:
     // drained batch.
     [[nodiscard]] size_t backlog_skipped() const {
         return backlog_skipped_.load(std::memory_order_acquire);
-    }
-    // MapTransactions constructed beyond MapperOptions::transaction_pool_size
-    // because an observer fell that far behind. Any thread.
-    [[nodiscard]] uint64_t transaction_pool_overflow() const {
-        return transaction_pool_.num_overflow_created();
     }
     // MapTransactions built (CreateTransaction), in total; every one is
     // published. Any thread.
@@ -417,8 +407,9 @@ private:
     // observation keys, merges, touched points): the start of transaction 1
     // and of a loop correction.
     void ResetTransactionScratch();
-    // A pooled transaction of the current map at the current epoch.
-    [[nodiscard]] events::MapTransaction<TFeatureExtractor>* CreateTransaction();
+    // A new transaction of the current map at the current epoch; fill it, then
+    // publish it with observable_.Notify(std::move(...)) and do not touch it again.
+    [[nodiscard]] std::shared_ptr<events::MapTransaction<TFeatureExtractor>> CreateTransaction();
     // Gives Frame `frame`, the newest one, its parent: the Frame sharing the
     // most points with it, the lower id on a tie; without shared points, the
     // previous newest Frame (ORB-SLAM3 leaves it without one). Returns it.
@@ -731,7 +722,7 @@ private:
     std::shared_ptr<const TVocabulary> vocabulary_;  // may be null
     // One ProcessPending() batch: the events drained from the inbox and, per
     // event, whether it is a superseded FrameTracked.
-    std::vector<events::Event*> batch_;
+    std::vector<events::EventPtr> batch_;
     std::vector<bool> superseded_;
     size_t backlog_ = 0;  // FrameTracked skipped since the last evaluated one
     std::atomic<size_t> num_frame_evaluations_{0};
@@ -770,9 +761,6 @@ private:
     std::vector<map::MapPointId> touched_;
     LocalBaSummary last_local_ba_;
     MapInitializer<TFeatureExtractor> initializer_;
-
-    memory::ObjectPool<events::MapTransaction<TFeatureExtractor>, memory::ThreadSafePolicy>
-        transaction_pool_{options_.transaction_pool_size, "MapTransaction"};
 
     CLASS_LOGGER(Mapper);
 

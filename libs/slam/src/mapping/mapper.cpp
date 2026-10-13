@@ -42,32 +42,36 @@ double TimestampOf(const features::TMeasurement<TFeatureExtractor>& measurement)
 template <typename TFeatureExtractor>
 Mapper<TFeatureExtractor>::Mapper(MapperOptions options,
                                   std::shared_ptr<const TVocabulary> vocabulary)
-    : options_(options)
+    : EventNode("Mapper")
+    , options_(options)
     , vocabulary_(std::move(vocabulary))
     , initializer_(std::move(options.initializer)) {}
 
 template <typename TFeatureExtractor>
 Mapper<TFeatureExtractor>::~Mapper() {
     worker_.Stop();
+    EndRun();
 }
 
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::Start() {
+    BeginRun();
     worker_.Start([this] { return ProcessPending(); });
 }
 
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::Stop() {
     worker_.Stop();
+    EndRun();
 }
 
 template <typename TFeatureExtractor>
 bool Mapper<TFeatureExtractor>::ProcessPending() {
     // The whole batch is drained first, so a FrameTracked can see whether a
     // newer one follows it (drain to latest, spec section 3.1).
-    events::Event* event = nullptr;
+    events::EventPtr event;
     while (inbox_.TryPop(event)) {
-        batch_.push_back(event);
+        batch_.push_back(std::move(event));
     }
     if (batch_.empty()) {
         return false;
@@ -79,7 +83,7 @@ bool Mapper<TFeatureExtractor>::ProcessPending() {
         } else {
             ApplyEvent(*batch_[i]);
         }
-        batch_[i]->recycle_(batch_[i]);  // acknowledges the event
+        batch_[i].reset();  // acknowledges the event: its memory is released now
     }
     batch_.clear();
     return true;
@@ -222,7 +226,7 @@ void Mapper<TFeatureExtractor>::OnTrackingLost(const events::TrackingLost& event
     const map::MapId lost = *active_;
     const size_t num_frames = num_keyframes_.load(std::memory_order_relaxed);
     const bool keep = num_frames >= options_.atlas.min_frames_to_keep;
-    auto* transaction = CreateTransaction();
+    auto transaction = CreateTransaction();
     if (!keep) {
         transaction->removed_maps.push_back(lost);
     }
@@ -234,7 +238,7 @@ void Mapper<TFeatureExtractor>::OnTrackingLost(const events::TrackingLost& event
     }
     initializer_.Reset();
     SetState(MapperState::Initializing);
-    observable_.Notify(transaction);
+    observable_.Notify(std::move(transaction));
 }
 
 template <typename TFeatureExtractor>
@@ -406,8 +410,9 @@ std::set<map::FrameId> Mapper<TFeatureExtractor>::LoopEdges(map::FrameId frame) 
 }
 
 template <typename TFeatureExtractor>
-auto Mapper<TFeatureExtractor>::CreateTransaction() -> events::MapTransaction<TFeatureExtractor>* {
-    auto* transaction = transaction_pool_.Create();
+auto Mapper<TFeatureExtractor>::CreateTransaction()
+    -> std::shared_ptr<events::MapTransaction<TFeatureExtractor>> {
+    auto transaction = std::make_shared<events::MapTransaction<TFeatureExtractor>>();
     num_transactions_built_.fetch_add(1, std::memory_order_release);
     transaction->map_id = *active_;
     transaction->priority = false;
@@ -529,7 +534,7 @@ KeyFrameSignals Mapper<TFeatureExtractor>::MeasureSignals(
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureExtractor>& event) {
     auto start = Clock::now();
-    auto* created = CreateTransaction();
+    auto created = CreateTransaction();
     ResetTransactionScratch();
 
     // The Frame and its tracked observations (ORB-SLAM3 ProcessNewKeyFrame).
@@ -600,7 +605,7 @@ void Mapper<TFeatureExtractor>::CreateFrame(const events::FrameTracked<TFeatureE
     const double fuse_ms = MillisecondsSince(start);
     num_keyframes_.fetch_add(1, std::memory_order_acq_rel);
     num_map_points_.store(Active().map_points.size(), std::memory_order_release);
-    observable_.Notify(created);
+    observable_.Notify(std::move(created));
 
     // Transaction 2: local BA and Frame culling.
     const Refinement refinement = RefineAroundFrame(id);
@@ -926,7 +931,7 @@ events::NewFrame<TFeatureExtractor>& Mapper<TFeatureExtractor>::AddFramePart(
 
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::PublishNewMap() {
-    auto* event = CreateTransaction();
+    auto event = CreateTransaction();
     event->new_map = true;
     event->start_frame = LastKeyFrame().id();
     for (const std::optional<KeyFrameRecord>& record : Active().keyframes) {
@@ -949,7 +954,7 @@ void Mapper<TFeatureExtractor>::PublishNewMap() {
         event->new_descriptors.col(i) = Active().map_points.Descriptor(id);
         event->new_normals.col(i) = Active().map_points.Normal(id);
     }
-    observable_.Notify(event);
+    observable_.Notify(std::move(event));
 }
 
 INSTANTIATE_CLASS(Mapper)

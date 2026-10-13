@@ -27,7 +27,6 @@
 #include <voyahslam/map/frame_id.h>
 #include <voyahslam/map/map_id.h>
 #include <voyahslam/map/map_point_id.h>
-#include <voyahslam/memory/object_pool.h>
 #include <voyahslam/optimization/pose_optimization.h>
 #include <voyahslam/tracking/local_map.h>
 #include <voyahslam/tracking/atlas_replica.h>
@@ -90,10 +89,6 @@ struct TrackerOptions {
     // must match the extractor's scale factor and number of levels.
     // TODO: derive them from the extractor.
     double level_scale = 1.2;
-    // Initial size of each published-event pool (InitializationMeasurement,
-    // FrameTracked, TrackingLost). A pool grows when an observer falls this
-    // many events behind (logged); raise it to pre-allocate for a known backlog.
-    size_t event_pool_size = 256;
 };
 
 // Estimates the camera pose of every incoming measurement against its own
@@ -173,7 +168,7 @@ public:
     // Mapper.
     explicit Tracker(TrackerOptions options = {},
                      std::shared_ptr<const bow::Vocabulary<TFeatureExtractor>> vocabulary = nullptr)
-        : options_(options), vocabulary_(std::move(vocabulary)) {}
+        : EventNode("Tracker"), options_(options), vocabulary_(std::move(vocabulary)) {}
     // Stops the worker before any member it uses is destroyed.
     ~Tracker();
 
@@ -195,13 +190,6 @@ public:
 
     // Safe to call from any thread.
     [[nodiscard]] TrackerState state() const { return state_.load(std::memory_order_acquire); }
-    // Events (all three pools) constructed beyond TrackerOptions::event_pool_size
-    // because an observer fell that far behind. Any thread.
-    [[nodiscard]] uint64_t event_pool_overflow() const {
-        return initialization_measurement_pool_.num_overflow_created() +
-               frame_tracked_pool_.num_overflow_created() +
-               tracking_lost_pool_.num_overflow_created();
-    }
     [[nodiscard]] map::MapId current_map_id() const {
         return current_map_id_.load(std::memory_order_acquire);
     }
@@ -338,14 +326,6 @@ private:
     std::optional<double> relocalized_at_;
     size_t tracked_frames_ = 0;  // in the current map
     std::chrono::steady_clock::time_point last_info_log_{};
-
-    memory::ObjectPool<events::InitializationMeasurement<TFeatureExtractor>,
-                       memory::ThreadSafePolicy>
-        initialization_measurement_pool_{options_.event_pool_size, "InitializationMeasurement"};
-    memory::ObjectPool<events::FrameTracked<TFeatureExtractor>, memory::ThreadSafePolicy>
-        frame_tracked_pool_{options_.event_pool_size, "FrameTracked"};
-    memory::ObjectPool<events::TrackingLost, memory::ThreadSafePolicy> tracking_lost_pool_{
-        options_.event_pool_size, "TrackingLost"};
 
     CLASS_LOGGER(Tracker);
 
