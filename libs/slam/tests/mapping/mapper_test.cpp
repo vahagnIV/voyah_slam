@@ -5,9 +5,9 @@
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
 #include <voyahslam/events/observable.h>
+#include <voyahslam/events/subscription.h>
 #include <voyahslam/geometry/sim3.h>
 #include <voyahslam/mapping/mapper.h>
-#include <voyahslam/memory/object_pool.h>
 #include <voyahslam/tracking/atlas_replica.h>
 #include <voyahslam/tracking/map_replica.h>
 
@@ -40,9 +40,9 @@ struct MapperTestAccess {
     template <typename TFeatureExtractor>
     static void PublishLoopEdge(Mapper<TFeatureExtractor>& out_mapper, map::FrameId a,
                                 map::FrameId b) {
-        auto* event = out_mapper.CreateTransaction();
+        auto event = out_mapper.CreateTransaction();
         out_mapper.AddLoopEdge(a, b, *event);
-        out_mapper.observable_.Notify(event);
+        out_mapper.observable_.Notify(std::move(event));
     }
     template <typename TFeatureExtractor>
     static void CorrectWindow(Mapper<TFeatureExtractor>& out_mapper, const std::vector<map::FrameId>& window,
@@ -62,22 +62,21 @@ struct MapperTestAccess {
         const geometry::RigidTransformation& T_match = out_mapper.FindKeyFrame(match)->pose();
         const auto correction = out_mapper.CorrectWindow(
             window, geometry::Compose(S_query_match, geometry::Sim3{1.0, T_match.rotation(), T_match.translation()}));
-        auto* scratch = out_mapper.CreateTransaction();
+        const auto scratch = out_mapper.CreateTransaction();
         out_mapper.FuseLoopPoints(correction, matched_points, {}, *scratch);
-        scratch->Recycle();
         return out_mapper.LoopConnections(correction, match);
     }
     // Culls Frame `frame` of the current map through Frame culling's path
     // (RemoveFrame, FinishRefinement) and publishes it as one transaction.
     template <typename TFeatureExtractor>
     static void CullFrame(Mapper<TFeatureExtractor>& out_mapper, map::FrameId frame) {
-        auto* event = out_mapper.CreateTransaction();
+        auto event = out_mapper.CreateTransaction();
         std::vector<map::MapPointId> changed;
         out_mapper.RemoveFrame(frame, *event, changed);
         out_mapper.FinishRefinement(std::move(changed), *event);
         out_mapper.num_keyframes_.fetch_sub(1, std::memory_order_acq_rel);
         out_mapper.num_map_points_.store(out_mapper.Active().map_points.size(), std::memory_order_release);
-        out_mapper.observable_.Notify(event);
+        out_mapper.observable_.Notify(std::move(event));
     }
     // Map merging step 1: the window of `frame` in map `map` (it must be live).
     template <typename TFeatureExtractor>
@@ -186,13 +185,13 @@ class MapperTest : public ::testing::Test {
 protected:
     explicit MapperTest(MapperOptions options = {})
         : mapper_(options) {
-        tracker_.ConnectAsync(mapper_.inbox());
-        mapper_.AddObserver(capture_);
+        subscriptions_.push_back(tracker_.ConnectAsync(mapper_.inbox()));
+        subscriptions_.push_back(mapper_.AddObserver(capture_));
     }
     MapperTest(MapperOptions options, std::shared_ptr<const TVocabulary> vocabulary)
         : mapper_(options, std::move(vocabulary)) {
-        tracker_.ConnectAsync(mapper_.inbox());
-        mapper_.AddObserver(capture_);
+        subscriptions_.push_back(tracker_.ConnectAsync(mapper_.inbox()));
+        subscriptions_.push_back(mapper_.AddObserver(capture_));
     }
 
     void Drain() {
@@ -202,18 +201,18 @@ protected:
 
     template <typename TMeasurement>
     void PublishInitializationMeasurement(TMeasurement measurement) {
-        auto* event = initialization_pool_.Create();
+        auto event = std::make_shared<TInitializationMeasurement>();
         event->map_id = map::MapId{0};
         event->measurement = std::move(measurement);
-        tracker_.Notify(event);
+        tracker_.Notify(std::move(event));
     }
 
     void PublishTrackingLost(uint32_t map, double timestamp, bool final = true) {
-        auto* event = tracking_lost_pool_.Create();
+        auto event = std::make_shared<events::TrackingLost>();
         event->map_id = map::MapId{map};
         event->timestamp = timestamp;
         event->final = final;
-        tracker_.Notify(event);
+        tracker_.Notify(std::move(event));
     }
 
     // Everything captured so far; `after_each` runs once each event has been
@@ -221,16 +220,16 @@ protected:
     std::vector<Published> TakeCaptured(
         const std::function<void(const Published&)>& after_each = {}) {
         std::vector<Published> published;
-        while (events::Event* event = listener_.GetNextEvent()) {
+        while (events::EventPtr event = listener_.GetNextEvent()) {
             if (event->type == events::EventType::MapTransaction) {
-                atlas_.Apply(*static_cast<TTransaction*>(event));
+                atlas_.Apply(static_cast<const TTransaction&>(*event));
             }
             for (const map::MapId id : atlas_.map_ids()) {
                 EXPECT_TRUE(atlas_.map(id)->CheckConsistency()) << "map " << id.value;
             }
             Published p{event->type, event->map_id};
             if (event->type == events::EventType::MapTransaction) {
-                const auto* transaction = static_cast<TTransaction*>(event);
+                const auto* transaction = static_cast<const TTransaction*>(event.get());
                 p.new_map = transaction->new_map;
                 p.start_frame = transaction->start_frame;
                 for (const events::NewFrame<Extractor>& added : transaction->added_frames) {
@@ -397,10 +396,9 @@ protected:
         TakeCaptured();
     }
 
-    memory::ObjectPool<TInitializationMeasurement, memory::ThreadSafePolicy> initialization_pool_{
-        256};
-    memory::ObjectPool<events::TrackingLost, memory::ThreadSafePolicy> tracking_lost_pool_{256};
-    memory::ObjectPool<TFrameTracked, memory::ThreadSafePolicy> frame_tracked_pool_{256};
+    // Declared first, so it is destroyed after the Mapper: a Subscription must
+    // not be destroyed while its producer runs.
+    std::vector<events::Subscription> subscriptions_;
     events::Observable tracker_;
     test::SyntheticSequence sequence_ = test::MakeSyntheticSequence();
     TMapper mapper_;
@@ -624,22 +622,6 @@ TEST_F(MapperTest, PointIdsRestartAfterTrackingLost) {
     EXPECT_EQ(second[0].count, mapper_.num_map_points());
 }
 
-TEST_F(MapperTest, PooledMapTransactionIsReset) {
-    memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> pool(1);
-    auto* event = pool.Create();
-    event->new_map = true;
-    event->added_frames.emplace_back().observed_features = {1, 2, 3};
-    event->removed_points = {map::MapPointId{0}, map::MapPointId{1}};
-    event->Recycle();
-
-    auto* reused = pool.Create();
-    ASSERT_EQ(reused, event);  // the same slot
-    EXPECT_FALSE(reused->new_map);
-    EXPECT_TRUE(reused->added_frames.empty());
-    EXPECT_TRUE(reused->removed_points.empty());
-    reused->Recycle();
-}
-
 TEST_F(MapperTest, FewFeaturesReplacesReference) {
     PublishInitializationMeasurement(sequence_.frames[0].measurement);
     PublishInitializationMeasurement(test::MakeMonocular(50, 0.01));
@@ -755,11 +737,11 @@ TEST_F(MapperTest, StateIsMappingWhenNewMapIsPublished) {
         bool seen = false;
         MapperState state = MapperState::Initializing;
     } probe{&mapper_};
-    mapper_.AddSyncObserver(
-        [](void* ctx, events::Event* event) {
+    const events::Subscription probe_subscription = mapper_.AddSyncObserver(
+        [](void* ctx, const events::Event& event) {
             auto* p = static_cast<Probe*>(ctx);
-            if (event->type == events::EventType::MapTransaction &&
-                static_cast<TTransaction*>(event)->new_map) {
+            if (event.type == events::EventType::MapTransaction &&
+                static_cast<const TTransaction&>(event).new_map) {
                 p->seen = true;
                 p->state = p->mapper->state();
             }
@@ -776,15 +758,15 @@ TEST_F(MapperTest, StateIsMappingWhenNewMapIsPublished) {
 TEST_F(MapperTest, DoesNotConsumeSharedMeasurement) {
     events::AsyncObserver other;
     events::Listener other_listener = other.GetListener();
-    tracker_.ConnectAsync(other);
+    subscriptions_.push_back(tracker_.ConnectAsync(other));
 
     PublishInitializationMeasurement(test::MakeMonocular(200, 0.0));
     Drain();
 
-    auto* event = other_listener.GetNextEvent();
+    const events::EventPtr event = other_listener.GetNextEvent();
     ASSERT_NE(event, nullptr);
     ASSERT_EQ(event->type, events::EventType::InitializationMeasurement);
-    const auto& init = *static_cast<TInitializationMeasurement*>(event);
+    const auto& init = static_cast<const TInitializationMeasurement&>(*event);
     ASSERT_TRUE(std::holds_alternative<TMonocularMeasurement>(init.measurement));
     EXPECT_EQ(std::get<TMonocularMeasurement>(init.measurement).points().cols(), 200);
 }
@@ -876,7 +858,7 @@ protected:
                              const std::vector<map::MapPointId>& visible = {},
                              events::TrackingStage stage = events::TrackingStage::MotionModel,
                              std::optional<double> timestamp = std::nullopt) {
-        auto* event = frame_tracked_pool_.Create();
+        auto event = std::make_shared<TFrameTracked>();
         event->map_id = map::MapId{map};
         event->timestamp = timestamp.value_or(sequence_.frames[index].measurement.timestamp());
         event->pose = pose.value_or(second_.pose);
@@ -890,7 +872,7 @@ protected:
         event->stage = stage;
         event->num_matches = static_cast<uint32_t>(pairs.size());
         event->num_inliers = static_cast<uint32_t>(num_inliers.value_or(pairs.size()));
-        tracker_.Notify(event);
+        tracker_.Notify(std::move(event));
     }
 
     Published initial_;      // the new map
@@ -938,7 +920,7 @@ protected:
     // observations as its inliers: weak enough to become a Frame.
     void PublishStereoFrameTracked(const PublishedFrame& first, TBinocularMeasurement measurement,
                                    size_t count) {
-        auto* event = frame_tracked_pool_.Create();
+        auto event = std::make_shared<TFrameTracked>();
         event->map_id = map::MapId{1};
         event->timestamp = measurement.timestamp();
         event->pose = first.pose;
@@ -949,7 +931,7 @@ protected:
                                       first.observed_points.begin() + count);
         event->reference_frame_id = first.frame_id;
         event->num_matches = event->num_inliers = static_cast<uint32_t>(count);
-        tracker_.Notify(event);
+        tracker_.Notify(std::move(event));
     }
 
     // Covisibility of the Mapper and of the replica agree for every Frame.
@@ -1341,7 +1323,7 @@ TEST_F(MapperFrameCreationTest, CreatesStereoFrame) {
     // (30 < 0.4 * ref_points), and need_close holds too (close_tracked <= 30
     // < 100, close_untracked > 70).
     const size_t count = 30;
-    auto* event = frame_tracked_pool_.Create();
+    auto event = std::make_shared<TFrameTracked>();
     event->map_id = map::MapId{1};
     event->timestamp = 1.0;
     event->pose = first.pose;
@@ -1352,7 +1334,7 @@ TEST_F(MapperFrameCreationTest, CreatesStereoFrame) {
                                   first.observed_points.begin() + count);
     event->reference_frame_id = first.frame_id;
     event->num_matches = event->num_inliers = static_cast<uint32_t>(count);
-    tracker_.Notify(event);
+    tracker_.Notify(std::move(event));
     Drain();
 
     const auto published = TakeCaptured();
@@ -1404,7 +1386,7 @@ TEST_F(MapperFrameCreationTest, RefPointsCountsStereoObservationsTwice) {
     }
     ASSERT_GE(close_tracked, options.close_tracked_max);
 
-    auto* event = frame_tracked_pool_.Create();
+    auto event = std::make_shared<TFrameTracked>();
     event->map_id = map::MapId{1};
     event->timestamp = 0.05;  // well within max_interval: c1b (idle) decides
     event->pose = first.pose;
@@ -1415,7 +1397,7 @@ TEST_F(MapperFrameCreationTest, RefPointsCountsStereoObservationsTwice) {
                                   first.observed_points.begin() + count);
     event->reference_frame_id = first.frame_id;
     event->num_matches = event->num_inliers = static_cast<uint32_t>(count);
-    tracker_.Notify(event);
+    tracker_.Notify(std::move(event));
     Drain();
 
     const auto published = TakeCaptured();
@@ -1667,7 +1649,7 @@ TEST_F(MapperFrameCreationTest, StereoNeighbourObservationCarriesDepth) {
     std::vector<Published> frames;
     for (const size_t index : {size_t{4}, size_t{8}}) {
         measurements.push_back(matched(index));
-        auto* event = frame_tracked_pool_.Create();
+        auto event = std::make_shared<TFrameTracked>();
         event->map_id = map::MapId{1};
         event->timestamp = measurements.back().timestamp();
         event->pose = stereo.frames[index].T_cw;
@@ -1683,7 +1665,7 @@ TEST_F(MapperFrameCreationTest, StereoNeighbourObservationCarriesDepth) {
         }
         event->reference_frame_id = first.frame_id;
         event->num_matches = event->num_inliers = static_cast<uint32_t>(event->observed_points.size());
-        tracker_.Notify(event);
+        tracker_.Notify(std::move(event));
         Drain();
         const auto published = TakeCaptured();
         ASSERT_EQ(published.size(), 2u) << "frame " << index;
@@ -1741,7 +1723,7 @@ protected:
     void PublishStereoFrameTracked(double timestamp, const geometry::RigidTransformation& pose,
                                    const std::vector<Pair>& pairs, map::FrameId reference,
                                    size_t num_inliers) {
-        auto* event = frame_tracked_pool_.Create();
+        auto event = std::make_shared<TFrameTracked>();
         event->map_id = map::MapId{1};
         event->timestamp = timestamp;
         event->pose = pose;
@@ -1753,7 +1735,7 @@ protected:
         event->reference_frame_id = reference;
         event->num_matches = static_cast<uint32_t>(pairs.size());
         event->num_inliers = static_cast<uint32_t>(num_inliers);
-        tracker_.Notify(event);
+        tracker_.Notify(std::move(event));
     }
 
     // Creates one Frame from `PublishFrameTracked(1, index, ...)`, weak at 20
@@ -1801,16 +1783,16 @@ protected:
     // Sync observer of the Mapper: on the first transaction 1 it publishes an
     // urgent FrameTracked into the Mapper's inbox, as the Tracker would while
     // the Mapper is about to run local BA.
-    static void PublishUrgentOnFrameCreated(void* ctx, events::Event* event) {
+    static void PublishUrgentOnFrameCreated(void* ctx, const events::Event& event) {
         auto* self = static_cast<MapperQualityTest*>(ctx);
-        if (self->urgent_sent_ || event->type != events::EventType::MapTransaction) return;
-        const auto* transaction = static_cast<const TTransaction*>(event);
-        if (transaction->new_map || transaction->added_frames.empty()) return;
+        if (self->urgent_sent_ || event.type != events::EventType::MapTransaction) return;
+        const auto& transaction = static_cast<const TTransaction&>(event);
+        if (transaction.new_map || transaction.added_frames.empty()) return;
         self->urgent_sent_ = true;
-        auto* urgent = self->frame_tracked_pool_.Create();
+        auto urgent = std::make_shared<TFrameTracked>();
         urgent->map_id = map::MapId{0};  // an old map's: ignored once drained
         urgent->priority = true;
-        self->urgent_.Notify(urgent);
+        self->urgent_.Notify(std::move(urgent));
     }
 
     events::Observable urgent_;
@@ -2105,7 +2087,7 @@ TEST_F(MapperFusionTest, StereoFusionKeepsPointIdentity) {
     size_t num_merged = 0;
     for (size_t index = 3; index < 24; index += 3) {
         const TBinocularMeasurement measurement = matched(index);
-        auto* event = frame_tracked_pool_.Create();
+        auto event = std::make_shared<TFrameTracked>();
         event->map_id = map::MapId{1};
         event->timestamp = measurement.timestamp();
         event->pose = stereo.frames[index].T_cw;
@@ -2121,7 +2103,7 @@ TEST_F(MapperFusionTest, StereoFusionKeepsPointIdentity) {
         }
         event->reference_frame_id = frames.back().first;
         event->num_matches = event->num_inliers = 20;
-        tracker_.Notify(event);
+        tracker_.Notify(std::move(event));
         Drain();
         const auto published = TakeCaptured();
         ASSERT_EQ(published.size(), 2u) << "frame " << index;
@@ -2375,9 +2357,9 @@ TEST_F(MapperQualityTest, RemovesBaOutliers) {
 TEST_F(MapperQualityTest, UrgentEventStopsBa) {
     // The same outlier, but an urgent FrameTracked arrives once transaction 1
     // is out: BA stops before its first iteration and removes nothing.
-    urgent_.ConnectAsync(mapper_.inbox());
+    subscriptions_.push_back(urgent_.ConnectAsync(mapper_.inbox()));
     SetUpMonoMap();
-    mapper_.AddSyncObserver(&MapperQualityTest::PublishUrgentOnFrameCreated, this);
+    subscriptions_.push_back(mapper_.AddSyncObserver(&MapperQualityTest::PublishUrgentOnFrameCreated, this));
     const size_t index = next_ + 2;
     std::vector<Pair> pairs = AllTrackedPairs(index);
     const map::MapPointId outlier = pairs[0].point;
@@ -2546,25 +2528,23 @@ protected:
     }
 
     void PublishLoop(uint32_t map, map::FrameId query, map::FrameId match) {
-        auto* event = loop_pool_.Create();
+        auto event = std::make_shared<events::LoopDetected>();
         event->map_id = event->query_map_id = event->match_map_id = map::MapId{map};
         event->query_frame = query;
         event->match_frame = match;
         event->S_query_match = geometry::Sim3{};
-        tracker_.Notify(event);
+        tracker_.Notify(std::move(event));
     }
     // An identity global-BA result of map `map` at epoch 0 for `frames`.
     void PublishGlobalBa(uint32_t map, const std::vector<PublishedFrame>& frames) {
-        auto* event = global_ba_pool_.Create();
+        auto event = std::make_shared<events::GlobalBAFinished>();
         event->map_id = map::MapId{map};
         event->map_epoch = 0;
         for (const PublishedFrame& frame : frames) event->frame_poses.emplace_back(frame.frame_id, frame.pose);
         event->priority = true;
-        tracker_.Notify(event);
+        tracker_.Notify(std::move(event));
     }
 
-    memory::ObjectPool<events::LoopDetected, memory::ThreadSafePolicy> loop_pool_{8};
-    memory::ObjectPool<events::GlobalBAFinished, memory::ThreadSafePolicy> global_ba_pool_{8};
 };
 
 // Review Focus 5 (with DiscardsSmallMap): 10 Frames are enough to keep.
@@ -3485,7 +3465,7 @@ protected:
             return;
         }
         const std::vector<std::optional<map::MapPointId>> mapped = SidePoints(side);
-        auto* event = frame_tracked_pool_.Create();
+        auto event = std::make_shared<TFrameTracked>();
         event->map_id = scene_map_;
         event->timestamp = timestamp;
         event->pose = T_map;
@@ -3501,7 +3481,7 @@ protected:
         event->reference_frame_id = frames_.back().id;
         event->num_matches = static_cast<uint32_t>(event->observed_points.size());
         event->num_inliers = 20;
-        tracker_.Notify(event);
+        tracker_.Notify(std::move(event));
         Drain();
         const std::vector<Published> created = TakeCaptured(on_scene_published_);
         ASSERT_EQ(created.size(), 2u) << "view " << k;
@@ -3532,7 +3512,7 @@ protected:
     void PublishLoop(map::FrameId query, map::FrameId match, const geometry::Sim3& S,
                      const std::vector<std::pair<map::MapPointId, map::MapPointId>>& matched_points,
                      uint32_t query_map = 1, uint32_t match_map = 1) {
-        auto* event = loop_pool_.Create();
+        auto event = std::make_shared<events::LoopDetected>();
         event->map_id = map::MapId{query_map};
         event->query_map_id = map::MapId{query_map};
         event->match_map_id = map::MapId{match_map};
@@ -3540,7 +3520,7 @@ protected:
         event->match_frame = match;
         event->S_query_match = S;
         event->matched_points = matched_points;
-        tracker_.Notify(event);
+        tracker_.Notify(std::move(event));
     }
 
     // The loop of the scene: L3 with E1, the true similarity, all pairs.
@@ -3597,7 +3577,6 @@ protected:
     std::vector<test::detail::SyntheticDescriptor> descriptors_;
     std::vector<double> angles_;
     std::vector<SceneFrame> frames_;
-    memory::ObjectPool<events::LoopDetected, memory::ThreadSafePolicy> loop_pool_{8};
 };
 
 class MapperLoopCullingTest : public MapperLoopTest {
@@ -3731,7 +3710,7 @@ TEST_F(MapperLoopTest, PublishesOneTransactionWithEpoch) {
 
     // Later transactions carry the new epoch.
     std::vector<Eigen::Index> scene_of_feature;
-    auto* event = frame_tracked_pool_.Create();
+    auto event = std::make_shared<TFrameTracked>();
     event->map_id = map::MapId{1};
     event->timestamp = 10.0;
     event->pose = replica().keyframe(Query().id)->T_cw;
@@ -3739,7 +3718,7 @@ TEST_F(MapperLoopTest, PublishesOneTransactionWithEpoch) {
     event->reference_frame_id = Query().id;
     event->num_inliers = 20;
     event->map_epoch = 1;
-    tracker_.Notify(event);
+    tracker_.Notify(std::move(event));
     Drain();
     const std::vector<Published> created = TakeCaptured();
     ASSERT_EQ(created.size(), 2u);
@@ -3759,7 +3738,7 @@ TEST_F(MapperLoopTest, StaleEpochCreatesNoFrame) {
     const uint32_t found = mapper_.NumFound(points[0]);
     for (const uint32_t epoch : {0u, 1u}) {
         std::vector<Eigen::Index> scene_of_feature;
-        auto* event = frame_tracked_pool_.Create();
+        auto event = std::make_shared<TFrameTracked>();
         event->map_id = map::MapId{1};
         event->timestamp = 10.0 + epoch;
         event->pose = replica().keyframe(Query().id)->T_cw;
@@ -3770,7 +3749,7 @@ TEST_F(MapperLoopTest, StaleEpochCreatesNoFrame) {
         event->reference_frame_id = Query().id;
         event->num_inliers = 20;
         event->map_epoch = epoch;
-        tracker_.Notify(event);
+        tracker_.Notify(std::move(event));
         Drain();
         const std::vector<Published> created = TakeCaptured();
         if (epoch == 0) {
@@ -4038,13 +4017,13 @@ protected:
     }
 
     void PublishGlobalBa(const Result& result) {
-        auto* event = global_ba_pool_.Create();
+        auto event = std::make_shared<events::GlobalBAFinished>();
         event->map_id = result.map_id;
         event->map_epoch = result.map_epoch;
         event->frame_poses = result.frame_poses;
         event->point_positions = result.point_positions;
         event->priority = true;  // as the GlobalBA thread publishes it
-        tracker_.Notify(event);
+        tracker_.Notify(std::move(event));
     }
 
     // Publishes `result` and returns what the Mapper published.
@@ -4080,22 +4059,21 @@ protected:
     // Sync observer of the Mapper: on the first transaction 1 of a new
     // Frame, publishes `pending_result_` into the Mapper's inbox, as the
     // GlobalBA thread would while the Mapper is about to run local BA.
-    static void PublishResultOnFrameCreated(void* ctx, events::Event* event) {
+    static void PublishResultOnFrameCreated(void* ctx, const events::Event& event) {
         auto* self = static_cast<MapperGlobalBaTest*>(ctx);
-        if (!self->pending_result_ || event->type != events::EventType::MapTransaction) return;
-        const auto* transaction = static_cast<const TTransaction*>(event);
-        if (transaction->new_map || transaction->added_frames.empty()) return;
-        auto* finished = self->global_ba_pool_.Create();
+        if (!self->pending_result_ || event.type != events::EventType::MapTransaction) return;
+        const auto& transaction = static_cast<const TTransaction&>(event);
+        if (transaction.new_map || transaction.added_frames.empty()) return;
+        auto finished = std::make_shared<events::GlobalBAFinished>();
         finished->map_id = self->pending_result_->map_id;
         finished->map_epoch = self->pending_result_->map_epoch;
         finished->frame_poses = self->pending_result_->frame_poses;
         finished->point_positions = self->pending_result_->point_positions;
         finished->priority = true;
         self->pending_result_.reset();
-        self->global_ba_.Notify(finished);
+        self->global_ba_.Notify(std::move(finished));
     }
 
-    memory::ObjectPool<events::GlobalBAFinished, memory::ThreadSafePolicy> global_ba_pool_{8};
     events::Observable global_ba_;  // stands in for the GlobalBA thread
     std::optional<Result> pending_result_;
 };
@@ -4309,7 +4287,7 @@ TEST_F(MapperGlobalBaTest, PublishesOneTransactionAtNextEpoch) {
     }
     // The Mapper is at epoch 2: a FrameTracked of epoch 1 creates no Frame.
     std::vector<Eigen::Index> scene_of_feature;
-    auto* event = frame_tracked_pool_.Create();
+    auto event = std::make_shared<TFrameTracked>();
     event->map_id = map::MapId{1};
     event->timestamp = 10.0;
     event->pose = replica().keyframe(Query().id)->T_cw;
@@ -4317,7 +4295,7 @@ TEST_F(MapperGlobalBaTest, PublishesOneTransactionAtNextEpoch) {
     event->reference_frame_id = Query().id;
     event->num_inliers = 20;
     event->map_epoch = 1;
-    tracker_.Notify(event);
+    tracker_.Notify(std::move(event));
     Drain();
     EXPECT_TRUE(TakeCaptured().empty());
     EXPECT_EQ(mapper_.stale_epoch_skipped(), 1u);
@@ -4329,10 +4307,10 @@ TEST_F(MapperGlobalBaTest, ResultInterruptsLocalBa) {
     // merged, the new Frame following its parent.
     BuildScene(kSnapshotViews);
     pending_result_ = Snapshot();
-    global_ba_.ConnectAsync(mapper_.inbox());
-    mapper_.AddSyncObserver(&MapperGlobalBaTest::PublishResultOnFrameCreated, this);
+    subscriptions_.push_back(global_ba_.ConnectAsync(mapper_.inbox()));
+    subscriptions_.push_back(mapper_.AddSyncObserver(&MapperGlobalBaTest::PublishResultOnFrameCreated, this));
     std::vector<Eigen::Index> scene_of_feature;
-    auto* event = frame_tracked_pool_.Create();
+    auto event = std::make_shared<TFrameTracked>();
     event->map_id = map::MapId{1};
     event->timestamp = 10.0;
     // Start Frame E1's view again, tracking the start side's points: local
@@ -4350,7 +4328,7 @@ TEST_F(MapperGlobalBaTest, ResultInterruptsLocalBa) {
     event->reference_frame_id = Match().id;
     event->num_matches = static_cast<uint32_t>(event->observed_points.size());
     event->num_inliers = 20;
-    tracker_.Notify(event);
+    tracker_.Notify(std::move(event));
     Drain();
     ASSERT_FALSE(pending_result_.has_value());
     const LocalBaSummary& ba = mapper_.last_local_ba();
@@ -4595,7 +4573,7 @@ protected:
     void PublishReturnFrameTracked(uint32_t map, uint32_t epoch,
                                    const std::vector<std::pair<uint32_t, map::MapPointId>>& pairs) {
         std::vector<Eigen::Index> scene_of_feature;
-        auto* event = frame_tracked_pool_.Create();
+        auto event = std::make_shared<TFrameTracked>();
         event->map_id = map::MapId{map};
         event->map_epoch = epoch;
         event->timestamp = 10.0 + static_cast<double>(++extra_views_);
@@ -4607,21 +4585,20 @@ protected:
         }
         event->reference_frame_id = Query().id;
         event->num_matches = event->num_inliers = 20;
-        tracker_.Notify(event);
+        tracker_.Notify(std::move(event));
     }
 
     void PublishGlobalBa(uint32_t map, uint32_t epoch) {
-        auto* event = global_ba_pool_.Create();
+        auto event = std::make_shared<events::GlobalBAFinished>();
         event->map_id = map::MapId{map};
         event->map_epoch = epoch;
         event->frame_poses.emplace_back(Match().id, replica().keyframe(Match().id)->T_cw);
         event->priority = true;
-        tracker_.Notify(event);
+        tracker_.Notify(std::move(event));
     }
 
     size_t extra_views_ = 0;
     std::function<void()> before_map_one_lost_;  // runs while map 1 is still active
-    memory::ObjectPool<events::GlobalBAFinished, memory::ThreadSafePolicy> global_ba_pool_{8};
 };
 
 // merge_window 3: each window is its Frame and its 3 best connected Frames.
