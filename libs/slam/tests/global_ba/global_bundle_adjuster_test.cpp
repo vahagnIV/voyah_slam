@@ -4,7 +4,6 @@
 #include <voyahslam/events/events.h>
 #include <voyahslam/events/observable.h>
 #include <voyahslam/global_ba/global_bundle_adjuster.h>
-#include <voyahslam/memory/object_pool.h>
 
 #include <Eigen/Geometry>
 #include <algorithm>
@@ -13,6 +12,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -97,11 +97,11 @@ std::vector<uint32_t> Range(uint32_t n) {
 // Mapper.
 class Harness {
 public:
-    // `pool_size`: the MapTransactions this harness can have in flight.
+    // `pool_size`: the MapTransactions this harness may have alive at once.
     explicit Harness(GlobalBaOptions options = {}, size_t pool_size = 16)
-        : transaction_pool_(pool_size), global_ba_(options) {
-        mapper_.ConnectAsync(global_ba_.inbox());
-        global_ba_.AddObserver(capture_);
+        : pool_size_(pool_size), global_ba_(options) {
+        subscriptions_.push_back(mapper_.ConnectAsync(global_ba_.inbox()));
+        subscriptions_.push_back(global_ba_.AddObserver(capture_));
     }
     // The inbox holds this harness's events and capture_ the GlobalBA's: both
     // are emptied before anything is destroyed.
@@ -195,18 +195,27 @@ public:
     std::vector<Result> Run() {
         while (global_ba_.ProcessPending()) {
         }
-        return hold_ ? std::vector<Result>{} : Take();
+        if (hold_) {
+            // The consumer keeps what was published, unacknowledged (legal: holding costs memory only).
+            while (events::EventPtr event = listener_.GetNextEvent()) {
+                held_.push_back(std::move(event));
+            }
+            return {};
+        }
+        return Take();
     }
 
-    // While held, published events stay in the queue (in flight).
+    // While held, the consumer keeps every published event until Take().
     void set_hold(bool hold) { hold_ = hold; }
 
-    // Takes (and acknowledges) everything published.
+    // Takes (and acknowledges) everything published, held events first.
     std::vector<Result> Take() {
         std::vector<Result> results;
-        while (events::Event* event = listener_.GetNextEvent()) {
+        std::vector<events::EventPtr> events = std::exchange(held_, {});
+        while (events::EventPtr event = listener_.GetNextEvent()) events.push_back(std::move(event));
+        for (const events::EventPtr& event : events) {
             if (event->type != events::EventType::GlobalBAFinished) continue;
-            const auto& finished = *static_cast<events::GlobalBAFinished*>(event);
+            const auto& finished = static_cast<const events::GlobalBAFinished&>(*event);
             Result& result = results.emplace_back();
             result.map_id = finished.map_id;
             result.map_epoch = finished.map_epoch;
@@ -222,29 +231,34 @@ public:
     }
 
     GlobalBundleAdjuster<Extractor>& global_ba() { return global_ba_; }
-    // Sends that found every transaction in flight (none was published).
+    // Sends that found pool_size transactions still alive (none was published).
     [[nodiscard]] size_t num_exhausted() const { return num_exhausted_; }
     [[nodiscard]] size_t num_sent() const { return num_sent_; }
 
 private:
     template <typename TFill>
     void Send(map::MapId map_id, uint32_t map_epoch, TFill fill) {
-        TTransaction* transaction = transaction_pool_.TryCreate();
-        if (transaction == nullptr) {
+        std::erase_if(in_flight_, [](const std::weak_ptr<TTransaction>& weak) { return weak.expired(); });
+        if (in_flight_.size() >= pool_size_) {
             ++num_exhausted_;
             return;
         }
+        auto transaction = std::make_shared<TTransaction>();
+        in_flight_.push_back(transaction);
         ++num_sent_;
         transaction->map_id = map_id;
         transaction->map_epoch = map_epoch;
         transaction->active_map = map_id;  // as the Mapper: the map it builds
         fill(*transaction);
-        mapper_.Notify(transaction);
+        mapper_.Notify(std::move(transaction));
     }
 
-    // Declaration order: the pool outlives the GlobalBA's inbox, the GlobalBA
-    // outlives capture_.
-    memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> transaction_pool_{16};
+    // Declaration order: the subscriptions are declared before the producers
+    // and the GlobalBA they connect; the GlobalBA outlives capture_.
+    std::vector<events::Subscription> subscriptions_;
+    size_t pool_size_;  // the transactions this harness may have alive at once
+    std::vector<std::weak_ptr<TTransaction>> in_flight_;  // every transaction sent; alive until the GlobalBA drops it
+    std::vector<events::EventPtr> held_;  // published events the consumer keeps while set_hold(true)
     events::Observable mapper_;
     GlobalBundleAdjuster<Extractor> global_ba_;
     events::AsyncObserver capture_;
@@ -503,12 +517,12 @@ TEST(GlobalBundleAdjusterTest, StopAfterLastPollPublishesNothing) {
     EXPECT_EQ(global_ba.num_runs_interrupted(), 1u);
 }
 
-// Review Focus 5: with every result in flight the next one is dropped and
-// counted, without an abort.
-TEST(GlobalBundleAdjusterTest, DropsResultWhenPoolExhausted) {
-    GlobalBaOptions options;
-    options.max_events_in_flight = 1;
-    Harness harness(options);
+// GlobalBAFinished is never dropped. Until 2026-10-13 the next result was
+// dropped and counted while an earlier one was held by the consumer
+// (in-flight limit of 1); events now own their memory (D-25), so holding the
+// first result only costs memory and every correction yields a published result.
+TEST(GlobalBundleAdjusterTest, DeliversResultWhileEarlierResultIsHeld) {
+    Harness harness;
     harness.SendMap(kMap);
     harness.set_hold(true);
     harness.SendCorrection(kMap, 1);
@@ -516,12 +530,12 @@ TEST(GlobalBundleAdjusterTest, DropsResultWhenPoolExhausted) {
     harness.SendCorrection(kMap, 2, 1, 4);
     EXPECT_TRUE(harness.Run().empty());
     EXPECT_EQ(harness.global_ba().num_runs_started(), 2u);
-    EXPECT_EQ(harness.global_ba().num_results_dropped(), 1u);
 
     harness.set_hold(false);
     const std::vector<Result> results = harness.Take();
-    ASSERT_EQ(results.size(), 1u);
+    ASSERT_EQ(results.size(), 2u);
     EXPECT_EQ(results[0].map_epoch, 1u);
+    EXPECT_EQ(results[1].map_epoch, 2u);
 }
 
 // A run applies (and so releases) each transaction it finds at a poll: the

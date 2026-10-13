@@ -2,7 +2,6 @@
 #include <support/test_measurements.h>
 #include <voyahslam/events/events.h>
 #include <voyahslam/global_ba/global_ba.h>
-#include <voyahslam/memory/object_pool.h>
 #include <voyahslam/tracking/map_replica.h>
 
 #include <Eigen/Geometry>
@@ -11,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <random>
 #include <utility>
@@ -97,12 +97,10 @@ features::TMeasurement<Extractor> Measure(const Scene& scene, const RigidTransfo
 // Applies one transaction of map kMap, filled by `fill`.
 template <typename TFill>
 void ApplyTransaction(TReplica& out_replica, TFill fill) {
-    memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> pool(1);
-    TTransaction* event = pool.Create();
+    auto event = std::make_shared<TTransaction>();
     event->map_id = {kMap};
     fill(*event);
     out_replica.Apply(*event);
-    event->Recycle();
 }
 
 // Builds the replica of `scene` in one transaction: Frame k at map pose
