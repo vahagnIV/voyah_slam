@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: API Ownership and Lifetime Contracts
 status: executing
-stopped_at: Completed 01-03-PLAN.md
-last_updated: "2026-10-13T14:09:09.995Z"
+stopped_at: Completed 01-04-PLAN.md
+last_updated: "2026-10-13T14:15:23.859Z"
 last_activity: 2026-10-13
 last_activity_desc: Phase 01 execution started
-state_head: b66b2a23c07adf5859a3ca8ee32210d7dcf9f62d
+state_head: 2eb8a027c55faaf1a6429dca8d71573f00e86fab
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 20
-  completed_plans: 3
+  completed_plans: 4
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 ## Current Position
 
 Phase: 01 (API Ownership and Lifetime Contracts) — EXECUTING
-Plan: 4 of 20
+Plan: 5 of 20
 Status: Ready to execute
 Last activity: 2026-10-13 — Phase 01 execution started
 
@@ -59,6 +59,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P01 | 6 min | 2 tasks | 20 files |
 | Phase 01 P02 | 5 min | 3 tasks | 22 files |
 | Phase 01 P03 | 7 min | 2 tasks | 5 files |
+| Phase 01 P04 | 5 min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -78,6 +79,7 @@ Recent decisions affecting current work:
 - [Phase 01]: Mapper::CreateTransaction() returns shared_ptr<MapTransaction>; LoopDetected and GlobalBAFinished are published unbounded, max_events_in_flight removed (D-02, D-25)
 - [Phase 01]: 01-03: Probe-style sync observers (ctx on the test stack) keep their Subscription as a local declared after the Probe; fixture-ctx handlers go into the fixture subscriptions_ vector
 - [Phase 01]: 01-03: MapperTest.PooledMapTransactionIsReset deleted; it tested only the removed ObjectPool slot reuse and reset (ObjectPool keeps its own tests)
+- [Phase 01]: Plan 01-04: LoopCloser/GlobalBA test harnesses keep pool_size as a weak_ptr-based in-flight limit and hold published events as EventPtr; MapViewer tests check release via weak_ptr
 
 ### Pending Todos
 
@@ -105,6 +107,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-13T14:09:09.974Z
-Stopped at: Completed 01-03-PLAN.md
+Last session: 2026-10-13T14:15:23.836Z
+Stopped at: Completed 01-04-PLAN.md
 Resume file: None
