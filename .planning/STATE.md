@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: API Ownership and Lifetime Contracts
 status: executing
-stopped_at: Completed 01-05-PLAN.md
-last_updated: "2026-10-13T14:30:22.943Z"
+stopped_at: Completed 01-06-PLAN.md
+last_updated: "2026-10-13T14:40:37.314Z"
 last_activity: 2026-10-13
 last_activity_desc: Phase 01 execution started
-state_head: dd46c209299c4c08210851b6e566943850f35d9a
+state_head: 68ceae41658ec2353fa930b87955d5e27047c9ce
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 20
-  completed_plans: 5
+  completed_plans: 6
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 ## Current Position
 
 Phase: 01 (API Ownership and Lifetime Contracts) — EXECUTING
-Plan: 6 of 20
+Plan: 7 of 20
 Status: Ready to execute
 Last activity: 2026-10-13 — Phase 01 execution started
 
@@ -61,6 +61,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P03 | 7 min | 2 tasks | 5 files |
 | Phase 01 P04 | 5 min | 2 tasks | 8 files |
 | Phase 01 P05 | 13 min | 2 tasks | 10 files |
+| Phase 01 P06 | 10 min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -83,6 +84,7 @@ Recent decisions affecting current work:
 - [Phase 01]: Plan 01-04: LoopCloser/GlobalBA test harnesses keep pool_size as a weak_ptr-based in-flight limit and hold published events as EventPtr; MapViewer tests check release via weak_ptr
 - [Phase 01]: ProtocolRecorder owns its Subscriptions; Slam-level tests declare the Subscription holder before the Slam (D-23) — Unwinding destroys the holder after ~Slam has stopped every producer; executed by SlamTest.UnwindPastSubscriptionHolderDoesNotTerminate
 - [Phase 01]: -Werror=unused-result on every test binary and both example apps (GNU/Clang) — A discarded [[nodiscard]] Subscription disconnects at once; error in tests and apps, package build unaffected
+- [Phase 01]: Package version 0.4.0 (SOVERSION 0.4); DESIGN 6.1 rewritten as the shared-ownership lifecycle, decisions-log rows R1 implemented and Package version 0.4.0 — Every audit item is an API break for the voyah_jni binding; DESIGN must describe the code as merged (CLAUDE.md)
 
 ### Pending Todos
 
@@ -110,6 +112,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-13T14:30:22.917Z
-Stopped at: Completed 01-05-PLAN.md
+Last session: 2026-10-13T14:40:32.916Z
+Stopped at: Completed 01-06-PLAN.md
 Resume file: None
