@@ -7,7 +7,6 @@
 #include <vector>
 #include <voyahslam/events/events.h>
 #include <voyahslam/features/orb_feature_extractor.h>
-#include <voyahslam/memory/object_pool.h>
 #include <voyahslam/tracking/local_map.h>
 #include <voyahslam/tracking/map_replica.h>
 
@@ -42,8 +41,7 @@ TMono MakeMeasurement(int n) {
 // points[i], and `num_new` points from id `start`.
 void CreateFrame(TReplica& out_replica, uint32_t frame, const std::vector<uint32_t>& points,
                  uint32_t num_new = 0, uint32_t start = 0) {
-    memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> pool(1);
-    TTransaction* event = pool.Create();
+    const auto event = std::make_shared<TTransaction>();
     event->map_id = {kMap};
     events::NewFrame<Extractor>& added = event->added_frames.emplace_back();
     added.id = {frame};
@@ -62,16 +60,13 @@ void CreateFrame(TReplica& out_replica, uint32_t frame, const std::vector<uint32
         event->new_normals.col(i) = Eigen::Vector3d(0, 0, 1).cast<precision_t>();
     }
     out_replica.Apply(*event);
-    event->Recycle();
 }
 
 void RemovePoint(TReplica& out_replica, uint32_t id) {
-    memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> pool(1);
-    TTransaction* event = pool.Create();
+    const auto event = std::make_shared<TTransaction>();
     event->map_id = {kMap};
     event->removed_points = {{id}};
     out_replica.Apply(*event);
-    event->Recycle();
 }
 
 std::vector<uint32_t> Range(uint32_t begin, uint32_t end) {

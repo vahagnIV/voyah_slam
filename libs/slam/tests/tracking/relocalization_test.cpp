@@ -276,11 +276,11 @@ TEST_F(RelocalizationTest, SkipsFrameRemovedMidRecovery) {
 
     // The Mapper removes the Frame relocalization would match while the
     // Tracker is RecentlyLost.
-    auto* transaction = transaction_pool_.Create();
+    auto transaction = std::make_shared<events::MapTransaction<Extractor>>();
     transaction->map_id = map::MapId{1};
     transaction->active_map = map::MapId{1};  // as the Mapper
     transaction->removed_frames = {first.frame};
-    injector_.Notify(transaction);
+    injector_.Notify(std::move(transaction));
     Drain();
     ASSERT_EQ(tracker_.map_replica().keyframe(first.frame), nullptr);
     ASSERT_FALSE(tracker_.map_replica().database().Contains(first.frame));

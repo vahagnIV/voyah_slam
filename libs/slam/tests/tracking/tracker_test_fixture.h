@@ -12,9 +12,9 @@
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
 #include <voyahslam/events/observable.h>
+#include <voyahslam/events/subscription.h>
 #include <voyahslam/features/stereo_matcher.h>
 #include <voyahslam/mapping/mapper.h>
-#include <voyahslam/memory/object_pool.h>
 #include <voyahslam/tracking/tracker.h>
 
 #include <chrono>
@@ -104,18 +104,19 @@ protected:
                          const std::shared_ptr<const TVocabulary>& vocabulary = nullptr)
         : mapper_(std::move(mapper_options), vocabulary),
           tracker_(std::move(tracker_options), vocabulary) {
-        mapper_.AddObserver(tracker_.inbox());
-        tracker_.AddObserver(mapper_.inbox());
-        injector_.ConnectAsync(tracker_.inbox());
-        tracker_.AddObserver(capture_);
+        subscriptions_.push_back(mapper_.AddObserver(tracker_.inbox()));
+        subscriptions_.push_back(tracker_.AddObserver(mapper_.inbox()));
+        subscriptions_.push_back(injector_.ConnectAsync(tracker_.inbox()));
+        subscriptions_.push_back(tracker_.AddObserver(capture_));
     }
 
-    // Each inbox holds events of the other component's pools: empty both
-    // before either is destroyed.
     void TearDown() override {
         tracker_.Stop();
         Drain();
     }
+
+    // Keeps an extra connection of a test alive until the fixture is destroyed.
+    void Connect(events::Subscription subscription) { subscriptions_.push_back(std::move(subscription)); }
 
     // Runs both components until neither has anything left to process.
     void Drain() {
@@ -138,10 +139,10 @@ protected:
 
     std::vector<Captured> TakeCaptured() {
         std::vector<Captured> captured;
-        while (events::Event* event = listener_.GetNextEvent()) {
+        while (events::EventPtr event = listener_.GetNextEvent()) {
             Captured c{event->type, event->map_id, map::FrameId{0}};
             if (event->type == events::EventType::FrameTracked) {
-                const auto& tracked = *static_cast<TFrameTracked*>(event);
+                const auto& tracked = static_cast<const TFrameTracked&>(*event);
                 c.has_reference = tracked.reference_frame_id.has_value();
                 c.frame_id = tracked.reference_frame_id.value_or(map::FrameId{0});
                 c.pose = tracked.pose;
@@ -160,7 +161,7 @@ protected:
                 c.local_frames = tracked.local_frames;
                 c.map_epoch = tracked.map_epoch;
             } else if (event->type == events::EventType::TrackingLost) {
-                const auto& lost = *static_cast<events::TrackingLost*>(event);
+                const auto& lost = static_cast<const events::TrackingLost&>(*event);
                 c.timestamp = lost.timestamp;
                 c.final = lost.final;
             }
@@ -309,9 +310,10 @@ protected:
         return run;
     }
 
-    memory::ObjectPool<events::MapTransaction<Extractor>, memory::ThreadSafePolicy> transaction_pool_{16};
-    // Declaration order: the components outlive every queue that can hold
-    // their events (capture_), and each other's inboxes are drained in TearDown.
+    // Declared before the components, so it is destroyed after them: a
+    // Subscription must not be destroyed while its producer runs. Events own
+    // their memory, so no other member order matters.
+    std::vector<events::Subscription> subscriptions_;
     TMapper mapper_;
     TTracker tracker_;
     events::Observable injector_;
