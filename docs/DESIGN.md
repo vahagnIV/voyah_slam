@@ -454,6 +454,10 @@ Rules:
 
 ### 6.1 Event Lifecycle: Pooled, Reference-Counted, Acknowledged
 
+> **Superseded (decision 2026-10-13, ownership audit #3):** events become
+> `std::shared_ptr<const T>` and the pools below are deleted; this section
+> describes the current code until #3 is implemented, then is rewritten.
+
 **Goal:** publishing an event must not hit the general-purpose heap allocator —
 neither for the event object nor for its payload. Events are produced at frame
 rate on every thread; `new`/`delete` per event means allocator contention
@@ -3140,6 +3144,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-12 | **Package version 0.2.0** (`conanfile.py`, `project()`; SOVERSION 0.2): the shared distortion models change the public `Camera`, `StereoRig` and measurement constructors, an API break while the version is 0.x. 0.1.0 stays in the local cache. | Consumers (the Android app) pin the version; an API change gets a new minor version. |
 | 2026-10-12 | **The object pool grows on overflow; a `MapTransaction` must never be dropped; lossy delivery for display-only observers is deferred** (ownership audit item 4). `ObjectPool::Create()` no longer aborts when every slot is in use: it adds a chunk doubling the capacity, logs one warning per growth and counts `num_overflow_created()`; recycled overflow objects stay on the free list (the pool keeps its peak size). `TryCreate()` keeps its meaning (null, never grows): the LoopCloser and GlobalBA still drop on purpose. The Tracker's three event pools and the Mapper's `MapTransaction` pool are sized by `TrackerOptions::event_pool_size` / `MapperOptions::transaction_pool_size` (default 256); `Tracker::event_pool_overflow()` / `Mapper::transaction_pool_overflow()` expose the counts. | An async observer 256 events behind (a stuck Java listener, a breakpoint, a rarely polled observer) aborted the app. Dropping is wrong for `MapTransaction` (every replica must apply every transaction) and for `FrameTracked` (the Mapper's input); growing costs memory only while a consumer is behind. Keeping overflow objects (not freeing them) keeps the lock-free index free list and steady-state allocation at zero. A per-observer lossy mode for display-only consumers is in TODO. |
 | 2026-10-12 | **Package version 0.3.0** (`conanfile.py`, `project()`; SOVERSION 0.3): `ObjectPool`'s constructor gains a name, its `Create()` semantics change (grows instead of aborting), and `TrackerOptions` / `MapperOptions` gain pool-size fields. | A public behaviour and API change gets a new minor version while 0.x. |
+| 2026-10-13 | **Events are heap-allocated and shared: `std::shared_ptr<const T>`; `ObjectPool` and `Recyclable` are to be deleted** (user decision, ownership audit #3, OWN-01; replaces the shared-pool-core design of 2026-10-12 discussion, never implemented). A producer creates each event with `std::make_shared` and publishes the `shared_ptr<const T>`; fan-out copies it and a consumer acknowledges by dropping its copy. The pool-size options, overflow counters and every event's `Reset()` go too; an event may be freed on any thread, so event destructors must not depend on the destroying thread. §6.1's "no heap allocation per event" goal is withdrawn; §6.1 is rewritten when #3 is implemented. | Events became coarse (one `MapTransaction` per Mapper action, one `FrameTracked` per frame: well under 100 events/s), and the large payload (the measurement) is already a per-frame `shared_ptr` (2026-10-10), so a pool saves only the event shell and some vector capacity: microseconds against a 10–30 ms frame (estimate, not measured). The pools were the reason an event could outlive its memory (OQ 25, the `global_ba_` ordering invariant, the apps' `StopAll` guard) and shaped the "apply on receipt" rulings of 2026-10-10. The allocator's internal locks are not locks on map data (§2), and per-frame allocations already exist. `const` makes event immutability a compile-time rule. Closes OQ 25; OQ 14 becomes obsolete. |
 
 ## 9. Open Questions
 
@@ -3260,7 +3265,8 @@ branch → review → merge to `master`. Update this document at the end.
     `initial_capacity` is still 1,000,000. Pools should be sized per event type
     from the worst-case backlog (consumer rule 3 in §6.1). Since 0.3.0 an
     undersized `Create()` pool grows instead of aborting, so sizing is a
-    memory / first-spike-latency question, not a crash.
+    memory / first-spike-latency question, not a crash. Obsolete with the pools
+    (decision 2026-10-13).
 25. **Event pool lifetime.** Components own the pools of the events they
     publish, but consumers (e.g. the `MapViewer` inbox) can still hold those
     events. The apps declare the viewer before `slam`, so on exception unwinding
@@ -3272,6 +3278,9 @@ branch → review → merge to `master`. Update this document at the end.
     stopped and fully drained before `~Slam` (as `libs/slam/tests/integration/slam_test.cpp`
     does). This is a caller-side workaround; the library-level design stays
     open: pools that outlive all producers and consumers.
+    **Decided 2026-10-13:** the pools are removed and events become
+    `std::shared_ptr<const T>` (ownership audit #3, decisions log); closed
+    when #3 is merged.
 
 ## 10. Status and Next Steps
 

@@ -209,7 +209,8 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
       a point dead), so storage grows with every point ever created in a map;
       decide whether/when to compact (a compaction would need an id remap
       event for the replicas).
-- [ ] Size event pools per event type. (OQ 14)
+- [ ] Size event pools per event type. (OQ 14) Obsolete once ownership
+      audit #3 removes the pools (decision 2026-10-13); close it with #3.
 - [ ] **ASan runs abort in g2o (pre-existing, 2026-10-12):** "attempting
       free on address which was not malloc()-ed" from `g2o::Solver::~Solver`
       (e.g. via `OptimizePose`). An ODR mix: Eigen 3.4 disables
@@ -913,7 +914,9 @@ Quality" (smoke table there).
       may still be draining into its pools, and the viewer's destructor drain
       recycles into freed pools. The apps now guard against it (a guard after
       `slam` runs `slam.Stop(); viewer.Stop()` on every exit path), but the
-      library still needs pools that outlive all producers and consumers.
+      library still needs events that outlive their producers. Resolved by
+      ownership audit #3 (2026-10-13): events become `shared_ptr<const T>`
+      and the pools are removed.
 - [ ] **Subscriber lifetime (raw pointers, no disconnect).**
       `Observable::ConnectAsync` stores `AsyncObserver*` and `ConnectSync` a
       raw `void* ctx`, with no way to disconnect; `AsyncObserver::SetWakeSignal`
@@ -936,10 +939,13 @@ and android-arm64; tell the voyah_jni session the new version.
 - [x] ~~#1 Distortion model held by raw pointer~~ (done 2026-10-12, 0.2.0).
 - [x] ~~#4 Pool exhaustion aborts~~ (done 2026-10-12, 0.3.0; see "Map & events").
 - [ ] **#3 Pooled events point back to a possibly destroyed pool**
-      (`Recyclable::object_pool_` is a raw `ObjectPool*`): pools shared by the
-      events handed out, a debug assert in `~ObjectPool` that every slot came
-      back, then drop the `global_ba_` ordering invariant in `slam.h` and the
-      apps' `StopAll` guard. Same item as "Event pool lifetime" (OQ 25) under
+      (`Recyclable::object_pool_` is a raw `ObjectPool*`). Decision
+      2026-10-13 (replaces the shared-pool-core plan): events are
+      heap-allocated and published as `std::shared_ptr<const T>`;
+      `ObjectPool`, `Recyclable`, the pool-size options and every event's
+      `Reset()` are deleted (events are coarse now, so one allocation per
+      event is negligible). Then drop the `global_ba_` ordering invariant in
+      `slam.h` and the apps' `StopAll` guard. Same item as "Event pool lifetime" (OQ 25) under
       "Event system". Next, designed together with #2.
 - [ ] **#2 Observer registration by raw pointer, no disconnect, wiring rules
       unenforced:** an RAII subscription returned by `AddObserver` (or

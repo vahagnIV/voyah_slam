@@ -31,7 +31,7 @@ voyahslam is already implemented: tracking, mapping, relocalization, loop closin
 
 Decimal phases appear between their surrounding integers in numeric order.
 
-- [ ] **Phase 1: API Ownership and Lifetime Contracts** - Finish the voyah_jni ownership audit: shared pool ownership and RAII observer subscriptions first, then thread affinity, lifecycle, extractor, logger and image fixes (ROADMAP "API hardening", inserted 2026-10-12)
+- [ ] **Phase 1: API Ownership and Lifetime Contracts** - Finish the voyah_jni ownership audit: self-owning `shared_ptr<const T>` events (pools removed) and RAII observer subscriptions first, then thread affinity, lifecycle, extractor, logger and image fixes (ROADMAP "API hardening", inserted 2026-10-12)
 - [ ] **Phase 2: Loop-Closing False-Positive Rejection** - Reject same-heading look-alike loops and false merges so loop closing and merging stop worsening corridor1 (ROADMAP step 6, first item)
 - [ ] **Phase 3: Multi-Map and Global BA Hardening** - Bound global BA time and memory and let a lost Tracker relocalize into inactive maps
 - [ ] **Phase 4: Feature Front-End and Geometry Robustness** - Per-level FAST extractor, 5-point solver and full-FOV rays, descriptor-traits layering, own vocabulary
@@ -46,14 +46,14 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Depends on**: Nothing (in flight: audit items #1 and #4 are merged as 0.2.0 and 0.3.0)
 **Requirements**: OWN-01, OWN-02, OWN-03, OWN-04, OWN-05, OWN-06, OWN-07
 **Success Criteria** (what must be TRUE):
-  1. An event, `Listener` or `AsyncObserver` that outlives the component that published it recycles safely (a test destroys the producer before the consumer releases), `~ObjectPool` asserts in debug builds that every slot came back, and the `global_ba_` ordering invariant in `slam.h` and the apps' `StopAll` guard are gone.
+  1. An event, `Listener` or `AsyncObserver` that outlives the component that published it stays valid and is freed exactly once (a test destroys the producer before the consumer releases); events are `std::shared_ptr<const T>` and `ObjectPool` / `Recyclable` are gone (decision 2026-10-13); and the `global_ba_` ordering invariant in `slam.h` and the apps' `StopAll` guard are gone.
   2. An observer destroyed before its producer is never notified again (a test), and connecting or disconnecting while a component runs fails loudly; the examples no longer depend on declaring the viewer and `TrajectoryWriter` before `Slam`.
   3. The "Mapper thread only" / "never while running" accessors cannot be reached from an app thread while running (test access or a debug thread assert), and apps have a supported way to read the map from their own thread.
   4. Invalid lifecycle transitions (`AddObserver` while running, `Start` twice, `Track` before `Start`) assert or return an error, and whether `Stop()` then `Start()` is supported is decided and documented.
   5. Two threads may call `DetectAndExtract` concurrently, or the API makes that impossible to do by mistake; `Logger::Initialize` also re-targets loggers created before it; a default-constructed `Image` is empty and view operations honour `offset_` / `stride_`.
   6. Each item has a DESIGN decisions-log entry, `check_all` is green, ThreadSanitizer is clean on the event and Slam tests, and the Conan packages (linux-gcc13 static and shared, android-arm64) are recreated with a version the voyah_jni session is told about.
 **Plans**: TBD
-**Notes**: Source: `../voyah_jni/docs/voyah_slam_ownership_audit.md` (TODO "Ownership audit"). Order agreed earlier: #3 with #2 first (designed together), then #5, #6, #7, #8, #9. Each item is its own branch, merged on the user's explicit "merge and push" with a minor version bump. Takes OQ 25 (event pool lifetime) from MEM-01.
+**Notes**: Source: `../voyah_jni/docs/voyah_slam_ownership_audit.md` (TODO "Ownership audit"). Order agreed earlier: #3 with #2 first (designed together), then #5, #6, #7, #8, #9. Each item is its own branch, merged on the user's explicit "merge and push" with a minor version bump. Takes OQ 25 (event pool lifetime) from MEM-01; 2026-10-13 the pools are removed instead (events are coarse, allocation cost negligible).
 
 ### Phase 2: Loop-Closing False-Positive Rejection
 **Goal**: Loop closing and map merging can be enabled on TUM-VI corridor1 without making the result worse, because same-heading look-alike loops and false merges are rejected while true returns are kept.
@@ -94,20 +94,20 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 ### Phase 5: Consumer Runtime and Platform Readiness
 **Goal**: An Android/JNI (or any embedded) consumer can run the library under load and on arm64 without unbounded memory growth, with the platform paths actually validated.
-**Depends on**: Phase 1 (pool ownership and subscriptions; lossy delivery builds on them)
+**Depends on**: Phase 1 (event ownership and subscriptions; lossy delivery builds on them)
 **Requirements**: EVT-01, MEM-01, TRKR-01, PLAT-01
 **Success Criteria** (what must be TRUE):
-  1. A stalled display-only observer using lossy delivery no longer grows the Tracker or Mapper pools without bound, and `MapTransaction` replicas and the Mapper's `FrameTracked` input never use lossy delivery (shown by a test).
-  2. The `MapPointStorage` growth/compaction question (OQ 2) and per-type event pool sizing (OQ 14) are decided in the DESIGN decisions log and implemented (event pool lifetime, OQ 25, is done in Phase 1).
+  1. A stalled display-only observer using lossy delivery no longer grows its inbox (and the events it holds) without bound, and `MapTransaction` replicas and the Mapper's `FrameTracked` input never use lossy delivery (shown by a test).
+  2. The `MapPointStorage` growth/compaction question (OQ 2) is decided in the DESIGN decisions log and implemented (event pool sizing, OQ 14, and lifetime, OQ 25, disappear with the pools in Phase 1).
   3. The Tracker's behaviour when it falls behind (track in order or skip to the newest) is chosen and tested, and `Tracker::Stop()` drains or discards queued measurements as documented.
   4. The FAST NEON path is bit-exact against the arm64 reference and timed with `fast_benchmark` on real arm64 hardware, `test_package` runs on a device, and an Android logcat sink exists.
   5. The package has a real licence in place of the placeholder, shared builds have symbol visibility, ASan runs no longer abort in g2o, and `check_all` also builds the apps.
 **Plans**: TBD
-**Notes**: Builds on Phase 1 (pool ownership, subscriptions, lifecycle). Event pool lifetime (OQ 25) moved to Phase 1 (OWN-01); the Android logcat sink here pairs with OWN-06 (logger initialization order).
+**Notes**: Builds on Phase 1 (event ownership, subscriptions, lifecycle). Event pools are removed in Phase 1 (OWN-01, 2026-10-13); the Android logcat sink here pairs with OWN-06 (logger initialization order).
 
 ### Phase 6: Remote Components and Mixed-Camera Maps
 **Goal**: SLAM, the viewer and pluggable components can run in separate processes or machines, and a single map can hold keyframes from both monocular and binocular measurements.
-**Depends on**: Phase 1 and Phase 5 (event pool lifetime, subscriptions and delivery modes underpin a transport)
+**Depends on**: Phase 1 and Phase 5 (event ownership, subscriptions and delivery modes underpin a transport)
 **Requirements**: REMOTE-01, LATE-01, MIXED-01
 **Success Criteria** (what must be TRUE):
   1. A viewer in a separate process receives serialized events over a chosen transport and shows the same scene as the in-process viewer, built only from event contents (references are serialized as values).
