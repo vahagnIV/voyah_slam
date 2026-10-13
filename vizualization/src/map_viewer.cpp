@@ -9,7 +9,8 @@
 namespace voyahviz {
 
 template <typename TFeatureExtractor>
-MapViewer<TFeatureExtractor>::MapViewer(MapViewerOptions options) : options_(options) {
+MapViewer<TFeatureExtractor>::MapViewer(MapViewerOptions options)
+    : options_(options), inbox_("MapViewer") {
     if (!(options_.fps > 0.0)) {
         throw std::invalid_argument("voyahviz::MapViewer: fps must be positive");
     }
@@ -63,8 +64,8 @@ void MapViewer<TFeatureExtractor>::Stop() {
         }
     }
     if (thread_.joinable()) thread_.join();
-    // Events still queued hold a reference; acknowledge them so their pool
-    // slots return.
+    // The final drain applies what arrived before the producers stopped; anything
+    // left is released with the inbox.
     DrainInbox();
     state_.store(kIdle);
 }
@@ -154,10 +155,9 @@ void MapViewer<TFeatureExtractor>::CloseWindow() {
 
 template <typename TFeatureExtractor>
 void MapViewer<TFeatureExtractor>::DrainInbox() {
-    // The Listener acknowledges each event when the next one is requested, and
-    // the last one when it goes out of scope.
+    // Each event is released at the end of its iteration.
     voyahslam::events::Listener listener = inbox_.GetListener();
-    while (voyahslam::events::Event* event = listener.GetNextEvent()) {
+    while (voyahslam::events::EventPtr event = listener.GetNextEvent()) {
         scene_.Apply(*event);
         events_processed_.fetch_add(1);
     }
