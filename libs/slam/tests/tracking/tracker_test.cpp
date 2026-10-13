@@ -9,7 +9,6 @@
 #include <voyahslam/features/stereo_matcher.h>
 #include <voyahslam/map/absorbed_point_ids.h>
 #include <voyahslam/mapping/mapper.h>
-#include <voyahslam/memory/object_pool.h>
 #include <voyahslam/tracking/tracker.h>
 
 #include <chrono>
@@ -66,10 +65,10 @@ TEST_F(TrackerTest, StereoMatchedBeforeForwarding) {
     tracker_.Track(std::move(frame.measurement));
     ASSERT_TRUE(tracker_.ProcessPending());  // the Mapper does not run
 
-    auto* event = listener_.GetNextEvent();
+    const events::EventPtr event = listener_.GetNextEvent();
     ASSERT_NE(event, nullptr);
     ASSERT_EQ(event->type, events::EventType::InitializationMeasurement);
-    const auto& init = *static_cast<TInitializationMeasurement*>(event);
+    const auto& init = static_cast<const TInitializationMeasurement&>(*event);
     ASSERT_TRUE(std::holds_alternative<TTracker::TBinocularMeasurement>(init.measurement));
     const auto& binocular = std::get<TTracker::TBinocularMeasurement>(init.measurement);
     EXPECT_TRUE(binocular.stereo_matched());
@@ -239,7 +238,7 @@ TEST_F(TrackerTest, MergesOwnFrameObservationsIntoLastFrame) {
     // A Frame of the last frame's measurement: feature unmatched[0] observes
     // a new point, unmatched[1] an existing one.
     const auto inject = [&](uint32_t frame, const auto& measurement) {
-        auto* created = transaction_pool_.Create();
+        auto created = std::make_shared<events::MapTransaction<Extractor>>();
         created->map_id = map::MapId{1};
         created->active_map = map::MapId{1};  // as the Mapper
         auto& added = created->added_frames.emplace_back();
@@ -253,7 +252,7 @@ TEST_F(TrackerTest, MergesOwnFrameObservationsIntoLastFrame) {
         created->new_positions.col(0) = geometry::TPoint3DF(0, 0, 5);
         created->new_descriptors.col(0).setZero();
         created->new_normals.col(0) = geometry::TPoint3DF(0, 0, 1);
-        injector_.Notify(created);
+        injector_.Notify(std::move(created));
         Drain();
     };
 
@@ -290,12 +289,12 @@ TEST_F(TrackerTest, RemovedAndReplacedPointsInLastFrame) {
     }
     ASSERT_TRUE(winner.has_value());
 
-    auto* transaction = transaction_pool_.Create();
+    auto transaction = std::make_shared<events::MapTransaction<Extractor>>();
     transaction->map_id = map::MapId{1};
     transaction->active_map = map::MapId{1};  // as the Mapper
     transaction->replaced_points = {{loser, *winner}};
     transaction->removed_points = {removed};
-    injector_.Notify(transaction);
+    injector_.Notify(std::move(transaction));
     Drain();
 
     EXPECT_FALSE(tracker_.map_replica().IsAlive(loser));
@@ -452,10 +451,10 @@ TEST_F(TrackerTest, StateIsLostWhenTrackingLostIsPublished) {
         bool seen = false;
         TrackerState state = TrackerState::WaitingForMap;
     } probe{&tracker_};
-    tracker_.AddSyncObserver(
-        [](void* ctx, events::Event* event) {
+    const events::Subscription probe_subscription = tracker_.AddSyncObserver(
+        [](void* ctx, const events::Event& event) {
             auto* p = static_cast<Probe*>(ctx);
-            if (event->type == events::EventType::TrackingLost) {
+            if (event.type == events::EventType::TrackingLost) {
                 p->seen = true;
                 p->state = p->tracker->state();
             }
@@ -477,11 +476,11 @@ TEST_F(TrackerTest, IgnoresStaleNewMap) {
     ASSERT_EQ(tracker_.current_map_id(), map::MapId{2});
     const map::FrameId keyframe = tracker_.map_replica().keyframe_ids().front();
 
-    auto* stale = transaction_pool_.Create();
+    auto stale = std::make_shared<events::MapTransaction<Extractor>>();
     stale->map_id = map::MapId{1};
     stale->new_map = true;
     stale->start_frame = map::FrameId{0};
-    injector_.Notify(stale);
+    injector_.Notify(std::move(stale));
     Drain();
 
     EXPECT_EQ(tracker_.current_map_id(), map::MapId{2});
@@ -677,10 +676,10 @@ TEST_F(TrackerBowTest, StateIsRecentlyLostWhenTrackingLostIsPublished) {
         bool seen = false;
         TrackerState state = TrackerState::WaitingForMap;
     } probe{&tracker_};
-    tracker_.AddSyncObserver(
-        [](void* ctx, events::Event* event) {
+    const events::Subscription probe_subscription = tracker_.AddSyncObserver(
+        [](void* ctx, const events::Event& event) {
             auto* p = static_cast<Probe*>(ctx);
-            if (event->type == events::EventType::TrackingLost) {
+            if (event.type == events::EventType::TrackingLost) {
                 p->seen = true;
                 p->state = p->tracker->state();
             }
@@ -787,7 +786,7 @@ protected:
     void InjectCorrection(const geometry::RigidTransformation& S, uint32_t epoch,
                           const std::vector<map::FrameId>& removed_frames = {}) {
         const MapReplica<Extractor>& replica = tracker_.map_replica();
-        auto* correction = transaction_pool_.Create();
+        auto correction = std::make_shared<events::MapTransaction<Extractor>>();
         correction->map_id = replica.map_id();
         correction->active_map = replica.map_id();  // as the Mapper
         correction->map_epoch = epoch;
@@ -807,7 +806,7 @@ protected:
             correction->updated_descriptors.col(col) = replica.Descriptor(alive[i]);
         }
         correction->removed_frames = removed_frames;
-        injector_.Notify(correction);
+        injector_.Notify(std::move(correction));
         Drain();
         ASSERT_EQ(tracker_.map_replica().map_epoch(), epoch);
         ASSERT_TRUE(tracker_.map_replica().CheckConsistency());
@@ -942,7 +941,7 @@ protected:
         ASSERT_EQ(absorbed.map_id(), kAbsorbedMap);
         const auto* start = absorbed.keyframe(absorbed.keyframe_ids().front());
         ASSERT_NE(start, nullptr);
-        auto* target = transaction_pool_.Create();
+        auto target = std::make_shared<events::MapTransaction<Extractor>>();
         target->map_id = kTargetMap;
         target->new_map = true;
         target->start_frame = kTargetFrame;
@@ -963,7 +962,7 @@ protected:
             copies_[point.value] = map::MapPointId{static_cast<uint32_t>(i)};
         }
         target->added_frames.push_back(std::move(frame));
-        injector_.Notify(target);
+        injector_.Notify(std::move(target));
         Settle();
         ASSERT_EQ(tracker_.atlas().map_ids(), (std::vector<map::MapId>{kAbsorbedMap, kTargetMap}));
         ASSERT_EQ(tracker_.atlas().active_map(), kAbsorbedMap);
@@ -982,7 +981,7 @@ protected:
         const std::vector<std::optional<map::MapPointId>> new_ids = map::AbsorbedPointIds(
             static_cast<uint32_t>(absorbed.num_points()), map::MapPointId{static_cast<uint32_t>(target.num_points())},
             [&](map::MapPointId point) { return absorbed.IsAlive(point); });
-        auto* merge = transaction_pool_.Create();
+        auto merge = std::make_shared<events::MapTransaction<Extractor>>();
         merge->map_id = kTargetMap;
         merge->absorbed_map = kAbsorbedMap;
         merge->removed_maps.push_back(kAbsorbedMap);
@@ -1020,7 +1019,7 @@ protected:
             }
             expected_[old.value] = copy->second;
         }
-        injector_.Notify(merge);
+        injector_.Notify(std::move(merge));
         Settle();
         ASSERT_EQ(tracker_.atlas().map_ids(), (std::vector<map::MapId>{kTargetMap}));
         ASSERT_EQ(tracker_.atlas().active_map(), active);
@@ -1246,7 +1245,7 @@ TEST_F(TrackerMergeTest, MergeOfAnotherMapLeavesTrackerAlone) {
     const auto new_ids = map::AbsorbedPointIds(
         static_cast<uint32_t>(absorbed.num_points()), map::MapPointId{static_cast<uint32_t>(active.num_points())},
         [&](map::MapPointId point) { return absorbed.IsAlive(point); });
-    auto* merge = transaction_pool_.Create();
+    auto merge = std::make_shared<events::MapTransaction<Extractor>>();
     merge->map_id = kAbsorbedMap;
     merge->absorbed_map = kTargetMap;
     merge->removed_maps.push_back(kTargetMap);
@@ -1269,7 +1268,7 @@ TEST_F(TrackerMergeTest, MergeOfAnotherMapLeavesTrackerAlone) {
         merge->updated_normals.col(col) = S_inverse.rotation() * absorbed.Normal(alive[i]);
         merge->updated_descriptors.col(col) = absorbed.Descriptor(alive[i]);
     }
-    injector_.Notify(merge);
+    injector_.Notify(std::move(merge));
     Settle();
     ASSERT_EQ(tracker_.atlas().map_ids(), (std::vector<map::MapId>{kAbsorbedMap}));
     ASSERT_EQ(tracker_.atlas().active_map(), kAbsorbedMap);

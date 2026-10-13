@@ -8,7 +8,6 @@
 #include <voyahslam/geometry/sim3.h>
 #include <voyahslam/loop_closing/loop_closer.h>
 #include <voyahslam/mapping/mapper.h>
-#include <voyahslam/memory/object_pool.h>
 
 #include <algorithm>
 #include <atomic>
@@ -249,13 +248,13 @@ LoopCloserOptions EnabledOptions() {
 // enabled unless `options` says otherwise.
 class Harness {
 public:
-    // `pool_size`: the MapTransactions this harness can have in flight.
+    // `pool_size`: the MapTransactions this harness may have alive at once.
     explicit Harness(std::shared_ptr<const TVocabulary> vocabulary, LoopCloserOptions options = EnabledOptions(),
                      size_t pool_size = 4)
-        : transaction_pool_(pool_size), loop_closer_(options, std::move(vocabulary)) {
-        mapper_.ConnectAsync(loop_closer_.inbox());
-        tracker_.ConnectAsync(loop_closer_.inbox());
-        loop_closer_.AddObserver(capture_);
+        : pool_size_(pool_size), loop_closer_(options, std::move(vocabulary)) {
+        subscriptions_.push_back(mapper_.ConnectAsync(loop_closer_.inbox()));
+        subscriptions_.push_back(tracker_.ConnectAsync(loop_closer_.inbox()));
+        subscriptions_.push_back(loop_closer_.AddObserver(capture_));
     }
     // The inbox holds this harness's events and capture_ the LoopCloser's:
     // both are emptied before anything is destroyed.
@@ -275,12 +274,13 @@ public:
     }
 
     // Publishes what Publish() does without running the LoopCloser. False
-    // (counted in num_exhausted()) if every transaction is in flight. The
+    // (counted in num_exhausted()) if pool_size transactions it sent are
+    // still alive (the LoopCloser has not released them). The
     // active map is the transaction's, unless `active_map` is given (the
     // Mapper never names another).
     bool Send(const SceneFrame& frame, const NewPoints& points = {}, bool new_map = false,
               std::optional<map::MapId> map_id = std::nullopt, std::optional<map::MapId> active_map = std::nullopt) {
-        auto* transaction = transaction_pool_.TryCreate();
+        auto transaction = TryNewTransaction();
         if (transaction == nullptr) {
             ++num_exhausted_;
             return false;
@@ -314,19 +314,19 @@ public:
             transaction->new_normals.col(i) = points.normals[i];
         }
         previous_ = frame.id;
-        mapper_.Notify(transaction);
+        mapper_.Notify(std::move(transaction));
         return true;
     }
 
     // Publishes a transaction of map 1 culling Frame `frame` (a leaf of the
     // spanning tree) without running the LoopCloser.
     void SendCull(map::FrameId frame) {
-        auto* transaction = transaction_pool_.Create();
+        auto transaction = NewTransaction();
         transaction->map_id = map::MapId{1};
         transaction->map_epoch = map_epoch_;
         transaction->active_map = map::MapId{1};
         transaction->removed_frames.push_back(frame);
-        mapper_.Notify(transaction);
+        mapper_.Notify(std::move(transaction));
     }
 
     // Publishes an empty transaction of map 1 at `map_epoch` (a loop
@@ -334,22 +334,22 @@ public:
     // LoopCloser; returns what it published.
     std::vector<Loop> PublishEpoch(uint32_t map_epoch) {
         map_epoch_ = map_epoch;
-        auto* transaction = transaction_pool_.Create();
+        auto transaction = NewTransaction();
         transaction->map_id = map::MapId{1};
         transaction->map_epoch = map_epoch;
         transaction->active_map = map::MapId{1};
-        mapper_.Notify(transaction);
+        mapper_.Notify(std::move(transaction));
         return Run();
     }
 
     // Publishes the Mapper's answer to a final loss of map `map_id` (removed,
     // none active), then runs the LoopCloser; returns what it published.
     std::vector<Loop> PublishRemoval(map::MapId map_id) {
-        auto* transaction = transaction_pool_.Create();
+        auto transaction = NewTransaction();
         transaction->map_id = map_id;
         transaction->map_epoch = map_epoch_;
         transaction->removed_maps.push_back(map_id);
-        mapper_.Notify(transaction);
+        mapper_.Notify(std::move(transaction));
         return Run();
     }
 
@@ -358,20 +358,20 @@ public:
     // `removed_maps`, then runs the LoopCloser; returns what it published.
     std::vector<Loop> PublishEmpty(map::MapId map_id, std::optional<map::MapId> active_map, uint32_t map_epoch = 0,
                                    std::vector<map::MapId> removed_maps = {}) {
-        auto* transaction = transaction_pool_.Create();
+        auto transaction = NewTransaction();
         transaction->map_id = map_id;
         transaction->map_epoch = map_epoch;
         transaction->active_map = active_map;
         transaction->removed_maps = std::move(removed_maps);
-        mapper_.Notify(transaction);
+        mapper_.Notify(std::move(transaction));
         return Run();
     }
 
     std::vector<Loop> PublishTrackingLost(map::MapId map_id, bool final) {
-        auto* lost = lost_pool_.Create();
+        auto lost = std::make_shared<events::TrackingLost>();
         lost->map_id = map_id;
         lost->final = final;
-        tracker_.Notify(lost);
+        tracker_.Notify(std::move(lost));
         return Run();
     }
 
@@ -379,10 +379,17 @@ public:
     std::vector<Loop> Run() {
         while (loop_closer_.ProcessPending()) {
         }
-        return hold_ ? std::vector<Loop>{} : Take();
+        if (hold_) {
+            // The consumer keeps what was published, unacknowledged (legal: holding costs memory only).
+            while (events::EventPtr event = listener_.GetNextEvent()) {
+                held_.push_back(std::move(event));
+            }
+            return {};
+        }
+        return Take();
     }
 
-    // While held, published events stay in the queue (in flight).
+    // While held, the consumer keeps every published event until Take().
     void set_hold(bool hold) { hold_ = hold; }
     // The map Publish() and Send() name by default (1).
     void set_map(map::MapId map_id) { map_ = map_id; }
@@ -390,22 +397,39 @@ public:
     LoopCloser<Extractor>& loop_closer() { return loop_closer_; }
     [[nodiscard]] size_t num_exhausted() const { return num_exhausted_; }
 
-    // Takes (and acknowledges) everything published.
+    // Takes (and acknowledges) everything published, held events first.
     std::vector<Loop> Take() {
         std::vector<Loop> loops;
-        while (events::Event* event = listener_.GetNextEvent()) {
-            if (event->type != events::EventType::LoopDetected) continue;
-            const auto& loop = *static_cast<events::LoopDetected*>(event);
+        const auto collect = [&loops](const events::Event& event) {
+            if (event.type != events::EventType::LoopDetected) return;
+            const auto& loop = static_cast<const events::LoopDetected&>(event);
             loops.push_back({loop.map_id, loop.query_map_id, loop.match_map_id, loop.query_frame,
                              loop.match_frame, loop.S_query_match, loop.matched_points, loop.priority});
-        }
+        };
+        for (const events::EventPtr& event : std::exchange(held_, {})) collect(*event);
+        while (events::EventPtr event = listener_.GetNextEvent()) collect(*event);
         return loops;
     }
 
-    // Declaration order: the pools outlive the LoopCloser's inbox, the
-    // LoopCloser outlives capture_.
-    memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> transaction_pool_{4};
-    memory::ObjectPool<events::TrackingLost, memory::ThreadSafePolicy> lost_pool_{2};
+    // A new MapTransaction counted against pool_size while it is alive.
+    std::shared_ptr<TTransaction> NewTransaction() {
+        auto transaction = std::make_shared<TTransaction>();
+        in_flight_.push_back(transaction);
+        return transaction;
+    }
+
+    // NewTransaction(), or null when pool_size transactions sent are still alive.
+    std::shared_ptr<TTransaction> TryNewTransaction() {
+        std::erase_if(in_flight_, [](const std::weak_ptr<TTransaction>& weak) { return weak.expired(); });
+        return in_flight_.size() < pool_size_ ? NewTransaction() : nullptr;
+    }
+
+    // Declaration order: the subscriptions are declared before the producers
+    // and the LoopCloser they connect; the LoopCloser outlives capture_.
+    std::vector<events::Subscription> subscriptions_;
+    size_t pool_size_;  // the transactions this harness may have alive at once
+    std::vector<std::weak_ptr<TTransaction>> in_flight_;  // every transaction sent; alive until the LoopCloser drops it
+    std::vector<events::EventPtr> held_;  // published events the consumer keeps while set_hold(true)
     std::shared_ptr<const TVocabulary> vocabulary_ = MakeRegionVocabulary();
     events::Observable mapper_;
     events::Observable tracker_;
@@ -745,13 +769,12 @@ TEST(LoopCloserTest, FailedConfirmationsDropPendingRegion) {
     EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);  // two: dropped
 }
 
-// LoopDetected is published with TryCreate: with every event in flight (here
-// max_events_in_flight 1, held by the consumer) a loop is dropped, not an
-// abort, and the next free event serves the next detection.
-TEST(LoopCloserTest, DropsLoopWhileEventsAreInFlight) {
-    LoopCloserOptions options = EnabledOptions();
-    options.max_events_in_flight = 1;
-    Harness harness(MakeRegionVocabulary(), options);
+// LoopDetected is never dropped. Until 2026-10-13 a loop was dropped when
+// every event was in flight (an in-flight limit of 1, held by the consumer);
+// events now own their memory (D-25), so a consumer that keeps the first
+// LoopDetected only costs memory and the next detection is still published.
+TEST(LoopCloserTest, DeliversLoopWhileEarlierLoopIsHeld) {
+    Harness harness(MakeRegionVocabulary());
     LoopScene scene(1, Revisit::Drifted, MonoDrift(), false);
     ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
     harness.set_hold(true);
@@ -759,11 +782,10 @@ TEST(LoopCloserTest, DropsLoopWhileEventsAreInFlight) {
         scene.PublishReturn(harness, k);
     }
     // L3 publishes the loop; L4 finds it again (3 covisible confirmations)
-    // while the first event is still in flight.
-    EXPECT_EQ(harness.loop_closer().num_dropped_loops(), 1u);
+    // while the first event is still held.
     harness.set_hold(false);
     const std::vector<Loop> loops = harness.Take();
-    ASSERT_EQ(loops.size(), 1u);
+    ASSERT_GE(loops.size(), 2u);
     EXPECT_EQ(loops[0].query_frame, LoopScene::ReturnId(3));
 }
 

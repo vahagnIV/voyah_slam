@@ -8,7 +8,7 @@
 > `docs/superpowers/specs/` and `docs/superpowers/plans/`. When they disagree
 > with this document, **this document wins** — fix the spec or note the change here.
 
-Last updated: 2026-10-08
+Last updated: 2026-10-13
 
 ---
 
@@ -31,8 +31,9 @@ keyframes of different types share the map is still open (Open Question 17).
 ## 2. Core Principles
 
 1. **No locks.** No mutex anywhere on the map or event path. Cross-thread
-   communication only via events on `moodycamel::ConcurrentQueue`; event pools
-   are lock-free (§6.1).
+   communication only via events on `moodycamel::ConcurrentQueue`. Events are
+   `std::shared_ptr<const T>` from `std::make_shared`, with no pool and no
+   reuse; the allocator's internal locks are not locks on map data (§6.1).
 2. **One replica of the map per thread.** Tracker, Mapper, LoopCloser (and later
    the Visualizer) each own a local copy: `MapPointStorage`, `Frame`s and a
    `CovisibilityIndex` as the observation record (since 2026-10-07; before,
@@ -50,8 +51,9 @@ keyframes of different types share the map is still open (Open Question 17).
    a lagging replica is therefore always detectable (the slot is invalid) and
    can never alias a newer object.
 6. **No virtual dispatch on hot paths.** Events dispatch on a type tag +
-   `static_cast`; recycling goes through a function pointer. Mono/stereo is chosen
-   at compile time via templates.
+   `static_cast`; an event carries no recycle function pointer (its lifetime is a
+   `shared_ptr` control block). Mono/stereo is chosen at compile time via
+   templates.
 7. **Structure-of-Arrays storage** for map points and observations, so the hot
    loops (projection, matching, BA) run over contiguous Eigen matrices.
 8. **OpenCV is an implementation detail.** Our public headers
@@ -94,7 +96,8 @@ keyframes of different types share the map is still open (Open Question 17).
 
 `slam::Slam<TFeatureExtractor>` (`slam/slam.h`) owns the three components,
 plus the GlobalBA when loop closing is in effect (see "Global BA"), and
-wires them asynchronously in its constructor:
+wires them asynchronously in its constructor, keeping the six connections as
+`events::Subscription`s in `subscriptions_`, its last member (§6.1):
 
 | Publisher | → Async observers |
 |---|---|
@@ -108,11 +111,17 @@ Tracker); `Stop()` stops producers first (Tracker, LoopCloser, GlobalBA,
 Mapper); the destructor calls `Stop()`. `Slam` is neither copyable nor movable — components hold
 pointers to each other's inboxes. Extra observers (visualizer, logging) attach
 via `slam.tracker()/mapper()/loop_closer()/global_ba()->AddObserver(...)`
-before `Start()` (`global_ba()` is null without a GlobalBA).
+before `Start()` (`global_ba()` is null without a GlobalBA). Each call returns a
+`[[nodiscard]]` `Subscription`; the app keeps them in a
+`std::vector<events::Subscription>` declared **before** the `Slam`, so `~Slam`
+(which stops every producer) runs first and no app-side teardown guard is
+needed (§6.1).
 
 Every component derives from `events::EventNode` (`events/event_node.h`, no
 virtuals): an `Observable` it publishes through, one `AsyncObserver` inbox it
-consumes, `AddObserver(AsyncObserver&)`, `AddSyncObserver(fn, ctx)`, `inbox()`.
+consumes, `AddObserver(AsyncObserver&)` and `AddSyncObserver(fn, ctx)` (both
+return a `Subscription` and throw `UsageError` while the component runs),
+`inbox()`, and `BeginRun()` / `EndRun()` that publish its `RunState` (§6.1).
 Components are templated on `TFeatureExtractor`, declared in headers and
 defined in `libs/slam/src/` with `INSTANTIATE_CLASS` (ORB; SIFT removed 2026-10-11).
 
@@ -120,8 +129,8 @@ defined in `libs/slam/src/` with `INSTANTIATE_CLASS` (ORB; SIFT removed 2026-10-
 |---|---|---|
 | `tracking::Tracker<FE>` | `tracking/tracker.h` | `Start()`, `Stop()`, `Track(TMonocularMeasurement)`, `Track(TBinocularMeasurement)`, `ProcessPending()`, `state()`, `current_map_id()`, `pending_measurements()` |
 | `mapping::Mapper<FE>` | `mapping/mapper.h` | `Mapper(MapperOptions)`, `Start()`, `Stop()`, `ProcessPending()`, `state()`, `current_map_id()` |
-| `loop_closing::LoopCloser<FE>` | `loop_closing/loop_closer.h` | `LoopCloser(LoopCloserOptions, vocabulary)`, `Start()`, `Stop()`, `ProcessPending()` (applies every transaction to its replica, queues the new Frames as queries, detects one; with loop closing off or no vocabulary only acknowledges), `replica()`, `atlas()`, `num_coincidences()`, `num_merge_coincidences()`, `last_stats()`, `last_merge_stats()`, `num_dropped_loops()`, `query_stats()` — see "Loop Closing" (merge detection since map merging Task 4) |
-| `global_ba::GlobalBundleAdjuster<FE>` | `global_ba/global_bundle_adjuster.h` | `GlobalBundleAdjuster(GlobalBaOptions)`, `Start()`, `Stop()` (interrupts a running BA), `ProcessPending()` (applies every transaction, runs one pending global BA), `replica()`, `num_runs_started()`, `num_runs_interrupted()`, `num_results_dropped()`; test-only `stop_requested()`, `set_run_hook()`, `set_poll_hook()`, `set_publish_hook()` — see "Global BA" |
+| `loop_closing::LoopCloser<FE>` | `loop_closing/loop_closer.h` | `LoopCloser(LoopCloserOptions, vocabulary)`, `Start()`, `Stop()`, `ProcessPending()` (applies every transaction to its replica, queues the new Frames as queries, detects one; with loop closing off or no vocabulary only acknowledges), `replica()`, `atlas()`, `num_coincidences()`, `num_merge_coincidences()`, `last_stats()`, `last_merge_stats()`, `query_stats()` — see "Loop Closing" (merge detection since map merging Task 4) |
+| `global_ba::GlobalBundleAdjuster<FE>` | `global_ba/global_bundle_adjuster.h` | `GlobalBundleAdjuster(GlobalBaOptions)`, `Start()`, `Stop()` (interrupts a running BA), `ProcessPending()` (applies every transaction, runs one pending global BA), `replica()`, `num_runs_started()`, `num_runs_interrupted()`; test-only `stop_requested()`, `set_run_hook()`, `set_poll_hook()`, `set_publish_hook()` — see "Global BA" |
 
 Each component owns a `events::WorkerThread` (`events/worker_thread.h`) bound to
 the `events::WakeSignal` of its `EventNode` (`events/wake_signal.h`) and a
@@ -131,9 +140,11 @@ work; tests drive it without a thread). Spec:
 
 **Waking without locks (resolves OQ 20).** `WakeSignal` is a
 `std::atomic<uint32_t>` counter with C++20 `wait`/`notify_one` (a futex on
-Linux): `Snapshot()`, `Notify()`, `Wait(seen)`. `AsyncObserver::Push()` enqueues
-and notifies the attached signal (`SetWakeSignal()`); `Tracker::Track()`
-notifies after enqueuing. `WorkerThread` loop: `seen = Snapshot(); if (!running)
+Linux): `Snapshot()`, `Notify()`, `Wait(seen)`. The inbox owns its signal
+(`AsyncObserver::wake_signal()`, held by the shared `InboxCore`, so it lives as
+long as any holder of the core); `InboxCore::Push()` enqueues and notifies it, and
+`Tracker::Track()` notifies after enqueuing. A consumer waits on the signal of
+the inbox it reads (there is no `SetWakeSignal`). `WorkerThread` loop: `seen = Snapshot(); if (!running)
 break; if (!process_pending()) Wait(seen);`. The snapshot is taken **before**
 the `running` check — otherwise a `Stop()` landing between the check and the
 snapshot is already counted in `seen` and `Wait` would never return (spec
@@ -217,7 +228,7 @@ stub was deleted on 2026-10-05.
   its Frames, points, covisibility, references, counters, recent points,
   spanning tree and loop edges, and correction epoch), at most one of them
   active (`active_`); the code works on `Active()`. Mapper-wide state
-  (options, vocabulary, pools, counters, inbox, thread, next map / Frame id)
+  (options, vocabulary, counters, inbox, thread, next map / Frame id)
   is outside `MapState`. Inactive maps are **frozen**: no local mapping,
   culling, BA or global BA; a `FrameTracked`, `LoopDetected` or
   `GlobalBAFinished` naming one is "another map's" and ignored or rejected
@@ -329,9 +340,6 @@ Detailed spec: `docs/superpowers/specs/2026-09-30-core-slam-data-structures-desi
 
 | Component | Header | Summary |
 |---|---|---|
-| `ObjectPool<T, SyncPolicy>` | `memory/object_pool.h` | Pre-allocated slab, index free-list; `Create()` grows the pool (doubling, logged) when exhausted, `TryCreate()` returns null. |
-| `Recyclable<T, SyncPolicy>` | `memory/recyclable.h` | CRTP atomic ref count (acq_rel); returns object to its pool at 0. `SetRefCount(n)` for fan-out. |
-| `ThreadSafePolicy` / `NoSyncPolicy` | `memory/sync_policy.h` | Pool free-list mode: lock-free CAS / single-thread. |
 | `ColumnBuffer<TScalar, Rows>` | `memory/column_buffer.h` | Grow-only `Rows × N` Eigen buffer; `Resize(n)` allocates only beyond capacity. |
 | `MapPointId`, `FrameId` | `map/*_id.h` | Strong ID wrappers. |
 | `MapPointStorage<FE>` | `map/map_point_storage.h` | SoA: positions, descriptors, normals, num observations, valid flags. |
@@ -341,11 +349,14 @@ Detailed spec: `docs/superpowers/specs/2026-09-30-core-slam-data-structures-desi
 | `CovisibilityIndex` | `map/covisibility_index.h` | Per point its observing Frames, per Frame its points; `Remove`, `RemovePoint`, `RemoveFrame` keep both sides in step. |
 | `StereoRig` | `features/stereo_rig.h` | K left/right, `T_rl` (left → right: `p_r = T_rl p_l`), baseline, distortion models. |
 | `BinocularMeasurement<T, L>` | `features/binocular_measurement.h` | Left/right `MonocularMeasurement`, copy of its `StereoRig`, stereo matches (`SetStereoMatches`; per-feature depth, right index); `timestamp()` = left's. |
-| `Event`, `EventType` | `events/event_types.h` | Base event: type tag + `recycle_` / `set_ref_count_` fn pointers. |
+| `Event`, `EventType`, `EventPtr` | `events/event_types.h` | Base event: type tag, `map_id`, `priority`; protected non-virtual destructor. `EventPtr = shared_ptr<const Event>` is what the delivery layer carries. |
 | concrete events | `events/<event_name>.h` | One header per event (e.g. `events/map_transaction.h`); `events/events.h` includes all. See §6. |
-| `Observable` | `events/observable.h` | Sync handlers (inline, fn ptr + ctx) run first, then async enqueue with ref count = #async queues. |
-| `AsyncObserver` | `events/async_observer.h` | One queue per observer (1:1 channel); counts the pending priority events (`pending_priority()`). |
-| `Listener` | `events/listener.h` | Iterates a queue; auto-recycles previous/last event; move-only. |
+| `Observable` | `events/observable.h` | `ConnectAsync` / `ConnectSync` return a `Subscription`; `Notify(std::shared_ptr<T>&&)` (rvalue only) runs the sync handlers inline (`const Event&`), then pushes an `EventPtr` copy into every async inbox. |
+| `InboxCore` | `events/inbox_core.h` | Shared state of one `AsyncObserver`: lock-free queue of `EventPtr`, pending-priority count, closed flag, owned `WakeSignal`, backlog warning (§6.1). |
+| `AsyncObserver` | `events/async_observer.h` | One inbox per observer: owner of an `InboxCore`; `TryPop(EventPtr&)`, `GetListener()`, `pending_priority()`, `wake_signal()`; `~AsyncObserver` closes the core and releases the queued events. |
+| `Listener` | `events/listener.h` | Copyable handle on an inbox core; `GetNextEvent()` returns an owning `EventPtr` (empty when none); dropping it is the acknowledgement. |
+| `Subscription`, `Wiring`, `RunState` | `events/subscription.h` | Move-only `[[nodiscard]]` RAII connection; the producer's connection list and run state in a shared block; `Created` / `Starting` / `Running` / `Stopping` / `Stopped`. |
+| `UsageError` | `errors.h` | `std::logic_error` thrown for invalid call sequences in every build (§7). |
 
 Ported from slamlab2: `images/`, `io/`, `algebra/`, `geometry/`, `features/`
 (ORB extractor, brute-force matcher, Kannala-Brandt distortion; the SIFT
@@ -358,16 +369,17 @@ The distortion models now live in `geometry/distortion_models/` (moved from
 | Event | Producer → Consumer | Payload |
 |---|---|---|
 | `FrameTracked<FE>` | Tracker → Mapper, viewer | every tracked measurement: timestamp, pose (`T_cw` after `OptimizePose`), the shared measurement (binocular: stereo-matched; since 2026-10-10 a `shared_ptr<const>`, not a copy), inlier pairs `observed_features[i]` -> `observed_points[i]`, `visible_points` (local points passing the projection gate, matched ones included), `reference_frame_id` (optional), `local_frames`, `stage` (the source of the initial pose the local-map step refined: `MotionModel` / `ZeroMotion` / `ReferenceFrame` / `Relocalization`; 2026-10-08, ruling C), `num_matches`, `num_inliers`, `urgent` (mirrored in `Event::priority`), `map_epoch` (the Tracker replica's epoch; since 2026-10-09 the Mapper drops a `FrameTracked` of an older epoch, after counting its visible/found) |
-| `MapTransaction<FE>` | Mapper → all | **every Mapper change, as one atomic transaction** (since 2026-10-07; replaces `KeyFrameCreated`, `MapCreated`, `MapPointsUpdated`, `MapPointsRemoved`, `KeyFramePoseUpdated`). Parts, each possibly empty: `new_map` + `start_frame`; added Frames (id, `T_cw`, measurement, own observations, and since 2026-10-08 the Frame's `bow::BowVector bow` and `bow::FeatureVector features`, empty without a vocabulary); new points (`new_points_start_id`, contiguous ids, positions / normals / descriptors); `added_observations` (frame, feature, point, depth and right index, -1 when absent); updated points (ids, positions, normals, descriptors); `replaced_points` (loser, winner); `removed_points`; `updated_poses`; `removed_observations`; `removed_frames`; since 2026-10-09 (loop closing) the map graph and epoch: `NewFrame::parent` (spanning tree), `parent_changes` (frame, new parent), `added_loop_edges` (frame, frame) and `map_epoch` (+1 per loop correction; 0 for a new map). A loop correction is one more transaction carrying every corrected pose and point. Pooled (256 in the Mapper): a transaction is recycled once every consumer has acknowledged it, so consumers apply on receipt (the LoopCloser too, since 2026-10-10) and never hold one for long work. Apply order and contract: see "Map Quality" |
-| `LoopDetected` | LoopCloser → Mapper | `query_map_id` (the active map), `match_map_id` (equal for a loop; an inactive map's id for a merge, since map merging Task 4), `query_frame`, `match_frame`, `S_query_match` (`geometry::Sim3`, x_query = S · x_match in camera coordinates, ORB Scm; scale 1 for stereo), `matched_points` ((query point, match point) pairs). `priority` (interrupts a running local BA) unless a loop was already published at the LoopCloser replica's epoch. Pool of 16, published with `TryCreate`. See "Loop Closing" |
-| `GlobalBAFinished` | GlobalBA → Mapper | `map_id`, `map_epoch` (N, the correction epoch optimized), `frame_poses` ((FrameId, T_cw) of every Frame of the run), `point_positions` ((MapPointId, world position) of every point of the run): plain data only. `priority` (interrupts a running local BA). Pool of `GlobalBaOptions::max_events_in_flight` (2), published with `TryCreate` (exhausted: the result is dropped and counted). The Mapper merges it as one `MapTransaction` at N + 1, or rejects it (another map or epoch). About 1.2 MB for a corridor1 map of 600 Frames and 38k points. See "Global BA" |
+| `MapTransaction<FE>` | Mapper → all | **every Mapper change, as one atomic transaction** (since 2026-10-07; replaces `KeyFrameCreated`, `MapCreated`, `MapPointsUpdated`, `MapPointsRemoved`, `KeyFramePoseUpdated`). Parts, each possibly empty: `new_map` + `start_frame`; added Frames (id, `T_cw`, measurement, own observations, and since 2026-10-08 the Frame's `bow::BowVector bow` and `bow::FeatureVector features`, empty without a vocabulary); new points (`new_points_start_id`, contiguous ids, positions / normals / descriptors); `added_observations` (frame, feature, point, depth and right index, -1 when absent); updated points (ids, positions, normals, descriptors); `replaced_points` (loser, winner); `removed_points`; `updated_poses`; `removed_observations`; `removed_frames`; since 2026-10-09 (loop closing) the map graph and epoch: `NewFrame::parent` (spanning tree), `parent_changes` (frame, new parent), `added_loop_edges` (frame, frame) and `map_epoch` (+1 per loop correction; 0 for a new map). A loop correction is one more transaction carrying every corrected pose and point. Published unbounded and never dropped: consumers apply on receipt (the LoopCloser too, since 2026-10-10) rather than hold a transaction through long work, which keeps memory bounded (a held event stays alive, §6.1). Apply order and contract: see "Map Quality" |
+| `LoopDetected` | LoopCloser → Mapper | `query_map_id` (the active map), `match_map_id` (equal for a loop; an inactive map's id for a merge, since map merging Task 4), `query_frame`, `match_frame`, `S_query_match` (`geometry::Sim3`, x_query = S · x_match in camera coordinates, ORB Scm; scale 1 for stereo), `matched_points` ((query point, match point) pairs). `priority` (interrupts a running local BA) unless a loop was already published at the LoopCloser replica's epoch. Published unbounded (no drop limit since 2026-10-13: the Mapper's transactions pace the LoopCloser, which keeps `max_query_backlog`). See "Loop Closing" |
+| `GlobalBAFinished` | GlobalBA → Mapper | `map_id`, `map_epoch` (N, the correction epoch optimized), `frame_poses` ((FrameId, T_cw) of every Frame of the run), `point_positions` ((MapPointId, world position) of every point of the run): plain data only. `priority` (interrupts a running local BA). Published unbounded and never dropped (since 2026-10-13). The Mapper merges it as one `MapTransaction` at N + 1, or rejects it (another map or epoch). About 1.2 MB for a corridor1 map of 600 Frames and 38k points. See "Global BA" |
 | `InitializationMeasurement<FE>` | Tracker → Mapper (+ other Tracker observers) | `features::TMeasurement<FE>` (`map_id` 0) |
 | `TrackingLost` | Tracker → all | timestamp, `final` (`map_id` = the lost map). Since 2026-10-08: `final = false` on entering `RecentlyLost` (the Mapper ignores it and keeps the map), `final = true` on entering `Lost` (only this one clears the Mapper's map) |
 
 Rules:
 - Events are coarse-grained (one event per batch, Eigen matrices inside).
-- Each concrete event type has its own `ObjectPool`.
-- Consumers never call `Recycle()` — the `Listener` does.
+- Events are created with `std::make_shared` and published as
+  `shared_ptr<const T>` (§6.1): no per-type pool, no `Recycle()`; a consumer
+  acknowledges by dropping its `EventPtr`.
 - Per channel delivery is FIFO, so a replica applying diffs in order always ends
   up identical to the Mapper's map as of the last applied event.
 - Because IDs are never reused, a `MapTransaction` allocates its new points a
@@ -380,11 +392,10 @@ Rules:
   change.
 - **Priority events and the inbox counter.** A producer sets
   `Event::priority` before publishing (the Tracker: on urgent `FrameTracked`).
-  `AsyncObserver::Push` increments the inbox's `pending_priority` counter
-  before the enqueue; **only `AsyncObserver::TryPop` (and a `Listener` from
-  `GetListener()`) decrement it** — popping from the raw `queue()` bypasses
-  the counter and leaves it too high (TODO: make `queue()` private). The
-  counter is event infrastructure, not map data, so it does not break the
+  `InboxCore::Push` increments the inbox's `pending_priority` counter before the
+  enqueue; `AsyncObserver::TryPop` and a `Listener` decrement it. The queue is
+  private to the `InboxCore`, so nothing can bypass the counter. The counter is
+  event infrastructure, not map data, so it does not break the
   no-locks-on-map-data rule.
 - **Older event names.** Sections written before 2026-10-07 name
   `KeyFrameCreated`, `MapCreated`, `MapPointsUpdated` / `MapPointsRemoved` and
@@ -416,12 +427,12 @@ Rules:
   and every replica's `ReplicaKeyFrame` keep that same object; nothing writes
   to it afterwards (`const` by type). The only other creator is the Mapper,
   for a new map's initial Frames, whose measurements come from
-  `InitializationMeasurement` copies. A pooled event releases its pointer on
-  reuse (`Reset()`).
+  `InitializationMeasurement` copies. An event releases its pointer when its
+  last holder drops it.
 - **`map_id`.** `map::MapId` (`map/map_id.h`, strong `uint32_t`; ids start at
   1, only increase, `MapId{0}` = not tied to a map). `Event` has a public
-  `map_id` field that **producers must set on every publish** (pooled events
-  are reused without reset). It is the map the Mapper is building
+  `map_id` field that **producers must set on every publish** (on the fresh
+  `make_shared` event, before `Notify`; it is immutable afterwards). It is the map the Mapper is building
   (`MapTransaction`), the map the Tracker tracks against (`FrameTracked`,
   `TrackingLost`) or 0 (`InitializationMeasurement`).
   **Replica rule** (since 2026-10-10, map merging Task 2; it replaced "newest
@@ -452,156 +463,181 @@ Rules:
   connected observer (the viewer also receives `InitializationMeasurement` and
   just counts it). A future serializing observer chooses what to send.
 
-### 6.1 Event Lifecycle: Pooled, Reference-Counted, Acknowledged
+### 6.1 Event Lifecycle: Shared, Immutable, Released by the Last Holder
 
-> **Superseded (decision 2026-10-13, ownership audit #3):** events become
-> `std::shared_ptr<const T>` and the pools below are deleted; this section
-> describes the current code until #3 is implemented, then is rewritten.
+**Goal:** an event owns its memory, so it stays valid for as long as anyone holds
+it, whichever object (producer, subscription, observer, listener) dies first.
+That is what a consumer with its own lifetime (the JNI binding: objects die in
+any order, on any thread) needs, and it removes every declaration-order rule the
+pooled design had. The price is one `std::make_shared` per event, which is
+accepted (decision 2026-10-13): events are coarse (one `MapTransaction` per
+Mapper action, one `FrameTracked` per frame; well under 100 events/s in total),
+the large payload (the measurement) is already a per-frame `shared_ptr`, and the
+allocator's internal locks are not locks on map data (§2 principle 1).
 
-**Goal:** publishing an event must not hit the general-purpose heap allocator —
-neither for the event object nor for its payload. Events are produced at frame
-rate on every thread; `new`/`delete` per event means allocator contention
-between threads and unpredictable latency. Instead, every concrete event type
-has a pre-allocated **`ObjectPool`**, each event is a **`Recyclable`** object
-that knows how to return itself to its pool, and pooled objects are **kept
-alive** between uses so their payload buffers are reused (steady state: zero
-allocations per event).
+**The building blocks (`libs/events/include/voyahslam/events/`, plus
+`voyahslam/errors.h` in `voyah_common`):**
 
-**The building blocks (`libs/common/include/voyahslam/memory/`):**
-
-- `ObjectPool<T, SyncPolicy>` — slots in chunks; chunk 0 is one contiguous
-  slab of `initial_capacity` slots allocated in the constructor. Free slots form
-  a stack of global slot indices whose links live in per-chunk
-  `atomic<uint32_t>` arrays, so slot memory is never read by the allocator and
-  is not touched (or committed by the OS) until first use. `TryCreate()` pops a
-  slot or returns `nullptr`; it **never grows**. `Create()` **never fails**
-  (since 2026-10-12, version 0.3.0; it used to `abort()`): when no slot is free
-  it adds chunk k ≥ 1 of `initial << (k - 1)` slots (doubling the capacity),
-  pushes them onto the free list as one chain and pops again. Each growth logs
-  one warning (logger `ObjectPool`, naming the pool, e.g. `FrameTracked`), so a
-  backlog of n overflow objects logs O(log n) lines, never one per event.
-  `num_overflow_created()` counts objects constructed beyond the initial
-  capacity; `capacity()` is the current slot count. The first time a slot is
-  used its `T` is default-constructed; on every later reuse the pool resets the
-  ref count to 1 and calls `T::Reset()` if `T` defines one. `Recycle(T*)` finds
-  the slot's chunk (a scan of at most 33 chunk pointers, chunk 0 first) and
-  pushes the slot back — **the object is not destroyed**, so vectors and Eigen
-  buffers inside it keep their allocations. Objects (overflow ones included) are
-  destroyed only in `~ObjectPool`. O(1) except the rare growth.
-  - **Overflow objects are kept, not freed.** A recycled overflow object goes
-    back on the free list like any other, so the pool keeps its peak size and a
-    later backlog of the same height allocates nothing (steady state stays
-    allocation-free after a spike). Freeing them on recycle would need a
-    per-object "overflow" mark and a heap free on the consumer's thread, and a
-    lock-free stack of individually allocated nodes reintroduces ABA on node
-    reuse; chunked indices keep the one tagged-index Treiber stack. The cost is
-    memory held after a spike, at most twice the peak backlog.
-  - **Growth is lock-free.** A chunk is published by a CAS of its (null)
-    pointer (acq_rel; its link array is written before), then its slots are
-    pushed with the usual release CAS on the head, so a thread that pops one of
-    them (acquire) sees the chunk. A creator that loses the CAS frees its chunk
-    and retries; under concurrent creators the pool may grow one chunk more
-    than strictly needed. Chunks are freed only in the destructor, so the stale
-    index a losing pop reads is always a valid slot. `Create()` passes the
-    count of completed growths it saw before its pop, so a creator that fails
-    after another finished growing retries instead of growing again; only one
-    that fails while another is between its chunk CAS and its push grows an
-    extra chunk (waiting would not be lock-free).
-  - **Limits.** Slot indices are 32-bit, so the capacity stops at the largest
-    `initial << k` ≤ 2^32 − 1 (between 2^31 and 2^32 − 1 slots); past it
-    `Create()` aborts. In practice memory runs out first: a `std::bad_alloc`
-    from a growth propagates out of `Create()` on the producer's thread (the
-    Tracker's or Mapper's worker thread).
-- `ColumnBuffer<TScalar, Rows>` — grow-only `Rows × N` Eigen buffer used for
-  event payloads. `Resize(n)` sets the visible column count and reallocates
-  (geometrically, preserving data) only when `n` exceeds capacity; `matrix()`
-  returns the `leftCols(n)` view. Plain `Eigen::Matrix` can't be used here
-  because it reallocates on every size change.
-- `Recyclable<T, SyncPolicy>` — CRTP mixin that gives an object an atomic
-  reference count (starts at **1**) and a back-pointer to the pool that created it.
-  `Recycle()` decrements; whoever drops the count to 0 returns the object to its
-  pool. `SetRefCount(n)` sets the count in one store (used for fan-out).
-- `SyncPolicy` — `ThreadSafePolicy`: the free-list is a lock-free Treiber stack
-  (CAS on a 64-bit head packing `tag << 32 | index`; the tag is bumped on every
-  push/pop to defeat ABA). Required for event pools, because `Create` runs on the
-  producer thread and `Recycle` on whichever consumer acknowledges last.
-  `NoSyncPolicy`: same structure with plain loads/stores, for single-thread pools.
-- `Event` — non-virtual base with a type tag and two function pointers
-  (`recycle_`, `set_ref_count_`) wired by each concrete event's constructor, so
-  code holding only an `Event*` can manage the lifetime without virtual dispatch
-  and without knowing the concrete type.
+- `Event` (`event_types.h`) — non-virtual base: the `EventType` tag, `map_id` and
+  `priority`. Its destructor is protected and non-virtual: events die through
+  their `shared_ptr` control block, which remembers the concrete type.
+  `EventPtr = std::shared_ptr<const Event>` is what the delivery layer carries;
+  `const` makes a received event immutable by type.
+- `InboxCore` (`inbox_core.h`) — the shared state of one `AsyncObserver`: a
+  `moodycamel::ConcurrentQueue<EventPtr>`, the pending-priority counter, a
+  `closed` flag, the observer's `WakeSignal` and its name. It is held by the
+  `AsyncObserver`, by every `Listener` and by every producer entry that delivers
+  into it, so the core lives until the last of them is gone. No lock: the queue
+  is lock-free and everything else is an atomic.
+- `Wiring` (`subscription.h`) — a producer's connection list (async entries
+  `{id, shared_ptr<InboxCore>}` and sync entries `{id, fn, ctx}`) and its
+  `std::atomic<RunState>`, in a block shared by the `Observable` and every
+  `Subscription` it handed out. A `Subscription` that outlives its producer only
+  edits this block.
+- `RunState` (`Created`, `Starting`, `Running`, `Stopping`, `Stopped`) lives in the
+  `Wiring`. `EventNode::BeginRun()` (before the worker thread is created) and
+  `EndRun()` (after it is joined) drive it in Tracker, Mapper, LoopCloser and
+  GlobalBA; `IsRunning` is true for the three middle values. Until the lifecycle
+  work (audit #6) it only gates wiring: it does not yet forbid `Start()` after
+  `Stop()`.
+- `Subscription` (`subscription.h`) — a move-only `[[nodiscard]]` RAII handle for
+  one connection (`shared_ptr<Wiring>` + an entry id). Its destructor or
+  `reset()` disconnects.
+- `voyahslam::UsageError` (`errors.h`) — a `std::logic_error` thrown for an
+  invalid call sequence (§7 "Exception policy").
+- `ColumnBuffer<TScalar, Rows>` (`memory/column_buffer.h`) — grow-only `Rows × N`
+  Eigen buffer used inside `MapTransaction`. `Resize(n)` sets the visible column
+  count and reallocates (geometrically, preserving data) only beyond capacity;
+  `matrix()` returns the `leftCols(n)` view. Plain `Eigen::Matrix` would
+  reallocate on every size change. With one event per use the buffer is a
+  convenience for building a payload, not a reuse mechanism.
 
 **The lifecycle of one async event:**
 
 ```
  producer thread                         consumer threads (N async observers)
  ───────────────                         ────────────────────────────────────
- 1. e = pool.Create()        ref = 1
- 2. fill payload
- 3. observable.Notify(e)
-      a. sync handlers run inline (e alive, producer still owns it)
-      b. SetRefCount(N)       ref = N    ◄── ownership transferred to consumers
-      c. enqueue e on each of the N queues
- 4. producer forgets e (must not touch it again)
-                                          5. listener.GetNextEvent() → e
-                                             consumer reads the payload
-                                          6. next GetNextEvent() / ~Listener()
-                                             = acknowledgement: e->Recycle()
-                                             ref = ref - 1
-                                          7. last consumer to acknowledge
-                                             (ref → 0) returns e to the pool
+ 1. e = std::make_shared<T>()
+ 2. fill payload; set map_id (and priority)
+ 3. observable.Notify(std::move(e))
+      a. sync handlers run inline, with const Event&
+      b. a copy of the EventPtr is pushed into each of the N inboxes
+         (N = 0: the event is freed before Notify returns)
+ 4. the producer's pointer is moved from (it cannot touch e again)
+                                          5. listener.GetNextEvent() → EventPtr
+                                             (or AsyncObserver::TryPop(EventPtr&));
+                                             the consumer reads the payload
+                                          6. the consumer drops its EventPtr
+                                             = acknowledgement
+                                          7. whoever drops the last copy, on its
+                                             own thread, destroys the event
 ```
 
-**Acknowledgement is implicit.** A consumer never calls `Recycle()` itself. The
-`Listener` treats "asking for the next event" as "I am done with the previous
-one", and its destructor acknowledges the last event it handed out. So the
-pointer returned by `GetNextEvent()` is a **borrow**, valid until the next
-`GetNextEvent()` call or until the `Listener` is destroyed.
-
-**Rules for consumers:**
-1. Do not keep an `Event*` (or references/`Map`s into its payload) beyond the
-   next `GetNextEvent()`. Copy whatever must outlive it into the local replica.
-2. Treat the payload as **read-only**. With fan-out the same object is read
-   concurrently by all N consumers, so moving data *out* of an event (e.g.
-   `std::move(e->positions)`) is a data race.
-3. Don't sit on events: until every consumer has acknowledged, the slot is not
-   back in the pool. A stalled consumer drains the pool; the producer's next
-   `Create()` then grows it (logged, counted; since 0.3.0, before that it
-   aborted), and a `TryCreate()` producer drops the event. The Tracker's
-   (`TrackerOptions::event_pool_size`) and the Mapper's
-   (`MapperOptions::transaction_pool_size`) pool sizes default to 256; raise
-   them to pre-allocate for a known backlog.
-4. A `Listener` is move-only; moving it transfers the borrowed event, so it is
-   acknowledged exactly once.
+**Acknowledgement is dropping the pointer.** The `EventPtr` returned by
+`GetNextEvent()` / `TryPop` is owned by the caller, so
+`while (EventPtr event = listener.GetNextEvent()) { Apply(*event); }` releases each
+event at the end of its iteration. Holding one longer is legal and safe (it pins
+that event's memory only); a replica copies what it keeps rather than aliasing
+event storage, otherwise one slow replica would pin every transaction it saw.
 
 **Rules for producers:**
-1. **`Notify()` always takes ownership.** After it returns the producer must not
-   touch the event. With N > 0 async observers, the count is set to N and the
-   consumers release it; with none, `Notify()` recycles it right after the sync
-   handlers. The producer doesn't need to know how it is wired.
-2. An event with a null `recycle_` is never recycled — this is how a
-   stack-allocated event is published to sync-only observers.
-3. Sync handlers run inline before the async enqueue and must not retain the
-   event or `AddRef()` it — the subsequent `SetRefCount(N)` would overwrite that
-   reference.
-4. Use `TryCreate()` where exhaustion is an expected, recoverable condition
-   (back-pressure) and `Create()` where it indicates a bug.
-5. A created event may be a reused one. Events with a `Reset()` come back
-   cleared (counts 0, ids empty, capacity kept). Events **without** `Reset()`
-   (`LoopDetected`, `TrackingLost`, `InitializationMeasurement`) still hold
-   the previous values: the producer must set every field. `FrameTracked` and
-   `MapTransaction` have `Reset()` (every part cleared, capacity kept).
-6. Fill batched payloads with `e->Resize(n)` and then write into
-   `e->positions.matrix()` / `.col(i)` etc. — never assign a freshly built
-   `Eigen::Matrix` to a buffer's storage, that would throw away the reuse.
+1. Create the event with `std::make_shared<T>()`, set `map_id` and every field
+   (a new object is default-constructed, there is no reuse and no `Reset()`),
+   set `priority` if urgent, and publish with `observable_.Notify(std::move(e))`.
+   `Notify` is a template taking `std::shared_ptr<T>&&`: an lvalue does not
+   compile, so the producer cannot keep a mutable alias after the hand-over.
+2. Sync handlers run first, inline on the producer's thread, with a
+   `const Event&`; they must not retain the reference (take an `EventPtr` from an
+   async observer for that). The entry vectors are read without a lock: they
+   change only while the producer is not running.
+3. An event may be destroyed on any thread (the last holder's: the viewer, a JNI
+   or GC thread), so an event's destructor must not depend on the thread. Keep
+   members to standard containers, Eigen, `shared_ptr` and `ColumnBuffer`.
+4. Fill batched payloads by sizing the buffer first (e.g.
+   `e->ResizeNewPoints(n)`) and writing into `new_positions.matrix()` / `.col(i)`;
+   do not assign a freshly built `Eigen::Matrix` to a buffer's storage.
 
-**Adding a new event type:** inherit `Event` and
-`memory::Recyclable<Self, memory::ThreadSafePolicy>`, wire `recycle_` /
-`set_ref_count_` in the constructor (see e.g. `events/frame_tracked.h`), make it default
-constructible, store variable-size payloads in `ColumnBuffer`s / `std::vector`s,
-and give it `Reset()` if it has any. Put it in its own header
-`events/<snake_case_name>.h`, add the `EventType` value, and add it to
-`events/events.h`.
+**Rules for consumers:**
+1. Read the payload through the `const` event; moving data out of it does not
+   compile (with fan-out the same object is read by all N consumers).
+2. Drop the `EventPtr` when done. A stalled consumer does not stop the producer
+   and nothing is dropped: its inbox grows (see the backlog warning below).
+3. A `Listener` is a handle on the observer's `InboxCore`: freely copyable, every
+   copy pops from the same queue, and it returns an empty `EventPtr` if the
+   observer was destroyed first.
+4. Pop through `AsyncObserver::TryPop` or a `Listener`; they keep the
+   `pending_priority()` counter right (`AsyncObserver` has no public queue).
+
+**Wiring and destruction order (D-05..D-08, D-22).** Connecting and disconnecting
+are allowed **only while the producer is stopped** (`Created` or `Stopped`).
+`AddObserver` / `AddSyncObserver` / `ConnectAsync` / `ConnectSync` return a
+`Subscription` (discarding it disconnects at once; `-Werror=unused-result` turns
+that into a build error in the tests and apps). While the producer runs:
+- connecting throws `UsageError`;
+- `Subscription::reset()` throws `UsageError`;
+- a `Subscription` **destroyed** while its producer runs logs the reason (stderr
+  and the logger) and calls `std::terminate` in every build, because a destructor
+  cannot throw and a defined, loud failure beats a later use-after-free.
+
+A `Subscription` that outlives its producer, a moved-from one and a second
+`reset()` are no-ops; `~Observable` stores `Stopped` into the `Wiring`, so a
+producer destroyed without `Stop()` does not make surviving subscriptions
+terminate. Every order of {producer, `Subscription`, `AsyncObserver`, `Listener`}
+is safe by construction (all 24 are tested under Debug, TSan and ASan):
+
+| Dies first | Producer Created / Stopped | Producer Running |
+|---|---|---|
+| `Subscription` | the entry is removed | reset: `UsageError`; destructor: log and `std::terminate` |
+| `AsyncObserver` | its core is closed and the queued events are released; the producer's entry stays and later pushes are dropped at once; the `Subscription` later removes the entry | the same: later pushes dropped, no use-after-free, no terminate |
+| Producer (`Slam`, component) | the `Wiring` survives inside each `Subscription`, state `Stopped`; disconnecting is harmless | cannot happen: every component's destructor stops its worker first |
+| `Listener` | nothing (it only shares the core) | nothing |
+| Events held by anyone | valid; freed once, on the thread of the last drop | the same |
+
+**Observer destruction (D-08).** `~AsyncObserver` closes its core: events still
+queued are released then, on the destroying thread, and a producer that still
+delivers into the closed core drops its copy at once. Nothing is drained on
+disconnect: an inbox can be fed by several producers (the viewer gets Tracker and
+Mapper events) and queued events carry no producer tag, so events left queued
+after a `Subscription` is reset stay valid until the observer goes. A `Push`
+that passed the `closed` check just before the close may leave one event in a
+closed core; it is valid and is freed with the core.
+
+**Consumer-side ordering that remains (D-22, D-23).**
+- A sync handler's `ctx` must outlive its connection. The library does not own
+  it (it is a raw pointer): keep it valid until the `Subscription` is reset or
+  destroyed (while the producer is stopped), or until the producer is destroyed.
+  The comment on `ConnectSync` / `AddSyncObserver` says the same. Async observers
+  need no such care.
+- Hold the `Subscription`s in a `std::vector<events::Subscription>` (or members)
+  **declared before the `Slam`** they connect to. `~Slam` stops every producer
+  first, so the later destruction of the subscriptions is a no-op, and an
+  exception unwinding past them never reaches the terminate rule. This is why the
+  examples carry no `StopAll` guard and `Slam` has no `global_ba_` ordering
+  invariant (it keeps its own six internal edges in `subscriptions_`, its last
+  member).
+
+**Backlog warning (D-24).** Without pools a stalled consumer grows memory
+silently, so `InboxCore::Push` logs one warning, `<name>: consumer is behind, N
+events queued` (logger `AsyncObserver`), when the queue first reaches 1024 events
+and again at each doubling (2048, 4096, ...), never per event. The threshold only
+grows: an inbox that is drained and refilled warns again only past the last
+threshold. Components name their inboxes (`Tracker`, `Mapper`, `LoopCloser`,
+`GlobalBA`, the viewer) so the warning names the stalled one. Real back-pressure
+or lossy delivery for display-only observers is EVT-01 (TODO "Map & events").
+
+**Unbounded producers (D-25).** `LoopDetected` and `GlobalBAFinished` are
+published unbounded like every other event: the former drop limits are gone
+because both producers are paced by the Mapper's transactions, the LoopCloser
+keeps its `max_query_backlog`, and a dropped `GlobalBAFinished` was never retried.
+
+**Adding a new event type:** derive from `Event` (its constructor is protected, so
+the derived default constructor passes the `EventType`; see `frame_tracked.h`),
+make it default constructible, store
+variable-size payloads in `ColumnBuffer`s / `std::vector`s, put it in its own
+header `events/<snake_case_name>.h`, add the `EventType` value (keep
+`TrackingLost` last), and add it to `events/events.h`. Producers create it with
+`std::make_shared` and publish it with `Notify(std::move(e))`; no pool, no
+`Reset()`, no registration.
 
 ## Example Applications (`examples/`)
 
@@ -703,7 +739,7 @@ Specs: `docs/superpowers/specs/2026-10-04-pangolin-viewer-design.md`
   `SceneState`, the renderer and the GL context. The window is created at loop
   entry and destroyed at loop exit (or on close), on that thread. Other threads
   only use the atomics (`window_closed()`, `events_processed()`) and `inbox()`.
-- Loop: drain inbox through a local `Listener` (acknowledges each event) ->
+- Loop: drain inbox through a local `Listener` (dropping each `EventPtr` is the acknowledgement) ->
   `SceneState::Apply` -> render (if the window is open) -> sleep to the next
   absolute deadline (no catch-up when late). No busy-waiting.
 - **`Start()` vs `RunOnCurrentThread()`:** `Start()` runs the loop on the
@@ -712,7 +748,7 @@ Specs: `docs/superpowers/specs/2026-10-04-pangolin-viewer-design.md`
   thread; the app would then run playback on a worker thread. The apps use
   `Start()` today; the macOS setup is in TODO.
 - **Stop semantics:** `Stop()` in `Start()` mode joins and drains once more so
-  queued events return to their pools; idempotent, safe without `Start()`,
+  queued events are released; idempotent, safe without `Start()`,
   restart allowed, destructor stops. During `RunOnCurrentThread()`, `Stop()`
   only requests the stop and the loop drains itself on its own thread; other
   threads end that run with `RequestStop()` only (a `Stop()` before the loop is
@@ -722,20 +758,23 @@ Specs: `docs/superpowers/specs/2026-10-04-pangolin-viewer-design.md`
   (externally ordered). A
   `RequestStop()` made before the loop is entered is kept (the run drains once
   and returns). `fps <= 0` throws.
-- **Window close does not end the loop.** It keeps draining headless (so the
-  producers' event pools never stall); only `RequestStop()` / `Stop()` end it.
+- **Window close does not end the loop.** It keeps draining headless (so its
+  inbox never builds a backlog); only `RequestStop()` / `Stop()` end it.
   `window_closed()` is also true if the window could not be created (logged,
   runs headless). Apps stop playback when it turns true and, after the last
   frame, wait with `WaitForWindowClose()`.
 - **Wayland:** on Linux under Wayland with `PANGOLIN_WINDOW_URI` unset, the
   `MapViewer` constructor sets it to `x11://` (XWayland): Pangolin's Wayland
   backend blocks in `eglSwapBuffers` on GNOME, which would stall the drain and
-  the producers' pools. Construct the viewer before other threads start.
+  let the viewer's inbox grow. Construct the viewer before other threads start.
 - **Ordering:** connect with `AddObserver(viewer.inbox())` before the producers
-  start; stop `Slam` before the viewer.
-- Pools feeding the viewer should cover the backlog published between two
-  ticks (about 33 ms at 30 fps) - relevant to OQ 14; a longer stall grows the
-  Tracker's and Mapper's pools (logged) instead of aborting.
+  start and keep the returned `Subscription` in a container declared before the
+  `Slam`; the viewer may be destroyed in any order relative to the producers
+  (§6.1). `MapViewer` keeps "restart after `Stop()` allowed" (the terminal
+  Stopped rule of the lifecycle work does not apply to it).
+- A stalled viewer holds the events it has not drained, nothing more: its inbox
+  grows and logs the "consumer is behind" warning (`MapViewer`, §6.1) instead of
+  stalling or aborting a producer.
 - **Pangolin is a private dependency:** linked `PRIVATE` via `pango_display`
   (installed in `/usr/local`, 0.9); no Pangolin types in public headers
   (principle 8).
@@ -2163,10 +2202,11 @@ still use the vocabulary). Every Frame of
 `added_frames` is a query once the map has `min_map_frames` (12) Frames.
 - **Queries wait, transactions do not (2026-10-10, final-review I1).** Each
   `ProcessPending()` first drains the inbox, applying every transaction to
-  the replica (which releases the pooled event) and queueing its new Frames'
+  the replica (which releases the event) and queueing its new Frames'
   ids, then detects the oldest query only. Before, a transaction was held
-  until its Frames were detected, so a lagging LoopCloser could exhaust the
-  Mapper's 256 transactions and abort it. Beyond `max_query_backlog` (8;
+  until its Frames were detected, so a lagging LoopCloser held every
+  transaction it had not applied (the Mapper's 256-slot transaction pool
+  aborted when exhausted until 0.3.0; since 2026-10-13 only memory grows). Beyond `max_query_backlog` (8;
   ORB-SLAM3's queue is unbounded) the oldest queries are dropped, counted
   (`QueryStats::dropped`) and logged once per backlog episode. The Mapper
   never drops transactions and gets no back-pressure. A query culled while
@@ -2264,8 +2304,8 @@ still use the vocabulary). Every Frame of
   a merge), `query_frame`,
   `match_frame`, `S_query_match` (scale 1 for stereo) and the matched
   `(query point, match point)` pairs (features without points are dropped:
-  TODO). Published from a pool of 16 with `TryCreate`: a loop found while
-  all are in flight is dropped and found again. Duplicates are not
+  TODO). Published unbounded (since 2026-10-13; it used to be a pool of 16 that
+  dropped a loop found while all were in flight). Duplicates are not
   suppressed; the Mapper ignores a closed loop. The LoopCloser is not wired
   to `TrackingLost` in `Slam`; the Mapper's map-id check rejects a lost
   map's late loops (TODO).
@@ -2581,12 +2621,11 @@ the ATE is still dominated by the same-heading false loops (step 6).
 | Local mapping stopped and the map locked for the merge | The merge is one Mapper handler call (the Mapper is the only writer) and one `MapTransaction` at epoch N + 1 |
 
 **The component** (`global_ba/global_bundle_adjuster.h`):
-- An `EventNode` with its own thread, replica and a pool of
-  `GlobalBaOptions::max_events_in_flight` (2) `GlobalBAFinished`, published
-  with `TryCreate` and `priority` (the Mapper's running local BA stops for the
-  merge). An exhausted pool drops the result (`num_results_dropped`, logged)
-  and is not retried: the map keeps the essential-graph correction until the
-  next loop.
+- An `EventNode` with its own thread and replica, publishing each
+  `GlobalBAFinished` with `priority` (the Mapper's running local BA stops for
+  the merge). The result is never dropped (since 2026-10-13; before, a pool of
+  `max_events_in_flight` (2) dropped it, counted and logged but not retried, and
+  the map kept only the essential-graph correction until the next loop).
 - **Trigger:** an applied transaction of the current map with
   `added_loop_edges`. There is no request event. After the inbox is drained,
   one run per `ProcessPending()`.
@@ -2598,10 +2637,11 @@ the ATE is still dominated by the same-heading false loops (step 6).
   carries the run's captured `(map_id, N)`.
 - **Apply-on-poll rule:** each `should_stop` poll drains the inbox; every
   transaction is first judged for interruption against the run's
-  `(map_id, N)`, then applied to the replica, and so released. Why: the
-  Mapper's transaction pool (256) aborts when exhausted, and a run on a large
-  map lasts seconds at about 2 transactions per KeyFrame (the LoopCloser's
-  apply-on-receipt rule, for the same reason). `should_stop` is sticky: once
+  `(map_id, N)`, then applied to the replica, and so released. Why: a run on a large
+  map lasts seconds at about 2 transactions per KeyFrame, and every transaction
+  left unapplied in the inbox stays alive (the LoopCloser's apply-on-receipt
+  rule, for the same reason; the old transaction pool made an unreleased
+  transaction an abort risk). `should_stop` is sticky: once
   it returns true it stops polling.
 - **Interruption:** `Stop()`, or a drained transaction that is a newer
   correction of the run's map (a larger `map_epoch` with a loop edge),
@@ -2668,9 +2708,10 @@ take `--no_global_ba`.
 - `GlobalBundleAdjusterTest` (11): the loop-edge trigger, interruption by a
   newer correction (also between LM iterations) and not by an ordinary
   transaction, a new map and a removed map (the final-loss transaction)
-  dropping the run, removed maps ignored, `Stop()`, a full
-  result pool, transactions released at each poll (a pool of 4 survives more
-  polls than its size), changes during a run not affecting the result
+  dropping the run, removed maps ignored, `Stop()`, a second result
+  delivered while the first is still held (nothing is dropped), transactions
+  released at each poll (a harness in-flight limit of 4 survives more polls
+  than its size), changes during a run not affecting the result
   (bitwise equal to an undisturbed run).
 - `MapperGlobalBa*` (9): optimized Frames and points, propagation down the
   tree (chains, re-parented chains), new points following their reference
@@ -2785,8 +2826,8 @@ How to read the table:
 
 | Library (target) | Contents | Depends on |
 |---|---|---|
-| `voyah_common` | `defs.h`, ids, `memory/*`, `logging/*`, `algebra/*`, geometry types (`RigidTransformation`, `Camera`, distortion models), image types, feature/measurement data types, stereo rig, the extractor *declarations* (`OrbFeatureExtractor`, `orb/image_pyramid.h`), map storage (`Frame`, `MapPointStorage`, `ObservationStorage`, `CovisibilityIndex`) | Eigen, spdlog (PUBLIC) |
-| `voyah_events` | `events/*`: event types, `Observable` / `AsyncObserver` / `EventNode`, `WakeSignal`, `WorkerThread` | common; concurrentqueue (PUBLIC) |
+| `voyah_common` | `defs.h`, `errors.h` (`UsageError`), ids, `memory/column_buffer.h`, `logging/*`, `algebra/*`, geometry types (`RigidTransformation`, `Camera`, distortion models), image types, feature/measurement data types, stereo rig, the extractor *declarations* (`OrbFeatureExtractor`, `orb/image_pyramid.h`), map storage (`Frame`, `MapPointStorage`, `ObservationStorage`, `CovisibilityIndex`) | Eigen, spdlog (PUBLIC) |
+| `voyah_events` | `events/*`: event types, `Observable` / `AsyncObserver` / `Listener` / `InboxCore` / `Subscription` / `EventNode`, `WakeSignal`, `WorkerThread` | common; concurrentqueue (PUBLIC) |
 | `voyah_algs` | estimators, two-view geometry, image filters, `io/read_image`, FAST (`features/fast.h`), the extractor *definitions*, feature grid and matchers, point statistics, keyframe decision, triangulation, `optimization/*`, bag of words (`bow/*`) | common; stb, g2o (PRIVATE); no OpenCV since 2026-10-11 |
 | `voyah_slam` | `tracking/*`, `mapping/{mapper, map_initializer}`, `loop_closing/*`, `slam/*`, `voyahslam.h` | common, events, algs |
 | `voyahslam` (INTERFACE) | umbrella: links all four; the apps link it | all |
@@ -2805,7 +2846,7 @@ libs/
 cmake/VoyahTests.cmake      voyah_add_test_binary, voyah_optimize_target, check / check_all
 cmake/voyahslamConfig.cmake.in  installed CMake package config (find_dependency)
 vizualization/              voyahviz (+ voyahviz_tests)
-conanfile.py                package recipe voyahslam/0.3.0 (also the dev installs)
+conanfile.py                package recipe voyahslam/0.4.0 (also the dev installs)
 test_package/               conan create's consumer test (links voyahslam::voyahslam)
 profiles/                   linux-gcc13 (default + gnu20), android-arm64,
                             settings_user.yml (clang 21)
@@ -2834,7 +2875,7 @@ profiles/                   linux-gcc13 (default + gnu20), android-arm64,
   `transitive_headers` (spdlog also `transitive_libs`); g2o and stb are not
   (g2o's libraries still reach static consumers' link lines, never its
   include paths). `shared=True` also makes spdlog and fmt shared; shared
-  libraries get `VERSION` / `SOVERSION` (0.3) and an `$ORIGIN` install
+  libraries get `VERSION` / `SOVERSION` (0.4) and an `$ORIGIN` install
   runpath (not on Apple).
 - `validate()` requires `compiler.cppstd` >= 20 (public headers are C++20;
   `profiles/linux-gcc13` = default + `gnu20` + Release, used by the dev
@@ -2898,6 +2939,28 @@ profiles/                   linux-gcc13 (default + gnu20), android-arm64,
   `tests/`); a test above 1 s in the optimized build goes to
   `libs/slam/tests/integration/`.
 
+**Exception policy (since 2026-10-13, ownership audit #3+#2, D-09):** the library
+throws almost nowhere (only `io/read_image.cpp`), and this is its first policy.
+An invalid call sequence (connecting to a producer that runs, resetting a
+`Subscription` while its producer runs, and later `Start()` twice or after
+`Stop()`) throws `voyahslam::UsageError` (`voyahslam/errors.h`, a
+`std::logic_error`) in every build, never only an `assert`, because the caller
+(a C++ app, the JNI binding) can recover or at least report it; the binding maps
+it to `IllegalStateException`. **Destructors never throw:** a misuse that can only
+be detected in a destructor (a `Subscription` destroyed while its producer runs)
+logs and calls `std::terminate` instead (§6.1, D-07).
+
+**Test conventions for misuse (2026-10-13):**
+- A test that expects the process to die (`std::terminate`, `abort`) is a gtest
+  *death test*; its suite name ends in `DeathTest` (e.g.
+  `SubscriptionDeathTest`), it uses the `threadsafe` death-test style, and it is
+  excluded from ThreadSanitizer runs (`--gtest_filter=-*DeathTest*`: forking a
+  threaded, instrumented process is unreliable).
+- Tests and example apps build with `-Werror=unused-result` (GNU and Clang,
+  per target in `voyah_add_test_binary` and in `examples/full_slam`), so a
+  discarded `[[nodiscard]]` `Subscription` is a build error there. The installed
+  package build is not affected.
+
 **Build & test (Conan 2 + CMake):**
 - Dependencies (`conanfile.py`; was `conanfile.txt` until 2026-10-11): eigen,
   stb, spdlog, concurrentqueue, g2o (local package, see below); gtest with
@@ -2940,9 +3003,9 @@ branch → review → merge to `master`. Update this document at the end.
 
 | Date | Decision | Rationale |
 |---|---|---|
-| 2026-09-30 | Event delivery layer (`Observable`/`AsyncObserver`/`Listener`) is non-template, carries `Event*`. | Avoid template bloat; concrete types only known at the consumer's `switch`. |
-| 2026-09-30 | Sync handlers run before async enqueue; sync-only notify skips ref counting. | No race on the event pointer; stack-allocated events possible for sync. |
-| 2026-09-30 | `Recyclable::Recycle()` uses `acq_rel`. | Correct cross-thread release of event payloads. |
+| 2026-09-30 | Event delivery layer (`Observable`/`AsyncObserver`/`Listener`) is non-template, carries `Event*`. *Superseded 2026-10-13 (ownership audit #3+#2): still non-template, now carries `EventPtr = shared_ptr<const Event>`.* | Avoid template bloat; concrete types only known at the consumer's `switch`. |
+| 2026-09-30 | Sync handlers run before async enqueue; sync-only notify skips ref counting. *Superseded 2026-10-13: sync handlers still run first, but there is no ref counting and no stack-allocated event (every event is `make_shared`).* | No race on the event pointer; stack-allocated events possible for sync. |
+| 2026-09-30 | `Recyclable::Recycle()` uses `acq_rel`. *Superseded 2026-10-13: `Recyclable` is deleted; `shared_ptr`'s count does the cross-thread release.* | Correct cross-thread release of event payloads. |
 | 2026-10-02 | Zero locks; each thread owns a map replica; pub/sub only. | Core design goal. |
 | 2026-10-02 | Mapper is the only map writer, including all loop closure logic. LoopCloser only detects. | Single writer keeps replicas consistent by construction. |
 | 2026-10-02 | Tracker optimizes only its own pose; never mutates map objects. Its replica changes only via Mapper diffs. | Same. |
@@ -3142,10 +3205,12 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-11 | **Conan package `voyahslam/0.1.0` (`conanfile.py`, replaces `conanfile.txt`), build options and install/export.** `VOYAHSLAM_BUILD_TESTS` / `VOYAHSLAM_BUILD_EXAMPLES` (OFF by default; the dev installs pass `-o with_tests=True -o with_examples=True`); the four libraries and the umbrella are installed and exported as `voyahslam::*`; Conan components with matching target names, the package target being the umbrella; PUBLIC deps (Eigen, spdlog/fmt, concurrentqueue) propagate headers, PRIVATE g2o and stb do not (g2o's libraries reach static consumers at link time only); `validate()` requires C++20, so the dev installs use `profiles/linux-gcc13` (default + `gnu20`), and rejects `shared=True` with `c++_static` and on Windows; `shared=True` makes spdlog/fmt shared. Android: `profiles/android-arm64`, API 24, clang 21 (NDK r30; `profiles/settings_user.yml` adds it to Conan 2.18's settings), **`compiler.libcxx=c++_static` (user decision)**: the app has a single JNI `.so` that links the static voyahslam libraries and is built with `ANDROID_STL=c++_static`. NDK rule: `c++_static` is safe only while the app has exactly one shared library containing C++; if more are ever added, everything must switch to `c++_shared`. | The library is consumed from an Android app (Kotlin + JNI, Gradle/CMake via the NDK) and from desktop. A package build must not need the dev tools (GTest, OpenCV, Pangolin, yaml-cpp). One C++ `.so` with a static STL is the smallest, simplest APK; a second C++ `.so` with its own static libc++ would split heaps, globals, exceptions and RTTI. |
 | 2026-10-12 | **Distortion models are shared, immutable: `TDistortionModelPtr = std::shared_ptr<const DistortionModel>`** (user decision; `distortion_model.h`) in `geometry::Camera::distortion`, `StereoRig::distortion_left` / `distortion_right`, `MonocularMeasurement`'s constructor (hence `BinocularMeasurement`) and the example `EurocDatasetReader` (`CameraCalibration::distortion`; its `unique_ptr` store is gone). Null still means pinhole. Functions that only use a model during a call keep `const DistortionModel*` / `&` (`DropFeaturesBeyondMaxRayAngle`, `voyahviz::ProjectToImage` / `DrawMeasurement`). Hot paths do not copy a `Camera`: the g2o edges of `BundleAdjust`, `OptimizePose` and `OptimizeSim3` hold `const Camera&` into the call's const arguments (`BaProblem::keyframe_cameras` / `keyframe_stereo` is not modified, hence not reallocated, while the edges exist), and `detail::ProjectionGate` holds `const Camera&` (always a local of a search whose measurement argument owns the camera; its rvalue constructor is deleted). Measured (Release, scratch benchmark, TUM-VI KB model set; medians of 30 BA / 300 pose runs, 3 interleaved rounds): local BA (10 keyframes, 1500 points, 7500 observations, half stereo) 44.8 / 45.6 / 45.5 ms raw pointer, 44.6 / 43.9 / 44.9 ms shared_ptr with reference edges (shared_ptr with copying edges: 44.2 / 45.0 / 48.4); pose optimization (400 observations, half stereo) 2.76 / 2.77 ms vs 2.78 / 2.76 / 2.80 ms; 4 threads concurrently 0.96-1.16 vs 0.95-1.17 ms per call: all within noise. Remaining copies on the Tracker's path per frame: the app's measurement construction (mono 1; stereo 4: the rig copy and each side's camera), and in stereo one per `OptimizeMatchedPose` call (`StereoCameras{right().camera(), T_rl}`, 2 per normally tracked frame); mono 0. | Raw pointers that "must outlive every Camera copy" were unmanageable for a library consumer (e.g. an Android JNI app) whose objects die in their own order: cameras are copied into measurements, events, every thread's replica, BA problems and edges. Shared ownership ends that; the per-copy atomic cost is kept off inner loops by references. |
 | 2026-10-12 | **Package version 0.2.0** (`conanfile.py`, `project()`; SOVERSION 0.2): the shared distortion models change the public `Camera`, `StereoRig` and measurement constructors, an API break while the version is 0.x. 0.1.0 stays in the local cache. | Consumers (the Android app) pin the version; an API change gets a new minor version. |
-| 2026-10-12 | **The object pool grows on overflow; a `MapTransaction` must never be dropped; lossy delivery for display-only observers is deferred** (ownership audit item 4). `ObjectPool::Create()` no longer aborts when every slot is in use: it adds a chunk doubling the capacity, logs one warning per growth and counts `num_overflow_created()`; recycled overflow objects stay on the free list (the pool keeps its peak size). `TryCreate()` keeps its meaning (null, never grows): the LoopCloser and GlobalBA still drop on purpose. The Tracker's three event pools and the Mapper's `MapTransaction` pool are sized by `TrackerOptions::event_pool_size` / `MapperOptions::transaction_pool_size` (default 256); `Tracker::event_pool_overflow()` / `Mapper::transaction_pool_overflow()` expose the counts. | An async observer 256 events behind (a stuck Java listener, a breakpoint, a rarely polled observer) aborted the app. Dropping is wrong for `MapTransaction` (every replica must apply every transaction) and for `FrameTracked` (the Mapper's input); growing costs memory only while a consumer is behind. Keeping overflow objects (not freeing them) keeps the lock-free index free list and steady-state allocation at zero. A per-observer lossy mode for display-only consumers is in TODO. |
+| 2026-10-12 | **The object pool grows on overflow; a `MapTransaction` must never be dropped; lossy delivery for display-only observers is deferred** (ownership audit item 4). `ObjectPool::Create()` no longer aborts when every slot is in use: it adds a chunk doubling the capacity, logs one warning per growth and counts `num_overflow_created()`; recycled overflow objects stay on the free list (the pool keeps its peak size). `TryCreate()` keeps its meaning (null, never grows): the LoopCloser and GlobalBA still drop on purpose. The Tracker's three event pools and the Mapper's `MapTransaction` pool are sized by `TrackerOptions::event_pool_size` / `MapperOptions::transaction_pool_size` (default 256); `Tracker::event_pool_overflow()` / `Mapper::transaction_pool_overflow()` expose the counts. | An async observer 256 events behind (a stuck Java listener, a breakpoint, a rarely polled observer) aborted the app. Dropping is wrong for `MapTransaction` (every replica must apply every transaction) and for `FrameTracked` (the Mapper's input); growing costs memory only while a consumer is behind. Keeping overflow objects (not freeing them) keeps the lock-free index free list and steady-state allocation at zero. A per-observer lossy mode for display-only consumers is in TODO. *Mechanism superseded 2026-10-13 (the pools are deleted; "a `MapTransaction` must never be dropped" stays, now by construction: nothing is dropped and the inbox grows).* |
 | 2026-10-12 | **Package version 0.3.0** (`conanfile.py`, `project()`; SOVERSION 0.3): `ObjectPool`'s constructor gains a name, its `Create()` semantics change (grows instead of aborting), and `TrackerOptions` / `MapperOptions` gain pool-size fields. | A public behaviour and API change gets a new minor version while 0.x. |
-| 2026-10-13 | **Events are heap-allocated and shared: `std::shared_ptr<const T>`; `ObjectPool` and `Recyclable` are to be deleted** (user decision, ownership audit #3, OWN-01; replaces the shared-pool-core design of 2026-10-12 discussion, never implemented). A producer creates each event with `std::make_shared` and publishes the `shared_ptr<const T>`; fan-out copies it and a consumer acknowledges by dropping its copy. The pool-size options, overflow counters and every event's `Reset()` go too; an event may be freed on any thread, so event destructors must not depend on the destroying thread. §6.1's "no heap allocation per event" goal is withdrawn; §6.1 is rewritten when #3 is implemented. | Events became coarse (one `MapTransaction` per Mapper action, one `FrameTracked` per frame: well under 100 events/s), and the large payload (the measurement) is already a per-frame `shared_ptr` (2026-10-10), so a pool saves only the event shell and some vector capacity: microseconds against a 10–30 ms frame (estimate, not measured). The pools were the reason an event could outlive its memory (OQ 25, the `global_ba_` ordering invariant, the apps' `StopAll` guard) and shaped the "apply on receipt" rulings of 2026-10-10. The allocator's internal locks are not locks on map data (§2), and per-frame allocations already exist. `const` makes event immutability a compile-time rule. Closes OQ 25; OQ 14 becomes obsolete. |
+| 2026-10-13 | **Events are heap-allocated and shared: `std::shared_ptr<const T>`; `ObjectPool` and `Recyclable` are deleted** (user decision, ownership audit #3, OWN-01; replaces the shared-pool-core design of 2026-10-12 discussion, never implemented; implemented by the "Ownership audit #3+#2 implemented" row below). A producer creates each event with `std::make_shared` and publishes the `shared_ptr<const T>`; fan-out copies it and a consumer acknowledges by dropping its copy. The pool-size options, overflow counters and every event's `Reset()` go too; an event may be freed on any thread, so event destructors must not depend on the destroying thread. §6.1's "no heap allocation per event" goal is withdrawn; §6.1 is rewritten (done 2026-10-13). | Events became coarse (one `MapTransaction` per Mapper action, one `FrameTracked` per frame: well under 100 events/s), and the large payload (the measurement) is already a per-frame `shared_ptr` (2026-10-10), so a pool saves only the event shell and some vector capacity: microseconds against a 10–30 ms frame (estimate, not measured). The pools were the reason an event could outlive its memory (OQ 25, the `global_ba_` ordering invariant, the apps' `StopAll` guard) and shaped the "apply on receipt" rulings of 2026-10-10. The allocator's internal locks are not locks on map data (§2), and per-frame allocations already exist. `const` makes event immutability a compile-time rule. Closes OQ 25; OQ 14 becomes obsolete. |
 | 2026-10-13 | **Ownership audit #3+#2 design answers (user: "all recommended"; Phase 1 CONTEXT D-08, D-14, D-22..D-26).** (1) An `AsyncObserver`'s queue, `WakeSignal` and priority counter live in a shared inbox core held by the observer, its `Listener`s and the producer's connection entry; a component's connections live in a shared wiring block held by it and its `Subscription`s; `SetWakeSignal(WakeSignal*)` is removed. (2) Apps hold subscriptions in a container declared before `slam`; the examples' `StopAll` guard goes. (3) Queued events are released when an `AsyncObserver` is destroyed, never drained on disconnect. (4) `LoopDetected` and `GlobalBAFinished` lose their drop-limits (`max_events_in_flight`, `num_dropped_loops`, `num_results_dropped` removed). (5) An `AsyncObserver` warns once per doubling of its queue size. (6) The thread-affinity restriction (private + `*TestAccess`) extends to `LoopCloser`/`GlobalBundleAdjuster` `atlas()`/`map_replica()`, their counters become atomics, the no-argument `num_keyframes()` stays public. (7) The examples' `PrintAtlas` uses a `MapFollower`. (8) `WorkerThread` stays restartable; Stopped is terminal only for components. (9) `MapViewer` keeps restart after `Stop()`. | (1) Every destruction order of producer, subscription, observer and listener is safe by construction, which the JNI binding needs, with no per-event cost and no terminate rule for observers. (2) `~Slam` stops first and later subscription destruction is a no-op, so unwinding never reaches D-07's terminate. (3) An inbox is fed by several producers and events carry no producer tag. (4) Both producers are paced by Mapper transactions (the LoopCloser keeps `max_query_backlog`); fixes "a dropped GBA result is not retried". (5) Without pools a stalled consumer would grow memory silently. (6)-(9) Same hazard class as the Mapper accessors; supported read path; `WorkerThreadTest.RestartAfterStop` and the viewer's documented restart stay valid. |
+| 2026-10-13 | **Ownership audit #3+#2 implemented (Release R1, branch `refactor/event-ownership`).** Events are `std::make_shared<T>()` objects published with the rvalue-only `Observable::Notify(std::shared_ptr<T>&&)` as `EventPtr = shared_ptr<const Event>`; sync handlers take `const Event&` and run first; a consumer's `Listener::GetNextEvent()` / `AsyncObserver::TryPop(EventPtr&)` return an owning pointer and dropping it is the acknowledgement. A shared `InboxCore` (lock-free queue of `EventPtr`, pending-priority count, closed flag, owned `WakeSignal`, backlog warning) is held by the `AsyncObserver`, its `Listener`s and the producer's entries; a shared `Wiring` (async/sync entries and an `std::atomic<RunState>`) is held by the `Observable` and its `Subscription`s. `AddObserver` / `AddSyncObserver` return a move-only `[[nodiscard]]` `Subscription`; connecting or `reset()` while the producer runs throws `voyahslam::UsageError`, a `Subscription` destroyed while it runs logs and terminates; `~Observable` stores `Stopped` so a `Subscription` outliving a never-stopped producer is a no-op. `RunState` is driven by `EventNode::BeginRun()` / `EndRun()` in the four components until the lifecycle work (audit #6) adds the throwing `Start`/`Stop` transitions. `~AsyncObserver` closes its core and releases the queued events; a disconnect drains nothing. `SetWakeSignal(WakeSignal*)`, `ObjectPool`, `Recyclable`, `SyncPolicy`, every event's `Reset()` and recycle function pointers, `TrackerOptions::event_pool_size`, `MapperOptions::transaction_pool_size`, the pool-overflow accessors, `max_events_in_flight` (LoopCloser, GlobalBA), `num_dropped_loops()` and `num_results_dropped()` are removed; `LoopDetected` and `GlobalBAFinished` are published unbounded. An `AsyncObserver` logs one "consumer is behind" warning at 1024 queued events and at each doubling (threshold never resets). `Slam` keeps its six internal edges as `Subscription`s (last member); the `global_ba_` ordering invariant and the apps' `StopAll` guard are gone; apps and tests hold their `Subscription`s in a container declared before the `Slam` (and a sync handler's `ctx` must outlive its connection). Tests and apps build with `-Werror=unused-result`; death-test suites end in `DeathTest`, use the `threadsafe` style and are excluded from TSan runs. Closes OQ 25, makes OQ 14 obsolete. **Supersedes** the 2026-09-30 rows "delivery layer carries `Event*`", "sync-only notify skips ref counting" and "`Recyclable::Recycle()` uses acq_rel", and the mechanism of the 2026-10-12 pool-growth row (its rule that a `MapTransaction` is never dropped stays); the 2026-10-02 pool rows (Treiber-stack free list, pooled objects with `Reset()`, `Create()` aborts on exhaustion) are historical. | The pools were the reason an event could outlive its memory; with `shared_ptr` the remaining hazard is the wiring, and two shared blocks make every destruction order of producer, subscription, observer and listener safe by construction (24 orders tested under Debug, TSan and ASan) at one allocation per observer or component, not per event. The producer can no longer keep a mutable alias after `Notify` (a compile error), a received event is immutable by type, and the JNI binding's stop-first and declaration-order workarounds become unnecessary. Backlog visibility replaces the pool's overflow log. A destroyed-while-running `Subscription` terminates because a destructor cannot throw and a defined, loud failure is better than a later use-after-free. |
+| 2026-10-13 | **Package version 0.4.0** (`conanfile.py`, `project()`; SOVERSION 0.4). API breaks for consumers (the voyah_jni binding): events are `EventPtr` (`shared_ptr<const Event>`) instead of `Event*` and publishers use `make_shared` + `Notify(std::move(e))`; `AddObserver` / `AddSyncObserver` / `ConnectAsync` / `ConnectSync` return a `[[nodiscard]]` `Subscription`; `SetWakeSignal` is removed (wait on `AsyncObserver::wake_signal()`); `ObjectPool`, `Recyclable`, `SyncPolicy` and the pool options, overflow accessors, `max_events_in_flight`, `num_dropped_loops()` and `num_results_dropped()` are removed; `voyahslam::UsageError` is thrown for invalid call sequences (map it to `IllegalStateException`); connecting or resetting a `Subscription` while the producer runs is an error. | Every audit item is an API break for the binding; a public API change gets a new minor version while 0.x (as 0.2.0 and 0.3.0). |
 
 ## 9. Open Questions
 
@@ -3261,14 +3326,20 @@ branch → review → merge to `master`. Update this document at the end.
 12. ~~Event pool takes a mutex~~ — resolved 2026-10-02 (lock-free Treiber stack).
 13. ~~Ownership in `Notify()` depends on wiring~~ — resolved 2026-10-02
     (`Notify()` always takes ownership).
-14. **Pool sizing.** Slot memory is now only committed on first use, but the
+14. ~~**Pool sizing.**~~ Obsolete 2026-10-13: the pools are deleted (§6.1,
+    decisions log "Ownership audit #3+#2 implemented"); a stalled consumer is
+    handled by the inbox backlog warning. Original text: slot memory is now only committed on first use, but the
     index array (4 B/slot) is written up front, and the default
     `initial_capacity` is still 1,000,000. Pools should be sized per event type
     from the worst-case backlog (consumer rule 3 in §6.1). Since 0.3.0 an
     undersized `Create()` pool grows instead of aborting, so sizing is a
     memory / first-spike-latency question, not a crash. Obsolete with the pools
     (decision 2026-10-13).
-25. **Event pool lifetime.** Components own the pools of the events they
+25. ~~**Event pool lifetime.**~~ **Closed 2026-10-13** (ownership audit #3+#2,
+    0.4.0): the pools are removed and events are `std::shared_ptr<const T>`, so
+    no event can outlive its memory; the `global_ba_` ordering invariant and the
+    apps' `StopAll` guard are gone (§6.1, decisions log). Original problem:
+    components own the pools of the events they
     publish, but consumers (e.g. the `MapViewer` inbox) can still hold those
     events. The apps declare the viewer before `slam`, so on exception unwinding
     `Slam` is destroyed first — while the viewer thread may still be running
@@ -3279,9 +3350,6 @@ branch → review → merge to `master`. Update this document at the end.
     stopped and fully drained before `~Slam` (as `libs/slam/tests/integration/slam_test.cpp`
     does). This is a caller-side workaround; the library-level design stays
     open: pools that outlive all producers and consumers.
-    **Decided 2026-10-13:** the pools are removed and events become
-    `std::shared_ptr<const T>` (ownership audit #3, decisions log); closed
-    when #3 is merged.
 
 ## 10. Status and Next Steps
 
@@ -3289,6 +3357,8 @@ branch → review → merge to `master`. Update this document at the end.
 - Ported core modules from slamlab2 (78 tests).
 - Core data layer + event system (merge `91b56aa`).
 - Lock-free event pool, `Notify()` ownership, payload buffer reuse (merge `2e10c59`).
+  The pool was replaced on 2026-10-13 by shared `std::shared_ptr<const T>`
+  events (§6.1, 0.4.0).
 - One header per event; `Slam` / `Tracker` / `Mapper` / `LoopCloser` /
   `EventNode` skeleton with wiring; measurement rename + timestamps; Tracker
   measurement queue (branches `refactor/event-per-file`,
@@ -3402,7 +3472,6 @@ branch → review → merge to `master`. Update this document at the end.
 **Required follow-up:**
 - Decide `MapPointStorage` growth / compaction (Open Question 2); ids are
   append-only since 2026-10-05.
-- Decide on Open Question 14 (pool sizing per event type).
 
 **Next:**
 - ORB extractor plan in Open Question 21 (FAST once per level, buffers;
@@ -3411,7 +3480,14 @@ branch → review → merge to `master`. Update this document at the end.
 - Tracker measurement policy (19).
 - Roadmap (`docs/ROADMAP.md`): TUM-VI tuning (step 6); relocalization into
   inactive maps is TODO ("Map merging follow-ups").
-- Event pool lifetime (Open Question 25).
+- Ownership audit (`docs/TODO.md`): #3 + #2 done (0.4.0, branch
+  `refactor/event-ownership`, merge pending); next #5, #6, #7, #8, #9.
+- Test suite (2026-10-13, ownership audit #3+#2, 0.4.0): 792 tests (762
+  `unit`, the integration tests, 1 `vocabulary`, skipped without ORBvoc);
+  `check_all` about 30 s. Events, wiring and Slam-level lifetime tests include
+  the 24 destruction orders and a death test; ThreadSanitizer was clean on
+  `voyah_events_tests` and the lifetime-sensitive `SlamTest`s, and AddressSanitizer
+  on `voyah_events_tests` (plan summaries 01-01 and 01-05).
 - Test suite (2026-10-11, FAST port): 764 tests (739 `unit`, 24
   `integration`, 1 `vocabulary`); the FAST unit tests add ~40 ms and
   `voyah_algs_dataset_tests` (corridor1) ~1 s.

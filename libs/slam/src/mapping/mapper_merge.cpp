@@ -103,7 +103,7 @@ void Mapper<TFeatureExtractor>::OnMergeDetected(const events::LoopDetected& even
     active_state_ = &target;
     current_map_id_.store(target_id, std::memory_order_release);
 
-    auto* merged = CreateTransaction();
+    auto merged = CreateTransaction();
     merged->map_epoch = ++Active().map_epoch;
     merged->absorbed_map = absorbed_id;
     merged->removed_maps.push_back(absorbed_id);
@@ -170,7 +170,7 @@ void Mapper<TFeatureExtractor>::OnMergeDetected(const events::LoopDetected& even
         losers_.size(), num_target_frames, absorbed_frames.size(), num_keyframes_.load(std::memory_order_relaxed),
         num_target_points, num_absorbed_points, Active().map_points.size(), Active().map_epoch,
         detail::MillisecondsSince(start), weld_ms);
-    observable_.Notify(merged);
+    observable_.Notify(std::move(merged));
 }
 
 template <typename TFeatureExtractor>

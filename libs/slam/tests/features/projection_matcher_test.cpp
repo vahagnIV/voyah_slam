@@ -24,7 +24,6 @@
 #include <voyahslam/geometry/distortion_models/kannala_brandt_distortion_model.h>
 #include <voyahslam/geometry/sim3.h>
 #include <voyahslam/mapping/mapper.h>
-#include <voyahslam/memory/object_pool.h>
 #include <voyahslam/tracking/map_replica.h>
 
 namespace voyahslam::features {
@@ -126,8 +125,7 @@ struct Point {
 // Adds the points through a transaction whose Frame (no features) observes
 // none of them, so they get no reference.
 void AddPoints(TReplica& out_replica, const std::vector<Point>& points) {
-    memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> pool(1);
-    TTransaction* event = pool.Create();
+    auto event = std::make_shared<TTransaction>();
     event->map_id = {1};
     events::NewFrame<TestExtractor>& added = event->added_frames.emplace_back();
     added.id = {1000 + static_cast<uint32_t>(out_replica.num_points())};
@@ -142,24 +140,20 @@ void AddPoints(TReplica& out_replica, const std::vector<Point>& points) {
             points[i].normal.isZero() ? points[i].position.normalized() : points[i].normal;
     }
     out_replica.Apply(*event);
-    event->Recycle();
 }
 
 void RemovePoint(TReplica& out_replica, uint32_t id) {
-    memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> pool(1);
-    TTransaction* event = pool.Create();
+    auto event = std::make_shared<TTransaction>();
     event->map_id = {1};
     event->removed_points = {{id}};
     out_replica.Apply(*event);
-    event->Recycle();
 }
 
 // A keyframe with centre `centre` (identity rotation) whose feature i, at
 // level levels[i], observes point points[i]: gives those points their reference.
 void CreateKeyFrame(TReplica& out_replica, uint32_t frame, const Eigen::Vector3d& centre,
                     const std::vector<int>& levels, const std::vector<uint32_t>& points) {
-    memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> pool(1);
-    TTransaction* event = pool.Create();
+    auto event = std::make_shared<TTransaction>();
     event->map_id = {1};
     events::NewFrame<TestExtractor>& added = event->added_frames.emplace_back();
     added.id = {frame};
@@ -172,7 +166,6 @@ void CreateKeyFrame(TReplica& out_replica, uint32_t frame, const Eigen::Vector3d
         added.observed_points.push_back({points[i]});
     }
     out_replica.Apply(*event);
-    event->Recycle();
 }
 
 // Last frame whose feature i has level levels[i] and observes point i.
@@ -601,34 +594,34 @@ struct SyntheticMap {
 
 SyntheticMap BuildSyntheticMap() {
     SyntheticMap result;
-    // Declaration order as in MapperTest: the pool outlives the Mapper.
-    memory::ObjectPool<events::InitializationMeasurement<TestExtractor>, memory::ThreadSafePolicy>
-        pool(256);
+    // Declaration order as in MapperTest: the subscriptions are declared before
+    // the components they connect.
+    std::vector<events::Subscription> subscriptions;
     events::Observable tracker;
     mapping::Mapper<TestExtractor> mapper;
     events::AsyncObserver capture;
     events::Listener listener = capture.GetListener();
-    tracker.ConnectAsync(mapper.inbox());
-    mapper.AddObserver(capture);
+    subscriptions.push_back(tracker.ConnectAsync(mapper.inbox()));
+    subscriptions.push_back(mapper.AddObserver(capture));
 
     const auto& frames = result.sequence.frames;
     for (size_t i = 0; i < frames.size() && mapper.state() == mapping::MapperState::Initializing;
          ++i) {
-        auto* event = pool.Create();
+        auto event = std::make_shared<events::InitializationMeasurement<TestExtractor>>();
         event->map_id = map::MapId{0};
         event->measurement = frames[i].measurement;
-        tracker.Notify(event);
+        tracker.Notify(std::move(event));
         while (mapper.ProcessPending()) {
         }
     }
     EXPECT_EQ(mapper.state(), mapping::MapperState::Mapping);
 
     std::map<map::FrameId, geometry::RigidTransformation> poses;
-    while (events::Event* event = listener.GetNextEvent()) {
+    while (events::EventPtr event = listener.GetNextEvent()) {
         result.replica.Apply(*event);
         if (event->type != events::EventType::MapTransaction) continue;
         result.scene_of_point.resize(result.replica.num_points(), -1);
-        for (const auto& created : static_cast<const TTransaction*>(event)->added_frames) {
+        for (const auto& created : static_cast<const TTransaction&>(*event).added_frames) {
             const auto& measurement = std::get<TMonocular>(*created.measurement);
             const auto k = static_cast<size_t>(std::lround(
                 measurement.timestamp() / test::SyntheticSequenceOptions{}.frame_interval));

@@ -25,16 +25,16 @@ Slam<TFeatureExtractor>::Slam(mapping::MapperOptions mapper_options,
     : tracker_(tracker_options, vocabulary),
       mapper_(MapperOptionsFor(mapper_options, vocabulary && loop_closer_options.enabled), vocabulary),
       loop_closer_(loop_closer_options, vocabulary) {
-    tracker_.AddObserver(mapper_.inbox());
-    mapper_.AddObserver(tracker_.inbox());
-    mapper_.AddObserver(loop_closer_.inbox());
-    loop_closer_.AddObserver(mapper_.inbox());
+    subscriptions_.push_back(tracker_.AddObserver(mapper_.inbox()));
+    subscriptions_.push_back(mapper_.AddObserver(tracker_.inbox()));
+    subscriptions_.push_back(mapper_.AddObserver(loop_closer_.inbox()));
+    subscriptions_.push_back(loop_closer_.AddObserver(mapper_.inbox()));
     // Without a vocabulary the LoopCloser never detects a loop, so a GlobalBA
     // would never run: none is created.
     if (vocabulary && loop_closer_options.enabled && global_ba_options.enabled) {
         global_ba_.emplace(global_ba_options);
-        mapper_.AddObserver(global_ba_->inbox());
-        global_ba_->AddObserver(mapper_.inbox());
+        subscriptions_.push_back(mapper_.AddObserver(global_ba_->inbox()));
+        subscriptions_.push_back(global_ba_->AddObserver(mapper_.inbox()));
     }
 }
 

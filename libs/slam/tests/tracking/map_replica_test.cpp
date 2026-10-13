@@ -8,7 +8,6 @@
 #include <vector>
 #include <voyahslam/events/events.h>
 #include <voyahslam/features/orb_feature_extractor.h>
-#include <voyahslam/memory/object_pool.h>
 #include <voyahslam/tracking/map_replica.h>
 
 namespace voyahslam::tracking {
@@ -29,12 +28,10 @@ geometry::RigidTransformation MakePose(double angle, double tx, double ty, doubl
 // Applies one transaction of map `map`, filled by `fill`.
 template <typename TFill>
 void ApplyTransaction(TReplica& out_replica, uint32_t map, TFill fill) {
-    memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> pool(1);
-    TTransaction* event = pool.Create();
+    auto event = std::make_shared<TTransaction>();
     event->map_id = {map};
     fill(*event);
     out_replica.Apply(*event);
-    event->Recycle();
 }
 
 // Sets the new-points part of `out_event`: ids [start, start + points.size()),

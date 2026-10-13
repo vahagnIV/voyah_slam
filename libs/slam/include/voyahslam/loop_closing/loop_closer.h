@@ -22,7 +22,6 @@
 #include <voyahslam/map/frame_id.h>
 #include <voyahslam/map/map_id.h>
 #include <voyahslam/map/map_point_id.h>
-#include <voyahslam/memory/object_pool.h>
 #include <voyahslam/tracking/atlas_replica.h>
 #include <voyahslam/tracking/map_replica.h>
 
@@ -45,7 +44,7 @@ struct QueryStats {
 // receives.
 //
 // Each transaction is applied to the replica on receipt, which releases it
-// (a slow detector never holds the Mapper's pooled events); every Frame it
+// (a slow detector never holds the Mapper's transactions); every Frame it
 // adds is queued as a query, the oldest dropped beyond max_query_backlog.
 // Queries are detected one at a time, once the map has min_map_frames
 // Frames; one culled while queued is skipped.
@@ -82,7 +81,7 @@ public:
     // `vocabulary` (may be null) is immutable and shared read-only with the
     // Mapper and the Tracker.
     explicit LoopCloser(LoopCloserOptions options = {}, std::shared_ptr<const TVocabulary> vocabulary = nullptr)
-        : options_(options), vocabulary_(std::move(vocabulary)) {}
+        : EventNode("LoopCloser"), options_(options), vocabulary_(std::move(vocabulary)) {}
     // Stops the worker before any member it uses is destroyed.
     ~LoopCloser();
 
@@ -115,8 +114,6 @@ public:
     // The last merge detection's gates (DetectCommonRegion on the merge
     // candidates).
     [[nodiscard]] const CommonRegionStats& last_merge_stats() const { return last_merge_stats_; }
-    // Loops dropped because max_events_in_flight LoopDetected were in use.
-    [[nodiscard]] size_t num_dropped_loops() const { return num_dropped_loops_; }
     [[nodiscard]] const QueryStats& query_stats() const { return query_stats_; }
 
     // Tests: `hook` is called on the LoopCloser's thread before each query is
@@ -175,14 +172,8 @@ private:
     std::optional<std::pair<map::MapId, uint32_t>> last_loop_epoch_;
     CommonRegionStats last_stats_;
     CommonRegionStats last_merge_stats_;
-    size_t num_dropped_loops_ = 0;
     QueryStats query_stats_;
     std::function<void(map::FrameId)> query_hook_;
-
-    // Published with TryCreate: a loop found while every event is in flight
-    // (a Mapper backlog) is dropped; the next query finds it again.
-    memory::ObjectPool<events::LoopDetected, memory::ThreadSafePolicy> loop_detected_pool_{
-        options_.max_events_in_flight};
 
     CLASS_LOGGER(LoopCloser);
 

@@ -8,7 +8,6 @@ add_library(voyah_common
     src/geometry/distortion_models/kannala_brandt_distortion_model.cpp
     src/logging/logger.cpp
     src/map/covisibility_index.cpp
-    src/memory/object_pool.cpp
 )
 
 voyah_optimize_target(voyah_common)

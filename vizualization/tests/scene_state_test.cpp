@@ -2,9 +2,10 @@
 
 #include <gtest/gtest.h>
 
+#include <memory>
+#include <vector>
 #include <voyahslam/events/events.h>
 #include <voyahslam/features/orb_feature_extractor.h>
-#include <voyahslam/memory/object_pool.h>
 
 namespace voyahviz {
 namespace {
@@ -16,10 +17,9 @@ using TOrbTransaction = events::MapTransaction<features::OrbFeatureExtractor>;
 using TOrbFrameTracked = events::FrameTracked<features::OrbFeatureExtractor>;
 
 template <typename TEvent>
-void ApplyOne(TOrbScene& out_scene, memory::ObjectPool<TEvent, memory::ThreadSafePolicy>& pool) {
-    TEvent* event = pool.Create();
+void ApplyOne(TOrbScene& out_scene) {
+    auto event = std::make_shared<TEvent>();
     out_scene.Apply(*event);
-    event->Recycle();
 }
 
 TEST(SceneStateTest, StartsEmpty) {
@@ -29,16 +29,12 @@ TEST(SceneStateTest, StartsEmpty) {
 }
 
 TEST(SceneStateTest, CountsAppliedEventsPerType) {
-    memory::ObjectPool<TOrbFrameTracked, memory::ThreadSafePolicy> positions(2);
-    memory::ObjectPool<TOrbTransaction, memory::ThreadSafePolicy> added(1);
-    memory::ObjectPool<events::LoopDetected, memory::ThreadSafePolicy> loops(1);
-
     TOrbScene scene;
-    ApplyOne(scene, positions);
-    ApplyOne(scene, positions);
-    ApplyOne(scene, added);
-    ApplyOne(scene, added);
-    ApplyOne(scene, loops);
+    ApplyOne<TOrbFrameTracked>(scene);
+    ApplyOne<TOrbFrameTracked>(scene);
+    ApplyOne<TOrbTransaction>(scene);
+    ApplyOne<TOrbTransaction>(scene);
+    ApplyOne<events::LoopDetected>(scene);
 
     EXPECT_EQ(scene.applied_count(EventType::FrameTracked), 2u);
     EXPECT_EQ(scene.applied_count(EventType::MapTransaction), 2u);
@@ -48,15 +44,10 @@ TEST(SceneStateTest, CountsAppliedEventsPerType) {
 }
 
 TEST(SceneStateTest, CountsNewEventTypes) {
-    memory::ObjectPool<TOrbTransaction, memory::ThreadSafePolicy> created(1);
-    memory::ObjectPool<events::TrackingLost, memory::ThreadSafePolicy> lost(1);
-    memory::ObjectPool<events::InitializationMeasurement<features::OrbFeatureExtractor>,
-                       memory::ThreadSafePolicy> init(1);
-
     TOrbScene scene;
-    ApplyOne(scene, created);
-    ApplyOne(scene, lost);
-    ApplyOne(scene, init);
+    ApplyOne<TOrbTransaction>(scene);
+    ApplyOne<events::TrackingLost>(scene);
+    ApplyOne<events::InitializationMeasurement<features::OrbFeatureExtractor>>(scene);
 
     EXPECT_EQ(scene.applied_count(EventType::MapTransaction), 1u);
     EXPECT_EQ(scene.applied_count(EventType::TrackingLost), 1u);
@@ -75,13 +66,11 @@ geometry::RigidTransformation MakePose(double angle, double tx, double ty, doubl
 // names its map as the active one.
 template <typename TFill>
 void ApplyTransaction(TOrbScene& out_scene, uint32_t map, TFill fill) {
-    memory::ObjectPool<TOrbTransaction, memory::ThreadSafePolicy> pool(1);
-    TOrbTransaction* event = pool.Create();
+    auto event = std::make_shared<TOrbTransaction>();
     event->map_id = {map};
     event->active_map = map::MapId{map};
     fill(*event);
     out_scene.Apply(*event);
-    event->Recycle();
 }
 
 void AddFrame(TOrbTransaction& out_event, uint32_t frame, const geometry::RigidTransformation& pose) {
@@ -107,8 +96,7 @@ void RemoveMap(TOrbScene& out_scene, uint32_t map) {
 void CreateKeyFrame(TOrbScene& out_scene, uint32_t map, uint32_t frame,
                     const geometry::RigidTransformation& pose,
                     const std::vector<Eigen::Vector3d>& new_points = {}, uint32_t start = 0) {
-    memory::ObjectPool<TOrbTransaction, memory::ThreadSafePolicy> pool(1);
-    TOrbTransaction* event = pool.Create();
+    auto event = std::make_shared<TOrbTransaction>();
     event->map_id = {map};
     event->active_map = map::MapId{map};
     AddFrame(*event, frame, pose);
@@ -118,7 +106,6 @@ void CreateKeyFrame(TOrbScene& out_scene, uint32_t map, uint32_t frame,
         event->new_positions.col(static_cast<Eigen::Index>(i)) = new_points[i].cast<precision_t>();
     }
     out_scene.Apply(*event);
-    event->Recycle();
 }
 
 // Adds points for `map` from id `start`, carried by Frame `frame`.
@@ -128,22 +115,18 @@ void AddPoints(TOrbScene& out_scene, uint32_t map, uint32_t start,
 }
 
 void TrackFrame(TOrbScene& out_scene, uint32_t map, const geometry::RigidTransformation& pose) {
-    memory::ObjectPool<TOrbFrameTracked, memory::ThreadSafePolicy> pool(1);
-    TOrbFrameTracked* event = pool.Create();
+    auto event = std::make_shared<TOrbFrameTracked>();
     event->map_id = {map};
     event->reference_frame_id = map::FrameId{0};
     event->pose = pose;
     out_scene.Apply(*event);
-    event->Recycle();
 }
 
 void LoseTracking(TOrbScene& out_scene, uint32_t map, bool final = true) {
-    memory::ObjectPool<events::TrackingLost, memory::ThreadSafePolicy> pool(1);
-    events::TrackingLost* event = pool.Create();
+    auto event = std::make_shared<events::TrackingLost>();
     event->map_id = {map};
     event->final = final;
     out_scene.Apply(*event);
-    event->Recycle();
 }
 
 const std::vector<Eigen::Vector3d> kThreePoints = {{1, 2, 3}, {4, 5, 6}, {7, 8, 9}};
@@ -177,8 +160,7 @@ TEST(SceneStateTest, TransactionAddsFrameAndUpdatesPoints) {
     NewMap(scene, 1);
     CreateKeyFrame(scene, 1, 0, MakePose(0, 0, 0, 0), kThreePoints);
 
-    memory::ObjectPool<TOrbTransaction, memory::ThreadSafePolicy> pool(1);
-    TOrbTransaction* event = pool.Create();
+    auto event = std::make_shared<TOrbTransaction>();
     event->map_id = {1};
     event->active_map = map::MapId{1};
     AddFrame(*event, 1, MakePose(0.1, 1, 0, 0));
@@ -191,7 +173,6 @@ TEST(SceneStateTest, TransactionAddsFrameAndUpdatesPoints) {
     event->updated_positions.col(0) = Eigen::Vector3d(10, 20, 30).cast<precision_t>();
     event->updated_positions.col(1) = Eigen::Vector3d(-1, -1, -1).cast<precision_t>();
     scene.Apply(*event);
-    event->Recycle();
 
     ASSERT_EQ(scene.point_positions().size(), 4u);
     EXPECT_EQ(scene.num_alive_points(), 4u);
@@ -245,15 +226,13 @@ TEST(SceneStateTest, FrameTrackedSetsPoseAndTrajectory) {
 TEST(SceneStateTest, FrameTrackedSetsTrackedAndVisible) {
     TOrbScene scene;
     NewMap(scene, 1);
-    memory::ObjectPool<TOrbFrameTracked, memory::ThreadSafePolicy> pool(1);
-    TOrbFrameTracked* event = pool.Create();
+    auto event = std::make_shared<TOrbFrameTracked>();
     event->map_id = {1};
     event->pose = MakePose(0.1, 1, 0, 0);
     event->observed_points = {{0}, {2}};
     event->visible_points = {{0}, {1}, {2}};
     event->local_frames = {{4}, {5}};
     scene.Apply(*event);
-    event->Recycle();
 
     EXPECT_EQ(scene.tracked_points(), (std::vector<map::MapPointId>{{0}, {2}}));
     EXPECT_EQ(scene.visible_points(), (std::vector<map::MapPointId>{{0}, {1}, {2}}));
@@ -269,14 +248,12 @@ TEST(SceneStateTest, FrameTrackedSetsTrackedAndVisible) {
 TEST(SceneStateTest, TrackingLostClearsTrackedSets) {
     TOrbScene scene;
     NewMap(scene, 1);
-    memory::ObjectPool<TOrbFrameTracked, memory::ThreadSafePolicy> pool(1);
-    TOrbFrameTracked* event = pool.Create();
+    auto event = std::make_shared<TOrbFrameTracked>();
     event->map_id = {1};
     event->observed_points = {{0}};
     event->visible_points = {{0}, {1}};
     event->local_frames = {{4}};
     scene.Apply(*event);
-    event->Recycle();
     ASSERT_FALSE(scene.tracked_points().empty());
 
     LoseTracking(scene, 1);
@@ -289,14 +266,12 @@ TEST(SceneStateTest, TrackingLostClearsTrackedSets) {
 TEST(SceneStateTest, NewActiveMapClearsTrackedSets) {
     TOrbScene scene;
     NewMap(scene, 1);
-    memory::ObjectPool<TOrbFrameTracked, memory::ThreadSafePolicy> pool(1);
-    TOrbFrameTracked* event = pool.Create();
+    auto event = std::make_shared<TOrbFrameTracked>();
     event->map_id = {1};
     event->observed_points = {{0}};
     event->visible_points = {{1}};
     event->local_frames = {{4}};
     scene.Apply(*event);
-    event->Recycle();
     NewMap(scene, 2);
     AddPoints(scene, 2, 0, {{1, 1, 1}});
     EXPECT_TRUE(scene.tracked_points().empty());
@@ -485,11 +460,9 @@ TEST(SceneStateTest, MapZeroCountedOnly) {
     TOrbScene scene;
     NewMap(scene, 1);
     AddPoints(scene, 1, 0, kThreePoints);
-    memory::ObjectPool<TOrbInit, memory::ThreadSafePolicy> pool(1);
-    TOrbInit* event = pool.Create();
+    auto event = std::make_shared<TOrbInit>();
     event->map_id = {0};
     scene.Apply(*event);
-    event->Recycle();
     EXPECT_EQ(scene.current_map_id().value, 1u);
     EXPECT_EQ(scene.num_alive_points(), 3u);
     EXPECT_EQ(scene.applied_count(EventType::InitializationMeasurement), 1u);

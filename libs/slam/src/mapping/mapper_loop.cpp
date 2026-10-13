@@ -58,7 +58,7 @@ void Mapper<TFeatureExtractor>::OnLoopDetected(const events::LoopDetected& event
     }
     const bool fix_scale = detail::BinocularOf<TFeatureExtractor>(query_record->frame.measurement()) != nullptr;
 
-    auto* corrected = CreateTransaction();
+    auto corrected = CreateTransaction();
     corrected->map_epoch = ++Active().map_epoch;
     const size_t num_points_before = Active().map_points.size();
 
@@ -98,7 +98,7 @@ void Mapper<TFeatureExtractor>::OnLoopDetected(const events::LoopDetected& event
         query.value, match.value, event.S_query_match.scale, fix_scale, window.size(),
         event.matched_points.size(), losers_.size(), num_points_before, Active().map_points.size(), Active().map_epoch,
         detail::MillisecondsSince(start));
-    observable_.Notify(corrected);
+    observable_.Notify(std::move(corrected));
 }
 
 template <typename TFeatureExtractor>

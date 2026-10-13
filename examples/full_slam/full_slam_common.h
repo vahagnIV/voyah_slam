@@ -187,7 +187,7 @@ void PrintAtlas(const mapping::Mapper<TFeatureExtractor>& mapper, std::ostream& 
 template <typename TFeatureExtractor>
 class TrajectoryWriter {
 public:
-    explicit TrajectoryWriter(const std::filesystem::path& path) : out_(path) {
+    explicit TrajectoryWriter(const std::filesystem::path& path) : out_(path), inbox_("TrajectoryWriter") {
         if (!out_) throw std::runtime_error("cannot write " + path.string());
         out_ << std::fixed;
     }
@@ -195,11 +195,11 @@ public:
     // Before the Tracker starts.
     events::AsyncObserver& inbox() { return inbox_; }
 
-    // Writes every pending FrameTracked; releases every event it read.
+    // Writes every pending FrameTracked; each event is released after its turn.
     void Poll() {
-        while (events::Event* event = listener_.GetNextEvent()) {
+        while (events::EventPtr event = listener_.GetNextEvent()) {
             if (event->type != events::EventType::FrameTracked) continue;
-            const auto& tracked = *static_cast<const events::FrameTracked<TFeatureExtractor>*>(event);
+            const auto& tracked = *static_cast<const events::FrameTracked<TFeatureExtractor>*>(event.get());
             if (!section_ || *section_ != event->map_id.value) {
                 section_ = event->map_id.value;
                 out_ << "# map " << *section_ << "\n";
@@ -218,7 +218,6 @@ public:
 private:
     std::ofstream out_;
     events::AsyncObserver inbox_;
-    // After its inbox: destroyed first, releasing the event it holds.
     events::Listener listener_ = inbox_.GetListener();
     std::optional<uint32_t> section_;
     size_t num_poses_ = 0;

@@ -3,6 +3,8 @@
 
 #include <memory>
 #include <optional>
+#include <vector>
+#include <voyahslam/events/subscription.h>
 #include <voyahslam/global_ba/global_bundle_adjuster.h>
 #include <voyahslam/loop_closing/loop_closer.h>
 #include <voyahslam/mapping/mapper.h>
@@ -16,9 +18,13 @@ namespace voyahslam::slam {
 //   Mapper     → Tracker, LoopCloser, GlobalBA
 //   LoopCloser → Mapper
 //   GlobalBA   → Mapper
-// Additional observers (e.g. a visualizer) are attached through tracker(),
-// mapper(), loop_closer() and global_ba() before Start(). Not movable: the
-// components hold pointers to each other's inboxes.
+// The six internal edges are held as Subscriptions in subscriptions_, which is
+// destroyed before the components and after ~Slam() has stopped every one of
+// them. Additional observers (e.g. a visualizer) are attached through
+// tracker(), mapper(), loop_closer() and global_ba() before Start(); the caller
+// keeps each returned Subscription, best in a container declared before the
+// Slam, so it is destroyed after it (a no-op on a stopped producer). Not
+// movable: subscriptions_ refer to the members' inboxes.
 template <typename TFeatureExtractor>
 class Slam {
 public:
@@ -61,12 +67,9 @@ private:
     TTracker tracker_;
     TMapper mapper_;
     TLoopCloser loop_closer_;
-    // After the Mapper: destroyed first. Safe because the Mapper recycles
-    // every GlobalBAFinished within one ProcessPending(), so none outlives
-    // this member's pool; and the GlobalBA holds no Mapper transaction once
-    // it has drained its inbox (a Mapper that parked events would break the
-    // first, so keep it so).
     std::optional<TGlobalBundleAdjuster> global_ba_;
+    // Last member: destroyed first, after ~Slam() has stopped every producer.
+    std::vector<events::Subscription> subscriptions_;
 };
 
 } // namespace voyahslam::slam

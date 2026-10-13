@@ -14,7 +14,6 @@
 #include <voyahslam/map/map_id.h>
 #include <voyahslam/map/map_point_id.h>
 #include <voyahslam/memory/column_buffer.h>
-#include <voyahslam/memory/recyclable.h>
 
 namespace voyahslam::events {
 
@@ -73,9 +72,7 @@ struct NewFrame {
 // and loop edges therefore only name Frames that exist when they are applied:
 // a culled Frame's children are re-parented before it goes.
 template <typename TFeatureExtractor>
-struct MapTransaction
-    : Event
-    , memory::Recyclable<MapTransaction<TFeatureExtractor>, memory::ThreadSafePolicy> {
+struct MapTransaction : Event {
     using TDescriptorScalar = typename TFeatureExtractor::TDescriptorScalarType;
     static constexpr int kDescriptorSize = TFeatureExtractor::DescriptorSize;
 
@@ -144,38 +141,7 @@ struct MapTransaction
         updated_descriptors.Resize(count);
     }
 
-    // Called by the pool on reuse; clears every part and keeps its capacity
-    // (clearing added_frames releases their measurements).
-    void Reset() {
-        new_map = false;
-        start_frame.reset();
-        added_frames.clear();
-        new_points_start_id = {};
-        ResizeNewPoints(0);
-        added_observations.clear();
-        ResizeUpdatedPoints(0);
-        removed_observations.clear();
-        replaced_points.clear();
-        removed_points.clear();
-        updated_poses.clear();
-        removed_frames.clear();
-        parent_changes.clear();
-        added_loop_edges.clear();
-        map_epoch = 0;
-        active_map.reset();
-        removed_maps.clear();
-        absorbed_map.reset();
-    }
-
-    MapTransaction()
-        : Event(EventType::MapTransaction,
-                [](Event* e) {
-                    static_cast<MapTransaction*>(e)->
-                        memory::Recyclable<MapTransaction, memory::ThreadSafePolicy>::Recycle();
-                },
-                [](Event* e, int n) {
-                    static_cast<MapTransaction*>(e)->SetRefCount(n);
-                }) {}
+    MapTransaction() : Event(EventType::MapTransaction) {}
 };
 
 } // namespace voyahslam::events

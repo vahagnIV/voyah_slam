@@ -52,16 +52,19 @@ size_t CountMatches(const std::vector<int64_t>& matches) {
 template <typename TFeatureExtractor>
 Tracker<TFeatureExtractor>::~Tracker() {
     worker_.Stop();
+    EndRun();
 }
 
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::Start() {
+    BeginRun();
     worker_.Start([this] { return ProcessPending(); });
 }
 
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::Stop() {
     worker_.Stop();
+    EndRun();
 }
 
 template <typename TFeatureExtractor>
@@ -79,7 +82,7 @@ void Tracker<TFeatureExtractor>::Track(TBinocularMeasurement measurement) {
 template <typename TFeatureExtractor>
 bool Tracker<TFeatureExtractor>::ProcessPending() {
     bool processed = false;
-    while (events::Event* event = inbox_listener_.GetNextEvent()) {
+    while (events::EventPtr event = inbox_listener_.GetNextEvent()) {
         processed = true;
         ApplyEvent(*event);
     }
@@ -571,16 +574,16 @@ void Tracker<TFeatureExtractor>::SetState(TrackerState state) {
 
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::PublishInitializationMeasurement(TMeasurement& measurement) {
-    auto* event = initialization_measurement_pool_.Create();
+    auto event = std::make_shared<events::InitializationMeasurement<TFeatureExtractor>>();
     event->map_id = map::MapId{0};
     event->priority = false;
     event->measurement = std::move(measurement);
-    observable_.Notify(event);
+    observable_.Notify(std::move(event));
 }
 
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::PublishFrameTracked(const PoseResult& pose) {
-    auto* event = frame_tracked_pool_.Create();
+    auto event = std::make_shared<events::FrameTracked<TFeatureExtractor>>();
     event->map_id = current_map_id();
     event->priority = false;
     event->timestamp = TimestampOf(*last_frame_.measurement);
@@ -602,18 +605,18 @@ void Tracker<TFeatureExtractor>::PublishFrameTracked(const PoseResult& pose) {
     event->urgent = options_.tracking.IsUrgent(pose.num_inliers);
     event->priority = event->urgent;
     event->map_epoch = map_replica().map_epoch();
-    observable_.Notify(event);
+    observable_.Notify(std::move(event));
 }
 
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::PublishTrackingLost(double timestamp, bool final) {
-    auto* event = tracking_lost_pool_.Create();
+    auto event = std::make_shared<events::TrackingLost>();
     event->map_id = current_map_id();
     event->priority = false;
     event->timestamp = timestamp;
     event->final = final;
     if (final) final_lost_at_ = timestamp;
-    observable_.Notify(event);
+    observable_.Notify(std::move(event));
 }
 
 INSTANTIATE_CLASS(Tracker)

@@ -1,67 +1,55 @@
 #ifndef VOYAHSLAM_EVENTS_ASYNC_OBSERVER_H
 #define VOYAHSLAM_EVENTS_ASYNC_OBSERVER_H
 
-#include <concurrentqueue.h>
-#include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <memory>
+#include <string>
+#include <utility>
 #include <voyahslam/events/event_types.h>
+#include <voyahslam/events/inbox_core.h>
 #include <voyahslam/events/listener.h>
 #include <voyahslam/events/wake_signal.h>
 
 namespace voyahslam::events {
 
+// The receiving end of event delivery: an inbox that producers push into and one
+// consumer thread drains, through GetListener() or TryPop(). Its queue, its
+// WakeSignal and its priority count live in a shared InboxCore (D-22), so
+// destroying the observer is safe in any order relative to its producers and
+// Listeners: queued events are released here (D-08), and a producer that still
+// delivers into the closed core just drops the event.
+//
+// Not copyable or movable: producers' entries and Listeners already share its
+// core, and a consumer waits on wake_signal().
 class AsyncObserver {
 public:
-    AsyncObserver() = default;
+    // `name` identifies the inbox in the "consumer is behind" log warning.
+    explicit AsyncObserver(std::string name = "AsyncObserver")
+        : core_(std::make_shared<InboxCore>(std::move(name))) {}
+    ~AsyncObserver() { core_->Close(); }
     AsyncObserver(const AsyncObserver&) = delete;
     AsyncObserver& operator=(const AsyncObserver&) = delete;
 
-    [[nodiscard]] Listener GetListener() { return Listener{queue_, &pending_priority_}; }
-    [[nodiscard]] moodycamel::ConcurrentQueue<Event*>& queue() { return queue_; }
+    [[nodiscard]] Listener GetListener() const { return Listener{core_}; }
 
-    // Nullable; must be set before producers start pushing.
-    void SetWakeSignal(WakeSignal* signal) { wake_signal_ = signal; }
+    // Dequeues into `out_event`; false if empty. Consumers pop through this (or a
+    // Listener) so the priority count stays right.
+    bool TryPop(EventPtr& out_event) { return core_->TryPop(out_event); }
 
     // Number of priority events pushed and not yet popped. A cheap lock-free
     // read for the consumer thread (e.g. to cut long work short).
-    [[nodiscard]] uint32_t pending_priority() const {
-        return pending_priority_.load(std::memory_order_acquire);
-    }
-    [[nodiscard]] const std::atomic<uint32_t>& pending_priority_counter() const {
-        return pending_priority_;
-    }
+    [[nodiscard]] uint32_t pending_priority() const { return core_->pending_priority(); }
+    [[nodiscard]] size_t size_approx() const { return core_->size_approx(); }
 
-    // Dequeues into `out_event`; false if empty. Consumers must pop through this
-    // (or a Listener) so the priority count stays right.
-    bool TryPop(Event*& out_event) {
-        if (!queue_.try_dequeue(out_event)) {
-            return false;
-        }
-        // The flag is stable from push to pop: it is set before publishing and
-        // the event is not recycled (so not reused) until every observer has
-        // popped and released it.
-        if (out_event->priority) {
-            pending_priority_.fetch_sub(1, std::memory_order_acq_rel);
-        }
-        return true;
-    }
-
-    // Enqueues `event`, then wakes the attached signal (if any).
-    void Push(Event* event) {
-        // Counted before the enqueue, so a pop never sees the count behind it.
-        if (event->priority) {
-            pending_priority_.fetch_add(1, std::memory_order_acq_rel);
-        }
-        queue_.enqueue(event);
-        if (wake_signal_) {
-            wake_signal_->Notify();
-        }
-    }
+    // Notified by every push. A consumer takes a Snapshot(), checks for work and
+    // Wait()s; the signal belongs to the inbox, not to the consumer.
+    [[nodiscard]] WakeSignal& wake_signal() { return core_->wake_signal(); }
+    [[nodiscard]] const std::string& name() const { return core_->name(); }
 
 private:
-    moodycamel::ConcurrentQueue<Event*> queue_;
-    std::atomic<uint32_t> pending_priority_{0};
-    WakeSignal* wake_signal_ = nullptr;
+    friend class Observable;
+    std::shared_ptr<InboxCore> core_;
 };
 
 } // namespace voyahslam::events

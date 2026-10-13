@@ -2,6 +2,7 @@
 #define VOYAHSLAM_EVENTS_EVENT_TYPES_H
 
 #include <cstdint>
+#include <memory>
 #include <voyahslam/map/map_id.h>
 
 namespace voyahslam::events {
@@ -15,20 +16,31 @@ enum class EventType : uint8_t {
     TrackingLost,  // keep last: consumers size per-type tables by it
 };
 
+// An event owns its memory. A producer creates it with std::make_shared<T>(),
+// fills it while it holds the mutable std::shared_ptr<T>, and hands it over with
+// Observable::Notify(std::move(event)); from then on it is published as an
+// EventPtr (shared, const). There is no reuse and no pool: an event stays valid
+// for as long as any holder keeps its EventPtr, whichever object (producer,
+// subscription, observer, listener) dies first, and it is destroyed on the
+// thread of the last drop. So an event's destructor must not depend on the
+// destroying thread: keep members to standard containers, Eigen, shared_ptr and
+// ColumnBuffer.
 struct Event {
     EventType type;
-    void (*recycle_)(Event*);
-    void (*set_ref_count_)(Event*, int);
-    map::MapId map_id{};  // producers set on every publish (pooled events are not reset)
+    map::MapId map_id{};  // set by the producer before Notify; immutable afterwards
     // Urgent: counted by the receiving inbox (AsyncObserver::pending_priority).
-    // Producers set it on every publish (not reset on reuse) and must not change
-    // it while the event is published.
+    // Set by the producer before Notify; immutable afterwards.
     bool priority = false;
 
 protected:
-    Event(EventType t, void (*r)(Event*), void (*s)(Event*, int))
-        : type(t), recycle_(r), set_ref_count_(s) {}
+    explicit Event(EventType t) : type(t) {}
+    // Non-virtual and protected: events die through their shared_ptr control
+    // block, which remembers the concrete type.
+    ~Event() = default;
 };
+
+// What the delivery layer carries: shared and immutable.
+using EventPtr = std::shared_ptr<const Event>;
 
 } // namespace voyahslam::events
 

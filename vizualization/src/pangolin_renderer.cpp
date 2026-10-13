@@ -55,7 +55,7 @@ void PreferX11BackendOnWayland() {
 #if defined(__linux__)
     // Pangolin's Wayland backend (its default here) blocks in eglSwapBuffers on
     // GNOME after the first frame, which would stall the viewer's inbox drain and
-    // with it the producers' event pools. On a Wayland session prefer X11
+    // with it the inbox, which would grow without bound. On a Wayland session prefer X11
     // (XWayland) unless the user chose a backend; if X11 is unavailable the
     // renderer's constructor throws and the viewer runs headless.
     if (std::getenv("WAYLAND_DISPLAY") != nullptr && std::getenv("PANGOLIN_WINDOW_URI") == nullptr) {

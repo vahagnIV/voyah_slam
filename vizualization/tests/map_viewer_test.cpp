@@ -4,13 +4,14 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <stdexcept>
 #include <thread>
 #include <vector>
 #include <voyahslam/events/observable.h>
 #include <voyahslam/events/frame_tracked.h>
+#include <voyahslam/events/subscription.h>
 #include <voyahslam/features/orb_feature_extractor.h>
-#include <voyahslam/memory/object_pool.h>
 
 namespace voyahviz {
 namespace {
@@ -18,20 +19,19 @@ namespace {
 using namespace voyahslam;
 using TViewer = MapViewer<features::OrbFeatureExtractor>;
 using TFrameTracked = events::FrameTracked<features::OrbFeatureExtractor>;
-using TPool = memory::ObjectPool<TFrameTracked, memory::ThreadSafePolicy>;
+using TWeakEvent = std::weak_ptr<TFrameTracked>;
 
-void Publish(events::Observable& out_producer, TPool& pool) {
-    TFrameTracked* event = pool.Create();
-    out_producer.Notify(event);
+// Publishes a new event; returns a weak handle on it, so a test can tell
+// whether every consumer has released it.
+TWeakEvent Publish(events::Observable& out_producer) {
+    auto event = std::make_shared<TFrameTracked>();
+    TWeakEvent weak = event;
+    out_producer.Notify(std::move(event));
+    return weak;
 }
 
-// True if a slot can be taken from the pool (i.e. it was returned); gives it back.
-bool SlotReturned(TPool& pool) {
-    TFrameTracked* event = pool.TryCreate();
-    if (event == nullptr) return false;
-    event->Recycle();
-    return true;
-}
+// True once nobody holds the event any more (the viewer released it).
+bool Released(const TWeakEvent& event) { return event.expired(); }
 
 // Polls for up to 2 s.
 bool WaitForProcessed(const TViewer& viewer, size_t expected) {
@@ -44,19 +44,19 @@ bool WaitForProcessed(const TViewer& viewer, size_t expected) {
 }
 
 TEST(MapViewerTest, ProcessesEventPublishedBeforeStart) {
-    TPool pool(1);
+    std::vector<events::Subscription> subscriptions;  // declared before the viewer and the producer
     TViewer viewer(MapViewerOptions{.fps = 30.0});
     events::Observable producer;
-    producer.ConnectAsync(viewer.inbox());
+    subscriptions.push_back(producer.ConnectAsync(viewer.inbox()));
 
-    Publish(producer, pool);
-    EXPECT_FALSE(SlotReturned(pool));  // held by the viewer's inbox
+    const TWeakEvent event = Publish(producer);
+    EXPECT_FALSE(Released(event));  // held by the viewer's inbox
     viewer.Start();
     ASSERT_TRUE(WaitForProcessed(viewer, 1));
-    // Acknowledged while the viewer is still running: the slot comes back.
+    // Acknowledged while the viewer is still running: the event is released.
     auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     bool returned = false;
-    while (!(returned = SlotReturned(pool)) && std::chrono::steady_clock::now() < deadline) {
+    while (!(returned = Released(event)) && std::chrono::steady_clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     EXPECT_TRUE(returned);
@@ -64,95 +64,95 @@ TEST(MapViewerTest, ProcessesEventPublishedBeforeStart) {
 }
 
 TEST(MapViewerTest, StopDrainsQueuedEvents) {
-    TPool pool(1);
+    std::vector<events::Subscription> subscriptions;  // declared before the viewer and the producer
     TViewer viewer(MapViewerOptions{.fps = 30.0});
     events::Observable producer;
-    producer.ConnectAsync(viewer.inbox());
+    subscriptions.push_back(producer.ConnectAsync(viewer.inbox()));
 
     viewer.Start();
     viewer.Stop();
-    Publish(producer, pool);
+    const TWeakEvent event = Publish(producer);
     viewer.Stop();  // idempotent; drains again
     EXPECT_EQ(viewer.events_processed(), 1u);
-    EXPECT_TRUE(SlotReturned(pool));
+    EXPECT_TRUE(Released(event));
 }
 
 TEST(MapViewerTest, StopWithoutStartDrains) {
-    TPool pool(1);
+    std::vector<events::Subscription> subscriptions;  // declared before the viewer and the producer
     TViewer viewer(MapViewerOptions{.fps = 30.0});
     events::Observable producer;
-    producer.ConnectAsync(viewer.inbox());
+    subscriptions.push_back(producer.ConnectAsync(viewer.inbox()));
 
-    Publish(producer, pool);
+    const TWeakEvent event = Publish(producer);
     viewer.Stop();
     EXPECT_EQ(viewer.events_processed(), 1u);
-    EXPECT_TRUE(SlotReturned(pool));
+    EXPECT_TRUE(Released(event));
 }
 
 TEST(MapViewerTest, DestructorAcknowledgesEventsPublishedAfterStop) {
-    TPool pool(1);
+    std::vector<events::Subscription> subscriptions;  // declared before the viewer and the producer
     events::Observable producer;
+    TWeakEvent event;
     {
         TViewer viewer(MapViewerOptions{.fps = 30.0});
-        producer.ConnectAsync(viewer.inbox());
+        subscriptions.push_back(producer.ConnectAsync(viewer.inbox()));
         viewer.Start();
         viewer.Stop();
-        Publish(producer, pool);
+        event = Publish(producer);
     }
-    EXPECT_TRUE(SlotReturned(pool));
+    EXPECT_TRUE(Released(event));
 }
 
 TEST(MapViewerTest, ReceivesFromTwoProducers) {
-    // The viewer drains at its frame rate, so the pool must cover the whole
-    // backlog published between ticks (here: all 20 events).
-    TPool pool(32);
+    // The viewer drains at its frame rate; the events published between ticks
+    // wait in its inbox (here: all 20 events may).
+    std::vector<events::Subscription> subscriptions;  // declared before the viewer and the producer
     TViewer viewer(MapViewerOptions{.fps = 30.0});
     events::Observable tracker;
     events::Observable mapper;
-    tracker.ConnectAsync(viewer.inbox());
-    mapper.ConnectAsync(viewer.inbox());
+    subscriptions.push_back(tracker.ConnectAsync(viewer.inbox()));
+    subscriptions.push_back(mapper.ConnectAsync(viewer.inbox()));
 
     viewer.Start();
+    std::vector<TWeakEvent> published;
     for (int i = 0; i < 10; ++i) {
-        Publish(tracker, pool);
-        Publish(mapper, pool);
+        published.push_back(Publish(tracker));
+        published.push_back(Publish(mapper));
     }
     EXPECT_TRUE(WaitForProcessed(viewer, 20));
     viewer.Stop();
     EXPECT_EQ(viewer.events_processed(), 20u);
-    // Every slot came back: all 32 can be taken at once.
-    std::vector<TFrameTracked*> taken;
-    for (int i = 0; i < 32; ++i) {
-        taken.push_back(pool.TryCreate());
-        ASSERT_NE(taken.back(), nullptr) << "slot " << i << " not returned";
+    // Every event was released by the viewer.
+    for (size_t i = 0; i < published.size(); ++i) {
+        ASSERT_NE(Released(published[i]), false) << "event " << i << " not released";
     }
-    for (auto* event : taken) event->Recycle();
 }
 
 TEST(MapViewerTest, DestructorStopsRunningViewerAndAcknowledges) {
-    TPool pool(1);
+    std::vector<events::Subscription> subscriptions;  // declared before the viewer and the producer
     events::Observable producer;
+    TWeakEvent event;
     {
         TViewer viewer(MapViewerOptions{.fps = 30.0});
-        producer.ConnectAsync(viewer.inbox());
+        subscriptions.push_back(producer.ConnectAsync(viewer.inbox()));
         viewer.Start();
-        Publish(producer, pool);
+        event = Publish(producer);
         // Leave scope while running, without Stop().
     }
-    EXPECT_TRUE(SlotReturned(pool));
+    EXPECT_TRUE(Released(event));
 }
 
 TEST(MapViewerTest, StartTwiceAndRestart) {
-    TPool pool(1);
+    std::vector<events::Subscription> subscriptions;  // declared before the viewer and the producer
     TViewer viewer(MapViewerOptions{.fps = 30.0});
     events::Observable producer;
-    producer.ConnectAsync(viewer.inbox());
+    subscriptions.push_back(producer.ConnectAsync(viewer.inbox()));
 
     viewer.Start();
     viewer.Start();
     viewer.Stop();
     viewer.Start();
-    Publish(producer, pool);
+    Publish(producer);
     EXPECT_TRUE(WaitForProcessed(viewer, 1));
     viewer.Stop();
 }
@@ -163,40 +163,38 @@ TEST(MapViewerTest, RejectsNonPositiveFps) {
 }
 
 TEST(MapViewerTest, RunOnCurrentThreadStopsOnRequestStop) {
-    TPool pool(1);
+    std::vector<events::Subscription> subscriptions;  // declared before the viewer and the producer
     TViewer viewer(MapViewerOptions{.fps = 100.0});
     events::Observable producer;
-    producer.ConnectAsync(viewer.inbox());
+    subscriptions.push_back(producer.ConnectAsync(viewer.inbox()));
 
     std::thread runner([&viewer] { viewer.RunOnCurrentThread(); });
-    Publish(producer, pool);
+    const TWeakEvent event = Publish(producer);
     EXPECT_TRUE(WaitForProcessed(viewer, 1));
     viewer.RequestStop();
     runner.join();
     EXPECT_EQ(viewer.events_processed(), 1u);
-    EXPECT_TRUE(SlotReturned(pool));
+    EXPECT_TRUE(Released(event));
 }
 
 TEST(MapViewerTest, StopEndsRunOnCurrentThread) {
-    TPool pool(2);
+    std::vector<events::Subscription> subscriptions;  // declared before the viewer and the producer
     TViewer viewer(MapViewerOptions{.fps = 100.0});
     events::Observable producer;
-    producer.ConnectAsync(viewer.inbox());
+    subscriptions.push_back(producer.ConnectAsync(viewer.inbox()));
 
     std::thread runner([&viewer] { viewer.RunOnCurrentThread(); });
-    Publish(producer, pool);
+    std::vector<TWeakEvent> published;
+    published.push_back(Publish(producer));
     ASSERT_TRUE(WaitForProcessed(viewer, 1));
-    Publish(producer, pool);  // may still be queued when Stop() is called
+    published.push_back(Publish(producer));  // may still be queued when Stop() is called
     viewer.Stop();
     runner.join();
     // RunOnCurrentThread()'s own final drain acknowledged everything.
     EXPECT_EQ(viewer.events_processed(), 2u);
-    std::vector<TFrameTracked*> taken;
-    for (int i = 0; i < 2; ++i) {
-        taken.push_back(pool.TryCreate());
-        ASSERT_NE(taken.back(), nullptr) << "slot " << i << " not returned";
+    for (size_t i = 0; i < published.size(); ++i) {
+        ASSERT_NE(Released(published[i]), false) << "event " << i << " not released";
     }
-    for (auto* event : taken) event->Recycle();
 }
 
 TEST(MapViewerTest, RunOnCurrentThreadWhileStartedThrows) {
@@ -207,13 +205,13 @@ TEST(MapViewerTest, RunOnCurrentThreadWhileStartedThrows) {
 }
 
 TEST(MapViewerTest, StartWhileRunOnCurrentThreadIsNoOp) {
-    TPool pool(1);
+    std::vector<events::Subscription> subscriptions;  // declared before the viewer and the producer
     TViewer viewer(MapViewerOptions{.fps = 100.0});
     events::Observable producer;
-    producer.ConnectAsync(viewer.inbox());
+    subscriptions.push_back(producer.ConnectAsync(viewer.inbox()));
 
     std::thread runner([&viewer] { viewer.RunOnCurrentThread(); });
-    Publish(producer, pool);
+    Publish(producer);
     ASSERT_TRUE(WaitForProcessed(viewer, 1));
     viewer.Start();  // logs a warning, does nothing
     viewer.RequestStop();
@@ -223,12 +221,12 @@ TEST(MapViewerTest, StartWhileRunOnCurrentThreadIsNoOp) {
 }
 
 TEST(MapViewerTest, RequestStopBeforeRunOnCurrentThreadReturns) {
-    TPool pool(1);
+    std::vector<events::Subscription> subscriptions;  // declared before the viewer and the producer
     TViewer viewer(MapViewerOptions{.fps = 100.0});
     events::Observable producer;
-    producer.ConnectAsync(viewer.inbox());
+    subscriptions.push_back(producer.ConnectAsync(viewer.inbox()));
 
-    Publish(producer, pool);
+    const TWeakEvent event = Publish(producer);
     viewer.RequestStop();  // e.g. the worker finished before the loop was entered
     std::atomic<bool> returned{false};
     std::thread runner([&] {
@@ -243,32 +241,32 @@ TEST(MapViewerTest, RequestStopBeforeRunOnCurrentThreadReturns) {
     if (!returned.load()) viewer.RequestStop();  // unblock so the test can finish
     runner.join();
     EXPECT_EQ(viewer.events_processed(), 1u);
-    EXPECT_TRUE(SlotReturned(pool));
+    EXPECT_TRUE(Released(event));
 
     // The request was consumed: a later run is not ended by it.
     std::thread second([&viewer] { viewer.RunOnCurrentThread(); });
-    Publish(producer, pool);
+    Publish(producer);
     EXPECT_TRUE(WaitForProcessed(viewer, 2));
     viewer.RequestStop();
     second.join();
 }
 
 TEST(MapViewerTest, RequestStopBeforeStartThenStopDrains) {
-    TPool pool(1);
+    std::vector<events::Subscription> subscriptions;  // declared before the viewer and the producer
     TViewer viewer(MapViewerOptions{.fps = 100.0});
     events::Observable producer;
-    producer.ConnectAsync(viewer.inbox());
+    subscriptions.push_back(producer.ConnectAsync(viewer.inbox()));
 
-    Publish(producer, pool);
+    const TWeakEvent event = Publish(producer);
     viewer.RequestStop();
     viewer.Start();
     viewer.Stop();
     EXPECT_EQ(viewer.events_processed(), 1u);
-    EXPECT_TRUE(SlotReturned(pool));
+    EXPECT_TRUE(Released(event));
 
     // A later Start() runs normally.
     viewer.Start();
-    Publish(producer, pool);
+    Publish(producer);
     EXPECT_TRUE(WaitForProcessed(viewer, 2));
     viewer.Stop();
 }

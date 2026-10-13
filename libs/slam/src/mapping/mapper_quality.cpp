@@ -308,7 +308,7 @@ void Mapper<TFeatureExtractor>::WriteUpdatedPoints(
 template <typename TFeatureExtractor>
 auto Mapper<TFeatureExtractor>::RefineAroundFrame(map::FrameId frame) -> Refinement {
     using Clock = std::chrono::steady_clock;
-    auto* refined = CreateTransaction();
+    auto refined = CreateTransaction();
     Refinement refinement;
     // Points moved by BA or that lost an observation, with repeats.
     std::vector<map::MapPointId> changed;
@@ -326,7 +326,7 @@ auto Mapper<TFeatureExtractor>::RefineAroundFrame(map::FrameId frame) -> Refinem
     refinement.num_removed_points = refined->removed_points.size();
     num_keyframes_.fetch_sub(refinement.num_culled_frames, std::memory_order_acq_rel);
     num_map_points_.store(Active().map_points.size(), std::memory_order_release);
-    observable_.Notify(refined);
+    observable_.Notify(std::move(refined));
     return refinement;
 }
 

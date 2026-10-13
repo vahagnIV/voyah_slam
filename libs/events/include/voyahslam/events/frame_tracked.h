@@ -10,7 +10,6 @@
 #include <voyahslam/geometry/rigid_transformation.h>
 #include <voyahslam/map/frame_id.h>
 #include <voyahslam/map/map_point_id.h>
-#include <voyahslam/memory/recyclable.h>
 
 namespace voyahslam::events {
 
@@ -21,9 +20,7 @@ enum class TrackingStage : uint8_t { MotionModel, ZeroMotion, ReferenceFrame, Re
 
 // Published by the Tracker for every successfully tracked measurement.
 template <typename TFeatureExtractor>
-struct FrameTracked
-    : Event
-    , memory::Recyclable<FrameTracked<TFeatureExtractor>, memory::ThreadSafePolicy> {
+struct FrameTracked : Event {
     double timestamp = 0.0;
     geometry::RigidTransformation pose;  // T_cw (world -> camera), after pose optimization
     // Binocular: stereo-matched. Shared with the Tracker and, once it is a
@@ -46,33 +43,7 @@ struct FrameTracked
     // The correction epoch of the map, as the Tracker's replica knew it.
     uint32_t map_epoch = 0;
 
-    // Called by the pool on reuse; keeps the vectors' capacity and releases
-    // the measurement.
-    void Reset() {
-        timestamp = 0.0;
-        measurement.reset();
-        observed_features.clear();
-        observed_points.clear();
-        visible_points.clear();
-        reference_frame_id.reset();
-        local_frames.clear();
-        stage = TrackingStage::MotionModel;
-        num_matches = 0;
-        num_inliers = 0;
-        urgent = false;
-        map_epoch = 0;
-        priority = false;
-    }
-
-    FrameTracked()
-        : Event(EventType::FrameTracked,
-                [](Event* e) {
-                    static_cast<FrameTracked*>(e)->
-                        memory::Recyclable<FrameTracked, memory::ThreadSafePolicy>::Recycle();
-                },
-                [](Event* e, int n) {
-                    static_cast<FrameTracked*>(e)->SetRefCount(n);
-                }) {}
+    FrameTracked() : Event(EventType::FrameTracked) {}
 };
 
 } // namespace voyahslam::events

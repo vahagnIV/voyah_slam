@@ -2,6 +2,7 @@
 #include <exception>
 #include <iostream>
 #include <utility>
+#include <vector>
 
 #include <dataset_reader/euroc_dataset_reader.h>
 #include <dataset_reader/playback_clock.h>
@@ -47,41 +48,27 @@ int main(int argc, char** argv) {
         TFeatureExtractor extractor(full_slam::kScaleFactor, full_slam::kNumLevels,
                                     full_slam::kInitThresholdFast, full_slam::kMinThresholdFast);
         // 3D viewer: consumes Tracker and Mapper events on its own thread (later
-        // a remote process behind a serializing observer). Declared before slam
-        // so that slam is destroyed first and nothing is published into a
-        // destroyed inbox.
+        // a remote process behind a serializing observer).
         voyahviz::MapViewer<TFeatureExtractor> viewer(
             voyahviz::MapViewerOptions{.show_window = options.viewer});
         // Created after the viewer: cv::namedWindow (gtk_init) may start threads,
         // and the viewer's constructor may setenv (so it must run first).
         std::optional<voyahviz::ImageWindow> window;
         if (options.show) window.emplace("binocular_full_slam");
-        // Declared before slam for the same reason as the viewer.
         std::optional<full_slam::TrajectoryWriter<TFeatureExtractor>> trajectory;
         if (!options.trajectory_out.empty()) trajectory.emplace(options.trajectory_out);
+        // The external wires. Declared before slam, so it is destroyed after it:
+        // ~Slam stops every producer first, so an exception unwinding past this
+        // point never destroys a Subscription of a running producer.
+        std::vector<events::Subscription> subscriptions;
         TSlam slam({}, {}, vocabulary, loop_closing::LoopCloserOptions{.enabled = options.loop_closing},
                    global_ba::GlobalBaOptions{.enabled = options.global_ba});
         // From the object: Slam creates a GlobalBA only with loop closing in effect.
         std::cout << "Global BA: " << (slam.global_ba() != nullptr ? "on" : "off") << "\n";
-        // Also when an exception unwinds: stop the producers, then the viewer
-        // and the trajectory (their final drains recycle events into slam's
-        // pools), all before ~Slam destroys those pools. Stop() and Poll()
-        // are idempotent, so the explicit calls below on the normal path are
-        // fine.
-        struct StopAll {
-            TSlam& slam;
-            voyahviz::MapViewer<TFeatureExtractor>& viewer;
-            std::optional<full_slam::TrajectoryWriter<TFeatureExtractor>>& trajectory;
-            ~StopAll() {
-                slam.Stop();
-                viewer.Stop();
-                if (trajectory) trajectory->Poll();
-            }
-        } stop_all{slam, viewer, trajectory};
         // Wire before Start().
-        slam.tracker().AddObserver(viewer.inbox());
-        slam.mapper().AddObserver(viewer.inbox());
-        if (trajectory) slam.tracker().AddObserver(trajectory->inbox());
+        subscriptions.push_back(slam.tracker().AddObserver(viewer.inbox()));
+        subscriptions.push_back(slam.mapper().AddObserver(viewer.inbox()));
+        if (trajectory) subscriptions.push_back(slam.tracker().AddObserver(trajectory->inbox()));
         viewer.Start();
         slam.Start();
 
@@ -130,7 +117,9 @@ int main(int argc, char** argv) {
             viewer.WaitForWindowClose();
         }
 
-        // Stop the producers before the viewer so nothing arrives after its final drain.
+        // Stop the producers before the viewer so nothing arrives after its final
+        // drain, and drain the trajectory: this is what produces the output. On an
+        // exception ~Slam stops the producers and the output is simply incomplete.
         slam.Stop();
         viewer.Stop();
         stats.Print(std::cout);

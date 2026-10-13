@@ -14,11 +14,13 @@ GlobalBundleAdjuster<TFeatureExtractor>::~GlobalBundleAdjuster() {
     // Interrupts a running BA instead of waiting it out (it publishes nothing).
     stop_requested_.store(true, std::memory_order_release);
     worker_.Stop();
+    EndRun();
 }
 
 template <typename TFeatureExtractor>
 void GlobalBundleAdjuster<TFeatureExtractor>::Start() {
     stop_requested_.store(false, std::memory_order_release);
+    BeginRun();
     worker_.Start([this] { return ProcessPending(); });
 }
 
@@ -28,20 +30,20 @@ void GlobalBundleAdjuster<TFeatureExtractor>::Stop() {
     stop_requested_.store(true, std::memory_order_release);
     const bool was_running = worker_.running();
     worker_.Stop();
+    EndRun();
     if (was_running && num_runs_started_ > 0) {  // once per run
-        log_->info("Global BA: {} runs, {} interrupted, {} results dropped", num_runs_started_,
-                   num_runs_interrupted_, num_results_dropped_);
+        log_->info("Global BA: {} runs, {} interrupted", num_runs_started_, num_runs_interrupted_);
     }
 }
 
 template <typename TFeatureExtractor>
 bool GlobalBundleAdjuster<TFeatureExtractor>::ProcessPending() {
     // Every event is applied on receipt and so released at once, here and at
-    // each poll of a run: GlobalBA never holds the Mapper's pooled
+    // each poll of a run: GlobalBA never holds the Mapper's
     // transactions.
     bool processed = false;
-    while (const events::Event* event = inbox_listener_.GetNextEvent()) {
-        processed = true;  // acknowledged by the next GetNextEvent()
+    while (events::EventPtr event = inbox_listener_.GetNextEvent()) {
+        processed = true;  // released at the end of this iteration
         ApplyEvent(*event);
     }
     if (!run_pending_) {
@@ -86,7 +88,7 @@ bool GlobalBundleAdjuster<TFeatureExtractor>::ApplyArrived(map::MapId map_id, ui
     // the run optimizes its own snapshot (RunGlobalBa's contract), so the
     // replica may move on under it, the run's map even dropped.
     bool superseded = false;
-    while (const events::Event* event = inbox_listener_.GetNextEvent()) {
+    while (events::EventPtr event = inbox_listener_.GetNextEvent()) {
         superseded = ApplyEvent(*event, map_id, map_epoch) || superseded;
     }
     return superseded;
@@ -147,13 +149,7 @@ void GlobalBundleAdjuster<TFeatureExtractor>::Run() {
 template <typename TFeatureExtractor>
 void GlobalBundleAdjuster<TFeatureExtractor>::Publish(map::MapId map_id, uint32_t map_epoch,
                                                       GlobalBaSolution&& solution) {
-    auto* event = result_pool_.TryCreate();
-    if (event == nullptr) {
-        ++num_results_dropped_;
-        log_->warn("Global BA result of map {} at epoch {} dropped: {} GlobalBAFinished events in flight",
-                   map_id.value, map_epoch, options_.max_events_in_flight);
-        return;
-    }
+    auto event = std::make_shared<events::GlobalBAFinished>();
     // The run's: the replica may have moved on since.
     event->map_id = map_id;
     event->map_epoch = map_epoch;
@@ -161,7 +157,7 @@ void GlobalBundleAdjuster<TFeatureExtractor>::Publish(map::MapId map_id, uint32_
     event->point_positions = std::move(solution.point_positions);
     // Urgent: the Mapper's running local BA stops for the merge.
     event->priority = true;
-    observable_.Notify(event);
+    observable_.Notify(std::move(event));
 }
 
 INSTANTIATE_CLASS(GlobalBundleAdjuster)

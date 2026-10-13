@@ -34,8 +34,8 @@ struct MapViewerOptions {
 // main thread). Only the thread running the loop touches the scene model and
 // the GL context; the window is created at loop entry and destroyed at loop
 // exit (or when the user closes it), on that thread. Closing the window does
-// not stop the loop: it keeps draining headless until RequestStop()/Stop(), so
-// producers' event pools never stall.
+// not stop the loop: it keeps draining headless until RequestStop()/Stop(), so a
+// closed window does not let the inbox grow.
 //
 // Threading contract: Start() and Stop() must be called from one controlling
 // thread (externally ordered; they are not safe to race with each other). In
@@ -43,7 +43,8 @@ struct MapViewerOptions {
 // Stop() and the destructor belong on the loop's thread, after
 // RunOnCurrentThread() has returned.
 //
-// Usage: connect producers with AddObserver(viewer.inbox()) before they start;
+// Usage: connect producers with AddObserver(viewer.inbox()) before they start and
+// keep the returned Subscription (e.g. in a vector declared before the Slam);
 // stop the producers before the viewer so nothing arrives after the final drain.
 template <typename TFeatureExtractor>
 class MapViewer {

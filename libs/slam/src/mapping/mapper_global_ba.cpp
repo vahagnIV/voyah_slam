@@ -41,7 +41,7 @@ void Mapper<TFeatureExtractor>::MergeGlobalBa(
     // One transaction; nothing here uses the scratch state, which is cleared
     // as at the start of every correction.
     ResetTransactionScratch();
-    auto* merged = CreateTransaction();
+    auto merged = CreateTransaction();
     merged->map_epoch = ++Active().map_epoch;
 
     std::unordered_map<uint32_t, const geometry::RigidTransformation*> optimized_poses;
@@ -132,7 +132,7 @@ void Mapper<TFeatureExtractor>::MergeGlobalBa(
         num_optimized_frames, num_keyframes(), merged->updated_poses.size() - num_optimized_frames,
         num_optimized_points, moved.size() - num_optimized_points, Active().map_epoch,
         detail::MillisecondsSince(start));
-    observable_.Notify(merged);
+    observable_.Notify(std::move(merged));
 }
 
 // Mapper is explicitly instantiated in mapper.cpp; the members defined here

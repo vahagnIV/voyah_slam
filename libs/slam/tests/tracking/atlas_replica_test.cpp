@@ -7,7 +7,6 @@
 #include <vector>
 #include <voyahslam/events/events.h>
 #include <voyahslam/features/orb_feature_extractor.h>
-#include <voyahslam/memory/object_pool.h>
 #include <voyahslam/tracking/atlas_replica.h>
 
 namespace voyahslam::tracking {
@@ -33,8 +32,7 @@ std::shared_ptr<const features::TMeasurement<Extractor>> EmptyMeasurement() {
 template <typename TFill>
 void Apply(TAtlas& out_atlas, uint32_t map, std::optional<uint32_t> frame, std::optional<uint32_t> active,
            TFill fill) {
-    memory::ObjectPool<TTransaction, memory::ThreadSafePolicy> pool(1);
-    TTransaction* event = pool.Create();
+    auto event = std::make_shared<TTransaction>();
     event->map_id = map::MapId{map};
     if (frame) {
         events::NewFrame<Extractor>& added = event->added_frames.emplace_back();
@@ -44,7 +42,6 @@ void Apply(TAtlas& out_atlas, uint32_t map, std::optional<uint32_t> frame, std::
     if (active) event->active_map = map::MapId{*active};
     fill(*event);
     out_atlas.Apply(*event);
-    event->Recycle();
 }
 
 // The Mapper's new map `map` with its first Frame `frame`; active.
