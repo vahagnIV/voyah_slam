@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: API Ownership and Lifetime Contracts
 status: executing
-stopped_at: Completed 01-02-PLAN.md
-last_updated: "2026-10-13T14:03:16.884Z"
+stopped_at: Completed 01-03-PLAN.md
+last_updated: "2026-10-13T14:09:09.995Z"
 last_activity: 2026-10-13
 last_activity_desc: Phase 01 execution started
-state_head: 83e821bf0c994f6b6fb0387f9ff0fdffe8f61fc5
+state_head: b66b2a23c07adf5859a3ca8ee32210d7dcf9f62d
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 20
-  completed_plans: 2
+  completed_plans: 3
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 ## Current Position
 
 Phase: 01 (API Ownership and Lifetime Contracts) — EXECUTING
-Plan: 3 of 20
+Plan: 4 of 20
 Status: Ready to execute
 Last activity: 2026-10-13 — Phase 01 execution started
 
@@ -58,6 +58,7 @@ Progress: [░░░░░░░░░░] 0%
 |------|----------|-------|-------|
 | Phase 01 P01 | 6 min | 2 tasks | 20 files |
 | Phase 01 P02 | 5 min | 3 tasks | 22 files |
+| Phase 01 P03 | 7 min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -75,6 +76,8 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-01: tests push through Observable::Notify (AsyncObserver has no Push); negative compile checks use concepts, not bare requires
 - [Phase 01]: Slam::subscriptions_ is the last member and the apps' Subscription vector is declared before slam; ~Slam stops every producer first, so StopAll is not needed (D-04, D-23)
 - [Phase 01]: Mapper::CreateTransaction() returns shared_ptr<MapTransaction>; LoopDetected and GlobalBAFinished are published unbounded, max_events_in_flight removed (D-02, D-25)
+- [Phase 01]: 01-03: Probe-style sync observers (ctx on the test stack) keep their Subscription as a local declared after the Probe; fixture-ctx handlers go into the fixture subscriptions_ vector
+- [Phase 01]: 01-03: MapperTest.PooledMapTransactionIsReset deleted; it tested only the removed ObjectPool slot reuse and reset (ObjectPool keeps its own tests)
 
 ### Pending Todos
 
@@ -102,6 +105,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-13T14:03:16.862Z
-Stopped at: Completed 01-02-PLAN.md
+Last session: 2026-10-13T14:09:09.974Z
+Stopped at: Completed 01-03-PLAN.md
 Resume file: None
