@@ -235,11 +235,13 @@ every lifetime rule enforced by the types, not by comments, because Java
 objects die in any order. Audit:
 `../voyah_jni/docs/voyah_slam_ownership_audit.md`; items in TODO "Ownership
 audit". Done: #1 shared distortion models (0.2.0), #4 pools grow instead of
-aborting (0.3.0). Remaining, in order: #3 with #2 (event ownership and observer
-subscriptions; since 2026-10-13 #3 removes the event pools and publishes
-events as `shared_ptr<const T>`: removes every required declaration and destruction order from
-`Slam`'s users), then #5, #6, #7, #8, #9. Each item is merged separately with
-a minor version bump and new Conan packages.
+aborting (0.3.0), #3 with #2 (0.4.0, 2026-10-13: events are
+`shared_ptr<const T>` with no pools, `AddObserver` returns a `Subscription`,
+and every destruction order of producer, subscription, observer and listener is
+safe, so `Slam`'s users no longer need a declaration or teardown order beyond
+holding their `Subscription`s before the `Slam`). Remaining, in order: #5, #6,
+#7, #8, #9. Each item is merged separately with a minor version bump and new
+Conan packages.
 
 ## 6. TUM-VI tuning
 

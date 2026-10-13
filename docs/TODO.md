@@ -209,8 +209,8 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
       a point dead), so storage grows with every point ever created in a map;
       decide whether/when to compact (a compaction would need an id remap
       event for the replicas).
-- [ ] Size event pools per event type. (OQ 14) Obsolete once ownership
-      audit #3 removes the pools (decision 2026-10-13); close it with #3.
+- [x] ~~Size event pools per event type (OQ 14)~~ (obsolete 2026-10-13, 0.4.0):
+      the pools are deleted by ownership audit #3 (events are `make_shared`).
 - [ ] **ASan runs abort in g2o (pre-existing, 2026-10-12):** "attempting
       free on address which was not malloc()-ed" from `g2o::Solver::~Solver`
       (e.g. via `OptimizePose`). An ODR mix: Eigen 3.4 disables
@@ -220,18 +220,20 @@ frames, init on frame 1 with 358 points, no loss, median 232 inliers.
       versa. Fix: build g2o with `-fsanitize=address` for ASan runs, or define
       `EIGEN_MALLOC_ALREADY_ALIGNED=0` consistently (ours and g2o) in that
       configuration.
-- [ ] **Lossy delivery for display-only observers** (deferred 2026-10-12,
-      ownership audit item 4). Since 0.3.0 a stuck async observer makes the
-      Tracker's and Mapper's pools grow (no abort, nothing dropped), so a
-      viewer stalled for minutes holds memory proportional to the backlog. Give
+- [ ] **Lossy delivery for display-only observers** (EVT-01, deferred
+      2026-10-12, ownership audit item 4). Since 0.4.0 a stuck async observer
+      makes its own inbox grow (events are `shared_ptr`s; nothing is dropped;
+      the inbox logs a "consumer is behind" warning at 1024 events and at each
+      doubling), so a viewer stalled for minutes holds memory proportional to
+      the backlog. Give
       observers a delivery mode, e.g. `AddObserver(o, Delivery::Lossy)` with a
       bounded queue that drops (and releases) the oldest events, for consumers
       that only display. Never for `MapTransaction` replicas or the Mapper's
       `FrameTracked` input.
 - [x] ~~Ownership audit item 4: pool exhaustion aborts the process~~ (done
-      2026-10-12, 0.3.0): `ObjectPool::Create()` grows on overflow (logged,
-      counted); Tracker / Mapper pool sizes are options. See DESIGN §6.1 and
-      the decisions log.
+      2026-10-12, 0.3.0): `ObjectPool::Create()` grew on overflow (logged,
+      counted); Tracker / Mapper pool sizes were options. The pools were then
+      deleted by #3 (0.4.0). See DESIGN §6.1 and the decisions log.
 - [ ] Immutable shared measurement in events (`shared_ptr<const>`):
       `FrameTracked`, `MapTransaction` and `InitializationMeasurement` copy
       the measurement (about 80 KB per frame).
@@ -570,10 +572,10 @@ BA" (smoke table there).
       kept one map. No loss was caused by a merge itself; with two runs per
       mode the effect is not separable from run-to-run loop variance.
       Re-measure once look-alikes are rejected (step 6), with more runs.
-- [ ] **A dropped result is not retried** (to be fixed by ownership audit #3:
-      decision 2026-10-13 removes the drop-limit): when the `GlobalBAFinished` pool
-      (2) is exhausted, the map keeps the essential-graph correction until
-      the next loop (counted in `num_results_dropped`). ORB-SLAM3 has no pool.
+- [x] ~~A dropped result is not retried~~ (done 2026-10-13, 0.4.0, ownership
+      audit #3, D-25): the `GlobalBAFinished` drop limit (`max_events_in_flight`,
+      `num_results_dropped`) is removed; results are published unbounded and
+      never dropped (the same for `LoopDetected`).
 - [ ] **The snapshot contract is enforced by documentation:**
       `ChangesDuringRunDoNotAffectResult` catches a `RunGlobalBa` that reads
       the replica after its first poll only when the data it reads changed.
@@ -814,8 +816,9 @@ Quality" (smoke table there).
 - [ ] **Culled Frames leave empty slots** in the Mapper's Frame array (lookup by
       id stays O(1) because ids are consecutive per map). Long runs grow it
       without bound; compact or switch to a map when it matters.
-- [ ] **Make `AsyncObserver::queue()` private:** popping from it bypasses the
-      priority counter (only `TryPop` / `Listener` decrement it).
+- [x] ~~Make `AsyncObserver::queue()` private~~ (done 2026-10-13, 0.4.0, audit
+      #3+#2): the queue lives in the private `InboxCore`; only `TryPop` /
+      `Listener` pop, so the priority counter stays right.
 - [ ] **Pre-existing flaky integration tests** (final review of
       `feat/loop-closing`, 2026-10-10; neither enables loop closing). Each
       was run 100 times (4 parallel processes × `--gtest_repeat=25`, both
@@ -907,24 +910,19 @@ Quality" (smoke table there).
 
 ## Event system
 
-- [ ] `AsyncObserver` destruction doesn't acknowledge events still queued, so
-      their pool slots never return. Drain on destruction.
-- [ ] **Event pool lifetime** (OQ 25): components own the pools of the events
-      they publish but consumers (e.g. the `MapViewer` inbox) can hold them.
-      Without care, on exception unwinding `~Slam` runs while the viewer thread
-      may still be draining into its pools, and the viewer's destructor drain
-      recycles into freed pools. The apps now guard against it (a guard after
-      `slam` runs `slam.Stop(); viewer.Stop()` on every exit path), but the
-      library still needs events that outlive their producers. Resolved by
-      ownership audit #3 (2026-10-13): events become `shared_ptr<const T>`
-      and the pools are removed.
-- [ ] **Subscriber lifetime (raw pointers, no disconnect).**
-      `Observable::ConnectAsync` stores `AsyncObserver*` and `ConnectSync` a
-      raw `void* ctx`, with no way to disconnect; `AsyncObserver::SetWakeSignal`
-      stores a raw `WakeSignal*`. A subscriber (e.g. an app's viewer or a JNI
-      bridge) that dies before its publisher leaves `Notify` pushing into freed
-      memory. Same class of hazard as the distortion-model pointers removed on
-      2026-10-12: a disconnect (RAII connection handle) or shared ownership.
+- [x] ~~`AsyncObserver` destruction doesn't acknowledge events still queued~~
+      (done 2026-10-13, 0.4.0): `~AsyncObserver` closes its inbox core and
+      releases the queued events (D-08); a disconnect drains nothing.
+- [x] ~~**Event pool lifetime** (OQ 25)~~ (done 2026-10-13, 0.4.0, ownership
+      audit #3): events are `shared_ptr<const T>` and own their memory; the
+      pools, the `global_ba_` ordering invariant and the apps' `StopAll` guard
+      are gone.
+- [x] ~~**Subscriber lifetime (raw pointers, no disconnect)**~~ (done
+      2026-10-13, 0.4.0, ownership audit #2): `AddObserver` / `AddSyncObserver`
+      return a `[[nodiscard]]` RAII `Subscription`; `SetWakeSignal` is removed
+      (the inbox owns its `WakeSignal`). Still open on the consumer side: a
+      sync handler's `ctx` is a raw pointer the library does not own and must
+      outlive its connection (documented on `ConnectSync` / `AddSyncObserver`).
 
 ## Ownership audit (voyah_jni, 2026-10-12)
 
@@ -939,20 +937,20 @@ and android-arm64; tell the voyah_jni session the new version.
 
 - [x] ~~#1 Distortion model held by raw pointer~~ (done 2026-10-12, 0.2.0).
 - [x] ~~#4 Pool exhaustion aborts~~ (done 2026-10-12, 0.3.0; see "Map & events").
-- [ ] **#3 Pooled events point back to a possibly destroyed pool**
-      (`Recyclable::object_pool_` is a raw `ObjectPool*`). Decision
-      2026-10-13 (replaces the shared-pool-core plan): events are
-      heap-allocated and published as `std::shared_ptr<const T>`;
-      `ObjectPool`, `Recyclable`, the pool-size options and every event's
-      `Reset()` are deleted (events are coarse now, so one allocation per
-      event is negligible). Then drop the `global_ba_` ordering invariant in
-      `slam.h` and the apps' `StopAll` guard. Same item as "Event pool lifetime" (OQ 25) under
-      "Event system". Next, designed together with #2.
-- [ ] **#2 Observer registration by raw pointer, no disconnect, wiring rules
-      unenforced:** an RAII subscription returned by `AddObserver` (or
-      observers held by `shared_ptr`); connecting or disconnecting while the
-      component runs fails loudly. Same item as "Subscriber lifetime" under
-      "Event system".
+- [x] ~~#3 Pooled events point back to a possibly destroyed pool~~ (done
+      2026-10-13, 0.4.0): events are `std::make_shared` objects published as
+      `std::shared_ptr<const T>` (rvalue-only `Notify`); `ObjectPool`,
+      `Recyclable`, `SyncPolicy`, the pool options and counters, every event's
+      `Reset()` and the `LoopDetected` / `GlobalBAFinished` drop limits are
+      deleted; the `global_ba_` ordering invariant and the apps' `StopAll`
+      guard are gone. Same item as "Event pool lifetime" (OQ 25).
+- [x] ~~#2 Observer registration by raw pointer, no disconnect, wiring rules
+      unenforced~~ (done 2026-10-13, 0.4.0): `AddObserver` returns a
+      move-only `[[nodiscard]]` `Subscription`; connecting or `reset()` while
+      the component runs throws `UsageError`; a `Subscription` destroyed while
+      it runs terminates; every destruction order of producer, subscription,
+      observer and listener is safe (shared `InboxCore` and `Wiring`). The
+      component `Start`/`Stop` transitions stay with #6.
 - [ ] **#5 Thread-affinity accessors enforced only by comments**
       (`Mapper` "Mapper thread only", `Tracker::atlas()` / `map_replica()` /
       `last_matches()`): move them behind test access or assert the thread,
@@ -988,8 +986,8 @@ Deferred minor findings from the per-task and final reviews.
       every consumer" should exempt the Mapper (it assigns map ids).
 - [ ] Docs: the `slam.h` stop-order comment overstates (the graph is
       cyclic, events stay queued in stopped inboxes); DESIGN.md Tracker section
-      keeps the older loop pseudo-code beside the state machine; event pool
-      size (256) is not documented.
+      keeps the older loop pseudo-code beside the state machine; ~~event pool
+      size (256) is not documented~~ (moot: the pools are deleted, 0.4.0).
 - [ ] Mapper: `keyframes_.back()` is unguarded if a real `TryInitialize`
       returns an engaged empty result — treat it as failure; transition log
       wording ("0 keyframes" with the old map id, "1 keyframes").

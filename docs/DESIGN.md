@@ -3482,6 +3482,11 @@ branch → review → merge to `master`. Update this document at the end.
   inactive maps is TODO ("Map merging follow-ups").
 - Ownership audit (`docs/TODO.md`): #3 + #2 done (0.4.0, branch
   `refactor/event-ownership`, merge pending); next #5, #6, #7, #8, #9.
+- Test suite (2026-10-13, ownership audit #3+#2, 0.4.0): 792 tests (762
+  `unit`, the integration tests, 1 `vocabulary`, skipped without ORBvoc);
+  `check_all` about 30 s. Events, wiring and Slam-level lifetime tests include
+  the 24 destruction orders and a death test; ThreadSanitizer and AddressSanitizer
+  were clean on `voyah_events_tests` and the lifetime-sensitive Slam tests.
 - Test suite (2026-10-11, FAST port): 764 tests (739 `unit`, 24
   `integration`, 1 `vocabulary`); the FAST unit tests add ~40 ms and
   `voyah_algs_dataset_tests` (corridor1) ~1 s.
