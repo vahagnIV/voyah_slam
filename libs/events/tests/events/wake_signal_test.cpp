@@ -1,10 +1,9 @@
+#include "probe_event.h"
+
 #include <voyahslam/events/async_observer.h>
-#include <voyahslam/events/events.h>
 #include <voyahslam/events/observable.h>
+#include <voyahslam/events/subscription.h>
 #include <voyahslam/events/wake_signal.h>
-#include <voyahslam/features/monocular_measurement.h>
-#include <voyahslam/features/orb_feature_extractor.h>
-#include <voyahslam/memory/object_pool.h>
 
 #include <gtest/gtest.h>
 
@@ -14,8 +13,6 @@
 
 namespace voyahslam::events {
 namespace {
-
-using OrbMapTransaction = MapTransaction<features::OrbFeatureExtractor>;
 
 TEST(WakeSignalTest, WaitReturnsImmediatelyWhenValueChanged) {
     WakeSignal s;
@@ -40,47 +37,48 @@ TEST(WakeSignalTest, WaitBlocksUntilNotify) {
     EXPECT_TRUE(woke.load());
 }
 
-TEST(AsyncObserverTest, PushNotifiesAttachedSignal) {
-    memory::ObjectPool<OrbMapTransaction, memory::ThreadSafePolicy> pool(2);
-    WakeSignal s;
+// The inbox owns the signal: every push to it notifies observer.wake_signal().
+TEST(AsyncObserverTest, PushNotifiesTheObserversSignal) {
     AsyncObserver observer;
-    observer.SetWakeSignal(&s);
+    Observable observable;
+    auto subscription = observable.ConnectAsync(observer);
 
-    auto* event = pool.Create();
-    uint32_t before = s.Snapshot();
-    observer.Push(event);
-    EXPECT_EQ(s.Snapshot(), before + 1);
+    uint32_t before = observer.wake_signal().Snapshot();
+    observable.Notify(MakeProbe());
+    EXPECT_EQ(observer.wake_signal().Snapshot(), before + 1);
 
     Listener listener = observer.GetListener();
-    EXPECT_EQ(listener.GetNextEvent(), event);
+    EXPECT_NE(listener.GetNextEvent(), nullptr);
     EXPECT_EQ(listener.GetNextEvent(), nullptr);
 }
 
-TEST(AsyncObserverTest, PushWithoutSignalStillEnqueues) {
-    memory::ObjectPool<OrbMapTransaction, memory::ThreadSafePolicy> pool(2);
+TEST(AsyncObserverTest, PushNobodyWaitsOnStillEnqueues) {
     AsyncObserver observer;
-    auto* event = pool.Create();
-    observer.Push(event);
+    Observable observable;
+    auto subscription = observable.ConnectAsync(observer);
+
+    auto event = MakeProbe(5);
+    const EventPtr watch = event;
+    observable.Notify(std::move(event));
+
     Listener listener = observer.GetListener();
-    EXPECT_EQ(listener.GetNextEvent(), event);
+    EXPECT_EQ(listener.GetNextEvent(), watch);
     EXPECT_EQ(listener.GetNextEvent(), nullptr);
 }
 
 TEST(AsyncObserverTest, ObservableDeliversThroughPush) {
-    memory::ObjectPool<OrbMapTransaction, memory::ThreadSafePolicy> pool(2);
-    WakeSignal s;
     AsyncObserver observer;
-    observer.SetWakeSignal(&s);
     Observable observable;
-    observable.ConnectAsync(observer);
+    auto subscription = observable.ConnectAsync(observer);
 
-    auto* event = pool.Create();
-    uint32_t before = s.Snapshot();
-    observable.Notify(event);
-    EXPECT_EQ(s.Snapshot(), before + 1);
+    auto event = MakeProbe();
+    const EventPtr watch = event;
+    uint32_t before = observer.wake_signal().Snapshot();
+    observable.Notify(std::move(event));
+    EXPECT_EQ(observer.wake_signal().Snapshot(), before + 1);
 
     Listener listener = observer.GetListener();
-    EXPECT_EQ(listener.GetNextEvent(), event);
+    EXPECT_EQ(listener.GetNextEvent(), watch);
 }
 
 } // namespace
