@@ -3485,8 +3485,9 @@ branch → review → merge to `master`. Update this document at the end.
 - Test suite (2026-10-13, ownership audit #3+#2, 0.4.0): 792 tests (762
   `unit`, the integration tests, 1 `vocabulary`, skipped without ORBvoc);
   `check_all` about 30 s. Events, wiring and Slam-level lifetime tests include
-  the 24 destruction orders and a death test; ThreadSanitizer and AddressSanitizer
-  were clean on `voyah_events_tests` and the lifetime-sensitive Slam tests.
+  the 24 destruction orders and a death test; ThreadSanitizer was clean on
+  `voyah_events_tests` and the lifetime-sensitive `SlamTest`s, and AddressSanitizer
+  on `voyah_events_tests` (plan summaries 01-01 and 01-05).
 - Test suite (2026-10-11, FAST port): 764 tests (739 `unit`, 24
   `integration`, 1 `vocabulary`); the FAST unit tests add ~40 ms and
   `voyah_algs_dataset_tests` (corridor1) ~1 s.
