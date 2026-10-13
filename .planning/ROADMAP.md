@@ -75,7 +75,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Success Criteria** (what must be TRUE):
   1. A global BA run is bounded by a cap or time budget (value set in the phase spec): stereo corridor1 runs no longer take up to 85 s, and `Slam::Stop()` no longer waits 6-8 s for a run to finish.
   2. Stereo corridor1 peak RSS with loop closing and global BA is re-measured against the recorded figures (4.23 GB before measurement sharing, 2.28 GB without global BA) and the extra memory is reduced or bounded by a stated budget.
-  3. A dropped `GlobalBAFinished` is retried, shown by a test in which the result is dropped once and the correction is still applied.
+  3. ~~A dropped `GlobalBAFinished` is retried~~ — moot since 2026-10-13: Phase 1 (D-25) publishes it unbounded, so it is never dropped (a Phase 1 test shows a result delivered while an earlier one is held).
   4. After a blackout, a Tracker lost in the active map relocalizes into an inactive Atlas map in a synthetic scenario, and the corridor1 `--drop_frames` smoke is unchanged otherwise.
 **Plans**: TBD
 

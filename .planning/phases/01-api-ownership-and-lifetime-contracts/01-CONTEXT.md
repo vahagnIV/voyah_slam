@@ -1,7 +1,7 @@
 # Phase 1: API Ownership and Lifetime Contracts - Context
 
 **Gathered:** 2026-10-12
-**Status:** Ready for planning
+**Status:** Ready for planning (revised 2026-10-13: event ownership, then the planning answers D-22..D-26)
 
 <domain>
 ## Phase Boundary
@@ -42,17 +42,15 @@ outlive their memory in the first place.
 - **D-02:** **`ObjectPool` and `Recyclable` are deleted** from `voyah_common` (events are their
   only users), with their tests, the pool-size options (`TrackerOptions::event_pool_size`,
   `MapperOptions::transaction_pool_size`), the overflow counters/accessors and every event's
-  `Reset()`. The audit's "`~ObjectPool` asserts every slot came back" becomes moot. Publishers
-  that drop on purpose today (`LoopDetected` pool of 16, `GlobalBAFinished`
-  `max_events_in_flight`) keep their bound with a plain in-flight count (or the bound is
-  dropped if research shows it is no longer needed) — planner's call, recorded in DESIGN.
+  `Reset()`. The audit's "`~ObjectPool` asserts every slot came back" becomes moot. The
+  drop-limits of `LoopDetected` (16) and `GlobalBAFinished` (`max_events_in_flight`, 2) are
+  **dropped** too (D-25).
 - **D-03:** The general-purpose allocator is acceptable on the event path: it is not a lock on
   map data (DESIGN §2), and per-frame allocations already happen (measurement, replicas). An
   event may be freed on any thread (viewer, JNI or GC thread): event destructors must not depend
   on the destroying thread (DESIGN rule).
 - **D-04:** Afterwards remove the `global_ba_` ordering invariant (`slam.h`, DESIGN) and the
-  apps' `StopAll` teardown guard (`examples/full_slam/*_full_slam.cpp`), subject to the D-07
-  question raised in research. This closes OQ 25 and makes OQ 14 (pool sizing) obsolete.
+  apps' `StopAll` teardown guard (`examples/full_slam/*_full_slam.cpp`) **entirely** (D-23). This closes OQ 25 and makes OQ 14 (pool sizing) obsolete.
 
 ### Subscription API (#2, OWN-02)
 - **D-05:** Connecting and disconnecting are allowed **only while the producer is stopped**
@@ -66,9 +64,11 @@ outlive their memory in the first place.
   the producer runs **throws** (the usage error of D-09). A `Subscription` **destroyed** while
   its producer runs **logs and calls `std::terminate`** in every build (destructors cannot
   throw; this gives a defined, loud failure instead of a later use-after-free).
-- **D-08:** On disconnect, or when an `AsyncObserver` is destroyed, the events still queued are
-  **drained and released** (this closes TODO "AsyncObserver destruction doesn't acknowledge
-  events"); safe even after the producer is gone, because events own their memory (D-01).
+- **D-08 (amended 2026-10-13):** When an `AsyncObserver` is destroyed, the events still queued
+  are **released** (this closes TODO "AsyncObserver destruction doesn't acknowledge events");
+  safe even after the producer is gone, because events own their memory (D-01). **Nothing is
+  drained on disconnect**: an inbox can be fed by several producers (the viewer gets Tracker and
+  Mapper events) and queued events carry no producer tag; events left queued stay valid.
 
 ### Misuse errors and lifecycle (#6, OWN-04)
 - **D-09:** Invalid lifecycle calls **throw a `std::logic_error` subclass** (e.g.
@@ -78,7 +78,8 @@ outlive their memory in the first place.
 - **D-10:** The state machine is Created → Running → Stopped, and **Stopped is terminal**:
   `Start` after `Stop` throws, `Start` twice throws, and `Stop` is idempotent (destructors call it).
   A new session means a new `Slam`. Applies to `Slam` and its components (Tracker, Mapper,
-  LoopCloser, GlobalBA, `WorkerThread` users).
+  LoopCloser, GlobalBA, `WorkerThread` users). Not `WorkerThread` itself, and not `MapViewer`
+  (D-26).
 - **D-11:** `Start`/`Stop` are safe **from any thread**, serialized by an atomic state CAS (a
   losing `Start` throws, `Stop` is idempotent). This replaces "must be called from one
   controlling thread", because a Java `close()` or GC cleaner may stop or destroy from another thread.
@@ -97,7 +98,10 @@ outlive their memory in the first place.
   `KeyFrame()`, `map_ids()`, `active_map()`, `num_keyframes()`) and the "never while running"
   ones (`Tracker::atlas()`, `map_replica()`, `last_matches()`) become **private behind friend
   `*TestAccess` structs** (the `MapperTestAccess` pattern), so misuse fails at compile time.
-  Tests and tools move to the access structs.
+  Tests and tools move to the access structs. **Extended 2026-10-13 (D-26):** the same applies
+  to `LoopCloser::atlas()`/`map_replica()` and `GlobalBundleAdjuster::atlas()`/`map_replica()`;
+  their plain `size_t` counters become `std::atomic`; only the `num_keyframes(MapId)` overload
+  is restricted, and the no-argument `num_keyframes()` (an any-thread atomic) stays public.
 
 ### Extractor thread safety (#7, OWN-05)
 - **D-15:** The **caller provides the workspace**:
@@ -125,6 +129,35 @@ outlive their memory in the first place.
   - make `Convert()`, `operator*=` and `operator*` row-wise, honouring `offset_` / `stride_`;
   - make `Set()` non-const;
   - document that views alias the parent's buffer.
+
+### Planning answers (2026-10-13, user: "all recommended")
+- **D-22 (shared inbox core, OWN-02):** an `AsyncObserver`'s queue, its `WakeSignal` and its
+  priority counter live in a shared **inbox core** held by the observer, its `Listener`s and the
+  producer's connection entry; a component's connection list lives in a shared **wiring block**
+  held by the component and its `Subscription`s. So every destruction order of {producer,
+  subscription, observer, listener} is safe by construction: an observer destroyed first just
+  stops being read (later events are released when the core goes), a `Subscription` destroyed
+  after its producer is a no-op. `SetWakeSignal(WakeSignal*)` is removed (the core owns the
+  signal; consumers wait on `observer.wake_signal()`). The earlier "count subscriptions per
+  observer and terminate" idea is not adopted. D-05 and D-07 are unchanged (connect/disconnect
+  only while stopped). — **Reversibility:** one-way (public wiring API, with D-06).
+- **D-23 (no `StopAll`):** apps and the binding hold their subscriptions in a
+  `std::vector<events::Subscription>` (or members) **declared before `slam`**, so `~Slam` (which
+  stops) runs first and the subscriptions are destroyed after their producers (a no-op, D-22);
+  an exception unwinding past them never hits D-07's terminate. The examples carry no guard.
+- **D-24 (backlog warning):** without pools a stalled observer grows memory silently, so an
+  `AsyncObserver` logs a "consumer is behind" warning once each time its queue size doubles
+  (above a small floor), naming the observer.
+- **D-25 (no drop-limits):** `LoopDetected` and `GlobalBAFinished` are published unbounded
+  (`make_shared`), like every other event; `max_events_in_flight`, `num_dropped_loops` and
+  `num_results_dropped` are removed. Both producers are paced by the Mapper's transactions and
+  the LoopCloser keeps `max_query_backlog`. This fixes TODO "A dropped result is not retried"
+  and makes the GBA-01 / Phase 3 "a dropped `GlobalBAFinished` is retried" criterion moot.
+- **D-26 (scope answers):** D-14 extended to LoopCloser/GlobalBA (see D-14); `PrintAtlas` in the
+  examples is replaced by a `MapFollower` subscribed before `Start()` and `Update()`d after
+  `Stop()`; `WorkerThread` stays a restartable low-level primitive (`RestartAfterStop` stays) and
+  the terminal Stopped rule lives in the components' lifecycle; `MapViewer` keeps "restart after
+  `Stop()` allowed" (D-10 does not apply to it), only its wiring changes (D-06, D-22).
 
 ### Releases
 - **D-21:** **#3 and #2 ship together** as one branch and one minor version bump (they are designed

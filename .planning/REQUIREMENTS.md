@@ -34,7 +34,7 @@ Source: `../voyah_jni/docs/voyah_slam_ownership_audit.md` (TODO "Ownership audit
 
 ### Global BA and Atlas (Phase 3)
 
-- [ ] **GBA-01**: Global BA is bounded and cheap enough to leave on: an iteration or size cap or time budget (stereo corridor1 runs took up to 85 s, interruptions land only at the next LM iteration, up to about 6 s, and `Slam::Stop()` waits 6-8 s); memory re-measured and reduced (about 1 MB per Frame; peak RSS 4.23 GB stereo with global BA against 2.28 GB without, measured before measurement sharing); a dropped `GlobalBAFinished` is retried; map loss after loop corrections is re-measured once look-alikes are rejected. Budgets: to be specced. *[REQ-global-ba-hardening]*
+- [ ] **GBA-01**: Global BA is bounded and cheap enough to leave on: an iteration or size cap or time budget (stereo corridor1 runs took up to 85 s, interruptions land only at the next LM iteration, up to about 6 s, and `Slam::Stop()` waits 6-8 s); memory re-measured and reduced (about 1 MB per Frame; peak RSS 4.23 GB stereo with global BA against 2.28 GB without, measured before measurement sharing); ~~a dropped `GlobalBAFinished` is retried~~ (moot: Phase 1 D-25 removes the drop, 2026-10-13); map loss after loop corrections is re-measured once look-alikes are rejected. Budgets: to be specced. *[REQ-global-ba-hardening]*
 - [ ] **ATLAS-01**: A Tracker lost in the active map can relocalize into an inactive Atlas map (today relocalization is active-map-only). Also in scope as TODO sub-items: MLPnP as an alternative, a candidate cap, a scale-distance gate in `SearchFromFrame`. Acceptance: to be specced. *[REQ-relocalization-into-inactive-maps]*
 
 ### Feature front-end and geometry (Phase 4)

@@ -570,7 +570,8 @@ BA" (smoke table there).
       kept one map. No loss was caused by a merge itself; with two runs per
       mode the effect is not separable from run-to-run loop variance.
       Re-measure once look-alikes are rejected (step 6), with more runs.
-- [ ] **A dropped result is not retried:** when the `GlobalBAFinished` pool
+- [ ] **A dropped result is not retried** (to be fixed by ownership audit #3:
+      decision 2026-10-13 removes the drop-limit): when the `GlobalBAFinished` pool
       (2) is exhausted, the map keeps the essential-graph correction until
       the next loop (counted in `num_results_dropped`). ORB-SLAM3 has no pool.
 - [ ] **The snapshot contract is enforced by documentation:**
