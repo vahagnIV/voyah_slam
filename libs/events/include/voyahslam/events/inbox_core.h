@@ -9,8 +9,13 @@
 #include <utility>
 #include <voyahslam/events/event_types.h>
 #include <voyahslam/events/wake_signal.h>
+#include <voyahslam/logging/logger.h>
 
 namespace voyahslam::events {
+
+// An inbox that reaches this many queued events logs a "consumer is behind"
+// warning, and again each time its size doubles (D-24).
+inline constexpr size_t kBacklogWarningFloor = 1024;
 
 // The shared state of one AsyncObserver: the queue of events, the count of
 // priority events in it, the observer's WakeSignal and a closed flag. It is held
@@ -22,6 +27,12 @@ namespace voyahslam::events {
 // An observer destroyed before its producer closes the core (Close()): queued
 // events are released and later pushes drop their event at once. Only a closed
 // inbox drops; a live, connected inbox never does (lossy delivery is EVT-01).
+//
+// Backlog visibility (D-24): without event pools a stalled consumer grows memory
+// silently, so Push logs one warning naming the observer when the queue first
+// reaches kBacklogWarningFloor events and again at each doubling (2048, 4096,
+// ...), never once per event. The threshold only grows: an inbox that is drained
+// and refilled warns again only past the last threshold.
 class InboxCore {
 public:
     explicit InboxCore(std::string name) : name_(std::move(name)) {}
@@ -39,7 +50,7 @@ public:
             pending_priority_.fetch_add(1, std::memory_order_acq_rel);
         }
         queue_.enqueue(std::move(event));
-        // BACKLOG-WARNING: the "consumer is behind" check goes here (D-24).
+        WarnIfBehind();
         wake_signal_.Notify();
     }
 
@@ -76,10 +87,22 @@ public:
     [[nodiscard]] const std::string& name() const { return name_; }
 
 private:
+    // Relaxed ordering is enough: the threshold only rate-limits a log line.
+    void WarnIfBehind() {
+        size_t threshold = warn_at_.load(std::memory_order_relaxed);
+        const size_t queued = queue_.size_approx();
+        if (queued >= threshold &&
+            warn_at_.compare_exchange_strong(threshold, threshold * 2, std::memory_order_relaxed)) {
+            Logger::CreateLogger("AsyncObserver")
+                ->warn("{}: consumer is behind, {} events queued", name_, queued);
+        }
+    }
+
     std::string name_;
     moodycamel::ConcurrentQueue<EventPtr> queue_;
     std::atomic<uint32_t> pending_priority_{0};
     std::atomic<bool> closed_{false};
+    std::atomic<size_t> warn_at_{kBacklogWarningFloor};
     WakeSignal wake_signal_;
 };
 
