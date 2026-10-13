@@ -14,7 +14,6 @@
 #include <voyahslam/global_ba/global_ba.h>
 #include <voyahslam/logging/logger.h>
 #include <voyahslam/map/map_id.h>
-#include <voyahslam/memory/object_pool.h>
 #include <voyahslam/tracking/atlas_replica.h>
 #include <voyahslam/tracking/map_replica.h>
 
@@ -28,8 +27,8 @@ namespace voyahslam::global_ba {
 // (the correction at epoch N). After the inbox is drained, one run optimizes
 // a snapshot of the replica at epoch N (RunGlobalBa's contract).
 // Transactions arriving meanwhile are applied, and so released, at each poll
-// of should_stop: the Mapper's transaction pool aborts when exhausted and a
-// run on a large map lasts seconds, so none may be held for a run.
+// of should_stop: a run on a large map lasts seconds, and holding the
+// transactions that arrive meanwhile would hold their memory for as long.
 // Interruption: Stop(), or an arrived transaction that is a newer correction
 // of the run's map (a larger map epoch with a loop edge), recreates it
 // (new_map), or leaves it not active (a new active map, or none after the
@@ -44,7 +43,7 @@ namespace voyahslam::global_ba {
 template <typename TFeatureExtractor>
 class GlobalBundleAdjuster : public events::EventNode {
 public:
-    explicit GlobalBundleAdjuster(GlobalBaOptions options = {}) : options_(options) {}
+    explicit GlobalBundleAdjuster(GlobalBaOptions options = {}) : EventNode("GlobalBA"), options_(options) {}
     // Stops the worker before any member it uses is destroyed.
     ~GlobalBundleAdjuster();
 
@@ -71,8 +70,6 @@ public:
     // Runs cut short by Stop(), an arrived newer correction or a change of
     // the active map.
     [[nodiscard]] size_t num_runs_interrupted() const { return num_runs_interrupted_; }
-    // Results dropped because max_events_in_flight GlobalBAFinished were in use.
-    [[nodiscard]] size_t num_results_dropped() const { return num_results_dropped_; }
     // True from Stop() until the next Start(); any thread.
     [[nodiscard]] bool stop_requested() const { return stop_requested_.load(std::memory_order_acquire); }
 
@@ -110,16 +107,9 @@ private:
     bool run_pending_ = false;
     size_t num_runs_started_ = 0;
     size_t num_runs_interrupted_ = 0;
-    size_t num_results_dropped_ = 0;
     std::function<void()> run_hook_;
     std::function<void()> poll_hook_;
     std::function<void()> publish_hook_;
-
-    // Published with TryCreate: a result finished while every event is in
-    // flight (a Mapper backlog) is dropped and counted; the map keeps its
-    // essential-graph correction until the next one.
-    memory::ObjectPool<events::GlobalBAFinished, memory::ThreadSafePolicy> result_pool_{
-        options_.max_events_in_flight};
 
     CLASS_LOGGER(GlobalBundleAdjuster);
 

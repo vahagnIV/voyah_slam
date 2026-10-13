@@ -18,10 +18,12 @@ using detail::ToSim3;
 template <typename TFeatureExtractor>
 LoopCloser<TFeatureExtractor>::~LoopCloser() {
     worker_.Stop();
+    EndRun();
 }
 
 template <typename TFeatureExtractor>
 void LoopCloser<TFeatureExtractor>::Start() {
+    BeginRun();
     worker_.Start([this] { return ProcessPending(); });
 }
 
@@ -29,22 +31,23 @@ template <typename TFeatureExtractor>
 void LoopCloser<TFeatureExtractor>::Stop() {
     const bool was_running = worker_.running();
     worker_.Stop();
+    EndRun();
     if (was_running && query_stats_.detected > 0) {  // once per run
-        log_->info("Loop detection: {} queries, {:.1f} ms mean, {:.1f} ms max; {} queries and {} loops dropped",
+        log_->info("Loop detection: {} queries, {:.1f} ms mean, {:.1f} ms max; {} queries dropped",
                    query_stats_.detected,
                    1e3 * query_stats_.total_seconds / static_cast<double>(query_stats_.detected),
-                   1e3 * query_stats_.max_seconds, query_stats_.dropped, num_dropped_loops_);
+                   1e3 * query_stats_.max_seconds, query_stats_.dropped);
     }
 }
 
 template <typename TFeatureExtractor>
 bool LoopCloser<TFeatureExtractor>::ProcessPending() {
     // Every event is applied on receipt and so released at once: however far
-    // detection lags, it holds none of the Mapper's pooled transactions. Only
+    // detection lags, it holds none of the Mapper's transactions. Only
     // the queries (Frame ids) wait.
     bool processed = false;
-    while (const events::Event* event = inbox_listener_.GetNextEvent()) {
-        processed = true;  // acknowledged by the next GetNextEvent()
+    while (events::EventPtr event = inbox_listener_.GetNextEvent()) {
+        processed = true;  // released at the end of this iteration
         if (vocabulary_ && options_.enabled) {
             ApplyEvent(*event);
         }
@@ -244,13 +247,7 @@ void LoopCloser<TFeatureExtractor>::PublishLoop(map::FrameId query, const Pendin
     if (!IsValid(S_query_match)) {
         return;
     }
-    auto* event = loop_detected_pool_.TryCreate();
-    if (event == nullptr) {
-        ++num_dropped_loops_;
-        log_->warn("Loop of Frame {} with Frame {} dropped: {} LoopDetected events in flight", query.value,
-                   region.match_frame.value, options_.max_events_in_flight);
-        return;
-    }
+    auto event = std::make_shared<events::LoopDetected>();
     event->map_id = map_replica().map_id();
     event->query_map_id = map_replica().map_id();
     event->match_map_id = region.match_map;
@@ -282,7 +279,7 @@ void LoopCloser<TFeatureExtractor>::PublishLoop(map::FrameId query, const Pendin
                    query.value, map_replica().map_id().value, region.match_frame.value, region.match_map.value,
                    S_query_match.scale, event->matched_points.size());
     }
-    observable_.Notify(event);
+    observable_.Notify(std::move(event));
 }
 
 INSTANTIATE_CLASS(LoopCloser)

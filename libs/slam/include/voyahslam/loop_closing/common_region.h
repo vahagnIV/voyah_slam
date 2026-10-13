@@ -65,8 +65,8 @@ struct LoopCloserOptions {
     // Queries (Frame ids) waiting for detection; beyond it the oldest are
     // dropped. Not ORB-SLAM3, whose keyframe queue is unbounded: the
     // LoopCloser applies each MapTransaction on receipt so that a slow
-    // detector never holds the Mapper's pooled events, and only the queries
-    // wait.
+    // detector never holds the Mapper's transactions, and only the queries
+    // wait. This is also the back-pressure that bounds the loops it publishes.
     size_t max_query_backlog = 8;
     // SolveSim3Ransac (Sim3Solver::SetRansacParameters, th2 9.21).
     int ransac_iterations = 300;
@@ -92,9 +92,6 @@ struct LoopCloserOptions {
     double level_scale = 1.2;
     // Level scale, number of levels and ray-angle limit of the projections.
     features::ProjectionMatcherOptions matcher;
-    // LoopDetected events in flight; a loop found while all are in use is
-    // dropped (the next query finds it again).
-    size_t max_events_in_flight = 16;
 };
 
 // The normal gate's measurement over matched pairs: pairs with both normals

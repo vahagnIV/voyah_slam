@@ -21,8 +21,6 @@ struct GlobalBaOptions {
     bool enabled = true;
     // LM iterations of the single plain stage (ORB-SLAM3 runs 10).
     int iterations = 10;
-    // The GlobalBAFinished pool.
-    size_t max_events_in_flight = 2;
     // Observation sigma at pyramid level 0 and the level scale: sigma =
     // sigma_px * level_scale^level (the defaults of MapperOptions::fuse).
     double sigma_px = 1.0;
