@@ -59,6 +59,38 @@ Filled by the planner per task; requirement → test map (from RESEARCH.md "Vali
 
 *Status: ⬜ pending · ✅ green · ❌ red · ⚠️ flaky*
 
+### Per-task map (filled by the planner, 2026-10-13)
+
+Every task's `<verify>` carries an `<automated>` command with a `<fails_when>`; this is the index.
+
+| Plan / Task | Requirement | Automated command (abridged) | Status |
+|-------------|-------------|------------------------------|--------|
+| 01-01 T1 (tracer) | OWN-01, OWN-02 | `--target voyah_events_tests` then the whole binary (EventLifetimeTest + ported tests) | ⬜ |
+| 01-01 T2 | OWN-02 | `voyah_events_tests --gtest_filter='DestructionOrderTest/*:SubscriptionTest.*:SubscriptionDeathTest.*:AsyncObserverTest.*'`; TSan (`setarch -R`, `-*DeathTest*`); ASan | ⬜ |
+| 01-02 T1..T3 | OWN-01, OWN-02 | per-object `make -C .../libs/slam src/...cpp.o`; `--target voyah_slam`; `--target voyahviz monocular_full_slam binocular_full_slam`; both apps run 40 corridor1 frames (`--rate=0 --max-frames=40`, "tracker state:" line, no terminate) | ⬜ |
+| 01-03 T1, T2 | OWN-01, OWN-02 | per-object `make -C .../libs/slam/tests tracking/... mapping/mapper_test.cpp.o`; assertion-preservation check (EXPECT_/ASSERT_ multiset per file equals `git merge-base HEAD master`) | ⬜ |
+| 01-04 T1 | OWN-01 (D-25) | per-object build of loop/GBA/replica/matcher tests; assertion-preservation check (the two replaced drop tests set aside) | ⬜ |
+| 01-04 T2 | OWN-02 | `voyahviz_tests` (whole binary); assertion-preservation check | ⬜ |
+| 01-05 T1 | OWN-01, OWN-02 | `voyah_integration_tests --gtest_filter='SlamTest.EventsOutliveSlam:SlamTest.StuckObserver*:SlamTest.ObserverDestroyed*:SlamTest.Unwind*:SlamTest.AddObserverWhileRunningThrows'` + TSan; assertion-preservation check on slam_test.cpp (seven named tests set aside) | ⬜ |
+| 01-05 T2 | OWN-01 | `--target check_all`; negated `git grep` for pool symbols | ⬜ |
+| 01-06 T1, T2 | OWN-01, OWN-02 | DESIGN/version greps; `--target check` | ⬜ |
+| 01-07 T1 | OWN-01, OWN-02 | check_all, apps 40-frame smoke, TSan x3, ASan, removed-symbol grep, three `conan create` | ⬜ |
+| 01-08 T1 (tracer), T2 | OWN-03 | `voyah_slam_tests --gtest_filter='MapFollowerTest.*'`, `voyah_integration_tests --gtest_filter='SlamTest.MapFollowerMirrorsMapper'`; TSan | ⬜ |
+| 01-09 T1, T2 | OWN-03 | `ThreadAffinityTest.*` (concept checks incl. the LoopCloser stats accessors), `check_all`; assertion-preservation check; negated `git grep` for LoopCloser stats calls outside its TestAccess | ⬜ |
+| 01-10 T1, T2 | OWN-03 | `check_all`; assertion-preservation check; DESIGN/version greps | ⬜ |
+| 01-11 T1 | OWN-03 | release gates + `ThreadAffinityTest.*:MapFollowerTest.*` | ⬜ |
+| 01-12 T1 (tracer), T2 | OWN-04 | `LifecycleTest.*`, `TrackerTest.Track*`, `check_all`, TSan `SlamTest.Lifecycle*` | ⬜ |
+| 01-13 T1, T2 | OWN-04 | DESIGN/version greps and the D-12 wording grep in `.planning/ROADMAP.md` / `REQUIREMENTS.md`; TSan `--gtest_repeat=50` on LifecycleTest and SlamTest.Lifecycle* | ⬜ |
+| 01-14 T1 | OWN-04 | release gates + `LifecycleTest.*` | ⬜ |
+| 01-15 T1 (tracer) | OWN-05 | `voyah_algs_tests --gtest_filter='OrbExtractorWorkspaceTest.*'`, `voyah_algs_dataset_tests --gtest_filter='OrbExtractorGoldenTest.*'` (not SKIPPED), TSan | ⬜ |
+| 01-16 T1 | OWN-05 | release gates + golden digests | ⬜ |
+| 01-17 T1 (tracer), T2 | OWN-06 | `voyah_common_tests --gtest_filter='LoggerTest.*'` + TSan | ⬜ |
+| 01-18 T1 | OWN-06 | release gates + LoggerTest | ⬜ |
+| 01-19 T1 (tracer), T2 | OWN-07 | `voyah_common_tests --gtest_filter='ImageTest.*'` + ASan + golden digests | ⬜ |
+| 01-20 T1 | OWN-07 | release gates + ImageTest under ASan | ⬜ |
+
+Notes: until plan 01-05 the `voyah_slam` test binaries do not link (expected), so R1 plans 01-02..01-04 verify per object file; `check` / `check_all` build every test binary and are used from 01-05 on. Plans run sequentially in the main working tree (one in-tree build directory and one release branch at a time).
+
 ---
 
 ## Wave 0 Requirements
