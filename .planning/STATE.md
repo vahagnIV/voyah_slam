@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: API Ownership and Lifetime Contracts
 status: executing
-stopped_at: Completed 01-12-PLAN.md
-last_updated: "2026-10-14T13:16:57.431Z"
+stopped_at: Completed 01-13-PLAN.md
+last_updated: "2026-10-14T13:24:39.735Z"
 last_activity: 2026-10-13
 last_activity_desc: Phase 01 execution started
-state_head: 66f449332e00f90731a2ef984059d00e94a7f3e0
+state_head: 8f1bbc69947035c7ea964d2508c678cff3f5c276
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 20
-  completed_plans: 12
+  completed_plans: 13
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 ## Current Position
 
 Phase: 01 (API Ownership and Lifetime Contracts) — EXECUTING
-Plan: 13 of 20
+Plan: 14 of 20
 Status: Ready to execute
 Last activity: 2026-10-13 — Phase 01 execution started
 
@@ -68,6 +68,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P10 | 14 min | 2 tasks | 12 files |
 | Phase 01 P11 | gates x2 + regression fix | 3 tasks | 0 files |
 | Phase 01 P12 | 80 min | 2 tasks | 20 files |
+| Phase 01 P13 | 25 min | 2 tasks | 8 files |
 
 ## Accumulated Context
 
@@ -98,6 +99,8 @@ Recent decisions affecting current work:
 - [Phase 01]: [01-11] MapFollower defined in the library (INSTANTIATE_CLASS) so -O0 consumers do not override optimized library code; binocular app gate bar: >=36 FrameTracked, >=3 Frames on corridor1 40 frames
 - [Phase 01]: 01-12: GlobalBA stop_requested_ is not reset in Start() (Stopped is terminal); it is raised inside the stop lambda and restored if a self-stop is refused
 - [Phase 01]: 01-12: a Slam::Stop() refused by a component's own thread restores the Slam state and rethrows; a later Stop() from another thread completes it
+- [Phase 01]: Stop() then Start() is not supported: Stopped is terminal for Slam and its components, a new session is a new Slam; WorkerThread and MapViewer stay restartable (01-13)
+- [Phase 01]: Slam::Stop() from a component's own thread is a documented gap (DESIGN 4, TODO), options left for the user; package version 0.6.0 (01-13)
 
 ### Pending Todos
 
@@ -125,6 +128,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-14T13:16:57.406Z
-Stopped at: Completed 01-12-PLAN.md
+Last session: 2026-10-14T13:24:39.709Z
+Stopped at: Completed 01-13-PLAN.md
 Resume file: None

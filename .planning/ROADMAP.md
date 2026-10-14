@@ -54,7 +54,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   5. Two threads may call `DetectAndExtract` concurrently, or the API makes that impossible to do by mistake; `Logger::Initialize` also re-targets loggers created before it; a default-constructed `Image` is empty and view operations honour `offset_` / `stride_`.
   6. Each item has a DESIGN decisions-log entry, `check_all` is green, ThreadSanitizer is clean on the event and Slam tests, and the Conan packages (linux-gcc13 static and shared, android-arm64) are recreated with a version the voyah_jni session is told about.
 
-**Plans**: 12/20 plans executed (six releases, sequential; each release ends with the user's "merge and push")
+**Plans**: 13/20 plans executed (six releases, sequential; each release ends with the user's "merge and push")
 
 Plans:
 **Wave 1**
@@ -94,7 +94,7 @@ Plans:
 - [x] 01-12-PLAN.md — R3 tracer: CAS lifecycle in EventNode and the Tracker; Mapper/LoopCloser/GlobalBA/Slam
 
 **Wave 13** *(blocked on Wave 12 completion)*
-- [ ] 01-13-PLAN.md — R3: lifecycle docs (Stopped is terminal), version 0.6.0, TSan stress
+- [x] 01-13-PLAN.md — R3: lifecycle docs (Stopped is terminal), version 0.6.0, TSan stress
 
 **Wave 14** *(blocked on Wave 13 completion)*
 - [ ] 01-14-PLAN.md — R3 release gates, checkpoint, merge (0.6.0)
@@ -218,7 +218,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 (decimal 
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. API Ownership and Lifetime Contracts | 12/20 | In Progress (audit #1, #4 merged before GSD) | - |
+| 1. API Ownership and Lifetime Contracts | 13/20 | In Progress (audit #1, #4 merged before GSD) | - |
 | 2. Loop-Closing False-Positive Rejection | 0/TBD | Not started | - |
 | 3. Multi-Map and Global BA Hardening | 0/TBD | Not started | - |
 | 4. Feature Front-End and Geometry Robustness | 0/TBD | Not started | - |
