@@ -8,7 +8,7 @@
 > `docs/superpowers/specs/` and `docs/superpowers/plans/`. When they disagree
 > with this document, **this document wins** — fix the spec or note the change here.
 
-Last updated: 2026-10-13
+Last updated: 2026-10-14
 
 ---
 
@@ -164,7 +164,8 @@ The Mapper's graph and the replicas are thread-affine (§2: no locks on map
 data), so an app must not read them from its own thread; the accessors that
 did are private behind `*TestAccess` structs (decisions log, "Ownership audit
 #5 implemented"). The supported way to read the map is
-`mapping::MapFollower<FE>` (`mapping/map_follower.h`, header-only): an inbox
+`mapping::MapFollower<FE>` (`mapping/map_follower.h`, defined in
+`libs/slam/src/mapping/map_follower.cpp` with `INSTANTIATE_CLASS`): an inbox
 plus a private `tracking::AtlasReplica` that the app brings up to date by
 calling `Update()` on its own thread. `Update()` applies every pending
 `MapTransaction` in order and releases other events; `Snapshot()` copies the
@@ -172,7 +173,7 @@ Atlas into a `mapping::MapSnapshot` (`mapping/map_snapshot.h`) and returns it as
 `std::shared_ptr<const MapSnapshot>`.
 
 - **One thread.** `Update()`, `atlas()` and `Snapshot()` belong to the thread
-  of the first `Update()`, asserted in debug builds; a `Snapshot()` before any
+  of the first `Update()`, asserted in debug builds of the library; a `Snapshot()` before any
   `Update()` is unrestricted. A snapshot is immutable plain data, so any thread
   may hold and read it, and it outlives the follower.
 - **Wiring (D-05).** `events::Subscription s = slam.mapper().AddObserver(follower.inbox());`
@@ -188,6 +189,26 @@ Atlas into a `mapping::MapSnapshot` (`mapping/map_snapshot.h`) and returns it as
   so its memory is that of the Tracker's, and a `Snapshot()` is O(map). A
   follower that is never updated lets its inbox grow; the "consumer is behind"
   warning names it "MapFollower".
+- **Defined in the library, not in its header (2026-10-14).** Every member,
+  trivial accessors included, is out of line and instantiated in `voyah_slam`,
+  so an app that uses the follower instantiates none of the replica code,
+  whatever its own optimization level. The first, header-only version made
+  each app instantiate `AtlasReplica` / `MapReplica` and with them Eigen's
+  descriptor copy (`Matrix<uint8_t, 32, 1>` from a descriptor column), which
+  `MatchStereo` calls out of line about two million times per stereo frame. In
+  the Debug tree the apps build at `-O0` and the libraries at `-O2`; with
+  static libraries and the app object first on the link line the linker kept
+  the app's `-O0` copy of that function for the library's calls too, so the
+  binocular Tracker took 0.9–1.1 s per frame instead of 0.25 s (corridor1,
+  `--rate=0 --max-frames=40`: 10–12 of 40 frames, 1 Frame, instead of 39 and
+  3). The same holds for any consumer built with less optimization than the
+  library (a Debug JNI binding against a Release package). Guarded by the
+  `BuildCheck.MapFollowerAddsNoLibraryInstantiations` test
+  (`libs/slam/tests/build_checks/`): an app-shaped consumer built at `-O0`,
+  with and without a follower, compared with `nm`; it fails when the follower
+  adds a weak function the libraries also define. `atlas()` exposes the
+  replica: calling its accessors instantiates them in the caller, so apps read
+  a `Snapshot()`.
 - **Deferred.** `voyahslam::Session` (the facade for the JNI binding, which
   would own a follower) and the viewer reading from a follower; both wait for
   the JNI work.
@@ -2967,6 +2988,14 @@ profiles/                   linux-gcc13 (default + gnu20), android-arm64,
   four libraries needs no `find_dependency(OpenCV)`; only `voyahviz` does.
 - Public headers included as `#include <voyahslam/...>`.
 - Template classes header-only; non-template classes have a `.cpp` in `libs/<lib>/src/` mirroring `libs/<lib>/include/`.
+  Exception: a template an **app** drives whose implementation is library
+  machinery (the components, `Slam`, `MapFollower`, not plain data such as
+  the measurements) is declared in its header and defined in `src/` with
+  `INSTANTIATE_CLASS`, so the app's translation unit, possibly built at
+  `-O0`, instantiates none of that code. A function both the app and the
+  library instantiate exists twice and the linker may give the library the
+  app's unoptimized copy (2026-10-14, "Map Follower" in §4;
+  `BuildCheck.MapFollowerAddsNoLibraryInstantiations`).
 - `[[nodiscard]]` on const accessors.
 - Move semantics throughout.
 - Templates over the feature extractor are explicitly instantiated with
@@ -3252,6 +3281,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-13 | **Package version 0.4.0** (`conanfile.py`, `project()`; SOVERSION 0.4). API breaks for consumers (the voyah_jni binding): events are `EventPtr` (`shared_ptr<const Event>`) instead of `Event*` and publishers use `make_shared` + `Notify(std::move(e))`; `AddObserver` / `AddSyncObserver` / `ConnectAsync` / `ConnectSync` return a `[[nodiscard]]` `Subscription`; `SetWakeSignal` is removed (wait on `AsyncObserver::wake_signal()`); `ObjectPool`, `Recyclable`, `SyncPolicy` and the pool options, overflow accessors, `max_events_in_flight`, `num_dropped_loops()` and `num_results_dropped()` are removed; `voyahslam::UsageError` is thrown for invalid call sequences (map it to `IllegalStateException`); connecting or resetting a `Subscription` while the producer runs is an error. | Every audit item is an API break for the binding; a public API change gets a new minor version while 0.x (as 0.2.0 and 0.3.0). |
 | 2026-10-14 | **Ownership audit #5 implemented (Release R2, branch `refactor/thread-affinity`; Phase 1 CONTEXT D-13, D-14, D-26).** `mapping::MapFollower<FE>` (an inbox and a private `AtlasReplica`, `Update()` on the caller's thread, one-thread rule asserted in debug builds) and the immutable `std::shared_ptr<const MapSnapshot>` (per live map: id, epoch, alive point ids and world positions, Frame ids and `T_cw`; the active map; the transaction count) are the supported cross-thread map read path; see "Map Follower" in §4. The thread-affine accessors are private behind friend `*TestAccess` structs, all defined in `libs/slam/tests/test_access.h` (one definition per test binary): `Tracker::atlas()`, `map_replica()`, `last_matches()` (`TrackerTestAccess`); `LoopCloser::atlas()`, `map_replica()` and the five stats accessors (`LoopCloserTestAccess`); `GlobalBundleAdjuster::atlas()`, `map_replica()` (`GlobalBundleAdjusterTestAccess`); and the Mapper's twelve: `covisibility()`, `Reference()`, `NumVisible()`, `NumFound()`, `last_local_ba()`, `BowVectorOf()`, `Parent()`, `LoopEdges()`, `KeyFrame()`, `map_ids()`, `active_map()`, `num_keyframes(MapId)` (`MapperTestAccess`, which keeps the existing graph-edit helpers). `Mapper::num_keyframes()` with no argument and the other atomic counters stay public. GlobalBA's `num_runs_started_` / `num_runs_interrupted_` are `std::atomic<size_t>`. `ThreadAffinityTest` holds a C++20 `concept` plus `static_assert(!Concept<T>)` per restricted accessor, so making one public again fails the build. **D-26 reading:** the LoopCloser's worker-written stats (the pending-region counts, the vector-bearing `CommonRegionStats`, `QueryStats`) are the same hazard class as D-14's accessors and get the same treatment (private behind `LoopCloserTestAccess`; only tests read them, and the `Stop()` summary log reports the query figures), while counters an app may read are atomic (the GlobalBA run counts), so every public LoopCloser/GlobalBA accessor is atomic or a lifecycle/driver call. Both example apps print the Atlas from a follower snapshot taken after `Stop()`; `voyahslam::Session` and the viewer on a follower are deferred (the JNI work). About 250 test call sites (about 100 Mapper, about 150 Tracker, LoopCloser and GlobalBA) were rewritten to the access structs with every assertion unchanged (the per-file multiset of `EXPECT_` / `ASSERT_` macros equals the branch base's). | An app that reads a map structure the Mapper is writing races with it (§2); comments did not stop that, types do. A follower keeps the Mapper the only writer, costs a full replica per reader and an O(map) copy per snapshot, and needs no lock. The stats accessors return worker-written vectors and counters read without synchronization, so they are test-only like D-14's; making them atomic would need a copy-out of vectors per read for no consumer. |
 | 2026-10-14 | **Package version 0.5.0** (`conanfile.py`, `project()`; SOVERSION 0.5). API breaks for consumers (the voyah_jni binding): `Tracker::atlas()` / `map_replica()` / `last_matches()`, `LoopCloser::atlas()` / `map_replica()` and its stats accessors (`num_coincidences()`, `num_merge_coincidences()`, `last_stats()`, `last_merge_stats()`, `query_stats()`), `GlobalBundleAdjuster::atlas()` / `map_replica()` and the twelve Mapper-thread accessors are private (use `mapping::MapFollower` / `MapSnapshot`); `GlobalBundleAdjuster::num_runs_started()` / `num_runs_interrupted()` keep their signatures and are now atomic; new public `mapping::MapFollower` and `mapping::MapSnapshot`. | Every audit item is an API break for the binding; a public API change gets a new minor version while 0.x (as 0.2.0, 0.3.0 and 0.4.0). |
+| 2026-10-14 | **`MapFollower` is defined in the library, not in its header** (regression fix on R2, before release). Its members, trivial accessors included, are out of line in `libs/slam/src/mapping/map_follower.cpp` and instantiated with `INSTANTIATE_CLASS`; its API, threading and wiring contract are unchanged. New unit test `BuildCheck.MapFollowerAddsNoLibraryInstantiations` (`libs/slam/tests/build_checks/`): two `-O0` objects of an app-shaped consumer (`Slam`, a subscription on the Mapper, `Update()` + `Snapshot()` read like `PrintAtlas`), with and without the follower, compared with `nm`; it fails when the follower variant defines a weak function (nm `W`) that `voyah_slam` / `voyah_algs` / `voyah_events` / `voyah_common` define and the baseline does not (66 at the header-only version, 0 now). §7 "Structure" gains the rule: a template an app uses is defined in `src/`. | When the apps subscribed a header-only follower (fd43a13), `binocular_full_slam` on corridor1 (`--rate=0 --max-frames=40`, Debug tree) tracked 10–12 of 40 frames and built 1 Frame instead of 39 and 3; the follower did nothing until after `Stop()`. Cause, measured: the app TU (`-O0`) instantiated the replica code and with it Eigen's `call_dense_assignment_loop<Matrix<uint8_t, 32, 1>, Block<...>>`; `tracker.cpp.o` (`-O2`) calls that function out of line in `MatchStereo` (each right descriptor copied, ~1500 × 1500 per frame), `SearchByBoW`, `SearchFromLocalMap`, `SearchFromLastFrame`; with static libraries and the app object first, the binary held the app's 0x116-byte `-O0` copy, not the library's 0xe6-byte one. Same source with only the app TU at `-O2`: 39 frames; follower code without a subscription: 11; an undrained plain inbox on the Mapper without follower code: 38 (so not fan-out or event retention). After the fix the binary holds the library's copy, 39 of 40 frames, 3 Frames, 0.25–0.27 s per frame (3 runs). |
 
 ## 9. Open Questions
 
