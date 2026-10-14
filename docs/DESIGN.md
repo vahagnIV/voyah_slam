@@ -955,6 +955,39 @@ auto features2 = extractor.DetectAndExtract(image, n);             // allocates 
   The `Workspace` class is declared in `voyah_common` with the extractor
   (placement rule, §7).
 
+## Logging (ownership audit #8, 0.8.0)
+
+`voyahslam::Logger` (`voyah_common`, `logging/logger.h`) is the process-wide logging
+setup. Before 0.8.0 each logger copied the sink list at the moment it was created,
+so a component constructed before `Logger::Initialize` kept writing to stdout, the
+sink vector and the level were unprotected statics, and two threads creating the
+same name could make `spdlog::register_logger` throw.
+
+- **One shared sink.** Every logger made by `Logger::CreateLogger` (so every
+  `CLASS_LOGGER`) writes through a single `spdlog::sinks::dist_sink_mt` held in a
+  function-local static of `logger.cpp`. `Logger::Initialize(sinks)` replaces that
+  sink's children with `set_sinks` (which takes the sink's own mutex), so it may run
+  before or after any component is constructed, any number of times, and re-targets
+  every existing and future logger. An empty vector restores a single coloured stdout
+  sink. A static-initialisation-order problem cannot occur (function-local statics).
+- **Level.** `Logger::SetLevel` stores a function-local `std::atomic` level and calls
+  `spdlog::set_level`, which applies it to every registered logger; loggers created
+  later start at it (default: info).
+- **Creation.** `CreateLogger` holds a function-local mutex across `spdlog::get` and
+  `register_logger`, so concurrent creation of one name returns one logger and never
+  throws. This is control plane (a component constructor), never on the map or event
+  path, so principle 1 (no locks on map data) is not affected.
+- **Cost.** One extra indirection and one mutex per log call (the dist sink's, on top
+  of the child sink's own). The Tracker, Mapper and `OptimizePose` log a debug line per
+  frame; the corridor1 40-frame binocular run was measured before and after
+  (39 FrameTracked, 3 Frames, 777 points both times; plan summary 01-17).
+- **Android.** The binding passes spdlog's `android_sink_mt` to `Initialize`; the
+  logcat default sink stays in PLAT-01 (Phase 5), not here (CONTEXT D-19).
+- **Verified by** `LoggerTest.*` (6: a component created before `Initialize`, a second
+  `Initialize`, an empty `Initialize`, `SetLevel` on existing and later loggers,
+  concurrent creation of one name, concurrent logging with `Initialize`); the
+  concurrent tests are clean under ThreadSanitizer.
+
 ## FAST Corner Detector (`features/fast.h`, `voyah_algs`)
 
 **Since 2026-10-11** the ORB extractor detects corners with our own port of
@@ -3018,7 +3051,7 @@ libs/
 cmake/VoyahTests.cmake      voyah_add_test_binary, voyah_optimize_target, check / check_all
 cmake/voyahslamConfig.cmake.in  installed CMake package config (find_dependency)
 vizualization/              voyahviz (+ voyahviz_tests)
-conanfile.py                package recipe voyahslam/0.7.0 (also the dev installs)
+conanfile.py                package recipe voyahslam/0.8.0 (also the dev installs)
 test_package/               conan create's consumer test (links voyahslam::voyahslam)
 profiles/                   linux-gcc13 (default + gnu20), android-arm64,
                             settings_user.yml (clang 21)
@@ -3047,7 +3080,7 @@ profiles/                   linux-gcc13 (default + gnu20), android-arm64,
   `transitive_headers` (spdlog also `transitive_libs`); g2o and stb are not
   (g2o's libraries still reach static consumers' link lines, never its
   include paths). `shared=True` also makes spdlog and fmt shared; shared
-  libraries get `VERSION` / `SOVERSION` (0.7) and an `$ORIGIN` install
+  libraries get `VERSION` / `SOVERSION` (0.8) and an `$ORIGIN` install
   runpath (not on Apple).
 - `validate()` requires `compiler.cppstd` >= 20 (public headers are C++20;
   `profiles/linux-gcc13` = default + `gnu20` + Release, used by the dev
@@ -3402,6 +3435,8 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-14 | **Package version 0.6.0** (`conanfile.py`, `project()`; SOVERSION 0.6). Behavior breaks for consumers (the voyah_jni binding): `Start()` twice, `Start()` after `Stop()`, `Tracker::Track()` after `Stop()` and `Stop()` on a component's own worker thread throw `voyahslam::UsageError` (map it to `IllegalStateException`); `Stop()` before `Start()` makes the component and `Slam` terminal (a later `Start()` throws); `Start()` / `Stop()` are safe from any thread, so `close()` / GC need no external ordering; `Slam::Stop()` called from a component's thread or an event callback throws `UsageError` and changes nothing, and destroying the `Slam` there terminates; `EventNode::BeginRun()` / `EndRun()` are removed (they were protected). | Every audit item is a behavior or API break for the binding; a public API change gets a new minor version while 0.x (as 0.2.0 to 0.5.0). |
 | 2026-10-14 | **Ownership audit #7 implemented (Release R4, branch `refactor/extractor-workspace`; Phase 1 CONTEXT D-15..D-17).** `OrbFeatureExtractor::DetectAndExtract(image, n, Workspace& out_workspace) const`; the pyramid moves from a `mutable` member into the caller-owned `OrbFeatureExtractor::Workspace` (not thread-safe, one per extraction thread, re-initialises on a new image size, level count or scale factor). The allocating `DetectAndExtract(image, n) const` stays for tests and one-offs. The extractor has no mutable member, so one extractor may be shared by threads. `orb::ImagePyramid` gets a `const operator[]`, `Width()`, `Height()`, `Fits()` and a re-entrant `Initialize()`. The mono example holds one `Workspace`, the stereo example two. Output unchanged (golden digests not re-recorded). | Chosen over making `DetectAndExtract` non-const (still one extractor per thread, and a const extractor in shared code would stop compiling) and over `thread_local` storage (hidden state per thread, never freed with the extractor, unusable from JNI threads that come and go): the caller already owns one thread per extraction loop, so it owns the scratch. Per-frame pyramid allocation (01-RESEARCH Pitfall 14) is avoided by reuse. Supersedes the `mutable` pyramid of the 2026-10-04 levels work. |
 | 2026-10-14 | **Package version 0.7.0** (`conanfile.py`, `project()`; SOVERSION 0.7). API change for consumers (the voyah_jni binding): `DetectAndExtract(image, n, Workspace&)` is the supported way to extract in a loop or from several threads (hold one `Workspace` per thread); the two-argument overload is unchanged but allocates a pyramid per call. | A public API addition with a documented concurrency contract gets a new minor version while 0.x (as 0.2.0 to 0.6.0). |
+| 2026-10-14 | **Ownership audit #8 implemented (Release R5, branch `fix/logger-init-order`; Phase 1 CONTEXT D-18, D-19, D-21).** All loggers made by `Logger::CreateLogger` write through one `spdlog::sinks::dist_sink_mt` (function-local static in `logger.cpp`); `Logger::Initialize(sinks)` replaces its children with `set_sinks` (empty vector: one stdout colour sink) and so re-targets loggers created before it; the level is a function-local `std::atomic`; `CreateLogger` is serialized by a function-local mutex. The `Logger` class lost its private static sink vector and level; the public API and `CLASS_LOGGER` are unchanged. The Android logcat default sink is not added (stays in PLAT-01). | A shared distributing sink fixes the order dependence at its root (one sink to re-target) and uses spdlog's own mutex, instead of walking the registry to rewrite each logger's sink vector (a race with logging threads, and a second list to keep in sync). Cost is one indirection and one mutex per log call, measured on the per-frame debug lines (plan summary 01-17). |
+| 2026-10-14 | **Package version 0.8.0** (`conanfile.py`, `project()`; SOVERSION 0.8). Behavior change for consumers (the voyah_jni binding): `Logger::Initialize` may be called at any time and also re-targets components that already exist, so the binding no longer has to call it before creating a `Slam`; `Logger::SetLevel` and logger creation are thread-safe. No signature changes. | A public behavior change with a concurrency contract gets a new minor version while 0.x (as 0.2.0 to 0.7.0). |
 
 ## 9. Open Questions
 
@@ -3675,7 +3710,12 @@ branch → review → merge to `master`. Update this document at the end.
   `refactor/event-ownership`, merge pending); #5 done (0.5.0, branch
   `refactor/thread-affinity`, merge pending); #6 done (0.6.0, branch
   `refactor/lifecycle`, merged and pushed); #7 done (0.7.0, branch
-  `refactor/extractor-workspace`, merge pending); next #8, #9.
+  `refactor/extractor-workspace`, merged and pushed); #8 done (0.8.0, branch
+  `fix/logger-init-order`, merge pending); next #9.
+- Test suite (2026-10-14, ownership audit #8, 0.8.0): 838 tests (798
+  `unit`, 39 `integration`, 1 `vocabulary`, skipped without ORBvoc);
+  `check_all` about 30 s. `LoggerTest.*` (6) are new; ThreadSanitizer was clean
+  on them (plan summary 01-17).
 - Test suite (2026-10-14, ownership audit #7, 0.7.0): 832 tests (792
   `unit`, 39 `integration`, 1 `vocabulary`, skipped without ORBvoc);
   `check_all` about 30 s. `OrbExtractorWorkspaceTest.*` (5) are new;
