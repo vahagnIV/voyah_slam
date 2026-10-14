@@ -8,16 +8,153 @@
 // per test binary in this header. Tests that drive ProcessPending()
 // synchronously (never concurrently with a running worker) read through it.
 
+#include <voyahslam/bow/bow_vector.h>
+#include <voyahslam/geometry/sim3.h>
 #include <voyahslam/global_ba/global_bundle_adjuster.h>
 #include <voyahslam/loop_closing/common_region.h>
 #include <voyahslam/loop_closing/loop_closer.h>
+#include <voyahslam/mapping/mapper.h>
 #include <voyahslam/tracking/atlas_replica.h>
 #include <voyahslam/tracking/map_replica.h>
 #include <voyahslam/tracking/tracker.h>
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <set>
+#include <utility>
 #include <vector>
+
+namespace voyahslam::mapping {
+
+// The Mapper's private steps for tests: publishes a transaction that adds a
+// loop edge between Frames `a` and `b` of the current map; runs the loop
+// correction's CorrectWindow (nothing published) and reads the map back.
+struct MapperTestAccess {
+    template <typename TFeatureExtractor>
+    static void PublishLoopEdge(Mapper<TFeatureExtractor>& out_mapper, map::FrameId a,
+                                map::FrameId b) {
+        auto event = out_mapper.CreateTransaction();
+        out_mapper.AddLoopEdge(a, b, *event);
+        out_mapper.observable_.Notify(std::move(event));
+    }
+    template <typename TFeatureExtractor>
+    static void CorrectWindow(Mapper<TFeatureExtractor>& out_mapper, const std::vector<map::FrameId>& window,
+                              const geometry::Sim3& S_query_world) {
+        out_mapper.CorrectWindow(window, S_query_world);
+    }
+    // Steps 1-5 of a correction of `query` with `match` that fuses only
+    // `matched_points` (no loop points): the loop connections. Nothing is
+    // published.
+    template <typename TFeatureExtractor>
+    static std::vector<std::pair<map::FrameId, map::FrameId>> LoopConnections(
+        Mapper<TFeatureExtractor>& out_mapper, map::FrameId query, map::FrameId match,
+        const geometry::Sim3& S_query_match,
+        const std::vector<std::pair<map::MapPointId, map::MapPointId>>& matched_points) {
+        std::vector<map::FrameId> window = {query};
+        for (const map::FrameId frame : out_mapper.Connected(query)) window.push_back(frame);
+        const geometry::RigidTransformation& T_match = out_mapper.FindKeyFrame(match)->pose();
+        const auto correction = out_mapper.CorrectWindow(
+            window, geometry::Compose(S_query_match, geometry::Sim3{1.0, T_match.rotation(), T_match.translation()}));
+        const auto scratch = out_mapper.CreateTransaction();
+        out_mapper.FuseLoopPoints(correction, matched_points, {}, *scratch);
+        return out_mapper.LoopConnections(correction, match);
+    }
+    // Culls Frame `frame` of the current map through Frame culling's path
+    // (RemoveFrame, FinishRefinement) and publishes it as one transaction.
+    template <typename TFeatureExtractor>
+    static void CullFrame(Mapper<TFeatureExtractor>& out_mapper, map::FrameId frame) {
+        auto event = out_mapper.CreateTransaction();
+        std::vector<map::MapPointId> changed;
+        out_mapper.RemoveFrame(frame, *event, changed);
+        out_mapper.FinishRefinement(std::move(changed), *event);
+        out_mapper.num_keyframes_.fetch_sub(1, std::memory_order_acq_rel);
+        out_mapper.num_map_points_.store(out_mapper.Active().map_points.size(), std::memory_order_release);
+        out_mapper.observable_.Notify(std::move(event));
+    }
+    // Map merging step 1: the window of `frame` in map `map` (it must be live).
+    template <typename TFeatureExtractor>
+    static std::vector<map::FrameId> MergeWindowOf(const Mapper<TFeatureExtractor>& mapper, map::MapId map,
+                                                   map::FrameId frame) {
+        return mapper.MergeWindowOf(mapper.maps_.at(map), frame);
+    }
+    template <typename TFeatureExtractor>
+    static geometry::RigidTransformation Pose(const Mapper<TFeatureExtractor>& mapper, map::FrameId frame) {
+        return mapper.FindKeyFrame(frame)->pose();
+    }
+    template <typename TFeatureExtractor>
+    static geometry::TPoint3DF Position(const Mapper<TFeatureExtractor>& mapper, map::MapPointId point) {
+        return mapper.Active().map_points.Position(point);
+    }
+    // Map `map`'s points and their visible / found counters (it must be live).
+    template <typename TFeatureExtractor>
+    static size_t NumPoints(const Mapper<TFeatureExtractor>& mapper, map::MapId map) {
+        return mapper.maps_.at(map).map_points.size();
+    }
+    template <typename TFeatureExtractor>
+    static std::vector<uint32_t> NumVisible(const Mapper<TFeatureExtractor>& mapper, map::MapId map) {
+        return mapper.maps_.at(map).num_visible;
+    }
+    template <typename TFeatureExtractor>
+    static std::vector<uint32_t> NumFound(const Mapper<TFeatureExtractor>& mapper, map::MapId map) {
+        return mapper.maps_.at(map).num_found;
+    }
+
+    // The Mapper-thread accessors, private on the Mapper (D-14): tests that
+    // drive ProcessPending() synchronously, or read after Stop(), use these.
+    template <typename TFeatureExtractor>
+    static const map::CovisibilityIndex& Covisibility(const Mapper<TFeatureExtractor>& mapper) {
+        return mapper.covisibility();
+    }
+    template <typename TFeatureExtractor>
+    static std::optional<map::PointReference> Reference(const Mapper<TFeatureExtractor>& mapper,
+                                                        map::MapPointId point) {
+        return mapper.Reference(point);
+    }
+    template <typename TFeatureExtractor>
+    static uint32_t NumVisible(const Mapper<TFeatureExtractor>& mapper, map::MapPointId point) {
+        return mapper.NumVisible(point);
+    }
+    template <typename TFeatureExtractor>
+    static uint32_t NumFound(const Mapper<TFeatureExtractor>& mapper, map::MapPointId point) {
+        return mapper.NumFound(point);
+    }
+    template <typename TFeatureExtractor>
+    static const LocalBaSummary& LastLocalBa(const Mapper<TFeatureExtractor>& mapper) {
+        return mapper.last_local_ba();
+    }
+    template <typename TFeatureExtractor>
+    static const bow::BowVector* BowVectorOf(const Mapper<TFeatureExtractor>& mapper, map::FrameId frame) {
+        return mapper.BowVectorOf(frame);
+    }
+    template <typename TFeatureExtractor>
+    static std::optional<map::FrameId> Parent(const Mapper<TFeatureExtractor>& mapper, map::FrameId frame) {
+        return mapper.Parent(frame);
+    }
+    template <typename TFeatureExtractor>
+    static std::set<map::FrameId> LoopEdges(const Mapper<TFeatureExtractor>& mapper, map::FrameId frame) {
+        return mapper.LoopEdges(frame);
+    }
+    template <typename TFeatureExtractor>
+    static const typename Mapper<TFeatureExtractor>::TKeyFrame* KeyFrame(const Mapper<TFeatureExtractor>& mapper,
+                                                                         map::FrameId frame) {
+        return mapper.KeyFrame(frame);
+    }
+    template <typename TFeatureExtractor>
+    static std::vector<map::MapId> MapIds(const Mapper<TFeatureExtractor>& mapper) {
+        return mapper.map_ids();
+    }
+    template <typename TFeatureExtractor>
+    static std::optional<map::MapId> ActiveMap(const Mapper<TFeatureExtractor>& mapper) {
+        return mapper.active_map();
+    }
+    template <typename TFeatureExtractor>
+    static size_t NumKeyframes(const Mapper<TFeatureExtractor>& mapper, map::MapId id) {
+        return mapper.num_keyframes(id);
+    }
+};
+
+}  // namespace voyahslam::mapping
 
 namespace voyahslam::tracking {
 

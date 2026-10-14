@@ -99,7 +99,8 @@ struct LocalBaSummary {
     size_t num_outliers = 0;   // observations removed as outliers
 };
 
-// Test access to the Mapper's private graph edits (defined by the tests).
+// Test access to the Mapper's private graph edits and Mapper-thread accessors
+// (defined by the tests, libs/slam/tests/test_access.h).
 struct MapperTestAccess;
 
 enum class MapperState : uint8_t {
@@ -249,8 +250,11 @@ public:
     // Merges applied (map merging).
     [[nodiscard]] size_t num_merges() const { return num_merges_.load(std::memory_order_acquire); }
 
-    // The current map's observations. Mapper thread (or a test driving
-    // ProcessPending synchronously) only.
+private:
+    friend struct MapperTestAccess;
+
+    // The current map's observations. Mapper-thread state; tests read it through
+    // MapperTestAccess; apps use mapping::MapFollower.
     [[nodiscard]] const map::CovisibilityIndex& covisibility() const { return ActiveOrEmpty().covisibility; }
     // The current map's point `point`: its reference observation, nullopt if
     // the point is not alive; how many FrameTracked found it in their view
@@ -277,9 +281,6 @@ public:
     [[nodiscard]] std::vector<map::MapId> map_ids() const;
     [[nodiscard]] std::optional<map::MapId> active_map() const { return active_; }
     [[nodiscard]] size_t num_keyframes(map::MapId id) const;
-
-private:
-    friend struct MapperTestAccess;
 
     // A Frame of the current map with its bag of words (empty without a
     // vocabulary) and its links in the map graph.

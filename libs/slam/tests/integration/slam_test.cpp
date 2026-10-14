@@ -706,10 +706,10 @@ void RunSequence(const TSequence& sequence, size_t init_frames,
     out_counts.global_ba_rejected = slam.mapper().num_global_ba_rejected();
     out_counts.merges = slam.mapper().num_merges();
     out_counts.other_map_skipped = slam.mapper().other_map_skipped();
-    out_counts.mapper_map_ids = slam.mapper().map_ids();
-    out_counts.mapper_active_map = slam.mapper().active_map();
+    out_counts.mapper_map_ids = mapping::MapperTestAccess::MapIds(slam.mapper());
+    out_counts.mapper_active_map = mapping::MapperTestAccess::ActiveMap(slam.mapper());
     for (const map::MapId id : out_counts.mapper_map_ids) {
-        out_counts.mapper_map_keyframes.push_back(slam.mapper().num_keyframes(id));
+        out_counts.mapper_map_keyframes.push_back(mapping::MapperTestAccess::NumKeyframes(slam.mapper(), id));
     }
     if (setup.follower != nullptr) setup.follower->Update();
     if (const auto* global_ba = slam.global_ba()) {
@@ -899,7 +899,7 @@ TEST(SlamTest, MeasurementsAreShared) {
     EXPECT_EQ(loop_closer_replica.keyframe_ids(), frames);
     for (const map::FrameId id : frames) {
         SCOPED_TRACE("Frame " + std::to_string(id.value));
-        const auto* mapper_frame = slam.mapper().KeyFrame(id);
+        const auto* mapper_frame = mapping::MapperTestAccess::KeyFrame(slam.mapper(), id);
         const auto* tracker_frame = tracker_replica.keyframe(id);
         const auto* loop_closer_frame = loop_closer_replica.keyframe(id);
         ASSERT_NE(mapper_frame, nullptr);
