@@ -17,10 +17,12 @@
 #include <Eigen/Geometry>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <map>
 #include <memory>
@@ -2022,6 +2024,122 @@ TEST(SlamTest, LifecycleTrackAfterStopThrows) {
     slam.Start();
     slam.Stop();
     EXPECT_THROW(slam.tracker().Track(test::MakeMonocular(200, 0.0)), UsageError);
+}
+
+// Runs `action` on the Mapper's thread, from a sync handler, on the first event the
+// Mapper publishes, and records what it threw. `ctx` must outlive the Subscription.
+struct OnMapperThread {
+    enum class Outcome { Pending, Returned, UsageErrorThrown, OtherThrown };
+
+    std::function<void()> action;
+    std::atomic<bool> fired{false};
+    std::atomic<Outcome> outcome{Outcome::Pending};
+
+    static void Handle(void* ctx, const events::Event&) {
+        auto& self = *static_cast<OnMapperThread*>(ctx);
+        if (self.fired.exchange(true)) return;
+        try {
+            self.action();
+            self.outcome.store(Outcome::Returned, std::memory_order_release);
+        } catch (const UsageError&) {
+            self.outcome.store(Outcome::UsageErrorThrown, std::memory_order_release);
+        } catch (...) {
+            self.outcome.store(Outcome::OtherThrown, std::memory_order_release);
+        }
+    }
+
+    [[nodiscard]] bool WaitForOutcome() const {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+        while (outcome.load(std::memory_order_acquire) == Outcome::Pending) {
+            if (std::chrono::steady_clock::now() > deadline) return false;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return true;
+    }
+};
+
+// Feeds a short synthetic sequence so that the Mapper initializes a map and publishes.
+void FeedUntilMapperPublishes(OrbSlam& slam) {
+    test::SyntheticSequenceOptions options;
+    options.num_frames = 15;
+    const test::SyntheticSequence sequence = test::MakeSyntheticSequence(options);
+    for (const auto& frame : sequence.frames) slam.tracker().Track(frame.measurement);
+}
+
+mapping::MapperOptions WellConditionedMapperOptions() {
+    mapping::MapperOptions mapper_options;
+    mapper_options.initializer.reconstruction.min_parallax_deg = 4.0;
+    return mapper_options;
+}
+
+// Option (a) of TODO "Slam::Stop() from a component's own thread": Stop() on any
+// component's thread is refused before it stops anything, so the earlier
+// components (here the Tracker and the LoopCloser, stopped before the Mapper) keep
+// running, and the Slam keeps reporting Running.
+TEST(SlamTest, LifecycleStopFromComponentThreadChangesNothing) {
+    // Declared before the Slam: the handler's ctx and the Subscription outlive it.
+    OnMapperThread on_mapper;
+    std::vector<events::Subscription> subscriptions;
+    OrbSlam slam(WellConditionedMapperOptions());
+    std::vector<events::RunState> seen_in_handler;
+    on_mapper.action = [&] {
+        try {
+            slam.Stop();
+        } catch (...) {
+            // What the components looked like right after the refused call.
+            seen_in_handler = {slam.tracker().run_state(), slam.mapper().run_state(),
+                               slam.loop_closer().run_state(), slam.run_state()};
+            throw;
+        }
+    };
+    subscriptions.push_back(slam.mapper().AddSyncObserver(&OnMapperThread::Handle, &on_mapper));
+    slam.Start();
+    FeedUntilMapperPublishes(slam);
+
+    ASSERT_TRUE(on_mapper.WaitForOutcome());
+    EXPECT_EQ(on_mapper.outcome.load(), OnMapperThread::Outcome::UsageErrorThrown);
+    EXPECT_EQ(seen_in_handler, std::vector<events::RunState>(4, events::RunState::Running));
+    ExpectEveryComponent(slam, events::RunState::Running);
+    EXPECT_EQ(slam.run_state(), events::RunState::Running);
+    // Nothing was stopped, so the Tracker still accepts measurements.
+    EXPECT_NO_THROW(slam.tracker().Track(test::MakeMonocular(200, 0.0)));
+
+    // Another thread can stop the Slam, and everything ends Stopped.
+    slam.Stop();
+    ExpectEveryComponent(slam, events::RunState::Stopped);
+    EXPECT_EQ(slam.run_state(), events::RunState::Stopped);
+}
+
+// A thread that is not a component's is not affected: a Stop() from a thread of
+// the test (here a plain std::thread) works as before.
+TEST(SlamTest, LifecycleStopFromForeignThreadStillStops) {
+    OrbSlam slam;
+    slam.Start();
+    std::thread stopper([&] { EXPECT_NO_THROW(slam.Stop()); });
+    stopper.join();
+    ExpectEveryComponent(slam, events::RunState::Stopped);
+    EXPECT_EQ(slam.run_state(), events::RunState::Stopped);
+}
+
+// Destroying the Slam on one of its own threads cannot work (the thread would
+// join itself and run inside a destroyed object) and a destructor cannot throw,
+// so it logs the reason and terminates, like a Subscription destroyed while its
+// producer runs (DESIGN section 7).
+TEST(SlamDeathTest, DestroyedOnAComponentThreadTerminates) {
+    GTEST_FLAG_SET(death_test_style, "threadsafe");
+    EXPECT_DEATH(
+        {
+            OnMapperThread on_mapper;
+            std::vector<events::Subscription> subscriptions;
+            auto slam = std::make_unique<OrbSlam>(WellConditionedMapperOptions());
+            on_mapper.action = [&] { slam.reset(); };
+            subscriptions.push_back(slam->mapper().AddSyncObserver(&OnMapperThread::Handle, &on_mapper));
+            slam->Start();
+            FeedUntilMapperPublishes(*slam);
+            static_cast<void>(on_mapper.WaitForOutcome());
+            std::this_thread::sleep_for(std::chrono::seconds(30));  // the handler's thread terminates first
+        },
+        "Slam destroyed on one of its component threads");
 }
 
 // D-05: connecting while the Slam runs is a usage error; after Stop() it works.
