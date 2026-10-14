@@ -247,7 +247,9 @@ state machine with `UsageError` on invalid transitions, `Start()` / `Stop()` are
 valid from any thread, and `Stop()` then `Start()` is decided as not supported:
 Stopped is terminal, a new session is a new `Slam`), #7 (0.7.0, 2026-10-14: `OrbFeatureExtractor`
 has no mutable state, the pyramid lives in a caller-owned `Workspace`, so one extractor is safe to
-share between threads). Remaining, in order: #8, #9. Each item is merged separately with a minor version bump and new
+share between threads), #8 (0.8.0, 2026-10-14: every logger writes through one shared
+`dist_sink_mt`, so `Logger::Initialize` re-targets components created before it, the level is atomic and
+logger creation is serialized). Remaining: #9. Each item is merged separately with a minor version bump and new
 Conan packages.
 
 ## 6. TUM-VI tuning

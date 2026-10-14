@@ -1020,10 +1020,13 @@ and android-arm64; tell the voyah_jni session the new version.
       size or level count); the allocating two-argument overload stays for tests.
       The extractor is shareable between threads; output unchanged. DESIGN
       "ORB Extractor Workspace".
-- [ ] **#8 Logger global state depends on initialization order:**
-      `Logger::Initialize` should also replace the sinks of loggers already
-      created, and `sinks_` must be protected (see the logcat item under
-      "Environment").
+- [x] ~~#8 Logger global state depends on initialization order~~ (done
+      2026-10-14, 0.8.0, branch `fix/logger-init-order`): every logger writes
+      through one shared `dist_sink_mt`; `Logger::Initialize` re-targets it at any
+      time (also for components created earlier), the level is atomic and
+      `CreateLogger` is serialized. DESIGN "Logging". The logcat default sink is
+      still open (see "Logs do not reach Android logcat" under "Environment",
+      PLAT-01).
 - [ ] **#9 `images::Image` correctness:** a default-constructed image has
       uninitialized members; `Convert()`, `operator*=` / `operator*` ignore
       `offset_` / `stride_` of sub-image views; `Set()` is `const` but writes
@@ -1138,6 +1141,8 @@ Deferred minor findings from the per-task reviews.
         `Logger::Initialize`). Make the default a
         `spdlog::sinks::android_sink_mt` behind `#ifdef __ANDROID__`; `package_info` then needs
         `system_libs = ["log"]` for `voyah_common` on Android.
+        Planned as PLAT-01 (Phase 5); the shared `dist_sink_mt` of 0.8.0 means the
+        default sink is added in one place (the initial child in `logger.cpp`).
       - **Symbol visibility for shared builds:** the `.so`s export
         everything (about 7000 spdlog/fmt symbols among them). Build with
         `-fvisibility=hidden` / `CXX_VISIBILITY_PRESET hidden` and export
