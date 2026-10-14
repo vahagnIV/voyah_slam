@@ -7,6 +7,18 @@
 
 namespace voyahslam::images {
 
+// A C-channel image of T, stored row-major and interleaved: element (y, x, c)
+// of a compact image lives at data[(y * width + x) * C + c].
+//
+// An image made with Image(width, height) owns a fresh buffer. A view made with
+// Image(parent, x, y, w, h) (or with operator[]) SHARES (aliases) the parent's
+// buffer: it keeps the buffer alive, and a write through either the view or the
+// parent is visible in both. A view is described by Offset() (element index of
+// its first pixel in the buffer), Width(), Height() and Stride() (the parent's
+// row length in PIXELS, not elements). Every operation below reads and writes
+// only the view's own rows and columns, whatever the stride.
+//
+// A default-constructed image is empty: all sizes are 0 and GetData() is null.
 template <typename T, int C> class Image {
 public:
   typedef T TScalar;
@@ -52,12 +64,20 @@ public:
     data_[offset] = value;
   }
 
+  // A fresh compact image of the view's size, every element cast to K, in the
+  // same (y, x, c) order. An empty image gives an empty image.
   template <typename K> Image<K, C> Convert() const {
+    if (width_ == 0 || height_ == 0) {
+      return Image<K, C>();
+    }
     Image<K, C> result(width_, height_);
-    auto image_data_ptr = result.GetData();
-    auto data_ptr = GetData();
-    for (int i = 0; i < width_ * height_; ++i) {
-      image_data_ptr[i] = data_ptr[i];
+    K *dst = result.GetData();
+    const size_t row_elements = static_cast<size_t>(width_) * C;
+    for (size_t y = 0; y < height_; ++y) {
+      const T *src = data_.get() + offset_ + y * stride_ * C;
+      for (size_t i = 0; i < row_elements; ++i) {
+        dst[y * row_elements + i] = static_cast<K>(src[i]);
+      }
     }
     return result;
   }
@@ -125,10 +145,10 @@ private:
         data_(other.data_) {}
 
 private:
-  size_t offset_;
-  unsigned width_;
-  unsigned height_;
-  unsigned stride_;
+  size_t offset_ = 0;
+  unsigned width_ = 0;
+  unsigned height_ = 0;
+  unsigned stride_ = 0;
   std::shared_ptr<T[]> data_;
 };
 
