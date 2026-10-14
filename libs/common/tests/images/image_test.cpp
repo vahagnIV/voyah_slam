@@ -1,4 +1,3 @@
-#include <cstring>  // TEMP-RED
 #include <voyahslam/images/image.h>
 
 #include <gtest/gtest.h>
@@ -8,6 +7,7 @@
 #include <cstring>
 #include <new>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 namespace voyahslam::images {
@@ -206,6 +206,28 @@ TEST(ImageTest, IndexChainMatchesAt) {
       }
     }
   }
+}
+
+TEST(ImageTest, OffsetIsSizeT) {
+  static_assert(std::is_same_v<decltype(std::declval<const Image<uint8_t, 3> &>().Offset()),
+                               size_t>);
+  auto parent = MakeParent(8, 6);
+  Image<uint8_t, 3> outer(parent, 2, 1, 5, 4);
+  EXPECT_EQ(outer.Offset(), (1u * 8u + 2u) * 3u);
+  Image<uint8_t, 3> inner(outer, 1, 2, 2, 2);
+  // parent offset + (y * stride + x) * C, the stride being the parent's 8.
+  EXPECT_EQ(inner.Offset(), outer.Offset() + (2u * 8u + 1u) * 3u);
+  EXPECT_EQ(inner.Offset(), (3u * 8u + 3u) * 3u);
+  EXPECT_EQ(inner.At(0, 0, 0), parent.At(3, 3, 0));
+}
+
+template <typename I>
+concept CanSet = requires(I &image) { image.Set(0, 0, 0, uint8_t{0}); };
+
+TEST(ImageTest, SetOnConstDoesNotCompile) {
+  static_assert(CanSet<Image<uint8_t, 3>>);
+  static_assert(!CanSet<const Image<uint8_t, 3>>);
+  SUCCEED();
 }
 
 }  // namespace

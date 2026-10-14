@@ -2,8 +2,14 @@
 #define VOYAHSLAM_IMAGES_IMAGE_H
 
 #include <cassert>
+#include <cstddef>
+#include <cstdint>
+#include <cstring>
+#include <limits>
 #include <memory>
 #include <ostream>
+#include <stdexcept>
+#include <utility>
 
 namespace voyahslam::images {
 
@@ -19,6 +25,17 @@ namespace voyahslam::images {
 // only the view's own rows and columns, whatever the stride.
 //
 // A default-constructed image is empty: all sizes are 0 and GetData() is null.
+// A moved-from image is empty too.
+//
+// Image(width, height) throws std::length_error when width * height * C does
+// not fit in size_t (the sizes may come from a caller, e.g. the JNI binding).
+// For C == 1 on a 64-bit target width * height of two unsigned values always
+// fits in size_t, so the check cannot fire there; a byte count the allocator
+// cannot serve is then reported by new[] itself (std::bad_array_new_length or
+// std::bad_alloc). Either way no size wraps silently.
+//
+// Offsets are size_t end to end (a view into a buffer of more than 2^32
+// elements keeps its offset).
 template <typename T, int C> class Image {
 public:
   typedef T TScalar;
@@ -28,22 +45,28 @@ public:
 
   Image(unsigned width, unsigned height)
       : offset_(0), width_(width), height_(height), stride_(width),
-        data_(std::shared_ptr<T[]>(new T[width * height * C])) {}
+        data_(AllocateElements(width, height)) {}
 
   Image(Image<T, C> &other, unsigned start_x, unsigned start_y, unsigned width,
         unsigned height)
-      : Image(other, other.offset_ + (start_y * other.stride_ + start_x) * C,
+      : Image(other,
+              other.offset_ +
+                  (static_cast<size_t>(start_y) * other.stride_ + start_x) * C,
               width, height) {}
 
   [[nodiscard]] unsigned Width() const { return width_; }
   [[nodiscard]] unsigned Height() const { return height_; }
   [[nodiscard]] unsigned Channels() const { return C; }
   [[nodiscard]] unsigned Stride() const { return stride_; }
-  [[nodiscard]] unsigned Offset() const { return offset_; }
+  [[nodiscard]] size_t Offset() const { return offset_; }
 
   T *GetData() { return data_.get(); }
   const T *GetData() const { return data_.get(); }
 
+  // Shape-dependent indexing, so that img[y][x][c] reads At(y, x, c):
+  // on an image with several rows, img[i] is row i (a width x 1 view);
+  // on a single-row image, img[i] is pixel i (a 1x1 view);
+  // on a 1x1 image, img[i] is channel i (a 1x1 view of that element).
   Image<T, C> operator[](size_t i) {
     if (height_ == 1) {
       if (width_ == 1) {
@@ -59,7 +82,7 @@ public:
     return data_[offset];
   }
 
-  void Set(size_t y, size_t x, size_t c, const T &value) const {
+  void Set(size_t y, size_t x, size_t c, const T &value) {
     size_t offset = offset_ + y * stride_ * C + x * C + c;
     data_[offset] = value;
   }
@@ -82,21 +105,34 @@ public:
     return result;
   }
 
+  // In place, row by row over the view: only the view's pixels change.
   Image<T, C> &operator*=(T n) {
-    for (int i = 0; i < width_ * height_ * C; ++i) {
-      data_[i] *= n;
+    const size_t row_elements = static_cast<size_t>(width_) * C;
+    for (size_t y = 0; y < height_; ++y) {
+      T *row = data_.get() + offset_ + y * stride_ * C;
+      for (size_t i = 0; i < row_elements; ++i) {
+        row[i] *= n;
+      }
     }
     return *this;
   }
 
+  // A fresh compact image of the view's size, every element multiplied by val.
   template <typename K>
   Image<decltype(std::declval<T>() + std::declval<K>()), C>
   operator*(K val) const {
-    Image<decltype(std::declval<T>() + std::declval<K>()), C> result(width_,
-                                                                     height_);
-    auto data = result.GetData();
-    for (int i = 0; i < width_ * height_ * C; ++i) {
-      data[i] = data_[i] * val;
+    using Result = Image<decltype(std::declval<T>() + std::declval<K>()), C>;
+    if (width_ == 0 || height_ == 0) {
+      return Result();
+    }
+    Result result(width_, height_);
+    auto *dst = result.GetData();
+    const size_t row_elements = static_cast<size_t>(width_) * C;
+    for (size_t y = 0; y < height_; ++y) {
+      const T *src = data_.get() + offset_ + y * stride_ * C;
+      for (size_t i = 0; i < row_elements; ++i) {
+        dst[y * row_elements + i] = src[i] * val;
+      }
     }
     return result;
   }
@@ -106,43 +142,65 @@ public:
     return *this;
   }
 
-  Image &operator=(Image<T, C> &&other) {
-    data_ = std::move(other.data_);
-    stride_ = other.stride_;
-    width_ = other.width_;
-    height_ = other.height_;
-    offset_ = other.offset_;
+  // The source is left empty.
+  Image &operator=(Image<T, C> &&other) noexcept {
+    if (this != &other) {
+      data_ = std::move(other.data_);
+      stride_ = std::exchange(other.stride_, 0);
+      width_ = std::exchange(other.width_, 0);
+      height_ = std::exchange(other.height_, 0);
+      offset_ = std::exchange(other.offset_, 0);
+    }
     return *this;
   }
 
-  Image(Image<T, C> &&other) noexcept {
-    data_ = std::move(other.data_);
-    stride_ = other.stride_;
-    width_ = other.width_;
-    height_ = other.height_;
-    offset_ = other.offset_;
-  }
+  Image(Image<T, C> &&other) noexcept
+      : offset_(std::exchange(other.offset_, 0)),
+        width_(std::exchange(other.width_, 0)),
+        height_(std::exchange(other.height_, 0)),
+        stride_(std::exchange(other.stride_, 0)),
+        data_(std::move(other.data_)) {}
 
   operator T() const { return data_[offset_]; }
 
+  // Copies this view's pixels into `other` (same width and height), row by
+  // row when either side is strided.
   void CopyTo(Image<T, C> &other) const {
     assert(other.Width() == Width());
     assert(other.Height() == Height());
+    if (width_ == 0 || height_ == 0) {
+      return;
+    }
     if (width_ == stride_ && other.stride_ == stride_) {
-      memcpy(other.GetData() + other.offset_, data_.get() + offset_,
-             width_ * height_ * C * sizeof(T));
+      std::memcpy(other.GetData() + other.offset_, data_.get() + offset_,
+             static_cast<size_t>(width_) * height_ * C * sizeof(T));
     } else {
       for (size_t y = 0; y < height_; ++y) {
-        memcpy(other.GetData() + other.offset_ + y * other.stride_ * C,
-               data_.get() + offset_ + y * stride_ * C, width_ * C);
+        std::memcpy(other.GetData() + other.offset_ + y * other.stride_ * C,
+               data_.get() + offset_ + y * stride_ * C,
+               static_cast<size_t>(width_) * C * sizeof(T));
       }
     }
   }
 
 private:
-  Image(Image<T, C> &other, unsigned offset, unsigned width, unsigned height)
+  Image(Image<T, C> &other, size_t offset, unsigned width, unsigned height)
       : offset_(offset), width_(width), height_(height), stride_(other.stride_),
         data_(other.data_) {}
+
+  // Element count computed in size_t; throws instead of allocating a wrapped
+  // size (see the class comment).
+  static std::shared_ptr<T[]> AllocateElements(unsigned width, unsigned height) {
+    constexpr size_t kMax = std::numeric_limits<size_t>::max();
+    if (width != 0 && height > kMax / width) {
+      throw std::length_error("Image size overflows");
+    }
+    const size_t pixels = static_cast<size_t>(width) * height;
+    if (pixels > kMax / C) {
+      throw std::length_error("Image size overflows");
+    }
+    return std::shared_ptr<T[]>(new T[pixels * C]);
+  }
 
 private:
   size_t offset_ = 0;
