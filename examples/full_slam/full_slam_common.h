@@ -19,6 +19,8 @@
 #include <voyahslam/bow/vocabulary.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/frame_tracked.h>
+#include <voyahslam/mapping/map_follower.h>
+#include <voyahslam/mapping/map_snapshot.h>
 #include <voyahslam/mapping/mapper.h>
 #include <voyahslam/tracking/tracker.h>
 
@@ -167,17 +169,17 @@ inline const char* StateName(mapping::MapperState state) {
     return "?";
 }
 
-// The Mapper's Atlas after the run: its live maps with their Frames, the
-// active one, and the merges applied. Call only once the Mapper has stopped
-// (its Atlas accessors are Mapper-thread only).
-template <typename TFeatureExtractor>
-void PrintAtlas(const mapping::Mapper<TFeatureExtractor>& mapper, std::ostream& out) {
+// The Atlas after the run, from a MapFollower's snapshot: its live maps with
+// their Frames, the active one, and the merges applied (Mapper::num_merges(),
+// readable from any thread). The snapshot is plain data, so this runs on the
+// caller's thread without touching the Mapper's map.
+inline void PrintAtlas(const mapping::MapSnapshot& snapshot, std::size_t num_merges, std::ostream& out) {
     out << "atlas:";
-    for (const map::MapId id : mapper.map_ids()) {
-        out << " map " << id.value << " (" << mapper.num_keyframes(id) << " Frames"
-            << (mapper.active_map() == id ? ", active" : "") << ")";
+    for (const mapping::MapSnapshot::Map& map : snapshot.maps) {
+        out << " map " << map.id.value << " (" << map.frame_ids.size() << " Frames"
+            << (snapshot.active_map == map.id ? ", active" : "") << ")";
     }
-    out << "; merges: " << mapper.num_merges() << "\n";
+    out << "; merges: " << num_merges << "\n";
 }
 
 // Writes every tracked frame's pose as one TUM line (`timestamp tx ty tz qx qy
