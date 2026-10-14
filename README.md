@@ -78,8 +78,8 @@ conan install . --output-folder=cmake-build-debug --build=missing -pr profiles/l
       -s build_type=Debug -o with_tests=True -o with_examples=True
 cmake --preset conan-debug
 cmake --build cmake-build-debug/build/Debug -j"$(nproc)"
-cmake --build cmake-build-debug/build/Debug --target check       # unit tests (786, ~10 s)
-cmake --build cmake-build-debug/build/Debug --target check_all   # every test (822, ~30 s)
+cmake --build cmake-build-debug/build/Debug --target check       # unit tests (787, ~10 s)
+cmake --build cmake-build-debug/build/Debug --target check_all   # every test (827, ~30 s)
 ```
 
 `check` runs `ctest -L unit`, `check_all` runs every label (`unit`, `integration`, `vocabulary`); both build the
