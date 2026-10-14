@@ -296,6 +296,12 @@ size_t OrbFeatureExtractor::num_levels() const { return scale_factors_.size(); }
 
 OrbFeatureExtractor::TFeatures
 OrbFeatureExtractor::DetectAndExtract(const images::TWorkingImage &image,
+                                      size_t number_of_features, Workspace &) const {
+  return DetectAndExtract(image, number_of_features);
+}
+
+OrbFeatureExtractor::TFeatures
+OrbFeatureExtractor::DetectAndExtract(const images::TWorkingImage &image,
                                       size_t number_of_features) const {
   if (!pyramid_.Initialized())
     pyramid_.Initialize(image.Width(), image.Height(), scale_factors_);

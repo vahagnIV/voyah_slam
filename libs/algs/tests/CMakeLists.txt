@@ -14,6 +14,7 @@ voyah_add_test_binary(voyah_algs_tests
         features/fuse_matcher_test.cpp
         features/initialization_matcher_test.cpp
         features/keypoint_matches_test.cpp
+        features/orb_extractor_workspace_test.cpp
         features/stereo_matcher_test.cpp
         geometry/geometry_test.cpp
         geometry/pnp_test.cpp

@@ -19,6 +19,13 @@ public:
   OrbFeatureExtractor(precision_t scale_factor = 1.2, size_t levels = 8,
                       unsigned init_threshold_FAST = 20,
                       unsigned min_threshold_FAST = 7);
+  // RED stub: the workspace is not used yet.
+  class Workspace {
+  public:
+    Workspace() = default;
+  };
+  [[nodiscard]] TFeatures DetectAndExtract(const images::TWorkingImage &image, size_t number_of_features,
+                                           Workspace &out_workspace) const;
   [[nodiscard]] TFeatures DetectAndExtract(const images::TWorkingImage &image, size_t number_of_features) const;
   static TDescriptorScalarType Distance(const TDescriptor& desc1, const TDescriptor& desc2);
 
