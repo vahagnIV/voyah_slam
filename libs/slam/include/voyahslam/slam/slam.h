@@ -65,6 +65,8 @@ public:
     // Stops producers before consumers: Tracker, LoopCloser, GlobalBA, Mapper.
     // Idempotent; see the class comment.
     void Stop();
+    // The Slam's own lifecycle state; any thread.
+    [[nodiscard]] events::RunState run_state() const { return state_.load(std::memory_order_acquire); }
 
     [[nodiscard]] TTracker& tracker() { return tracker_; }
     [[nodiscard]] TMapper& mapper() { return mapper_; }

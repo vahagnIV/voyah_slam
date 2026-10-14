@@ -1968,6 +1968,15 @@ void ExpectEveryComponent(OrbSlam& slam, events::RunState expected) {
     EXPECT_EQ(slam.loop_closer().run_state(), expected);
 }
 
+TEST(SlamTest, LifecycleRunStateFollowsStartAndStop) {
+    OrbSlam slam;
+    EXPECT_EQ(slam.run_state(), events::RunState::Created);
+    slam.Start();
+    EXPECT_EQ(slam.run_state(), events::RunState::Running);
+    slam.Stop();
+    EXPECT_EQ(slam.run_state(), events::RunState::Stopped);
+}
+
 TEST(SlamTest, LifecycleStartTwiceThrows) {
     OrbSlam slam;
     slam.Start();
