@@ -37,7 +37,8 @@ namespace voyahslam::mapping {
 // library's hot loops call. Built at -O0 and linked before the library, the
 // app's copies replaced the library's optimized ones and the Debug-tree
 // Tracker ran 3.5 times slower (decisions log 2026-10-14). Every member,
-// trivial ones included, is therefore out of line.
+// trivial ones included, is therefore out of line; the build check
+// BuildCheck.MapFollowerAddsNoLibraryInstantiations guards it.
 template <typename TFeatureExtractor>
 class MapFollower {
 public:
