@@ -15,6 +15,7 @@ voyah_add_test_binary(voyah_slam_tests
         tracking/atlas_replica_test.cpp
         tracking/map_replica_test.cpp
         tracking/relocalization_test.cpp
+        thread_affinity_test.cpp
         tracking/tracker_test.cpp
     LIBS
         voyah_slam

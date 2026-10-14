@@ -91,6 +91,9 @@ struct TrackerOptions {
     double level_scale = 1.2;
 };
 
+// Test access to the Tracker's thread-affine state (defined by the tests).
+struct TrackerTestAccess;
+
 // Estimates the camera pose of every incoming measurement against its own
 // replica of the map. Runs on its own thread with two inputs:
 //   - inbox():        map diffs from the Mapper,
@@ -126,7 +129,8 @@ struct TrackerOptions {
 //
 // MapTransactions. They build the Tracker's AtlasReplica (the replica rule:
 // atlas_replica.h); the Tracker tracks and relocalizes only in the active map
-// (map_replica()). A change of the active map to another map resets the last
+// (Tracker-thread state: apps read the map through mapping::MapFollower,
+// tests through TrackerTestAccess). A change of the active map to another map resets the last
 // frame, the velocity and the reference Frame; current_map_id() is the last
 // active map (kept while none is active, after a final loss). Only a
 // transaction of the active map acts on the Tracker's state below. A new map
@@ -200,8 +204,12 @@ public:
     // total; each counted after whatever it published.
     [[nodiscard]] size_t num_processed() const { return num_processed_.load(std::memory_order_acquire); }
 
-    // Tracker-thread state, for tests that drive ProcessPending()
-    // synchronously: never read while the worker runs.
+private:
+    friend struct TrackerTestAccess;
+
+    // Tracker-thread state; tests that drive ProcessPending() synchronously
+    // read it through TrackerTestAccess. Apps read the map through
+    // mapping::MapFollower.
     [[nodiscard]] const AtlasReplica<TFeatureExtractor>& atlas() const { return atlas_; }
     // The active map, which the Tracker tracks and relocalizes in; empty if
     // there is none.
@@ -210,7 +218,6 @@ public:
     // MapPointId value or -1.
     [[nodiscard]] const std::vector<int64_t>& last_matches() const { return last_frame_.matches; }
 
-private:
     struct LastFrame {
         // Null when there is no last frame. A tracked frame's measurement is
         // created here (AcceptPose), once, and shared by its FrameTracked.

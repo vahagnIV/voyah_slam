@@ -1,6 +1,7 @@
 #include <support/synthetic_sequence.h>
 #include <support/test_measurements.h>
 #include <support/trajectory_error.h>
+#include <test_access.h>
 #include <voyahslam/bow/vocabulary.h>
 #include <voyahslam/errors.h>
 #include <voyahslam/events/async_observer.h>
@@ -891,7 +892,7 @@ TEST(SlamTest, MeasurementsAreShared) {
     while (slam.loop_closer().ProcessPending()) {
     }
 
-    const auto& tracker_replica = slam.tracker().map_replica();
+    const auto& tracker_replica = tracking::TrackerTestAccess::MapReplica(slam.tracker());
     const auto& loop_closer_replica = slam.loop_closer().map_replica();
     const std::vector<map::FrameId> frames = tracker_replica.keyframe_ids();
     ASSERT_GE(frames.size(), 2u);

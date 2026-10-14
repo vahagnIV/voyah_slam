@@ -89,7 +89,7 @@ TEST_F(TrackerTest, NewMapTransactionStartsTracking) {
 
     EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
     EXPECT_EQ(tracker_.current_map_id(), map::MapId{1});
-    const MapReplica<Extractor>& replica = tracker_.map_replica();
+    const MapReplica<Extractor>& replica = TrackerTestAccess::MapReplica(tracker_);
     EXPECT_EQ(replica.map_id(), map::MapId{1});
     EXPECT_EQ(replica.num_points(), mapper_.num_map_points());
     EXPECT_GE(replica.num_points(), 100u);
@@ -100,7 +100,7 @@ TEST_F(TrackerTest, NewMapTransactionStartsTracking) {
 TEST_F(TrackerTest, TracksAndPublishesFrameTracked) {
     const auto sequence = StereoSequence();
     ASSERT_EQ(InitializeStereo(sequence, 0), 0u);
-    const map::FrameId keyframe = tracker_.map_replica().keyframe_ids().front();
+    const map::FrameId keyframe = TrackerTestAccess::MapReplica(tracker_).keyframe_ids().front();
 
     const auto captured = Feed(sequence.frames[1].measurement);
 
@@ -112,7 +112,7 @@ TEST_F(TrackerTest, TracksAndPublishesFrameTracked) {
     EXPECT_GE(captured[0].num_inliers, TrackingOptions{}.min_local_map_inliers);
     // The published observations are the last frame's matches.
     size_t num_last_matches = 0;
-    for (const int64_t id : tracker_.last_matches()) num_last_matches += id >= 0 ? 1 : 0;
+    for (const int64_t id : TrackerTestAccess::LastMatches(tracker_)) num_last_matches += id >= 0 ? 1 : 0;
     EXPECT_EQ(captured[0].num_observed_points, num_last_matches);
     EXPECT_DOUBLE_EQ(captured[0].timestamp, sequence.frames[1].measurement.timestamp());
     ExpectTrackedMetric(captured, sequence.frames[1].T_cw,
@@ -199,7 +199,7 @@ TEST_F(TrackerTest, FrameTrackedCarriesLocalMap) {
     }
     ASSERT_EQ(tracker_.state(), TrackerState::Tracking);
     ASSERT_LT(k, sequence.frames.size());
-    std::vector<map::FrameId> frames = tracker_.map_replica().keyframe_ids();
+    std::vector<map::FrameId> frames = TrackerTestAccess::MapReplica(tracker_).keyframe_ids();
     ASSERT_EQ(frames.size(), 2u);
 
     const auto captured = Feed(sequence.frames[k].measurement);
@@ -226,14 +226,14 @@ TEST_F(TrackerTest, MergesOwnFrameObservationsIntoLastFrame) {
     const auto sequence = StereoSequence();
     ASSERT_EQ(InitializeStereo(sequence, 0), 0u);
     ASSERT_EQ(Feed(sequence.frames[1].measurement).size(), 1u);
-    const std::vector<int64_t> before = tracker_.last_matches();
+    const std::vector<int64_t> before = TrackerTestAccess::LastMatches(tracker_);
     // Two unmatched features of the last frame.
     std::vector<uint32_t> unmatched;
     for (size_t i = 0; i < before.size() && unmatched.size() < 2; ++i) {
         if (before[i] < 0) unmatched.push_back(static_cast<uint32_t>(i));
     }
     ASSERT_EQ(unmatched.size(), 2u);
-    const auto new_id = static_cast<uint32_t>(tracker_.map_replica().num_points());
+    const auto new_id = static_cast<uint32_t>(TrackerTestAccess::MapReplica(tracker_).num_points());
 
     // A Frame of the last frame's measurement: feature unmatched[0] observes
     // a new point, unmatched[1] an existing one.
@@ -258,20 +258,20 @@ TEST_F(TrackerTest, MergesOwnFrameObservationsIntoLastFrame) {
 
     // Another measurement's Frame: not merged.
     inject(900, sequence.frames[2].measurement);
-    EXPECT_EQ(tracker_.last_matches(), before);
+    EXPECT_EQ(TrackerTestAccess::LastMatches(tracker_), before);
 
     inject(901, sequence.frames[1].measurement);
     std::vector<int64_t> expected = before;
     expected[unmatched[0]] = new_id;
     expected[unmatched[1]] = 0;
-    EXPECT_EQ(tracker_.last_matches(), expected);
+    EXPECT_EQ(TrackerTestAccess::LastMatches(tracker_), expected);
 }
 
 TEST_F(TrackerTest, RemovedAndReplacedPointsInLastFrame) {
     const auto sequence = StereoSequence();
     ASSERT_EQ(InitializeStereo(sequence, 0), 0u);
     ASSERT_EQ(Feed(sequence.frames[1].measurement).size(), 1u);
-    const std::vector<int64_t> before = tracker_.last_matches();
+    const std::vector<int64_t> before = TrackerTestAccess::LastMatches(tracker_);
     // Two matched points of the last frame, and an alive point it does not match.
     std::vector<int64_t> matched;
     for (const int64_t id : before) {
@@ -281,8 +281,8 @@ TEST_F(TrackerTest, RemovedAndReplacedPointsInLastFrame) {
     const auto loser = map::MapPointId{static_cast<uint32_t>(matched[0])};
     const auto removed = map::MapPointId{static_cast<uint32_t>(matched[1])};
     std::optional<map::MapPointId> winner;
-    for (uint32_t p = 0; p < tracker_.map_replica().num_points() && !winner; ++p) {
-        if (tracker_.map_replica().IsAlive({p}) &&
+    for (uint32_t p = 0; p < TrackerTestAccess::MapReplica(tracker_).num_points() && !winner; ++p) {
+        if (TrackerTestAccess::MapReplica(tracker_).IsAlive({p}) &&
             std::find(before.begin(), before.end(), int64_t{p}) == before.end()) {
             winner = map::MapPointId{p};
         }
@@ -297,15 +297,15 @@ TEST_F(TrackerTest, RemovedAndReplacedPointsInLastFrame) {
     injector_.Notify(std::move(transaction));
     Drain();
 
-    EXPECT_FALSE(tracker_.map_replica().IsAlive(loser));
-    EXPECT_FALSE(tracker_.map_replica().IsAlive(removed));
-    EXPECT_TRUE(tracker_.map_replica().CheckConsistency());
+    EXPECT_FALSE(TrackerTestAccess::MapReplica(tracker_).IsAlive(loser));
+    EXPECT_FALSE(TrackerTestAccess::MapReplica(tracker_).IsAlive(removed));
+    EXPECT_TRUE(TrackerTestAccess::MapReplica(tracker_).CheckConsistency());
     std::vector<int64_t> expected = before;
     for (int64_t& id : expected) {
         if (id == matched[0]) id = static_cast<int64_t>(winner->value);
         if (id == matched[1]) id = -1;
     }
-    EXPECT_EQ(tracker_.last_matches(), expected);
+    EXPECT_EQ(TrackerTestAccess::LastMatches(tracker_), expected);
 
     // The next frame tracks without failing.
     const auto captured = Feed(sequence.frames[2].measurement);
@@ -408,9 +408,9 @@ TEST_F(TrackerTest, NewMapResetsTrackingState) {
     constexpr size_t kMap2Frame = 12;
     ASSERT_EQ(InitializeStereo(sequence, kMap2Frame), kMap2Frame);
     EXPECT_EQ(tracker_.current_map_id(), map::MapId{2});
-    EXPECT_EQ(tracker_.map_replica().map_id(), map::MapId{2});
-    ASSERT_EQ(tracker_.map_replica().keyframe_ids().size(), 1u);
-    ExpectLastMatchesAreKeyFrameObservations(tracker_.map_replica().keyframe_ids().front());
+    EXPECT_EQ(TrackerTestAccess::MapReplica(tracker_).map_id(), map::MapId{2});
+    ASSERT_EQ(TrackerTestAccess::MapReplica(tracker_).keyframe_ids().size(), 1u);
+    ExpectLastMatchesAreKeyFrameObservations(TrackerTestAccess::MapReplica(tracker_).keyframe_ids().front());
 
     const test::MapAlignment alignment = AlignmentOf(truth, /*monocular=*/false);
     for (size_t k = kMap2Frame + 1; k <= kMap2Frame + 6; ++k) {
@@ -474,7 +474,7 @@ TEST_F(TrackerTest, IgnoresStaleNewMap) {
     Feed(test::MakeMonocular(0, 0.07));  // lost
     ASSERT_EQ(InitializeStereo(sequence, 2), 2u);
     ASSERT_EQ(tracker_.current_map_id(), map::MapId{2});
-    const map::FrameId keyframe = tracker_.map_replica().keyframe_ids().front();
+    const map::FrameId keyframe = TrackerTestAccess::MapReplica(tracker_).keyframe_ids().front();
 
     auto stale = std::make_shared<events::MapTransaction<Extractor>>();
     stale->map_id = map::MapId{1};
@@ -484,7 +484,7 @@ TEST_F(TrackerTest, IgnoresStaleNewMap) {
     Drain();
 
     EXPECT_EQ(tracker_.current_map_id(), map::MapId{2});
-    EXPECT_EQ(tracker_.map_replica().map_id(), map::MapId{2});
+    EXPECT_EQ(TrackerTestAccess::MapReplica(tracker_).map_id(), map::MapId{2});
     EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
 
     // The position is still reported against map 2's keyframe and world.
@@ -727,7 +727,7 @@ TEST_F(TrackerBowTest, RecentlyLostTimesOutToLost) {
 TEST_F(TrackerSmallMapTest, SmallMapGoesStraightToLost) {
     const auto sequence = StereoSequence();
     ASSERT_EQ(InitializeStereo(sequence, 0), 0u);
-    ASSERT_EQ(tracker_.map_replica().keyframe_ids().size(), 1u);
+    ASSERT_EQ(TrackerTestAccess::MapReplica(tracker_).keyframe_ids().size(), 1u);
 
     const auto captured = LoseAt(1.0);
 
@@ -785,7 +785,7 @@ protected:
     // `epoch`. Frames in `removed_frames` are culled in the same transaction.
     void InjectCorrection(const geometry::RigidTransformation& S, uint32_t epoch,
                           const std::vector<map::FrameId>& removed_frames = {}) {
-        const MapReplica<Extractor>& replica = tracker_.map_replica();
+        const MapReplica<Extractor>& replica = TrackerTestAccess::MapReplica(tracker_);
         auto correction = std::make_shared<events::MapTransaction<Extractor>>();
         correction->map_id = replica.map_id();
         correction->active_map = replica.map_id();  // as the Mapper
@@ -808,8 +808,8 @@ protected:
         correction->removed_frames = removed_frames;
         injector_.Notify(std::move(correction));
         Drain();
-        ASSERT_EQ(tracker_.map_replica().map_epoch(), epoch);
-        ASSERT_TRUE(tracker_.map_replica().CheckConsistency());
+        ASSERT_EQ(TrackerTestAccess::MapReplica(tracker_).map_epoch(), epoch);
+        ASSERT_TRUE(TrackerTestAccess::MapReplica(tracker_).CheckConsistency());
     }
 
     // Initializes on frame 0 and tracks frames 1..last; returns the last
@@ -856,17 +856,17 @@ TEST_F(TrackerLoopTest, FollowsAnotherFrameWhenReferenceCulled) {
     const auto sequence = StereoSequence();
     size_t last = 1;
     Captured tracked = TrackUpTo(sequence, last);
-    while (tracker_.map_replica().num_keyframes() < 2 && last + 1 < sequence.frames.size()) {
+    while (TrackerTestAccess::MapReplica(tracker_).num_keyframes() < 2 && last + 1 < sequence.frames.size()) {
         const auto captured = Feed(sequence.frames[++last].measurement);
         ASSERT_EQ(captured.size(), 1u) << "frame " << last;
         ASSERT_EQ(captured[0].type, events::EventType::FrameTracked) << "frame " << last;
         tracked = captured[0];
     }
-    ASSERT_GE(tracker_.map_replica().num_keyframes(), 2u);
+    ASSERT_GE(TrackerTestAccess::MapReplica(tracker_).num_keyframes(), 2u);
     ASSERT_TRUE(tracked.has_reference);
     const geometry::RigidTransformation S = WorldMove();
     InjectCorrection(S, 1, {tracked.frame_id});
-    ASSERT_EQ(tracker_.map_replica().keyframe(tracked.frame_id), nullptr);
+    ASSERT_EQ(TrackerTestAccess::MapReplica(tracker_).keyframe(tracked.frame_id), nullptr);
 
     const size_t next = last + 1;
     const auto captured = Feed(sequence.frames[next].measurement);
@@ -897,7 +897,7 @@ TEST_F(TrackerLoopTest, CorrectionWhileRecentlyLost) {
     const geometry::RigidTransformation S = WorldMove();
     InjectCorrection(S, 1);
     EXPECT_EQ(tracker_.state(), TrackerState::RecentlyLost);
-    EXPECT_TRUE(tracker_.last_matches().empty());
+    EXPECT_TRUE(TrackerTestAccess::LastMatches(tracker_).empty());
 
     const auto captured = Feed(sequence.frames[5].measurement);
     ExpectTrackedMetric(captured, sequence.frames[5].T_cw, CorrectedAlignment(sequence, S), 5,
@@ -937,7 +937,7 @@ protected:
 
     // Injects N: a new map that leaves M active.
     void InjectTargetMap(const geometry::RigidTransformation& S) {
-        const MapReplica<Extractor>& absorbed = tracker_.map_replica();
+        const MapReplica<Extractor>& absorbed = TrackerTestAccess::MapReplica(tracker_);
         ASSERT_EQ(absorbed.map_id(), kAbsorbedMap);
         const auto* start = absorbed.keyframe(absorbed.keyframe_ids().front());
         ASSERT_NE(start, nullptr);
@@ -964,10 +964,10 @@ protected:
         target->added_frames.push_back(std::move(frame));
         injector_.Notify(std::move(target));
         Settle();
-        ASSERT_EQ(tracker_.atlas().map_ids(), (std::vector<map::MapId>{kAbsorbedMap, kTargetMap}));
-        ASSERT_EQ(tracker_.atlas().active_map(), kAbsorbedMap);
+        ASSERT_EQ(TrackerTestAccess::Atlas(tracker_).map_ids(), (std::vector<map::MapId>{kAbsorbedMap, kTargetMap}));
+        ASSERT_EQ(TrackerTestAccess::Atlas(tracker_).active_map(), kAbsorbedMap);
         ASSERT_EQ(tracker_.current_map_id(), kAbsorbedMap);
-        ASSERT_TRUE(tracker_.atlas().map(kTargetMap)->CheckConsistency());
+        ASSERT_TRUE(TrackerTestAccess::Atlas(tracker_).map(kTargetMap)->CheckConsistency());
     }
 
     // Injects the merge of M into N; `removed` (an M id) is removed by it.
@@ -975,8 +975,8 @@ protected:
     // the transaction's active_map: N, as the Mapper sends it.
     void InjectMerge(const geometry::RigidTransformation& S, std::optional<map::MapPointId> removed,
                      std::optional<map::MapId> active = kTargetMap) {
-        const MapReplica<Extractor>& absorbed = *tracker_.atlas().map(kAbsorbedMap);
-        const MapReplica<Extractor>& target = *tracker_.atlas().map(kTargetMap);
+        const MapReplica<Extractor>& absorbed = *TrackerTestAccess::Atlas(tracker_).map(kAbsorbedMap);
+        const MapReplica<Extractor>& target = *TrackerTestAccess::Atlas(tracker_).map(kTargetMap);
         const uint32_t target_epoch = target.map_epoch();
         const std::vector<std::optional<map::MapPointId>> new_ids = map::AbsorbedPointIds(
             static_cast<uint32_t>(absorbed.num_points()), map::MapPointId{static_cast<uint32_t>(target.num_points())},
@@ -1021,10 +1021,10 @@ protected:
         }
         injector_.Notify(std::move(merge));
         Settle();
-        ASSERT_EQ(tracker_.atlas().map_ids(), (std::vector<map::MapId>{kTargetMap}));
-        ASSERT_EQ(tracker_.atlas().active_map(), active);
-        ASSERT_EQ(tracker_.atlas().map(kTargetMap)->map_epoch(), target_epoch + 1);
-        ASSERT_TRUE(tracker_.atlas().map(kTargetMap)->CheckConsistency());
+        ASSERT_EQ(TrackerTestAccess::Atlas(tracker_).map_ids(), (std::vector<map::MapId>{kTargetMap}));
+        ASSERT_EQ(TrackerTestAccess::Atlas(tracker_).active_map(), active);
+        ASSERT_EQ(TrackerTestAccess::Atlas(tracker_).map(kTargetMap)->map_epoch(), target_epoch + 1);
+        ASSERT_TRUE(TrackerTestAccess::Atlas(tracker_).map(kTargetMap)->CheckConsistency());
     }
 
     // Tracks frames 0..last in M, injects N and merges M into it.
@@ -1042,7 +1042,7 @@ protected:
     // The first point of the last frame the merge does not fuse; none if
     // there is none.
     [[nodiscard]] std::optional<map::MapPointId> FirstUnfusedMatch() const {
-        for (const int64_t match : tracker_.last_matches()) {
+        for (const int64_t match : TrackerTestAccess::LastMatches(tracker_)) {
             if (match >= 0 && !IsFused(static_cast<uint32_t>(match))) {
                 return map::MapPointId{static_cast<uint32_t>(match)};
             }
@@ -1078,7 +1078,7 @@ TEST_F(TrackerMergeTest, TranslatesPointReferences) {
     const auto sequence = StereoSequence();
     const geometry::RigidTransformation S = WorldMove();
     TrackUpTo(sequence, 3);
-    const std::vector<int64_t> before = tracker_.last_matches();
+    const std::vector<int64_t> before = TrackerTestAccess::LastMatches(tracker_);
     InjectTargetMap(S);
     ASSERT_FALSE(HasFatalFailure());
     const std::optional<map::MapPointId> removed = FirstUnfusedMatch();
@@ -1086,7 +1086,7 @@ TEST_F(TrackerMergeTest, TranslatesPointReferences) {
     InjectMerge(S, removed);
     ASSERT_FALSE(HasFatalFailure());
 
-    const std::vector<int64_t>& after = tracker_.last_matches();
+    const std::vector<int64_t>& after = TrackerTestAccess::LastMatches(tracker_);
     ASSERT_EQ(after.size(), before.size());
     size_t renumbered = 0;
     size_t fused = 0;
@@ -1108,7 +1108,7 @@ TEST_F(TrackerMergeTest, TranslatesPointReferences) {
             ++renumbered;
             EXPECT_GE(expected->value, copies_.size());  // after N's own points
         }
-        if (expected) EXPECT_TRUE(tracker_.map_replica().IsAlive(*expected)) << "feature " << feature;
+        if (expected) EXPECT_TRUE(TrackerTestAccess::MapReplica(tracker_).IsAlive(*expected)) << "feature " << feature;
     }
     EXPECT_EQ(unmatched, 1u);
     EXPECT_GT(fused, 0u);
@@ -1134,10 +1134,10 @@ TEST_F(TrackerMergeTest, FrameTrackedCarriesTargetMap) {
     EXPECT_EQ(captured[0].map_epoch, 1u);
     ASSERT_FALSE(captured[0].observed_points.empty());
     for (const map::MapPointId point : captured[0].observed_points) {
-        EXPECT_TRUE(tracker_.map_replica().IsAlive(point)) << point.value;
+        EXPECT_TRUE(TrackerTestAccess::MapReplica(tracker_).IsAlive(point)) << point.value;
     }
     for (const map::FrameId frame : captured[0].local_frames) {
-        EXPECT_NE(tracker_.map_replica().keyframe(frame), nullptr) << frame.value;
+        EXPECT_NE(TrackerTestAccess::MapReplica(tracker_).keyframe(frame), nullptr) << frame.value;
     }
 }
 
@@ -1157,7 +1157,7 @@ TEST_F(TrackerMergeTest, MergeWhileRecentlyLost) {
     ASSERT_FALSE(HasFatalFailure());
     EXPECT_EQ(tracker_.state(), TrackerState::RecentlyLost);
     EXPECT_EQ(tracker_.current_map_id(), kTargetMap);
-    EXPECT_TRUE(tracker_.last_matches().empty());
+    EXPECT_TRUE(TrackerTestAccess::LastMatches(tracker_).empty());
     EXPECT_TRUE(TakeCaptured().empty());  // no loss announced
 
     const auto captured = Feed(sequence.frames[5].measurement);
@@ -1166,7 +1166,7 @@ TEST_F(TrackerMergeTest, MergeWhileRecentlyLost) {
     EXPECT_EQ(captured[0].map_id, kTargetMap);
     EXPECT_EQ(captured[0].map_epoch, 1u);
     for (const map::MapPointId point : captured[0].observed_points) {
-        EXPECT_TRUE(tracker_.map_replica().IsAlive(point)) << point.value;
+        EXPECT_TRUE(TrackerTestAccess::MapReplica(tracker_).IsAlive(point)) << point.value;
     }
     EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
 }
@@ -1215,13 +1215,13 @@ TEST_F(TrackerMergeTest, MergeLeavingNoActiveMapResets) {
     // is kept: the last frame's M ids would index into N.
     const auto sequence = StereoSequence();
     TrackUpTo(sequence, 3);
-    ASSERT_FALSE(tracker_.last_matches().empty());
+    ASSERT_FALSE(TrackerTestAccess::LastMatches(tracker_).empty());
     const geometry::RigidTransformation S = WorldMove();
     InjectTargetMap(S);
     ASSERT_FALSE(HasFatalFailure());
     InjectMerge(S, std::nullopt, /*active=*/std::nullopt);
     ASSERT_FALSE(HasFatalFailure());
-    EXPECT_TRUE(tracker_.last_matches().empty());
+    EXPECT_TRUE(TrackerTestAccess::LastMatches(tracker_).empty());
     EXPECT_NE(tracker_.current_map_id(), kAbsorbedMap);  // M is gone
     EXPECT_TRUE(TakeCaptured().empty());
 }
@@ -1233,14 +1233,14 @@ TEST_F(TrackerMergeTest, MergeOfAnotherMapLeavesTrackerAlone) {
     // next frame by the motion model in M's world, as before.
     const auto sequence = StereoSequence();
     TrackUpTo(sequence, 3);
-    const std::vector<int64_t> before = tracker_.last_matches();
+    const std::vector<int64_t> before = TrackerTestAccess::LastMatches(tracker_);
     ASSERT_FALSE(before.empty());
     const geometry::RigidTransformation S = WorldMove();
     InjectTargetMap(S);
     ASSERT_FALSE(HasFatalFailure());
 
-    const MapReplica<Extractor>& active = *tracker_.atlas().map(kAbsorbedMap);
-    const MapReplica<Extractor>& absorbed = *tracker_.atlas().map(kTargetMap);
+    const MapReplica<Extractor>& active = *TrackerTestAccess::Atlas(tracker_).map(kAbsorbedMap);
+    const MapReplica<Extractor>& absorbed = *TrackerTestAccess::Atlas(tracker_).map(kTargetMap);
     const uint32_t active_epoch = active.map_epoch();
     const auto new_ids = map::AbsorbedPointIds(
         static_cast<uint32_t>(absorbed.num_points()), map::MapPointId{static_cast<uint32_t>(active.num_points())},
@@ -1270,14 +1270,14 @@ TEST_F(TrackerMergeTest, MergeOfAnotherMapLeavesTrackerAlone) {
     }
     injector_.Notify(std::move(merge));
     Settle();
-    ASSERT_EQ(tracker_.atlas().map_ids(), (std::vector<map::MapId>{kAbsorbedMap}));
-    ASSERT_EQ(tracker_.atlas().active_map(), kAbsorbedMap);
-    ASSERT_NE(tracker_.map_replica().keyframe(kTargetFrame), nullptr);
-    ASSERT_TRUE(tracker_.map_replica().CheckConsistency());
+    ASSERT_EQ(TrackerTestAccess::Atlas(tracker_).map_ids(), (std::vector<map::MapId>{kAbsorbedMap}));
+    ASSERT_EQ(TrackerTestAccess::Atlas(tracker_).active_map(), kAbsorbedMap);
+    ASSERT_NE(TrackerTestAccess::MapReplica(tracker_).keyframe(kTargetFrame), nullptr);
+    ASSERT_TRUE(TrackerTestAccess::MapReplica(tracker_).CheckConsistency());
 
     EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
     EXPECT_EQ(tracker_.current_map_id(), kAbsorbedMap);
-    EXPECT_EQ(tracker_.last_matches(), before);
+    EXPECT_EQ(TrackerTestAccess::LastMatches(tracker_), before);
     EXPECT_TRUE(TakeCaptured().empty());
     const auto captured = Feed(sequence.frames[4].measurement);
     ExpectTrackedMetric(captured, sequence.frames[4].T_cw,
