@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <support/synthetic_sequence.h>
 #include <support/test_measurements.h>
+#include <test_access.h>
 #include <voyahslam/bow/vocabulary.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
@@ -32,80 +33,6 @@
 #include <vector>
 
 namespace voyahslam::mapping {
-
-// The Mapper's private steps for tests: publishes a transaction that adds a
-// loop edge between Frames `a` and `b` of the current map; runs the loop
-// correction's CorrectWindow (nothing published) and reads the map back.
-struct MapperTestAccess {
-    template <typename TFeatureExtractor>
-    static void PublishLoopEdge(Mapper<TFeatureExtractor>& out_mapper, map::FrameId a,
-                                map::FrameId b) {
-        auto event = out_mapper.CreateTransaction();
-        out_mapper.AddLoopEdge(a, b, *event);
-        out_mapper.observable_.Notify(std::move(event));
-    }
-    template <typename TFeatureExtractor>
-    static void CorrectWindow(Mapper<TFeatureExtractor>& out_mapper, const std::vector<map::FrameId>& window,
-                              const geometry::Sim3& S_query_world) {
-        out_mapper.CorrectWindow(window, S_query_world);
-    }
-    // Steps 1-5 of a correction of `query` with `match` that fuses only
-    // `matched_points` (no loop points): the loop connections. Nothing is
-    // published.
-    template <typename TFeatureExtractor>
-    static std::vector<std::pair<map::FrameId, map::FrameId>> LoopConnections(
-        Mapper<TFeatureExtractor>& out_mapper, map::FrameId query, map::FrameId match,
-        const geometry::Sim3& S_query_match,
-        const std::vector<std::pair<map::MapPointId, map::MapPointId>>& matched_points) {
-        std::vector<map::FrameId> window = {query};
-        for (const map::FrameId frame : out_mapper.Connected(query)) window.push_back(frame);
-        const geometry::RigidTransformation& T_match = out_mapper.FindKeyFrame(match)->pose();
-        const auto correction = out_mapper.CorrectWindow(
-            window, geometry::Compose(S_query_match, geometry::Sim3{1.0, T_match.rotation(), T_match.translation()}));
-        const auto scratch = out_mapper.CreateTransaction();
-        out_mapper.FuseLoopPoints(correction, matched_points, {}, *scratch);
-        return out_mapper.LoopConnections(correction, match);
-    }
-    // Culls Frame `frame` of the current map through Frame culling's path
-    // (RemoveFrame, FinishRefinement) and publishes it as one transaction.
-    template <typename TFeatureExtractor>
-    static void CullFrame(Mapper<TFeatureExtractor>& out_mapper, map::FrameId frame) {
-        auto event = out_mapper.CreateTransaction();
-        std::vector<map::MapPointId> changed;
-        out_mapper.RemoveFrame(frame, *event, changed);
-        out_mapper.FinishRefinement(std::move(changed), *event);
-        out_mapper.num_keyframes_.fetch_sub(1, std::memory_order_acq_rel);
-        out_mapper.num_map_points_.store(out_mapper.Active().map_points.size(), std::memory_order_release);
-        out_mapper.observable_.Notify(std::move(event));
-    }
-    // Map merging step 1: the window of `frame` in map `map` (it must be live).
-    template <typename TFeatureExtractor>
-    static std::vector<map::FrameId> MergeWindowOf(const Mapper<TFeatureExtractor>& mapper, map::MapId map,
-                                                   map::FrameId frame) {
-        return mapper.MergeWindowOf(mapper.maps_.at(map), frame);
-    }
-    template <typename TFeatureExtractor>
-    static geometry::RigidTransformation Pose(const Mapper<TFeatureExtractor>& mapper, map::FrameId frame) {
-        return mapper.FindKeyFrame(frame)->pose();
-    }
-    template <typename TFeatureExtractor>
-    static geometry::TPoint3DF Position(const Mapper<TFeatureExtractor>& mapper, map::MapPointId point) {
-        return mapper.Active().map_points.Position(point);
-    }
-    // Map `map`'s points and their visible / found counters (it must be live).
-    template <typename TFeatureExtractor>
-    static size_t NumPoints(const Mapper<TFeatureExtractor>& mapper, map::MapId map) {
-        return mapper.maps_.at(map).map_points.size();
-    }
-    template <typename TFeatureExtractor>
-    static std::vector<uint32_t> NumVisible(const Mapper<TFeatureExtractor>& mapper, map::MapId map) {
-        return mapper.maps_.at(map).num_visible;
-    }
-    template <typename TFeatureExtractor>
-    static std::vector<uint32_t> NumFound(const Mapper<TFeatureExtractor>& mapper, map::MapId map) {
-        return mapper.maps_.at(map).num_found;
-    }
-};
 
 namespace {
 
@@ -936,7 +863,7 @@ protected:
 
     // Covisibility of the Mapper and of the replica agree for every Frame.
     void ExpectReplicaConsistent() {
-        const map::CovisibilityIndex& mapper = mapper_.covisibility();
+        const map::CovisibilityIndex& mapper = MapperTestAccess::Covisibility(mapper_);
         const map::CovisibilityIndex& replicated = replica().covisibility();
         const std::vector<map::FrameId> frames = replica().keyframe_ids();
         ASSERT_EQ(frames.size(), mapper_.num_keyframes());
@@ -961,13 +888,14 @@ protected:
             EXPECT_EQ(replicated.Covisible(frame, max_count), mapper.Covisible(frame, max_count))
                 << "Frame " << frame.value;
             // Same map graph.
-            EXPECT_EQ(replica().parent(frame), mapper_.Parent(frame)) << "Frame " << frame.value;
-            EXPECT_EQ(replica().loop_edges(frame), mapper_.LoopEdges(frame)) << "Frame " << frame.value;
+            EXPECT_EQ(replica().parent(frame), MapperTestAccess::Parent(mapper_, frame)) << "Frame " << frame.value;
+            EXPECT_EQ(replica().loop_edges(frame), MapperTestAccess::LoopEdges(mapper_, frame))
+                << "Frame " << frame.value;
         }
         // Same alive points, same references.
         for (uint32_t p = 0; p < replica().num_points(); ++p) {
             const map::MapPointId point{p};
-            const std::optional<map::PointReference> expected = mapper_.Reference(point);
+            const std::optional<map::PointReference> expected = MapperTestAccess::Reference(mapper_, point);
             ASSERT_EQ(replica().IsAlive(point), expected.has_value()) << "point " << p;
             if (!expected) {
                 continue;
@@ -1348,10 +1276,10 @@ TEST_F(MapperFrameCreationTest, CreatesStereoFrame) {
     EXPECT_EQ(published[0].updated_ids.size(), count);
     for (size_t i = 0; i < count; ++i) {
         EXPECT_EQ(published[0].frame().observed_points[i], first.observed_points[i]) << "point " << i;
-        EXPECT_EQ(mapper_.covisibility().NumObservations(first.observed_points[i]), 2u)
+        EXPECT_EQ(MapperTestAccess::Covisibility(mapper_).NumObservations(first.observed_points[i]), 2u)
             << "point " << i;
     }
-    EXPECT_EQ(mapper_.covisibility().Points(published[0].frame().frame_id).size(),
+    EXPECT_EQ(MapperTestAccess::Covisibility(mapper_).Points(published[0].frame().frame_id).size(),
               count + published[0].count);
 }
 
@@ -1843,11 +1771,11 @@ TEST_F(MapperFusionTest, MergesDuplicatePoints) {
     };
     ASSERT_GT(created.count, 0u);
     size_t num_edge = 0;
-    for (const map::MapPointId point : mapper_.covisibility().Points(created.frame().frame_id)) {
+    for (const map::MapPointId point : MapperTestAccess::Covisibility(mapper_).Points(created.frame().frame_id)) {
         if (point >= created.start_id) {
             ++num_edge;
-            ASSERT_EQ(mapper_.covisibility().NumObservations(point), 1u);
-            EXPECT_TRUE(on_edge(mapper_.covisibility().Observations(point).front().feature))
+            ASSERT_EQ(MapperTestAccess::Covisibility(mapper_).NumObservations(point), 1u);
+            EXPECT_TRUE(on_edge(MapperTestAccess::Covisibility(mapper_).Observations(point).front().feature))
                 << "unmerged point " << point.value;
         }
     }
@@ -1862,7 +1790,7 @@ TEST_F(MapperFusionTest, MergesDuplicatePoints) {
         // The union: Frame 0's and Frame 1's observation, through the same
         // feature.
         const std::vector<map::PointObservation>& observations =
-            mapper_.covisibility().Observations(replaced.winner);
+            MapperTestAccess::Covisibility(mapper_).Observations(replaced.winner);
         ASSERT_EQ(observations.size(), 2u) << "winner " << replaced.winner.value;
         EXPECT_EQ(observations[0].feature, observations[1].feature);
     }
@@ -1957,7 +1885,7 @@ TEST_F(MapperFusionTest, FusionRaisesObservationCounts) {
     uint32_t observed_3 = 0;
     for (uint32_t p = static_cast<uint32_t>(num_points_); p < replica().num_points(); ++p) {
         observed_3 += replica().IsAlive(map::MapPointId{p}) &&
-                      mapper_.covisibility().NumObservations(map::MapPointId{p}) >= 3;
+                      MapperTestAccess::Covisibility(mapper_).NumObservations(map::MapPointId{p}) >= 3;
     }
     ASSERT_GE(total, 10u);
     EXPECT_GE(2 * observed_3, total) << observed_3 << " of " << total;
@@ -1987,9 +1915,9 @@ TEST_F(MapperCullingTest, CountersIncludeSkippedFrameTracked) {
     const std::vector<Pair> pairs = TrackedPairs(next_, num_points_ / 2);
     const map::MapPointId found = pairs[0].point;
     const map::MapPointId unmatched = TrackedPairs(next_, num_points_ / 2 + 1).back().point;
-    const uint32_t visible_before = mapper_.NumVisible(found);
-    const uint32_t found_before = mapper_.NumFound(found);
-    const uint32_t unmatched_found_before = mapper_.NumFound(unmatched);
+    const uint32_t visible_before = MapperTestAccess::NumVisible(mapper_, found);
+    const uint32_t found_before = MapperTestAccess::NumFound(mapper_, found);
+    const uint32_t unmatched_found_before = MapperTestAccess::NumFound(mapper_, unmatched);
     const size_t evaluations = mapper_.num_frame_evaluations();
 
     // Three strong events (no Frame) in one batch: one evaluated, two skipped.
@@ -2000,10 +1928,10 @@ TEST_F(MapperCullingTest, CountersIncludeSkippedFrameTracked) {
     ASSERT_TRUE(mapper_.ProcessPending());
     ASSERT_EQ(mapper_.num_frame_evaluations(), evaluations + 1);
 
-    EXPECT_EQ(mapper_.NumVisible(found), visible_before + 3);
-    EXPECT_EQ(mapper_.NumFound(found), found_before + 3);
-    EXPECT_EQ(mapper_.NumVisible(unmatched), visible_before + 3);
-    EXPECT_EQ(mapper_.NumFound(unmatched), unmatched_found_before);
+    EXPECT_EQ(MapperTestAccess::NumVisible(mapper_, found), visible_before + 3);
+    EXPECT_EQ(MapperTestAccess::NumFound(mapper_, found), found_before + 3);
+    EXPECT_EQ(MapperTestAccess::NumVisible(mapper_, unmatched), visible_before + 3);
+    EXPECT_EQ(MapperTestAccess::NumFound(mapper_, unmatched), unmatched_found_before);
 }
 
 TEST_F(MapperCullingTest, RemovesPoorRecentPoint) {
@@ -2019,8 +1947,8 @@ TEST_F(MapperCullingTest, RemovesPoorRecentPoint) {
         }
     }
     ASSERT_TRUE(poor.has_value());
-    ASSERT_EQ(mapper_.NumVisible(*poor), 1u);
-    ASSERT_EQ(mapper_.NumFound(*poor), 1u);
+    ASSERT_EQ(MapperTestAccess::NumVisible(mapper_, *poor), 1u);
+    ASSERT_EQ(MapperTestAccess::NumFound(mapper_, *poor), 1u);
 
     // Four strong events see it but do not match it: found / visible = 1/5.
     for (size_t k = 1; k <= 4; ++k) {
@@ -2029,14 +1957,14 @@ TEST_F(MapperCullingTest, RemovesPoorRecentPoint) {
         Drain();
     }
     ASSERT_TRUE(TakeCaptured().empty());
-    ASSERT_EQ(mapper_.NumVisible(*poor), 5u);
-    ASSERT_EQ(mapper_.NumFound(*poor), 1u);
+    ASSERT_EQ(MapperTestAccess::NumVisible(mapper_, *poor), 5u);
+    ASSERT_EQ(MapperTestAccess::NumFound(mapper_, *poor), 1u);
 
     const Published next = CreateMonoFrame(index + 5);
     EXPECT_NE(std::find(next.removed_points.begin(), next.removed_points.end(), *poor),
               next.removed_points.end());
     EXPECT_FALSE(replica().IsAlive(*poor));
-    EXPECT_FALSE(mapper_.Reference(*poor).has_value());
+    EXPECT_FALSE(MapperTestAccess::Reference(mapper_, *poor).has_value());
     ExpectReplicaConsistent();
 }
 
@@ -2074,7 +2002,7 @@ TEST_F(MapperFusionTest, StereoFusionKeepsPointIdentity) {
             const map::MapPointId point{p};
             if (!replica().IsAlive(point)) continue;
             const std::vector<map::PointObservation>& observations =
-                mapper_.covisibility().Observations(point);
+                MapperTestAccess::Covisibility(mapper_).Observations(point);
             const Eigen::Index scene = scene_of(observations.front());
             for (const map::PointObservation& observation : observations) {
                 EXPECT_EQ(scene_of(observation), scene) << "point " << p << ", frame " << index;
@@ -2187,7 +2115,7 @@ TEST_F(MapperFusionTest, LoserObservationDroppedWhereWinnerObserved) {
     EXPECT_EQ(added_a_s, 1u);
     // A_s: Frames 0, 1 and 2, each once.
     std::vector<uint32_t> frames;
-    for (const map::PointObservation& o : mapper_.covisibility().Observations(*a_s)) {
+    for (const map::PointObservation& o : MapperTestAccess::Covisibility(mapper_).Observations(*a_s)) {
         frames.push_back(o.frame.value);
         EXPECT_EQ(o.feature, feature_s);
     }
@@ -2202,19 +2130,19 @@ TEST_F(MapperCullingTest, CountersResetOnMapClear) {
     PublishFrameTracked(1, next_, TrackedPairs(next_, num_points_ / 2), map::FrameId{1},
                         num_points_, std::nullopt, {point});
     Drain();
-    ASSERT_EQ(mapper_.NumVisible(point), 2u);
+    ASSERT_EQ(MapperTestAccess::NumVisible(mapper_, point), 2u);
 
     PublishTrackingLost(1, sequence_.frames[next_].measurement.timestamp());
     Drain();
-    EXPECT_EQ(mapper_.NumVisible(point), 0u);
-    EXPECT_EQ(mapper_.NumFound(point), 0u);
-    EXPECT_FALSE(mapper_.Reference(point).has_value());
+    EXPECT_EQ(MapperTestAccess::NumVisible(mapper_, point), 0u);
+    EXPECT_EQ(MapperTestAccess::NumFound(mapper_, point), 0u);
+    EXPECT_FALSE(MapperTestAccess::Reference(mapper_, point).has_value());
 
     // Map 2 issues the id again, fresh.
     ASSERT_FALSE(InitializeMono(17).empty());
     ASSERT_GT(mapper_.num_map_points(), point.value);
-    EXPECT_EQ(mapper_.NumVisible(point), 1u);
-    EXPECT_EQ(mapper_.NumFound(point), 1u);
+    EXPECT_EQ(MapperTestAccess::NumVisible(mapper_, point), 1u);
+    EXPECT_EQ(MapperTestAccess::NumFound(mapper_, point), 1u);
 }
 
 TEST_F(MapperCullingWithoutFusionTest, TrackedObservationCountsBeforeCulling) {
@@ -2237,7 +2165,7 @@ TEST_F(MapperCullingWithoutFusionTest, TrackedObservationCountsBeforeCulling) {
     // Frame 3 does not track it: still 2 observations.
     CreateMonoFrame(second_index + 7);
     ASSERT_TRUE(replica().IsAlive(recent->first));
-    ASSERT_EQ(mapper_.covisibility().NumObservations(recent->first), 2u);
+    ASSERT_EQ(MapperTestAccess::Covisibility(mapper_).NumObservations(recent->first), 2u);
 
     // Frame 4, 2 Frames after its creation, tracks it: its third observation
     // counts before the culling rule (weighted observations <= 2) is applied.
@@ -2288,9 +2216,9 @@ TEST_F(MapperQualityTest, PublishesTwoTransactionsPerFrame) {
         EXPECT_EQ(refined.num_added_observations, 0u);
         EXPECT_TRUE(refined.replaced_points.empty());
         // The new Frame is optimized, the first Frame never is.
-        ASSERT_TRUE(mapper_.last_local_ba().ran);
-        EXPECT_FALSE(mapper_.last_local_ba().interrupted);
-        EXPECT_EQ(mapper_.last_local_ba().stage_reached, 2);
+        ASSERT_TRUE(MapperTestAccess::LastLocalBa(mapper_).ran);
+        EXPECT_FALSE(MapperTestAccess::LastLocalBa(mapper_).interrupted);
+        EXPECT_EQ(MapperTestAccess::LastLocalBa(mapper_).stage_reached, 2);
         std::vector<map::FrameId> posed;
         for (const auto& [id, pose] : refined.updated_poses) posed.push_back(id);
         EXPECT_NE(std::find(posed.begin(), posed.end(), frame), posed.end());
@@ -2323,7 +2251,7 @@ TEST_F(MapperQualityTest, LocalBaReducesReprojectionError) {
             before = MeanReprojectionError(local);
         });
     ASSERT_FALSE(local.empty());
-    ASSERT_TRUE(mapper_.last_local_ba().ran);
+    ASSERT_TRUE(MapperTestAccess::LastLocalBa(mapper_).ran);
     const double after = MeanReprojectionError(local);
     EXPECT_LT(after, before);
     EXPECT_LT(after, 1.0) << "before " << before;
@@ -2340,16 +2268,16 @@ TEST_F(MapperQualityTest, RemovesBaOutliers) {
     pairs[0].feature = ExtraFeatures(index).at(0);
     const std::vector<Published> published = CreateMonoFrame(index, pairs);
     const map::FrameId frame = published[0].frame().frame_id;
-    ASSERT_TRUE(mapper_.last_local_ba().ran);
-    EXPECT_EQ(mapper_.last_local_ba().stage_reached, 2);
-    EXPECT_GE(mapper_.last_local_ba().num_outliers, 1u);
+    ASSERT_TRUE(MapperTestAccess::LastLocalBa(mapper_).ran);
+    EXPECT_EQ(MapperTestAccess::LastLocalBa(mapper_).stage_reached, 2);
+    EXPECT_GE(MapperTestAccess::LastLocalBa(mapper_).num_outliers, 1u);
     const auto& removed = published[1].removed_observations;
     EXPECT_NE(std::find_if(removed.begin(), removed.end(),
                            [&](const events::RemovedObservation& r) {
                                return r.frame == frame && r.point == outlier;
                            }),
               removed.end());
-    EXPECT_FALSE(mapper_.covisibility().Contains(frame, outlier));
+    EXPECT_FALSE(MapperTestAccess::Covisibility(mapper_).Contains(frame, outlier));
     EXPECT_TRUE(replica().IsAlive(outlier));
     ExpectReplicaConsistent();
 }
@@ -2367,13 +2295,13 @@ TEST_F(MapperQualityTest, UrgentEventStopsBa) {
     const std::vector<Published> published = CreateMonoFrame(index, pairs);
     ASSERT_TRUE(urgent_sent_);
     const map::FrameId frame = published[0].frame().frame_id;
-    const LocalBaSummary& ba = mapper_.last_local_ba();
+    const LocalBaSummary& ba = MapperTestAccess::LastLocalBa(mapper_);
     ASSERT_TRUE(ba.ran);
     EXPECT_TRUE(ba.interrupted);
     EXPECT_EQ(ba.stage_reached, 0);
     EXPECT_EQ(ba.num_outliers, 0u);
     EXPECT_TRUE(published[1].removed_observations.empty());
-    EXPECT_TRUE(mapper_.covisibility().Contains(frame, outlier));
+    EXPECT_TRUE(MapperTestAccess::Covisibility(mapper_).Contains(frame, outlier));
     // Nothing moved: the new Frame keeps its tracked pose.
     for (const auto& [id, pose] : published[1].updated_poses) {
         if (id == frame) EXPECT_TRUE(pose.ToMatrix34().isApprox(MapPose(index).ToMatrix34()));
@@ -2416,7 +2344,7 @@ TEST_F(MapperQualityTest, CullsFrameHoldingReferences) {
     const map::FrameId f = created.frame().frame_id;
     std::vector<map::MapPointId> referenced;
     for (const map::MapPointId point : created.frame().observed_points) {
-        const auto reference = mapper_.Reference(point);
+        const auto reference = MapperTestAccess::Reference(mapper_, point);
         if (reference && reference->keyframe == f) referenced.push_back(point);
     }
     ASSERT_FALSE(referenced.empty());
@@ -2435,11 +2363,11 @@ TEST_F(MapperQualityTest, CullsFrameHoldingReferences) {
     for (const map::MapPointId point : referenced) {
         if (!replica().IsAlive(point)) continue;
         ++num_alive;
-        const auto reference = mapper_.Reference(point);
+        const auto reference = MapperTestAccess::Reference(mapper_, point);
         ASSERT_TRUE(reference.has_value());
         EXPECT_NE(reference->keyframe, f);
         map::FrameId smallest = reference->keyframe;
-        for (const map::PointObservation& o : mapper_.covisibility().Observations(point)) {
+        for (const map::PointObservation& o : MapperTestAccess::Covisibility(mapper_).Observations(point)) {
             smallest = std::min(smallest, o.frame);
         }
         EXPECT_EQ(reference->keyframe, smallest) << "point " << point.value;
@@ -2453,7 +2381,7 @@ TEST_F(MapperQualityTest, SkipsBaWithoutFreeFrames) {
     const size_t index = next_ + 2;
     const std::vector<Published> published = CreateMonoFrame(index, {});
     EXPECT_TRUE(published[0].frame().observed_points.empty());
-    EXPECT_FALSE(mapper_.last_local_ba().ran);
+    EXPECT_FALSE(MapperTestAccess::LastLocalBa(mapper_).ran);
     // Transaction 2 is still published, empty.
     const Published& refined = published[1];
     EXPECT_EQ(refined.type, events::EventType::MapTransaction);
@@ -2490,7 +2418,7 @@ protected:
             ASSERT_FALSE(HasFailure());
         }
         ASSERT_EQ(mapper_.num_keyframes(), num_frames);
-        ASSERT_EQ(mapper_.num_keyframes(map::MapId{1}), num_frames);
+        ASSERT_EQ(MapperTestAccess::NumKeyframes(mapper_, map::MapId{1}), num_frames);
     }
 
     // A final TrackingLost of the active map `map`, which the Mapper keeps
@@ -2519,11 +2447,12 @@ protected:
     // The replica fed every transaction mirrors the Mapper's Atlas: the same
     // live maps, each with the same Frames, and the same active map.
     void ExpectReplicaMirrorsAtlas() const {
-        EXPECT_EQ(atlas_.map_ids(), mapper_.map_ids());
-        EXPECT_EQ(atlas_.active_map(), mapper_.active_map());
-        for (const map::MapId id : mapper_.map_ids()) {
+        EXPECT_EQ(atlas_.map_ids(), MapperTestAccess::MapIds(mapper_));
+        EXPECT_EQ(atlas_.active_map(), MapperTestAccess::ActiveMap(mapper_));
+        for (const map::MapId id : MapperTestAccess::MapIds(mapper_)) {
             ASSERT_NE(atlas_.map(id), nullptr) << "map " << id.value;
-            EXPECT_EQ(atlas_.map(id)->num_keyframes(), mapper_.num_keyframes(id)) << "map " << id.value;
+            EXPECT_EQ(atlas_.map(id)->num_keyframes(), MapperTestAccess::NumKeyframes(mapper_, id))
+                << "map " << id.value;
         }
     }
 
@@ -2556,9 +2485,9 @@ TEST_F(MapperAtlasTest, KeepsMapsFromTenFrames) {
     DeactivateMap(1, sequence_.frames[next_].measurement.timestamp());
 
     EXPECT_EQ(mapper_.state(), MapperState::Initializing);
-    EXPECT_EQ(mapper_.map_ids(), std::vector<map::MapId>{map::MapId{1}});
-    EXPECT_FALSE(mapper_.active_map().has_value());
-    EXPECT_EQ(mapper_.num_keyframes(map::MapId{1}), 10u);
+    EXPECT_EQ(MapperTestAccess::MapIds(mapper_), std::vector<map::MapId>{map::MapId{1}});
+    EXPECT_FALSE(MapperTestAccess::ActiveMap(mapper_).has_value());
+    EXPECT_EQ(MapperTestAccess::NumKeyframes(mapper_, map::MapId{1}), 10u);
     EXPECT_EQ(MapperTestAccess::NumPoints(mapper_, map::MapId{1}), num_points);
     // The active-map counters: none active.
     EXPECT_EQ(mapper_.num_keyframes(), 0u);
@@ -2573,9 +2502,9 @@ TEST_F(MapperAtlasTest, DiscardsSmallMap) {
     LoseMap(1, sequence_.frames[next_].measurement.timestamp());
 
     EXPECT_EQ(mapper_.state(), MapperState::Initializing);
-    EXPECT_TRUE(mapper_.map_ids().empty());
-    EXPECT_FALSE(mapper_.active_map().has_value());
-    EXPECT_EQ(mapper_.num_keyframes(map::MapId{1}), 0u);
+    EXPECT_TRUE(MapperTestAccess::MapIds(mapper_).empty());
+    EXPECT_FALSE(MapperTestAccess::ActiveMap(mapper_).has_value());
+    EXPECT_EQ(MapperTestAccess::NumKeyframes(mapper_, map::MapId{1}), 0u);
 }
 
 TEST_F(MapperAtlasTest, NewMapGetsNextId) {
@@ -2597,10 +2526,10 @@ TEST_F(MapperAtlasTest, NewMapGetsNextId) {
     EXPECT_EQ(published[0].frame().frame_id, map::FrameId{10});
     EXPECT_EQ(mapper_.state(), MapperState::Mapping);
     EXPECT_EQ(mapper_.current_map_id(), map::MapId{2});
-    EXPECT_EQ(mapper_.active_map(), map::MapId{2});
-    EXPECT_EQ(mapper_.map_ids(), (std::vector<map::MapId>{map::MapId{1}, map::MapId{2}}));
-    EXPECT_EQ(mapper_.num_keyframes(map::MapId{1}), 10u);
-    EXPECT_EQ(mapper_.num_keyframes(map::MapId{2}), 1u);
+    EXPECT_EQ(MapperTestAccess::ActiveMap(mapper_), map::MapId{2});
+    EXPECT_EQ(MapperTestAccess::MapIds(mapper_), (std::vector<map::MapId>{map::MapId{1}, map::MapId{2}}));
+    EXPECT_EQ(MapperTestAccess::NumKeyframes(mapper_, map::MapId{1}), 10u);
+    EXPECT_EQ(MapperTestAccess::NumKeyframes(mapper_, map::MapId{2}), 1u);
     EXPECT_EQ(mapper_.num_keyframes(), 1u);
 }
 
@@ -2634,7 +2563,7 @@ TEST_F(MapperAtlasTest, InactiveMapIsFrozen) {
     PublishInitializationMeasurement(StereoMeasurement(100.0));
     Drain();
     for (Published& p : TakeCaptured()) published.push_back(std::move(p));
-    ASSERT_EQ(mapper_.active_map(), map::MapId{2});
+    ASSERT_EQ(MapperTestAccess::ActiveMap(mapper_), map::MapId{2});
     const size_t map_2_points = mapper_.num_map_points();
     const std::vector<uint32_t> map_2_visible = MapperTestAccess::NumVisible(mapper_, map::MapId{2});
     const std::vector<uint32_t> map_2_found = MapperTestAccess::NumFound(mapper_, map::MapId{2});
@@ -2647,12 +2576,12 @@ TEST_F(MapperAtlasTest, InactiveMapIsFrozen) {
     EXPECT_TRUE(published[0].new_map);
     EXPECT_EQ(mapper_.num_global_ba_rejected(), rejected_before + 2);
     EXPECT_EQ(mapper_.num_global_ba_merges(), 0u);
-    EXPECT_EQ(mapper_.num_keyframes(map::MapId{1}), 10u);
+    EXPECT_EQ(MapperTestAccess::NumKeyframes(mapper_, map::MapId{1}), 10u);
     EXPECT_EQ(MapperTestAccess::NumPoints(mapper_, map::MapId{1}), num_points);
     EXPECT_EQ(MapperTestAccess::NumVisible(mapper_, map::MapId{1}), num_visible);
     EXPECT_EQ(MapperTestAccess::NumFound(mapper_, map::MapId{1}), num_found);
     // Map 2 is untouched too.
-    EXPECT_EQ(mapper_.num_keyframes(map::MapId{2}), 1u);
+    EXPECT_EQ(MapperTestAccess::NumKeyframes(mapper_, map::MapId{2}), 1u);
     EXPECT_EQ(mapper_.num_map_points(), map_2_points);
     EXPECT_EQ(MapperTestAccess::NumVisible(mapper_, map::MapId{2}), map_2_visible);
     EXPECT_EQ(MapperTestAccess::NumFound(mapper_, map::MapId{2}), map_2_found);
@@ -2679,7 +2608,7 @@ TEST_F(MapperAtlasTest, ReplicasMirrorAtlas) {
 
     InitializeStereo(102.0);
     ExpectReplicaMirrorsAtlas();
-    EXPECT_EQ(mapper_.map_ids(), (std::vector<map::MapId>{map::MapId{1}, map::MapId{3}}));
+    EXPECT_EQ(MapperTestAccess::MapIds(mapper_), (std::vector<map::MapId>{map::MapId{1}, map::MapId{3}}));
     EXPECT_EQ(atlas_.active_map(), map::MapId{3});
 }
 
@@ -3132,7 +3061,7 @@ TEST(MapperBowTest, FramesGetBowWithVocabulary) {
     size_t num_checked = 0;
     for (const Published& p : published) {
         for (const PublishedFrame& frame : p.frames) {
-            const bow::BowVector* bow = run.mapper().BowVectorOf(frame.frame_id);
+            const bow::BowVector* bow = MapperTestAccess::BowVectorOf(run.mapper(), frame.frame_id);
             if (bow == nullptr) continue;  // culled
             ++num_checked;
             ASSERT_FALSE(bow->entries.empty()) << "Frame " << frame.frame_id.value;
@@ -3148,7 +3077,7 @@ TEST(MapperBowTest, FramesGetBowWithVocabulary) {
     }
     EXPECT_EQ(num_checked, run.mapper().num_keyframes());
     // The initial Frames included (Frame 0 is never culled).
-    EXPECT_NE(run.mapper().BowVectorOf(map::FrameId{0}), nullptr);
+    EXPECT_NE(MapperTestAccess::BowVectorOf(run.mapper(), map::FrameId{0}), nullptr);
 }
 
 TEST(MapperBowTest, TransactionsCarryBow) {
@@ -3170,7 +3099,7 @@ TEST(MapperBowTest, TransactionsCarryBow) {
             EXPECT_EQ(frame.features.offsets, features.offsets);
             EXPECT_EQ(frame.features.features, features.features);
             // Equal to the Mapper's own, where the Frame is still in the map.
-            if (const bow::BowVector* own = run.mapper().BowVectorOf(frame.frame_id)) {
+            if (const bow::BowVector* own = MapperTestAccess::BowVectorOf(run.mapper(), frame.frame_id)) {
                 EXPECT_EQ(frame.bow.entries, own->entries);
             }
         }
@@ -3191,7 +3120,7 @@ TEST(MapperBowTest, TransactionsHaveNoBowWithoutVocabulary) {
 TEST(MapperBowTest, NoBowWithoutVocabulary) {
     MapperBowRun run;
     run.RunMono();
-    EXPECT_EQ(run.mapper().BowVectorOf(map::FrameId{0}), nullptr);
+    EXPECT_EQ(MapperTestAccess::BowVectorOf(run.mapper(), map::FrameId{0}), nullptr);
 }
 
 TEST(MapperBowTest, TriangulationUsesBowPath) {
@@ -3229,7 +3158,7 @@ TEST(MapperBowTest, OneNodeVocabularyMatchesNull) {
     MapperBowRun one_node(MapperOptions{}, MakeOneNodeVocabulary());
     const std::vector<Published> expected = without.RunMono();
     const std::vector<Published> actual = one_node.RunMono();
-    ASSERT_NE(one_node.mapper().BowVectorOf(map::FrameId{0}), nullptr);  // the BoW path ran
+    ASSERT_NE(MapperTestAccess::BowVectorOf(one_node.mapper(), map::FrameId{0}), nullptr);  // the BoW path ran
     // The scene triangulates (and exercises every other step).
     size_t num_new_points = 0;
     for (const Published& p : expected) {
@@ -3732,10 +3661,10 @@ TEST_F(MapperLoopTest, StaleEpochCreatesNoFrame) {
     const size_t num_keyframes = mapper_.num_keyframes();
     // A FrameTracked of the replica before the correction: weak, but no
     // Frame; its points are still counted.
-    const std::vector<map::MapPointId> points = mapper_.covisibility().Points(Query().id);
+    const std::vector<map::MapPointId> points = MapperTestAccess::Covisibility(mapper_).Points(Query().id);
     ASSERT_FALSE(points.empty());
-    const uint32_t visible = mapper_.NumVisible(points[0]);
-    const uint32_t found = mapper_.NumFound(points[0]);
+    const uint32_t visible = MapperTestAccess::NumVisible(mapper_, points[0]);
+    const uint32_t found = MapperTestAccess::NumFound(mapper_, points[0]);
     for (const uint32_t epoch : {0u, 1u}) {
         std::vector<Eigen::Index> scene_of_feature;
         auto event = std::make_shared<TFrameTracked>();
@@ -3755,8 +3684,8 @@ TEST_F(MapperLoopTest, StaleEpochCreatesNoFrame) {
         if (epoch == 0) {
             EXPECT_TRUE(created.empty());
             EXPECT_EQ(mapper_.num_keyframes(), num_keyframes);
-            EXPECT_EQ(mapper_.NumVisible(points[0]), visible + 1);
-            EXPECT_EQ(mapper_.NumFound(points[0]), found + 1);
+            EXPECT_EQ(MapperTestAccess::NumVisible(mapper_, points[0]), visible + 1);
+            EXPECT_EQ(MapperTestAccess::NumFound(mapper_, points[0]), found + 1);
         } else {
             EXPECT_EQ(created.size(), 2u);  // the current epoch creates it
             EXPECT_EQ(mapper_.num_keyframes(), num_keyframes + 1);
@@ -3837,7 +3766,7 @@ TEST_F(MapperLoopTest, MonoWindowFoldsScale) {
     const map::FrameId other = CreateMonoFrame(next_ + 8).frame().frame_id;
     const map::FrameId query = CreateMonoFrame(next_ + 16).frame().frame_id;
     const std::vector<map::FrameId> window = {query, other};
-    const map::CovisibilityIndex& covisibility = mapper_.covisibility();
+    const map::CovisibilityIndex& covisibility = MapperTestAccess::Covisibility(mapper_);
     ASSERT_FALSE(covisibility.Points(query).empty());
 
     const geometry::TVector3DF axis = geometry::TVector3DF(0.3, 1.0, 0.2).normalized();
@@ -3919,12 +3848,13 @@ TEST_F(MapperLoopTest, WeakQueryMatchLinkIsALoopConnection) {
     BuildScene();
     std::vector<std::pair<map::MapPointId, map::MapPointId>> pairs;
     for (const auto& pair : MatchedPoints()) {
-        if (pairs.size() < 10 && mapper_.covisibility().Contains(Match().id, pair.second)) pairs.push_back(pair);
+        if (pairs.size() < 10 && MapperTestAccess::Covisibility(mapper_).Contains(Match().id, pair.second))
+            pairs.push_back(pair);
     }
     ASSERT_EQ(pairs.size(), 10u);
     const auto connections = MapperTestAccess::LoopConnections(mapper_, Query().id, Match().id, TrueS(), pairs);
     const auto shared = [&](map::FrameId a, map::FrameId b) {
-        for (const auto& [other, count] : mapper_.covisibility().Covisible(a, frames_.size())) {
+        for (const auto& [other, count] : MapperTestAccess::Covisibility(mapper_).Covisible(a, frames_.size())) {
             if (other == b) return count;
         }
         return 0u;
@@ -4044,7 +3974,7 @@ protected:
     [[nodiscard]] std::map<uint32_t, geometry::TPoint3DF> MapperPositions() const {
         std::map<uint32_t, geometry::TPoint3DF> positions;
         for (uint32_t p = 0; p < replica().num_points(); ++p) {
-            if (mapper_.Reference(map::MapPointId{p})) {
+            if (MapperTestAccess::Reference(mapper_, map::MapPointId{p})) {
                 positions.emplace(p, MapperTestAccess::Position(mapper_, map::MapPointId{p}));
             }
         }
@@ -4126,7 +4056,8 @@ TEST_F(MapperGlobalBaTest, PropagatesToNewFramesThroughTree) {
     size_t chain = 0;
     for (const map::FrameId frame : added) {
         size_t depth = 0;
-        for (std::optional<map::FrameId> f = frame; f && is_added(*f); f = mapper_.Parent(*f)) ++depth;
+        for (std::optional<map::FrameId> f = frame; f && is_added(*f); f = MapperTestAccess::Parent(mapper_, *f))
+            ++depth;
         chain = std::max(chain, depth);
     }
     EXPECT_EQ(chain, 3u);
@@ -4134,7 +4065,7 @@ TEST_F(MapperGlobalBaTest, PropagatesToNewFramesThroughTree) {
 
     ASSERT_EQ(Merge(result).size(), 1u);
     for (const map::FrameId frame : added) {
-        const map::FrameId parent = *mapper_.Parent(frame);
+        const map::FrameId parent = *MapperTestAccess::Parent(mapper_, frame);
         const geometry::RigidTransformation relative_before =
             before.at(frame.value) * before.at(parent.value).Inverse();
         const geometry::RigidTransformation relative_after =
@@ -4178,7 +4109,7 @@ TEST_F(MapperGlobalBaCullingTest, FollowsReparentedChain) {
 
     ASSERT_EQ(Merge(result).size(), 1u);
     for (const map::FrameId frame : followers) {
-        const map::FrameId parent = *mapper_.Parent(frame);
+        const map::FrameId parent = *MapperTestAccess::Parent(mapper_, frame);
         EXPECT_EQ(parent, reparented.at(frame.value));
         const geometry::RigidTransformation relative_before =
             before.at(frame.value) * before.at(parent.value).Inverse();
@@ -4207,7 +4138,7 @@ TEST_F(MapperGlobalBaTest, NewPointFollowsNewReferenceFrame) {
     for (const auto& [p, X_before] : positions_before) {
         if (p < first_new) continue;
         const map::MapPointId point{p};
-        const map::FrameId reference = mapper_.Reference(point)->keyframe;
+        const map::FrameId reference = MapperTestAccess::Reference(mapper_, point)->keyframe;
         ASSERT_GE(reference.value, frames_[kSnapshotViews].id.value) << "point " << p;
         const geometry::TPoint3DF X = MapperTestAccess::Position(mapper_, point);
         const geometry::TPoint3DF camera_before = poses_before.at(reference.value).Transform(X_before);
@@ -4331,7 +4262,7 @@ TEST_F(MapperGlobalBaTest, ResultInterruptsLocalBa) {
     tracker_.Notify(std::move(event));
     Drain();
     ASSERT_FALSE(pending_result_.has_value());
-    const LocalBaSummary& ba = mapper_.last_local_ba();
+    const LocalBaSummary& ba = MapperTestAccess::LastLocalBa(mapper_);
     ASSERT_TRUE(ba.ran);
     EXPECT_TRUE(ba.interrupted);
     EXPECT_EQ(mapper_.inbox().pending_priority(), 0u);
@@ -4438,7 +4369,7 @@ protected:
             AddSceneView(LoopSide::Return, ReturnPose(j), ReturnPose(j) * T_world2_world.Inverse());
             ASSERT_FALSE(HasFatalFailure()) << "R" << j;
         }
-        ASSERT_EQ(mapper_.active_map(), map::MapId{2});
+        ASSERT_EQ(MapperTestAccess::ActiveMap(mapper_), map::MapId{2});
         ASSERT_EQ(atlas_.map_ids(), (std::vector<map::MapId>{map::MapId{1}, map::MapId{2}}));
         ASSERT_EQ(atlas_.map(map::MapId{1})->num_keyframes(), kMapOneFrames);
         ASSERT_EQ(atlas_.map(map::MapId{2})->num_keyframes(), 2 * kLoopSideFrames);
@@ -4536,8 +4467,9 @@ protected:
             AddSceneView(LoopSide::Return, ReturnPose(j), ReturnPose(j) * T_world_b.Inverse());
             ASSERT_FALSE(HasFatalFailure());
         }
-        ASSERT_EQ(mapper_.map_ids(), (std::vector<map::MapId>{map::MapId{1}, map::MapId{2}, map::MapId{3}}));
-        ASSERT_EQ(mapper_.active_map(), map::MapId{3});
+        ASSERT_EQ(MapperTestAccess::MapIds(mapper_),
+                  (std::vector<map::MapId>{map::MapId{1}, map::MapId{2}, map::MapId{3}}));
+        ASSERT_EQ(MapperTestAccess::ActiveMap(mapper_), map::MapId{3});
     }
 
     // Publishes the scene's merge and returns its one transaction.
@@ -4818,9 +4750,9 @@ TEST_F(MapperMergeTest, PublishesOneMergeTransaction) {
     EXPECT_EQ(merged.added_loop_edges,
               (std::vector<std::pair<map::FrameId, map::FrameId>>{{Query().id, Match().id}}));
 
-    EXPECT_EQ(mapper_.active_map(), map::MapId{1});
+    EXPECT_EQ(MapperTestAccess::ActiveMap(mapper_), map::MapId{1});
     EXPECT_EQ(mapper_.current_map_id(), map::MapId{1});
-    EXPECT_EQ(mapper_.map_ids(), std::vector<map::MapId>{map::MapId{1}});
+    EXPECT_EQ(MapperTestAccess::MapIds(mapper_), std::vector<map::MapId>{map::MapId{1}});
     EXPECT_EQ(mapper_.num_keyframes(), kMapOneFrames + 2 * kLoopSideFrames);
     EXPECT_EQ(mapper_.num_merges(), 1u);
     EXPECT_EQ(atlas_.map_ids(), std::vector<map::MapId>{map::MapId{1}});
@@ -4855,7 +4787,7 @@ TEST_F(MapperMergeTest, RejectsActiveOrRemovedTarget) {
     Drain();
     EXPECT_TRUE(TakeCaptured().empty());
     EXPECT_EQ(mapper_.num_merges(), 1u);
-    EXPECT_EQ(mapper_.map_ids(), std::vector<map::MapId>{map::MapId{1}});
+    EXPECT_EQ(MapperTestAccess::MapIds(mapper_), std::vector<map::MapId>{map::MapId{1}});
 }
 
 // Rejection: the query or the match Frame was culled (through the Mapper's
@@ -4885,7 +4817,7 @@ TEST_F(MapperMergeTest, RejectsCulledFrames) {
     PublishLoop(Query().id, map::FrameId{1000}, MergeS(), MergePairs(), 2, 1);    // unknown
     Drain();
     EXPECT_TRUE(TakeCaptured().empty());
-    EXPECT_EQ(mapper_.active_map(), map::MapId{2});
+    EXPECT_EQ(MapperTestAccess::ActiveMap(mapper_), map::MapId{2});
     EXPECT_EQ(mapper_.num_merges(), 0u);
     MergeScene();  // nothing was changed
     EXPECT_EQ(mapper_.num_merges(), 1u);
@@ -4948,13 +4880,13 @@ TEST_F(MapperMergeTest, ReannouncedLossAfterMergeDeactivatesTarget) {
     BuildMergeScene();
     ASSERT_FALSE(HasFatalFailure());
     MergeScene();
-    ASSERT_EQ(mapper_.active_map(), map::MapId{1});
+    ASSERT_EQ(MapperTestAccess::ActiveMap(mapper_), map::MapId{1});
 
     PublishTrackingLost(2, 20.0);
     Drain();
     EXPECT_TRUE(TakeCaptured().empty());
     EXPECT_EQ(mapper_.state(), MapperState::Mapping);
-    EXPECT_EQ(mapper_.active_map(), map::MapId{1});
+    EXPECT_EQ(MapperTestAccess::ActiveMap(mapper_), map::MapId{1});
 
     PublishTrackingLost(1, 20.0);
     Drain();
@@ -4963,12 +4895,12 @@ TEST_F(MapperMergeTest, ReannouncedLossAfterMergeDeactivatesTarget) {
     EXPECT_FALSE(lost[0].active_map.has_value());
     EXPECT_TRUE(lost[0].removed_maps.empty());  // kept inactive
     EXPECT_EQ(mapper_.state(), MapperState::Initializing);
-    EXPECT_EQ(mapper_.map_ids(), (std::vector<map::MapId>{map::MapId{1}}));
+    EXPECT_EQ(MapperTestAccess::MapIds(mapper_), (std::vector<map::MapId>{map::MapId{1}}));
 
     InitializeStereo(21.0);
     ASSERT_FALSE(HasFatalFailure());
-    EXPECT_EQ(mapper_.active_map(), map::MapId{3});
-    EXPECT_EQ(mapper_.map_ids(), (std::vector<map::MapId>{map::MapId{1}, map::MapId{3}}));
+    EXPECT_EQ(MapperTestAccess::ActiveMap(mapper_), map::MapId{3});
+    EXPECT_EQ(MapperTestAccess::MapIds(mapper_), (std::vector<map::MapId>{map::MapId{1}, map::MapId{3}}));
 }
 
 // Review Focus 2: a global BA of the absorbed map, or of the target before
@@ -5022,7 +4954,7 @@ TEST_F(MapperMergeTest, ChainedMergesThreeMaps) {
     std::vector<Published> published = TakeCaptured();
     ASSERT_EQ(published.size(), 1u);
     ASSERT_EQ(published[0].absorbed_map, map::MapId{3});
-    ASSERT_EQ(mapper_.active_map(), map::MapId{1});
+    ASSERT_EQ(MapperTestAccess::ActiveMap(mapper_), map::MapId{1});
 
     const SceneFrame& query_b = frames_[2 * kMapOneFrames + 3];  // map 3's M3, now in map 1
     const SceneFrame& match_b = frames_[kMapOneFrames + 2];      // map 2's view at MiddlePose(2)
@@ -5037,8 +4969,8 @@ TEST_F(MapperMergeTest, ChainedMergesThreeMaps) {
     EXPECT_EQ(published[0].map_id, map::MapId{2});
     EXPECT_EQ(published[0].absorbed_map, map::MapId{1});
 
-    EXPECT_EQ(mapper_.map_ids(), std::vector<map::MapId>{map::MapId{2}});
-    EXPECT_EQ(mapper_.active_map(), map::MapId{2});
+    EXPECT_EQ(MapperTestAccess::MapIds(mapper_), std::vector<map::MapId>{map::MapId{2}});
+    EXPECT_EQ(MapperTestAccess::ActiveMap(mapper_), map::MapId{2});
     EXPECT_EQ(mapper_.current_map_id(), map::MapId{2});
     EXPECT_EQ(mapper_.num_merges(), 2u);
     EXPECT_EQ(atlas_.map_ids(), std::vector<map::MapId>{map::MapId{2}});
@@ -5048,7 +4980,8 @@ TEST_F(MapperMergeTest, ChainedMergesThreeMaps) {
     std::sort(all.begin(), all.end());
     EXPECT_EQ(replica().keyframe_ids(), all);
     EXPECT_EQ(mapper_.num_keyframes(), all.size());
-    for (const map::FrameId frame : all) EXPECT_NE(mapper_.KeyFrame(frame), nullptr) << "Frame " << frame.value;
+    for (const map::FrameId frame : all)
+        EXPECT_NE(MapperTestAccess::KeyFrame(mapper_, frame), nullptr) << "Frame " << frame.value;
     ASSERT_TRUE(replica().CheckConsistency());  // CheckGraph included
     ExpectReplicaConsistent();
     // One tree, rooted at map 2's root.

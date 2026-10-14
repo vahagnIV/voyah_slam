@@ -57,6 +57,9 @@ int main(int argc, char** argv) {
         if (options.show) window.emplace("binocular_full_slam");
         std::optional<full_slam::TrajectoryWriter<TFeatureExtractor>> trajectory;
         if (!options.trajectory_out.empty()) trajectory.emplace(options.trajectory_out);
+        // The app's own read path to the map: updated on this thread after Stop.
+        // Declared before the wires, so it outlives them.
+        mapping::MapFollower<TFeatureExtractor> follower;
         // The external wires. Declared before slam, so it is destroyed after it:
         // ~Slam stops every producer first, so an exception unwinding past this
         // point never destroys a Subscription of a running producer.
@@ -68,6 +71,7 @@ int main(int argc, char** argv) {
         // Wire before Start().
         subscriptions.push_back(slam.tracker().AddObserver(viewer.inbox()));
         subscriptions.push_back(slam.mapper().AddObserver(viewer.inbox()));
+        subscriptions.push_back(slam.mapper().AddObserver(follower.inbox()));
         if (trajectory) subscriptions.push_back(slam.tracker().AddObserver(trajectory->inbox()));
         viewer.Start();
         slam.Start();
@@ -132,7 +136,8 @@ int main(int argc, char** argv) {
                   << "mapper state: " << full_slam::StateName(slam.mapper().state()) << "\n"
                   << "map: " << slam.mapper().num_keyframes() << " Frames, " << slam.mapper().num_map_points()
                   << " points\n";
-        full_slam::PrintAtlas(slam.mapper(), std::cout);
+        follower.Update();
+        full_slam::PrintAtlas(*follower.Snapshot(), slam.mapper().num_merges(), std::cout);
         std::cout << "viewer: " << viewer.events_processed() << " events processed\n";
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << "\n";

@@ -31,8 +31,8 @@ void GlobalBundleAdjuster<TFeatureExtractor>::Stop() {
     const bool was_running = worker_.running();
     worker_.Stop();
     EndRun();
-    if (was_running && num_runs_started_ > 0) {  // once per run
-        log_->info("Global BA: {} runs, {} interrupted", num_runs_started_, num_runs_interrupted_);
+    if (was_running && num_runs_started() > 0) {  // once per run
+        log_->info("Global BA: {} runs, {} interrupted", num_runs_started(), num_runs_interrupted());
     }
 }
 
@@ -99,7 +99,7 @@ void GlobalBundleAdjuster<TFeatureExtractor>::Run() {
     if (run_hook_) {
         run_hook_();
     }
-    ++num_runs_started_;
+    num_runs_started_.fetch_add(1, std::memory_order_acq_rel);
     // Pending only while the active map is the corrected one.
     const tracking::MapReplica<TFeatureExtractor>& run_map = map_replica();
     const map::MapId map_id = run_map.map_id();
@@ -120,7 +120,7 @@ void GlobalBundleAdjuster<TFeatureExtractor>::Run() {
     std::optional<GlobalBaSolution> solution = RunGlobalBa(run_map, options_, should_stop);
     const double ms = 1e3 * std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
     if (interrupted) {
-        ++num_runs_interrupted_;
+        num_runs_interrupted_.fetch_add(1, std::memory_order_acq_rel);
         log_->info("Global BA of map {} at epoch {} interrupted after {:.1f} ms", map_id.value, map_epoch, ms);
         return;
     }
@@ -139,7 +139,7 @@ void GlobalBundleAdjuster<TFeatureExtractor>::Run() {
         publish_hook_();
     }
     if (stop_requested()) {  // a Stop() after the last poll: publish nothing
-        ++num_runs_interrupted_;
+        num_runs_interrupted_.fetch_add(1, std::memory_order_acq_rel);
         log_->info("Global BA of map {} at epoch {} discarded: stop requested", map_id.value, map_epoch);
         return;
     }

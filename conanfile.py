@@ -18,7 +18,7 @@ class VoyahSlamConan(ConanFile):
     """
 
     name = "voyahslam"
-    version = "0.4.0"
+    version = "0.5.0"
     package_type = "library"
     license = "proprietary"
     description = "Lock-free, event-driven, ORB-SLAM3-inspired SLAM library"

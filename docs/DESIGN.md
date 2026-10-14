@@ -8,7 +8,7 @@
 > `docs/superpowers/specs/` and `docs/superpowers/plans/`. When they disagree
 > with this document, **this document wins** — fix the spec or note the change here.
 
-Last updated: 2026-10-13
+Last updated: 2026-10-14
 
 ---
 
@@ -127,10 +127,10 @@ defined in `libs/slam/src/` with `INSTANTIATE_CLASS` (ORB; SIFT removed 2026-10-
 
 | Component | Header | Public API so far |
 |---|---|---|
-| `tracking::Tracker<FE>` | `tracking/tracker.h` | `Start()`, `Stop()`, `Track(TMonocularMeasurement)`, `Track(TBinocularMeasurement)`, `ProcessPending()`, `state()`, `current_map_id()`, `pending_measurements()` |
-| `mapping::Mapper<FE>` | `mapping/mapper.h` | `Mapper(MapperOptions)`, `Start()`, `Stop()`, `ProcessPending()`, `state()`, `current_map_id()` |
-| `loop_closing::LoopCloser<FE>` | `loop_closing/loop_closer.h` | `LoopCloser(LoopCloserOptions, vocabulary)`, `Start()`, `Stop()`, `ProcessPending()` (applies every transaction to its replica, queues the new Frames as queries, detects one; with loop closing off or no vocabulary only acknowledges), `replica()`, `atlas()`, `num_coincidences()`, `num_merge_coincidences()`, `last_stats()`, `last_merge_stats()`, `query_stats()` — see "Loop Closing" (merge detection since map merging Task 4) |
-| `global_ba::GlobalBundleAdjuster<FE>` | `global_ba/global_bundle_adjuster.h` | `GlobalBundleAdjuster(GlobalBaOptions)`, `Start()`, `Stop()` (interrupts a running BA), `ProcessPending()` (applies every transaction, runs one pending global BA), `replica()`, `num_runs_started()`, `num_runs_interrupted()`; test-only `stop_requested()`, `set_run_hook()`, `set_poll_hook()`, `set_publish_hook()` — see "Global BA" |
+| `tracking::Tracker<FE>` | `tracking/tracker.h` | `Start()`, `Stop()`, `Track(TMonocularMeasurement)`, `Track(TBinocularMeasurement)`, `ProcessPending()`, `state()`, `current_map_id()`, `pending_measurements()`, `num_processed()`; `atlas()`, `map_replica()` and `last_matches()` are Tracker-thread state, private and read by tests through `TrackerTestAccess` |
+| `mapping::Mapper<FE>` | `mapping/mapper.h` | `Mapper(MapperOptions)`, `Start()`, `Stop()`, `ProcessPending()`, and the any-thread atomics: `state()`, `current_map_id()`, `num_keyframes()` (no argument), `num_map_points()` and the other counters. The Mapper-thread accessors (`covisibility()`, `Reference()`, `NumVisible()`, `NumFound()`, `last_local_ba()`, `BowVectorOf()`, `Parent()`, `LoopEdges()`, `KeyFrame()`, `map_ids()`, `active_map()`, `num_keyframes(MapId)`) are private and read by tests through `MapperTestAccess`; apps read the map through a `MapFollower` |
+| `loop_closing::LoopCloser<FE>` | `loop_closing/loop_closer.h` | `LoopCloser(LoopCloserOptions, vocabulary)`, `Start()`, `Stop()`, `ProcessPending()` (applies every transaction to its replica, queues the new Frames as queries, detects one; with loop closing off or no vocabulary only acknowledges). `atlas()`, `map_replica()` and the five worker-written stats accessors `num_coincidences()`, `num_merge_coincidences()`, `last_stats()`, `last_merge_stats()`, `query_stats()` are private and test-only through `LoopCloserTestAccess` (the `Stop()` summary log reports the query figures) — see "Loop Closing" (merge detection since map merging Task 4) |
+| `global_ba::GlobalBundleAdjuster<FE>` | `global_ba/global_bundle_adjuster.h` | `GlobalBundleAdjuster(GlobalBaOptions)`, `Start()`, `Stop()` (interrupts a running BA), `ProcessPending()` (applies every transaction, runs one pending global BA), and the atomic run counters `num_runs_started()`, `num_runs_interrupted()` (`std::atomic<size_t>`, any thread); `atlas()` and `map_replica()` are private and test-only through `GlobalBundleAdjusterTestAccess`; test-only `stop_requested()`, `set_run_hook()`, `set_poll_hook()`, `set_publish_hook()` — see "Global BA" |
 
 Each component owns a `events::WorkerThread` (`events/worker_thread.h`) bound to
 the `events::WakeSignal` of its `EventNode` (`events/wake_signal.h`) and a
@@ -157,6 +157,63 @@ Initialization"): `mapping::MapInitializer<FE>` (`mapping/map_initializer.h`:
 Stereo initialization is real too (see "Stereo Initialization"). Tracking
 against the map is real (see "Tracking Against the Map"); the `PoseEstimator`
 stub was deleted on 2026-10-05.
+
+### Map Follower (supported map read path)
+
+The Mapper's graph and the replicas are thread-affine (§2: no locks on map
+data), so an app must not read them from its own thread; the accessors that
+did are private behind `*TestAccess` structs (decisions log, "Ownership audit
+#5 implemented"). The supported way to read the map is
+`mapping::MapFollower<FE>` (`mapping/map_follower.h`, defined in
+`libs/slam/src/mapping/map_follower.cpp` with `INSTANTIATE_CLASS`): an inbox
+plus a private `tracking::AtlasReplica` that the app brings up to date by
+calling `Update()` on its own thread. `Update()` applies every pending
+`MapTransaction` in order and releases other events; `Snapshot()` copies the
+Atlas into a `mapping::MapSnapshot` (`mapping/map_snapshot.h`) and returns it as
+`std::shared_ptr<const MapSnapshot>`.
+
+- **One thread.** `Update()`, `atlas()` and `Snapshot()` belong to the thread
+  of the first `Update()`, asserted in debug builds of the library; a `Snapshot()` before any
+  `Update()` is unrestricted. A snapshot is immutable plain data, so any thread
+  may hold and read it, and it outlives the follower.
+- **Wiring (D-05).** `events::Subscription s = slam.mapper().AddObserver(follower.inbox());`
+  before `Start()`: connections change only while the producer is stopped, so a
+  follower sees every transaction from the first one on and cannot join a
+  running `Slam`. Declare the follower, then the `Subscription`, before the
+  `Slam`.
+- **`MapSnapshot` contents.** Per live map (ascending id): the id, the
+  correction epoch, the alive point ids with their world positions, the Frame
+  ids with their `T_cw`; plus the active map, if any, and the number of
+  transactions applied. It carries no descriptors, BoW or covisibility.
+- **Cost.** A follower holds a full replica (descriptors, BoW, covisibility),
+  so its memory is that of the Tracker's, and a `Snapshot()` is O(map). A
+  follower that is never updated lets its inbox grow; the "consumer is behind"
+  warning names it "MapFollower".
+- **Defined in the library, not in its header (2026-10-14).** Every member,
+  trivial accessors included, is out of line and instantiated in `voyah_slam`,
+  so an app that uses the follower instantiates none of the replica code,
+  whatever its own optimization level. The first, header-only version made
+  each app instantiate `AtlasReplica` / `MapReplica` and with them Eigen's
+  descriptor copy (`Matrix<uint8_t, 32, 1>` from a descriptor column), which
+  `MatchStereo` calls out of line about two million times per stereo frame. In
+  the Debug tree the apps build at `-O0` and the libraries at `-O2`; with
+  static libraries and the app object first on the link line the linker kept
+  the app's `-O0` copy of that function for the library's calls too, so the
+  binocular Tracker took 0.9–1.1 s per frame instead of 0.25 s (corridor1,
+  `--rate=0 --max-frames=40`: 10–12 of 40 frames, 1 Frame, instead of 39 and
+  3). The same holds for any consumer built with less optimization than the
+  library (a Debug JNI binding against a Release package). Guarded by the
+  `BuildCheck.MapFollowerAddsNoLibraryInstantiations` test
+  (`libs/slam/tests/build_checks/`): an app-shaped consumer built at `-O0`,
+  with and without a follower, compared with `nm`; it fails when the follower
+  adds a weak function the libraries also define. `atlas()` exposes the
+  replica: calling its accessors instantiates them in the caller, so apps read
+  a `Snapshot()`.
+- **Deferred.** `voyahslam::Session` (the facade for the JNI binding, which
+  would own a follower) and the viewer reading from a follower; both wait for
+  the JNI work.
+
+The example apps print the Atlas from a snapshot taken after `Stop()`.
 
 ### Tracker
 - **State machine** (`TrackerState`, readable from any thread via `state()`):
@@ -232,8 +289,10 @@ stub was deleted on 2026-10-05.
   is outside `MapState`. Inactive maps are **frozen**: no local mapping,
   culling, BA or global BA; a `FrameTracked`, `LoopDetected` or
   `GlobalBAFinished` naming one is "another map's" and ignored or rejected
-  (only a merge changes one: it absorbs the active map). Test accessors: `map_ids()`,
-  `active_map()`, `num_keyframes(MapId)`.
+  (only a merge changes one: it absorbs the active map). The Atlas accessors
+  `map_ids()`, `active_map()` and `num_keyframes(MapId)` are Mapper-thread state:
+  private, read by tests through `MapperTestAccess`, by apps through a
+  `MapFollower`.
 - **State machine** (`MapperState`, `state()`): `Initializing` -> `Mapping`.
   *Initialization protocol:* while `Tracker` has no map it forwards
   measurements as `InitializationMeasurement`. In `Initializing` the Mapper
@@ -1435,7 +1494,8 @@ signals and the result.
 
 The Mapper keeps a `map::CovisibilityIndex` (per point: observing Frames; per
 Frame: points), fed by initialization and `CreateFrame`, readable through
-`Mapper::covisibility()` on the Mapper thread / in tests only (ruling C). The
+`Mapper::covisibility()` (private; tests read it through
+`MapperTestAccess::Covisibility`; ruling C). The
 replica keeps its own, fed by `KeyFrameCreated`.
 
 **Tracker local map** (replaces "every alive point of the replica"):
@@ -2846,7 +2906,7 @@ libs/
 cmake/VoyahTests.cmake      voyah_add_test_binary, voyah_optimize_target, check / check_all
 cmake/voyahslamConfig.cmake.in  installed CMake package config (find_dependency)
 vizualization/              voyahviz (+ voyahviz_tests)
-conanfile.py                package recipe voyahslam/0.4.0 (also the dev installs)
+conanfile.py                package recipe voyahslam/0.5.0 (also the dev installs)
 test_package/               conan create's consumer test (links voyahslam::voyahslam)
 profiles/                   linux-gcc13 (default + gnu20), android-arm64,
                             settings_user.yml (clang 21)
@@ -2875,7 +2935,7 @@ profiles/                   linux-gcc13 (default + gnu20), android-arm64,
   `transitive_headers` (spdlog also `transitive_libs`); g2o and stb are not
   (g2o's libraries still reach static consumers' link lines, never its
   include paths). `shared=True` also makes spdlog and fmt shared; shared
-  libraries get `VERSION` / `SOVERSION` (0.4) and an `$ORIGIN` install
+  libraries get `VERSION` / `SOVERSION` (0.5) and an `$ORIGIN` install
   runpath (not on Apple).
 - `validate()` requires `compiler.cppstd` >= 20 (public headers are C++20;
   `profiles/linux-gcc13` = default + `gnu20` + Release, used by the dev
@@ -2928,6 +2988,14 @@ profiles/                   linux-gcc13 (default + gnu20), android-arm64,
   four libraries needs no `find_dependency(OpenCV)`; only `voyahviz` does.
 - Public headers included as `#include <voyahslam/...>`.
 - Template classes header-only; non-template classes have a `.cpp` in `libs/<lib>/src/` mirroring `libs/<lib>/include/`.
+  Exception: a template an **app** drives whose implementation is library
+  machinery (the components, `Slam`, `MapFollower`, not plain data such as
+  the measurements) is declared in its header and defined in `src/` with
+  `INSTANTIATE_CLASS`, so the app's translation unit, possibly built at
+  `-O0`, instantiates none of that code. A function both the app and the
+  library instantiate exists twice and the linker may give the library the
+  app's unoptimized copy (2026-10-14, "Map Follower" in §4;
+  `BuildCheck.MapFollowerAddsNoLibraryInstantiations`).
 - `[[nodiscard]]` on const accessors.
 - Move semantics throughout.
 - Templates over the feature extractor are explicitly instantiated with
@@ -3211,6 +3279,9 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-13 | **Ownership audit #3+#2 design answers (user: "all recommended"; Phase 1 CONTEXT D-08, D-14, D-22..D-26).** (1) An `AsyncObserver`'s queue, `WakeSignal` and priority counter live in a shared inbox core held by the observer, its `Listener`s and the producer's connection entry; a component's connections live in a shared wiring block held by it and its `Subscription`s; `SetWakeSignal(WakeSignal*)` is removed. (2) Apps hold subscriptions in a container declared before `slam`; the examples' `StopAll` guard goes. (3) Queued events are released when an `AsyncObserver` is destroyed, never drained on disconnect. (4) `LoopDetected` and `GlobalBAFinished` lose their drop-limits (`max_events_in_flight`, `num_dropped_loops`, `num_results_dropped` removed). (5) An `AsyncObserver` warns once per doubling of its queue size. (6) The thread-affinity restriction (private + `*TestAccess`) extends to `LoopCloser`/`GlobalBundleAdjuster` `atlas()`/`map_replica()`, their counters become atomics, the no-argument `num_keyframes()` stays public. (7) The examples' `PrintAtlas` uses a `MapFollower`. (8) `WorkerThread` stays restartable; Stopped is terminal only for components. (9) `MapViewer` keeps restart after `Stop()`. | (1) Every destruction order of producer, subscription, observer and listener is safe by construction, which the JNI binding needs, with no per-event cost and no terminate rule for observers. (2) `~Slam` stops first and later subscription destruction is a no-op, so unwinding never reaches D-07's terminate. (3) An inbox is fed by several producers and events carry no producer tag. (4) Both producers are paced by Mapper transactions (the LoopCloser keeps `max_query_backlog`); fixes "a dropped GBA result is not retried". (5) Without pools a stalled consumer would grow memory silently. (6)-(9) Same hazard class as the Mapper accessors; supported read path; `WorkerThreadTest.RestartAfterStop` and the viewer's documented restart stay valid. |
 | 2026-10-13 | **Ownership audit #3+#2 implemented (Release R1, branch `refactor/event-ownership`).** Events are `std::make_shared<T>()` objects published with the rvalue-only `Observable::Notify(std::shared_ptr<T>&&)` as `EventPtr = shared_ptr<const Event>`; sync handlers take `const Event&` and run first; a consumer's `Listener::GetNextEvent()` / `AsyncObserver::TryPop(EventPtr&)` return an owning pointer and dropping it is the acknowledgement. A shared `InboxCore` (lock-free queue of `EventPtr`, pending-priority count, closed flag, owned `WakeSignal`, backlog warning) is held by the `AsyncObserver`, its `Listener`s and the producer's entries; a shared `Wiring` (async/sync entries and an `std::atomic<RunState>`) is held by the `Observable` and its `Subscription`s. `AddObserver` / `AddSyncObserver` return a move-only `[[nodiscard]]` `Subscription`; connecting or `reset()` while the producer runs throws `voyahslam::UsageError`, a `Subscription` destroyed while it runs logs and terminates; `~Observable` stores `Stopped` so a `Subscription` outliving a never-stopped producer is a no-op. `RunState` is driven by `EventNode::BeginRun()` / `EndRun()` in the four components until the lifecycle work (audit #6) adds the throwing `Start`/`Stop` transitions. `~AsyncObserver` closes its core and releases the queued events; a disconnect drains nothing. `SetWakeSignal(WakeSignal*)`, `ObjectPool`, `Recyclable`, `SyncPolicy`, every event's `Reset()` and recycle function pointers, `TrackerOptions::event_pool_size`, `MapperOptions::transaction_pool_size`, the pool-overflow accessors, `max_events_in_flight` (LoopCloser, GlobalBA), `num_dropped_loops()` and `num_results_dropped()` are removed; `LoopDetected` and `GlobalBAFinished` are published unbounded. An `AsyncObserver` logs one "consumer is behind" warning at 1024 queued events and at each doubling (threshold never resets). `Slam` keeps its six internal edges as `Subscription`s (last member); the `global_ba_` ordering invariant and the apps' `StopAll` guard are gone; apps and tests hold their `Subscription`s in a container declared before the `Slam` (and a sync handler's `ctx` must outlive its connection). Tests and apps build with `-Werror=unused-result`; death-test suites end in `DeathTest`, use the `threadsafe` style and are excluded from TSan runs. Closes OQ 25, makes OQ 14 obsolete. **Supersedes** the 2026-09-30 rows "delivery layer carries `Event*`", "sync-only notify skips ref counting" and "`Recyclable::Recycle()` uses acq_rel", and the mechanism of the 2026-10-12 pool-growth row (its rule that a `MapTransaction` is never dropped stays); the 2026-10-02 pool rows (Treiber-stack free list, pooled objects with `Reset()`, `Create()` aborts on exhaustion) are historical. | The pools were the reason an event could outlive its memory; with `shared_ptr` the remaining hazard is the wiring, and two shared blocks make every destruction order of producer, subscription, observer and listener safe by construction (24 orders tested under Debug, TSan and ASan) at one allocation per observer or component, not per event. The producer can no longer keep a mutable alias after `Notify` (a compile error), a received event is immutable by type, and the JNI binding's stop-first and declaration-order workarounds become unnecessary. Backlog visibility replaces the pool's overflow log. A destroyed-while-running `Subscription` terminates because a destructor cannot throw and a defined, loud failure is better than a later use-after-free. |
 | 2026-10-13 | **Package version 0.4.0** (`conanfile.py`, `project()`; SOVERSION 0.4). API breaks for consumers (the voyah_jni binding): events are `EventPtr` (`shared_ptr<const Event>`) instead of `Event*` and publishers use `make_shared` + `Notify(std::move(e))`; `AddObserver` / `AddSyncObserver` / `ConnectAsync` / `ConnectSync` return a `[[nodiscard]]` `Subscription`; `SetWakeSignal` is removed (wait on `AsyncObserver::wake_signal()`); `ObjectPool`, `Recyclable`, `SyncPolicy` and the pool options, overflow accessors, `max_events_in_flight`, `num_dropped_loops()` and `num_results_dropped()` are removed; `voyahslam::UsageError` is thrown for invalid call sequences (map it to `IllegalStateException`); connecting or resetting a `Subscription` while the producer runs is an error. | Every audit item is an API break for the binding; a public API change gets a new minor version while 0.x (as 0.2.0 and 0.3.0). |
+| 2026-10-14 | **Ownership audit #5 implemented (Release R2, branch `refactor/thread-affinity`; Phase 1 CONTEXT D-13, D-14, D-26).** `mapping::MapFollower<FE>` (an inbox and a private `AtlasReplica`, `Update()` on the caller's thread, one-thread rule asserted in debug builds) and the immutable `std::shared_ptr<const MapSnapshot>` (per live map: id, epoch, alive point ids and world positions, Frame ids and `T_cw`; the active map; the transaction count) are the supported cross-thread map read path; see "Map Follower" in §4. The thread-affine accessors are private behind friend `*TestAccess` structs, all defined in `libs/slam/tests/test_access.h` (one definition per test binary): `Tracker::atlas()`, `map_replica()`, `last_matches()` (`TrackerTestAccess`); `LoopCloser::atlas()`, `map_replica()` and the five stats accessors (`LoopCloserTestAccess`); `GlobalBundleAdjuster::atlas()`, `map_replica()` (`GlobalBundleAdjusterTestAccess`); and the Mapper's twelve: `covisibility()`, `Reference()`, `NumVisible()`, `NumFound()`, `last_local_ba()`, `BowVectorOf()`, `Parent()`, `LoopEdges()`, `KeyFrame()`, `map_ids()`, `active_map()`, `num_keyframes(MapId)` (`MapperTestAccess`, which keeps the existing graph-edit helpers). `Mapper::num_keyframes()` with no argument and the other atomic counters stay public. GlobalBA's `num_runs_started_` / `num_runs_interrupted_` are `std::atomic<size_t>`. `ThreadAffinityTest` holds a C++20 `concept` plus `static_assert(!Concept<T>)` per restricted accessor, so making one public again fails the build. **D-26 reading:** the LoopCloser's worker-written stats (the pending-region counts, the vector-bearing `CommonRegionStats`, `QueryStats`) are the same hazard class as D-14's accessors and get the same treatment (private behind `LoopCloserTestAccess`; only tests read them, and the `Stop()` summary log reports the query figures), while counters an app may read are atomic (the GlobalBA run counts), so every public LoopCloser/GlobalBA accessor is atomic or a lifecycle/driver call. Both example apps print the Atlas from a follower snapshot taken after `Stop()`; `voyahslam::Session` and the viewer on a follower are deferred (the JNI work). About 250 test call sites (about 100 Mapper, about 150 Tracker, LoopCloser and GlobalBA) were rewritten to the access structs with every assertion unchanged (the per-file multiset of `EXPECT_` / `ASSERT_` macros equals the branch base's). | An app that reads a map structure the Mapper is writing races with it (§2); comments did not stop that, types do. A follower keeps the Mapper the only writer, costs a full replica per reader and an O(map) copy per snapshot, and needs no lock. The stats accessors return worker-written vectors and counters read without synchronization, so they are test-only like D-14's; making them atomic would need a copy-out of vectors per read for no consumer. |
+| 2026-10-14 | **Package version 0.5.0** (`conanfile.py`, `project()`; SOVERSION 0.5). API breaks for consumers (the voyah_jni binding): `Tracker::atlas()` / `map_replica()` / `last_matches()`, `LoopCloser::atlas()` / `map_replica()` and its stats accessors (`num_coincidences()`, `num_merge_coincidences()`, `last_stats()`, `last_merge_stats()`, `query_stats()`), `GlobalBundleAdjuster::atlas()` / `map_replica()` and the twelve Mapper-thread accessors are private (use `mapping::MapFollower` / `MapSnapshot`); `GlobalBundleAdjuster::num_runs_started()` / `num_runs_interrupted()` keep their signatures and are now atomic; new public `mapping::MapFollower` and `mapping::MapSnapshot`. | Every audit item is an API break for the binding; a public API change gets a new minor version while 0.x (as 0.2.0, 0.3.0 and 0.4.0). |
+| 2026-10-14 | **`MapFollower` is defined in the library, not in its header** (regression fix on R2, before release). Its members, trivial accessors included, are out of line in `libs/slam/src/mapping/map_follower.cpp` and instantiated with `INSTANTIATE_CLASS`; its API, threading and wiring contract are unchanged. New unit test `BuildCheck.MapFollowerAddsNoLibraryInstantiations` (`libs/slam/tests/build_checks/`): two `-O0` objects of an app-shaped consumer (`Slam`, a subscription on the Mapper, `Update()` + `Snapshot()` read like `PrintAtlas`), with and without the follower, compared with `nm`; it fails when the follower variant defines a weak function (nm `W`) that `voyah_slam` / `voyah_algs` / `voyah_events` / `voyah_common` define and the baseline does not (66 at the header-only version, 0 now). §7 "Structure" gains the rule: a template an app uses is defined in `src/`. | When the apps subscribed a header-only follower (fd43a13), `binocular_full_slam` on corridor1 (`--rate=0 --max-frames=40`, Debug tree) tracked 10–12 of 40 frames and built 1 Frame instead of 39 and 3; the follower did nothing until after `Stop()`. Cause, measured: the app TU (`-O0`) instantiated the replica code and with it Eigen's `call_dense_assignment_loop<Matrix<uint8_t, 32, 1>, Block<...>>`; `tracker.cpp.o` (`-O2`) calls that function out of line in `MatchStereo` (each right descriptor copied, ~1500 × 1500 per frame), `SearchByBoW`, `SearchFromLocalMap`, `SearchFromLastFrame`; with static libraries and the app object first, the binary held the app's 0x116-byte `-O0` copy, not the library's 0xe6-byte one. Same source with only the app TU at `-O2`: 39 frames; follower code without a subscription: 11; an undrained plain inbox on the Mapper without follower code: 38 (so not fan-out or event retention). After the fix the binary holds the library's copy, 39 of 40 frames, 3 Frames, 0.25–0.27 s per frame (3 runs). |
 
 ## 9. Open Questions
 
@@ -3481,7 +3552,13 @@ branch → review → merge to `master`. Update this document at the end.
 - Roadmap (`docs/ROADMAP.md`): TUM-VI tuning (step 6); relocalization into
   inactive maps is TODO ("Map merging follow-ups").
 - Ownership audit (`docs/TODO.md`): #3 + #2 done (0.4.0, branch
-  `refactor/event-ownership`, merge pending); next #5, #6, #7, #8, #9.
+  `refactor/event-ownership`, merge pending); #5 done (0.5.0, branch
+  `refactor/thread-affinity`, merge pending); next #6, #7, #8, #9.
+- Test suite (2026-10-14, ownership audit #5, 0.5.0): 802 tests (771
+  `unit`, 30 `integration`, 1 `vocabulary`, skipped without ORBvoc);
+  `check_all` about 30 s. `ThreadAffinityTest` (compile-time concept checks)
+  and `MapFollowerTest.*` / `SlamTest.MapFollowerMirrorsMapper` are new;
+  ThreadSanitizer was clean on the follower tests (plan summary 01-08).
 - Test suite (2026-10-13, ownership audit #3+#2, 0.4.0): 792 tests (762
   `unit`, the integration tests, 1 `vocabulary`, skipped without ORBvoc);
   `check_all` about 30 s. Events, wiring and Slam-level lifetime tests include

@@ -1,11 +1,13 @@
 #include <support/synthetic_sequence.h>
 #include <support/test_measurements.h>
 #include <support/trajectory_error.h>
+#include <test_access.h>
 #include <voyahslam/bow/vocabulary.h>
 #include <voyahslam/errors.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
 #include <voyahslam/features/orb_feature_extractor.h>
+#include <voyahslam/mapping/map_follower.h>
 #include <voyahslam/slam/slam.h>
 #include <voyahslam/tracking/atlas_replica.h>
 #include <voyahslam/tracking/map_replica.h>
@@ -118,8 +120,12 @@ struct MergeRecord {
 // declare it before the Slam it is attached to (D-23).
 class ProtocolRecorder {
 public:
-    // Before slam.Start().
-    void Attach(OrbSlam& slam) {
+    // Before slam.Start(). `follower`, if any, also subscribes to the Mapper
+    // (it must outlive this recorder's Subscriptions' use, so declare it first).
+    void Attach(OrbSlam& slam, mapping::MapFollower<features::OrbFeatureExtractor>* follower = nullptr) {
+        if (follower != nullptr) {
+            subscriptions_.push_back(slam.mapper().AddObserver(follower->inbox()));
+        }
         subscriptions_.push_back(slam.mapper().AddObserver(mapper_events_));
         subscriptions_.push_back(slam.tracker().AddObserver(tracker_events_));
         subscriptions_.push_back(slam.loop_closer().AddObserver(loop_closer_events_));
@@ -554,6 +560,11 @@ struct RunCounts {
     // map (in flight across a merge or a loss).
     size_t merges = 0;
     size_t other_map_skipped = 0;
+    // The Mapper's Atlas after Stop (its accessors are Mapper-thread only, and
+    // the Mapper thread has ended): live maps, the active one, Frames per map.
+    std::vector<map::MapId> mapper_map_ids;
+    std::optional<map::MapId> mapper_active_map;
+    std::vector<size_t> mapper_map_keyframes;  // per mapper_map_ids
 };
 
 // Frames [begin, end] of a run arrive as measurements without features (a
@@ -580,6 +591,9 @@ struct RunSetup {
     std::optional<Blackout> blackout;
     loop_closing::LoopCloserOptions loop_closer_options;
     global_ba::GlobalBaOptions global_ba_options;
+    // Subscribed to the Mapper before Start; updated after Stop (the test
+    // thread). Declared by the caller before the run (it outlives the Slam).
+    mapping::MapFollower<features::OrbFeatureExtractor>* follower = nullptr;
     // Each frame to track is fed once the Tracker has processed the previous
     // one (tracked it, lost it, or forwarded it for a new map), the Mapper has
     // handled every FrameTracked and InitializationMeasurement so far and has
@@ -605,7 +619,7 @@ void RunSequence(const TSequence& sequence, size_t init_frames,
     // Lifetimes as in EndToEndInitializeTrackLoseReinitialize.
     OrbSlam slam(mapper_options, setup.tracker_options, setup.vocabulary, setup.loop_closer_options,
                  setup.global_ba_options);
-    out_recorder.Attach(slam);
+    out_recorder.Attach(slam, setup.follower);
     struct StopAndDrain {
         OrbSlam& slam;
         ProtocolRecorder& recorder;
@@ -692,6 +706,12 @@ void RunSequence(const TSequence& sequence, size_t init_frames,
     out_counts.global_ba_rejected = slam.mapper().num_global_ba_rejected();
     out_counts.merges = slam.mapper().num_merges();
     out_counts.other_map_skipped = slam.mapper().other_map_skipped();
+    out_counts.mapper_map_ids = mapping::MapperTestAccess::MapIds(slam.mapper());
+    out_counts.mapper_active_map = mapping::MapperTestAccess::ActiveMap(slam.mapper());
+    for (const map::MapId id : out_counts.mapper_map_ids) {
+        out_counts.mapper_map_keyframes.push_back(mapping::MapperTestAccess::NumKeyframes(slam.mapper(), id));
+    }
+    if (setup.follower != nullptr) setup.follower->Update();
     if (const auto* global_ba = slam.global_ba()) {
         out_counts.has_global_ba = true;
         out_counts.global_ba_runs_started = global_ba->num_runs_started();
@@ -759,6 +779,49 @@ TEST(SlamTest, StereoMapGrowsWhileLeavingInitialView) {
     // Error bound: see LeavingInitialViewOptions.
     ExpectMapGrowsWhileLeavingInitialView(sequence, /*init_frames=*/1, /*monocular=*/false,
                                           mapper_options, 1.5 * 0.0248);
+}
+
+// A MapFollower subscribed before Start() mirrors the Mapper's Atlas once the
+// Mapper has stopped and the follower is updated (D-13): the same live maps,
+// active map and Frames per map; the snapshot says the same.
+TEST(SlamTest, MapFollowerMirrorsMapper) {
+    test::SyntheticStereoSequenceOptions options;
+    options.trajectory = LeavingInitialViewOptions();
+    options.trajectory.num_points = 700;
+    const test::SyntheticStereoSequence sequence = test::MakeSyntheticStereoSequence(options);
+    mapping::MapperOptions mapper_options;
+    mapper_options.initializer.stereo_min_features = 150;
+
+    // Declared before the Slam of the run (and before the recorder holding the
+    // Subscription): destroyed after both.
+    mapping::MapFollower<features::OrbFeatureExtractor> follower;
+    ProtocolRecorder recorder;
+    RunCounts counts;
+    RunSetup setup;
+    setup.follower = &follower;
+    RunSequence(sequence, /*init_frames=*/1, mapper_options, recorder, counts, setup);
+    if (HasFatalFailure()) return;
+
+    ASSERT_FALSE(counts.mapper_map_ids.empty());
+    const std::shared_ptr<const mapping::MapSnapshot> snapshot = follower.Snapshot();
+    EXPECT_GT(follower.num_transactions_applied(), 0u);
+    EXPECT_EQ(snapshot->num_transactions_applied, follower.num_transactions_applied());
+    EXPECT_EQ(follower.atlas().map_ids(), counts.mapper_map_ids);
+    EXPECT_EQ(follower.atlas().active_map(), counts.mapper_active_map);
+    EXPECT_EQ(snapshot->active_map, counts.mapper_active_map);
+    ASSERT_EQ(snapshot->maps.size(), counts.mapper_map_ids.size());
+    for (size_t i = 0; i < counts.mapper_map_ids.size(); ++i) {
+        const map::MapId id = counts.mapper_map_ids[i];
+        const auto* replica = follower.atlas().map(id);
+        ASSERT_NE(replica, nullptr);
+        EXPECT_EQ(replica->num_keyframes(), counts.mapper_map_keyframes[i]) << "map " << id.value;
+        EXPECT_EQ(snapshot->maps[i].id, id);
+        EXPECT_EQ(snapshot->maps[i].frame_ids.size(), counts.mapper_map_keyframes[i]);
+        EXPECT_FALSE(snapshot->maps[i].point_ids.empty());
+        EXPECT_EQ(snapshot->maps[i].point_ids.size(), snapshot->maps[i].point_positions.size());
+    }
+    // The recorder's own replica saw the same transactions.
+    EXPECT_EQ(follower.atlas().map_ids(), recorder.atlas.map_ids());
 }
 
 // k = 2, L = 1: two words of weight 1 under the root (as the Tracker tests'
@@ -829,14 +892,14 @@ TEST(SlamTest, MeasurementsAreShared) {
     while (slam.loop_closer().ProcessPending()) {
     }
 
-    const auto& tracker_replica = slam.tracker().map_replica();
-    const auto& loop_closer_replica = slam.loop_closer().map_replica();
+    const auto& tracker_replica = tracking::TrackerTestAccess::MapReplica(slam.tracker());
+    const auto& loop_closer_replica = loop_closing::LoopCloserTestAccess::MapReplica(slam.loop_closer());
     const std::vector<map::FrameId> frames = tracker_replica.keyframe_ids();
     ASSERT_GE(frames.size(), 2u);
     EXPECT_EQ(loop_closer_replica.keyframe_ids(), frames);
     for (const map::FrameId id : frames) {
         SCOPED_TRACE("Frame " + std::to_string(id.value));
-        const auto* mapper_frame = slam.mapper().KeyFrame(id);
+        const auto* mapper_frame = mapping::MapperTestAccess::KeyFrame(slam.mapper(), id);
         const auto* tracker_frame = tracker_replica.keyframe(id);
         const auto* loop_closer_frame = loop_closer_replica.keyframe(id);
         ASSERT_NE(mapper_frame, nullptr);

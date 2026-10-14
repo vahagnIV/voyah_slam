@@ -20,6 +20,28 @@ as soon as they come up.
       `check_all` or build `all` before merging (restructure final review,
       2026-10-07). The "Library layout" block sits under DESIGN §7 "Coding
       Conventions"; give it its own section.
+- [ ] **Debug-tree apps still replace about 75 library functions with their
+      `-O0` copies** (found 2026-10-14 with the `MapFollower` regression,
+      DESIGN §4 "Map Follower"; older than R2: after that fix the set is a
+      subset of 5079f94's). The apps build at `-O0`, the libraries at `-O2`,
+      and the linker takes every inline or template function both
+      instantiate from the app object, which is first on the link line
+      (Eigen `Matrix3d` products and 3×3 inverse, `RigidTransformation::Inverse()`,
+      `shared_ptr` release, `aligned_malloc`, ...). Binocular, 40 frames: no
+      measurable effect (39 of 40 tracked, app at `-O0` or `-O2`). Monocular,
+      200 frames: 13 and 13 Frames with the app at `-O0` against 16, 16 and 17
+      with the same source at `-O2`; the Tracker processes the same frames
+      (780 `OptimizePose` lines each), so it is the Mapper. Few runs and
+      timing-dependent: measure more before acting. Options:
+      `voyah_optimize_target()` on the apps and the dataset reader (stepping
+      through app code then needs `VOYAHSLAM_OPTIMIZE_TESTS=OFF`, as for the
+      libraries), and keeping the libraries' hot loops off out-of-line
+      template helpers (`MatchStereo` copies each right descriptor through
+      Eigen's `call_dense_assignment_loop`; it could read the column in
+      place). The same mechanism hits any consumer built with less
+      optimization than the library (a Debug voyah_jni against a Release
+      package); hidden visibility ("Library structure", symbol visibility)
+      would help shared builds only.
 - [ ] Map-quality final-review follow-ups (2026-10-07):
   - Long runs scale with point ids ever issued, not live points: fusion and
     culling make ids ~6× the live points, the Tracker scans all ids per frame.
@@ -951,12 +973,27 @@ and android-arm64; tell the voyah_jni session the new version.
       it runs terminates; every destruction order of producer, subscription,
       observer and listener is safe (shared `InboxCore` and `Wiring`). The
       component `Start`/`Stop` transitions stay with #6.
-- [ ] **#5 Thread-affinity accessors enforced only by comments**
-      (`Mapper` "Mapper thread only", `Tracker::atlas()` / `map_replica()` /
-      `last_matches()`): move them behind test access or assert the thread,
-      and give apps a supported way to read the map from their own thread (a
-      map follower consuming `MapTransaction` into its own replica; the core
-      of a planned `voyahslam::Session` facade for JNI).
+- [x] ~~#5 Thread-affinity accessors enforced only by comments~~ (done
+      2026-10-14, 0.5.0, branch `refactor/thread-affinity`): the Mapper's
+      twelve "Mapper thread only" accessors, `Tracker::atlas()` /
+      `map_replica()` / `last_matches()`, `LoopCloser::atlas()` /
+      `map_replica()` and its five stats accessors, and
+      `GlobalBundleAdjuster::atlas()` / `map_replica()` are private behind
+      `*TestAccess` structs (`libs/slam/tests/test_access.h`, compile-time
+      `ThreadAffinityTest`); GlobalBA's run counters are atomic; apps read the
+      map through `mapping::MapFollower` / `MapSnapshot` (DESIGN §4 "Map
+      Follower"). The LoopCloser stats accessors are test-only like D-14's, so
+      no item is left to decide. Still deferred with the JNI work: the
+      `voyahslam::Session` facade and the viewer on a follower.
+- [ ] **Follow-ups of #5 (deferred, after the binding uses `MapFollower`):** a
+      `voyahslam::Session` facade (`Slam` plus `MapFollower` in one object for
+      JNI; design it in the library or in voyah_jni), and moving voyahviz's
+      `SceneState` onto a `MapFollower` (dogfooding it in the viewer).
+      Also decide whether `MapFollower::atlas()` stays public: its replica
+      accessors are inline, so a caller instantiates them in its own
+      translation unit (DESIGN §4 "Map Follower", 2026-10-14); apps and a
+      Session should read a `Snapshot()`. A Session in the library would be
+      defined in `src/` like the follower (DESIGN §7 "Structure").
 - [ ] **#6 Lifecycle rules unenforced:** a Created → Running → Stopped state
       machine with asserts or errors on invalid transitions (`AddObserver`
       while running, `Start` twice, `Track()` before `Start()`); decide and

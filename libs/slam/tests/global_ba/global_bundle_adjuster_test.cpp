@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <support/test_measurements.h>
+#include <test_access.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
 #include <voyahslam/events/observable.h>
@@ -278,7 +279,7 @@ TEST(GlobalBundleAdjusterTest, StartsOnlyOnLoopEdge) {
     harness.SendOrdinary(kMap, 0);
     EXPECT_TRUE(harness.Run().empty());
     EXPECT_EQ(harness.global_ba().num_runs_started(), 0u);
-    ASSERT_EQ(harness.global_ba().map_replica().num_keyframes(), kNumFrames);
+    ASSERT_EQ(GlobalBundleAdjusterTestAccess::MapReplica(harness.global_ba()).num_keyframes(), kNumFrames);
 
     harness.SendCorrection(kMap, 3);
     const std::vector<Result> results = harness.Run();
@@ -317,7 +318,7 @@ TEST(GlobalBundleAdjusterTest, NewerCorrectionInterruptsRun) {
     EXPECT_EQ(results[0].map_epoch, 2u);
     EXPECT_EQ(harness.global_ba().num_runs_started(), 2u);
     EXPECT_EQ(harness.global_ba().num_runs_interrupted(), 1u);
-    EXPECT_EQ(harness.global_ba().map_replica().map_epoch(), 2u);
+    EXPECT_EQ(GlobalBundleAdjusterTestAccess::MapReplica(harness.global_ba()).map_epoch(), 2u);
 }
 
 // Transactions without a loop edge, even at a newer epoch, leave the run be.
@@ -335,7 +336,7 @@ TEST(GlobalBundleAdjusterTest, OrdinaryTransactionDoesNotInterruptRun) {
     ASSERT_EQ(results.size(), 1u);
     EXPECT_EQ(results[0].map_epoch, 1u);
     EXPECT_EQ(harness.global_ba().num_runs_interrupted(), 0u);
-    EXPECT_EQ(harness.global_ba().map_replica().map_epoch(), 2u);  // applied after the run
+    EXPECT_EQ(GlobalBundleAdjusterTestAccess::MapReplica(harness.global_ba()).map_epoch(), 2u);  // applied after the run
 }
 
 // A new map clears the replica and drops the pending run, whether it comes
@@ -356,9 +357,9 @@ TEST(GlobalBundleAdjusterTest, NewMapClearsAndDropsRun) {
 
         EXPECT_EQ(harness.global_ba().num_runs_started(), during_run ? 1u : 0u);
         EXPECT_EQ(harness.global_ba().num_runs_interrupted(), during_run ? 1u : 0u);
-        EXPECT_EQ(harness.global_ba().map_replica().map_id(), map::MapId{2});
-        EXPECT_EQ(harness.global_ba().map_replica().map_epoch(), 0u);
-        EXPECT_EQ(harness.global_ba().map_replica().num_keyframes(), kNumFrames);
+        EXPECT_EQ(GlobalBundleAdjusterTestAccess::MapReplica(harness.global_ba()).map_id(), map::MapId{2});
+        EXPECT_EQ(GlobalBundleAdjusterTestAccess::MapReplica(harness.global_ba()).map_epoch(), 0u);
+        EXPECT_EQ(GlobalBundleAdjusterTestAccess::MapReplica(harness.global_ba()).num_keyframes(), kNumFrames);
     }
 }
 
@@ -380,8 +381,8 @@ TEST(GlobalBundleAdjusterTest, RemovedMapDropsRun) {
 
         EXPECT_EQ(harness.global_ba().num_runs_started(), during_run ? 1u : 0u);
         EXPECT_EQ(harness.global_ba().num_runs_interrupted(), during_run ? 1u : 0u);
-        EXPECT_FALSE(harness.global_ba().atlas().active_map().has_value());
-        EXPECT_TRUE(harness.global_ba().atlas().map_ids().empty());
+        EXPECT_FALSE(GlobalBundleAdjusterTestAccess::Atlas(harness.global_ba()).active_map().has_value());
+        EXPECT_TRUE(GlobalBundleAdjusterTestAccess::Atlas(harness.global_ba()).map_ids().empty());
     }
 }
 
@@ -396,12 +397,12 @@ TEST(GlobalBundleAdjusterTest, InactiveMapLeavesGlobalBaIdle) {
     harness.SendCorrectionOf(kMap, map::MapId{2}, 5);
     EXPECT_TRUE(harness.Run().empty());
     EXPECT_EQ(harness.global_ba().num_runs_started(), 0u);
-    const auto& atlas = harness.global_ba().atlas();
+    const auto& atlas = GlobalBundleAdjusterTestAccess::Atlas(harness.global_ba());
     EXPECT_EQ(atlas.map_ids(), (std::vector<map::MapId>{kMap, map::MapId{2}}));
     EXPECT_EQ(atlas.active_map(), map::MapId{2});
     ASSERT_NE(atlas.map(kMap), nullptr);
     EXPECT_EQ(atlas.map(kMap)->map_epoch(), 5u);  // applied to its map
-    EXPECT_EQ(harness.global_ba().map_replica().map_epoch(), 0u);
+    EXPECT_EQ(GlobalBundleAdjusterTestAccess::MapReplica(harness.global_ba()).map_epoch(), 0u);
 
     // Nor does one arriving while the active map's run polls (sent once: a
     // GlobalBA that ran on it would otherwise loop).
@@ -440,8 +441,8 @@ TEST(GlobalBundleAdjusterTest, DeactivatedMapDropsRun) {
 
         EXPECT_EQ(harness.global_ba().num_runs_started(), during_run ? 1u : 0u);
         EXPECT_EQ(harness.global_ba().num_runs_interrupted(), during_run ? 1u : 0u);
-        EXPECT_FALSE(harness.global_ba().atlas().active_map().has_value());
-        EXPECT_EQ(harness.global_ba().atlas().map_ids(), std::vector<map::MapId>{kMap});
+        EXPECT_FALSE(GlobalBundleAdjusterTestAccess::Atlas(harness.global_ba()).active_map().has_value());
+        EXPECT_EQ(GlobalBundleAdjusterTestAccess::Atlas(harness.global_ba()).map_ids(), std::vector<map::MapId>{kMap});
     }
 }
 
@@ -455,8 +456,8 @@ TEST(GlobalBundleAdjusterTest, IgnoresRemovedMap) {
     harness.SendCorrection(map::MapId{0}, 5);
     EXPECT_TRUE(harness.Run().empty());
     EXPECT_EQ(harness.global_ba().num_runs_started(), 0u);
-    EXPECT_EQ(harness.global_ba().map_replica().map_id(), map::MapId{2});
-    EXPECT_EQ(harness.global_ba().map_replica().map_epoch(), 0u);
+    EXPECT_EQ(GlobalBundleAdjusterTestAccess::MapReplica(harness.global_ba()).map_id(), map::MapId{2});
+    EXPECT_EQ(GlobalBundleAdjusterTestAccess::MapReplica(harness.global_ba()).map_epoch(), 0u);
 
     harness.SendCorrection(map::MapId{2}, 1);
     harness.global_ba().set_run_hook([&] {
@@ -469,8 +470,8 @@ TEST(GlobalBundleAdjusterTest, IgnoresRemovedMap) {
     EXPECT_EQ(results[0].map_id, map::MapId{2});
     EXPECT_EQ(results[0].map_epoch, 1u);
     EXPECT_EQ(harness.global_ba().num_runs_interrupted(), 0u);
-    EXPECT_EQ(harness.global_ba().map_replica().map_id(), map::MapId{2});
-    EXPECT_EQ(harness.global_ba().map_replica().map_epoch(), 1u);
+    EXPECT_EQ(GlobalBundleAdjusterTestAccess::MapReplica(harness.global_ba()).map_id(), map::MapId{2});
+    EXPECT_EQ(GlobalBundleAdjusterTestAccess::MapReplica(harness.global_ba()).map_epoch(), 1u);
 }
 
 // Review Focus 4: Stop() interrupts a running BA on the worker thread; it
@@ -619,7 +620,7 @@ TEST(GlobalBundleAdjusterTest, ChangesDuringRunDoNotAffectResult) {
                   undisturbed[0].frame_poses[i].second.translation());
     }
     EXPECT_EQ(results[0].point_positions, undisturbed[0].point_positions);
-    EXPECT_EQ(harness.global_ba().map_replica().num_keyframes(), kNumFrames - 1);
+    EXPECT_EQ(GlobalBundleAdjusterTestAccess::MapReplica(harness.global_ba()).num_keyframes(), kNumFrames - 1);
 }
 
 } // namespace

@@ -8,6 +8,7 @@
 #include <support/synthetic_sequence.h>
 #include <support/test_measurements.h>
 #include <support/trajectory_error.h>
+#include <test_access.h>
 #include <voyahslam/bow/vocabulary.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
@@ -133,7 +134,7 @@ protected:
     std::vector<Captured> Feed(TMeasurement measurement) {
         tracker_.Track(std::move(measurement));
         Drain();
-        EXPECT_TRUE(tracker_.map_replica().CheckConsistency());
+        EXPECT_TRUE(TrackerTestAccess::MapReplica(tracker_).CheckConsistency());
         return TakeCaptured();
     }
 
@@ -174,7 +175,7 @@ protected:
     // the current map to ground truth `T_cw_of_frame` (indexed by frame).
     test::MapAlignment AlignmentOf(const std::vector<geometry::RigidTransformation>& T_cw_of_frame,
                                    bool monocular) const {
-        const MapReplica<Extractor>& replica = tracker_.map_replica();
+        const MapReplica<Extractor>& replica = TrackerTestAccess::MapReplica(tracker_);
         const std::vector<map::FrameId> ids = replica.keyframe_ids();
         const auto truth_of = [&](map::FrameId id) {
             const double timestamp = std::visit([](const auto& m) { return m.timestamp(); },
@@ -194,9 +195,9 @@ protected:
     // Expects the replica's last-frame matches to be exactly the observations
     // of the current map's keyframe `frame`.
     void ExpectLastMatchesAreKeyFrameObservations(map::FrameId frame) const {
-        const auto* keyframe = tracker_.map_replica().keyframe(frame);
+        const auto* keyframe = TrackerTestAccess::MapReplica(tracker_).keyframe(frame);
         ASSERT_NE(keyframe, nullptr);
-        const std::vector<int64_t>& matches = tracker_.last_matches();
+        const std::vector<int64_t>& matches = TrackerTestAccess::LastMatches(tracker_);
         size_t matched = 0;
         for (const int64_t id : matches) matched += id >= 0 ? 1 : 0;
         EXPECT_EQ(matched, keyframe->observations.size());
