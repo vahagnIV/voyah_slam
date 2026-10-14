@@ -245,7 +245,9 @@ private behind test access structs, and `mapping::MapFollower` is the supported
 map read path), #6 (0.6.0, 2026-10-14: the Created to Stopped lifecycle is an atomic
 state machine with `UsageError` on invalid transitions, `Start()` / `Stop()` are
 valid from any thread, and `Stop()` then `Start()` is decided as not supported:
-Stopped is terminal, a new session is a new `Slam`). Remaining, in order: #7, #8, #9. Each item is merged separately with a minor version bump and new
+Stopped is terminal, a new session is a new `Slam`), #7 (0.7.0, 2026-10-14: `OrbFeatureExtractor`
+has no mutable state, the pyramid lives in a caller-owned `Workspace`, so one extractor is safe to
+share between threads). Remaining, in order: #8, #9. Each item is merged separately with a minor version bump and new
 Conan packages.
 
 ## 6. TUM-VI tuning

@@ -916,6 +916,45 @@ Specs: `docs/superpowers/specs/2026-10-04-pangolin-viewer-design.md`
   to be closed).
 - Verified with ThreadSanitizer (`MapViewer*:SceneState*`, 2026-10-04: clean).
 
+## ORB Extractor Workspace (ownership audit #7, 0.7.0)
+
+`features::OrbFeatureExtractor` holds no state that a call changes: the
+configuration (scale factors, FAST thresholds, Gaussian kernels) is fixed at
+construction and every `const` method only reads it. The image pyramid, which
+used to be a `mutable` member and made `DetectAndExtract` a data race under
+two threads, lives in a caller-owned `OrbFeatureExtractor::Workspace`:
+
+```cpp
+OrbFeatureExtractor extractor;            // shareable between threads
+OrbFeatureExtractor::Workspace workspace; // one per extraction thread
+auto features = extractor.DetectAndExtract(image, n, workspace);  // reuse across frames
+auto features2 = extractor.DetectAndExtract(image, n);             // allocates a temporary Workspace
+```
+
+- **Ownership (CONTEXT D-15..D-17).** The `Workspace` is not thread-safe and is
+  owned one per extraction thread; stereo needs two if left and right are
+  extracted in parallel (the example apps hold `left_workspace` and
+  `right_workspace`, the mono app one). Passing it by non-const reference
+  (`out_workspace`) says in the signature that the call writes it.
+- **Reuse.** The pyramid is allocated on the first call and reused, so the
+  hot loop does not allocate a pyramid per frame. The `Workspace` re-initialises
+  itself (`ImagePyramid::Fits` is false) when the image size, the level count or
+  a scale factor differs from the one it was built for; the result is then
+  exactly that of a fresh `Workspace` (no assert in Debug, no out-of-bounds in
+  Release).
+- **Allocating overload.** `DetectAndExtract(image, n)` stays for tests and
+  one-offs; it makes a temporary `Workspace` per call, so a loop over frames
+  should hold one.
+- **Output unchanged.** The features are bit-identical to before (the ORB
+  golden digests of `OrbExtractorGoldenTest` were not re-recorded). Verified by
+  `OrbExtractorWorkspaceTest.*` (two threads on one extractor equal the
+  single-thread result, clean under ThreadSanitizer; the allocating overload,
+  a reused workspace and the size / level-count changes equal fresh results).
+- `orb::ImagePyramid` has a `const operator[]`, `Width()`, `Height()` and `Fits()`;
+  `Initialize()` clears before building, and its size members are initialised.
+  The `Workspace` class is declared in `voyah_common` with the extractor
+  (placement rule, §7).
+
 ## FAST Corner Detector (`features/fast.h`, `voyah_algs`)
 
 **Since 2026-10-11** the ORB extractor detects corners with our own port of
@@ -2979,7 +3018,7 @@ libs/
 cmake/VoyahTests.cmake      voyah_add_test_binary, voyah_optimize_target, check / check_all
 cmake/voyahslamConfig.cmake.in  installed CMake package config (find_dependency)
 vizualization/              voyahviz (+ voyahviz_tests)
-conanfile.py                package recipe voyahslam/0.6.0 (also the dev installs)
+conanfile.py                package recipe voyahslam/0.7.0 (also the dev installs)
 test_package/               conan create's consumer test (links voyahslam::voyahslam)
 profiles/                   linux-gcc13 (default + gnu20), android-arm64,
                             settings_user.yml (clang 21)
@@ -3008,7 +3047,7 @@ profiles/                   linux-gcc13 (default + gnu20), android-arm64,
   `transitive_headers` (spdlog also `transitive_libs`); g2o and stb are not
   (g2o's libraries still reach static consumers' link lines, never its
   include paths). `shared=True` also makes spdlog and fmt shared; shared
-  libraries get `VERSION` / `SOVERSION` (0.6) and an `$ORIGIN` install
+  libraries get `VERSION` / `SOVERSION` (0.7) and an `$ORIGIN` install
   runpath (not on Apple).
 - `validate()` requires `compiler.cppstd` >= 20 (public headers are C++20;
   `profiles/linux-gcc13` = default + `gnu20` + Release, used by the dev
@@ -3361,6 +3400,8 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-14 | **Ownership audit #6 implemented (Release R3, branch `refactor/lifecycle`; Phase 1 CONTEXT D-09..D-12, D-26).** Tracker, Mapper, LoopCloser, GlobalBA and `Slam` follow Created, Starting, Running, Stopping, Stopped through an atomic CAS (`EventNode::StartWith` / `StopWith`, `Observable::CompareExchangeState` / `WaitWhileState`; `EventNode::BeginRun()` / `EndRun()` are removed). `Start()` / `Stop()` are valid from any thread; `Start()` twice or after `Stop()`, `Tracker::Track()` after `Stop()` and `Stop()` on a component's own worker thread throw `UsageError`; `Track()` before `Start()` queues; `Stop()` is idempotent and a concurrent `Stop()` returns only after the join; a failed `Start()` leaves the component `Stopped` and `Slam::Start()` rolls back. **`Stop()` then `Start()` is not supported: Stopped is terminal for `Slam` and its components, a new session is a new `Slam`; `WorkerThread` and `MapViewer` stay restartable.** `WorkerThread::Stop()` throws on the worker's own thread and a failed thread start resets `running()`. GlobalBA does not reset `stop_requested_` in `Start()` (Stopped is terminal; a reset could undo a `Stop()` waiting on `Starting`). Known gap at the time, closed by the next row: `Slam::Stop()` on a component's own thread stopped the components before it, then was refused. | A Java `close()`, finalizer or GC can run `Stop()` on any thread, so one-controlling-thread rules cannot be assumed and a data race on the state is a crash. Deterministic `UsageError`s replace silent no-ops (before 0.6.0 `BeginRun()` / `EndRun()` only published the state: a misused `Start()` or `Stop()` was a silent no-op or a silent restart). A restart would have to re-arm the wiring, the inbox and the counters against threads that may still hold the old state; a new `Slam` is cheap and removes that whole class. Tracker `Track()` before `Start()` is harmless (the queue is lock-free) and refusing it would only add an ordering rule. |
 | 2026-10-14 | **`Slam::Stop()` on a component's own thread is refused before it stops anything (TODO option (a), chosen by the user; Release R3, 0.6.0).** `Slam::Stop()` checks the calling thread against the worker of the Tracker, Mapper, LoopCloser and GlobalBA first (`WorkerThread::OnWorkerThread()` over the existing atomic `worker_id_`, exposed per component as `OnWorkerThread()`) and throws `UsageError`, changing nothing: no component stops and `Slam::run_state()` (new accessor) stays `Running`. `~Slam()` on a component thread logs and calls `std::terminate`. Replaces the "Known gap" of the row above. | The earlier behavior stopped the components before the caller's (Tracker, LoopCloser) and only then refused, leaving a half-stopped `Slam` that reported `Running`; a JNI callback that stops the session is a realistic mistake and must be recoverable and side-effect free. The check is lock-free (an atomic thread-id load per worker), consistent with principle 1, and a destructor cannot throw, hence the loud terminate, as for a `Subscription` destroyed while its producer runs. Options (b), (c) (a no-throw "request stop") and (d) were not chosen. |
 | 2026-10-14 | **Package version 0.6.0** (`conanfile.py`, `project()`; SOVERSION 0.6). Behavior breaks for consumers (the voyah_jni binding): `Start()` twice, `Start()` after `Stop()`, `Tracker::Track()` after `Stop()` and `Stop()` on a component's own worker thread throw `voyahslam::UsageError` (map it to `IllegalStateException`); `Stop()` before `Start()` makes the component and `Slam` terminal (a later `Start()` throws); `Start()` / `Stop()` are safe from any thread, so `close()` / GC need no external ordering; `Slam::Stop()` called from a component's thread or an event callback throws `UsageError` and changes nothing, and destroying the `Slam` there terminates; `EventNode::BeginRun()` / `EndRun()` are removed (they were protected). | Every audit item is a behavior or API break for the binding; a public API change gets a new minor version while 0.x (as 0.2.0 to 0.5.0). |
+| 2026-10-14 | **Ownership audit #7 implemented (Release R4, branch `refactor/extractor-workspace`; Phase 1 CONTEXT D-15..D-17).** `OrbFeatureExtractor::DetectAndExtract(image, n, Workspace& out_workspace) const`; the pyramid moves from a `mutable` member into the caller-owned `OrbFeatureExtractor::Workspace` (not thread-safe, one per extraction thread, re-initialises on a new image size, level count or scale factor). The allocating `DetectAndExtract(image, n) const` stays for tests and one-offs. The extractor has no mutable member, so one extractor may be shared by threads. `orb::ImagePyramid` gets a `const operator[]`, `Width()`, `Height()`, `Fits()` and a re-entrant `Initialize()`. The mono example holds one `Workspace`, the stereo example two. Output unchanged (golden digests not re-recorded). | Chosen over making `DetectAndExtract` non-const (still one extractor per thread, and a const extractor in shared code would stop compiling) and over `thread_local` storage (hidden state per thread, never freed with the extractor, unusable from JNI threads that come and go): the caller already owns one thread per extraction loop, so it owns the scratch. Per-frame pyramid allocation (01-RESEARCH Pitfall 14) is avoided by reuse. Supersedes the `mutable` pyramid of the 2026-10-04 levels work. |
+| 2026-10-14 | **Package version 0.7.0** (`conanfile.py`, `project()`; SOVERSION 0.7). API change for consumers (the voyah_jni binding): `DetectAndExtract(image, n, Workspace&)` is the supported way to extract in a loop or from several threads (hold one `Workspace` per thread); the two-argument overload is unchanged but allocates a pyramid per call. | A public API addition with a documented concurrency contract gets a new minor version while 0.x (as 0.2.0 to 0.6.0). |
 
 ## 9. Open Questions
 
@@ -3452,7 +3493,7 @@ branch → review → merge to `master`. Update this document at the end.
     **Plan:** ~~own FAST-9-16~~ (done 2026-10-11: OpenCV's FAST ported
     bit-exact, still run per cell; see "FAST Corner Detector") run once per
     level, corners assigned to cells (≥ 20 if any, else ≥ 7) — fixes speed and
-    blind strips; preallocated blur/pyramid buffers; ~~round descriptor offsets~~ (done);
+    blind strips; preallocated blur buffers (the pyramid is preallocated per `Workspace` since 0.7.0); ~~round descriptor offsets~~ (done);
     keep the level in `ImageFeatures`. Then re-profile. Parallel left/right
     extraction after that.
 22. **Fisheye rays beyond 90°:** `MonocularMeasurement` stores undistorted
@@ -3633,7 +3674,12 @@ branch → review → merge to `master`. Update this document at the end.
 - Ownership audit (`docs/TODO.md`): #3 + #2 done (0.4.0, branch
   `refactor/event-ownership`, merge pending); #5 done (0.5.0, branch
   `refactor/thread-affinity`, merge pending); #6 done (0.6.0, branch
-  `refactor/lifecycle`, merge pending); next #7, #8, #9.
+  `refactor/lifecycle`, merged and pushed); #7 done (0.7.0, branch
+  `refactor/extractor-workspace`, merge pending); next #8, #9.
+- Test suite (2026-10-14, ownership audit #7, 0.7.0): 832 tests (792
+  `unit`, 39 `integration`, 1 `vocabulary`, skipped without ORBvoc);
+  `check_all` about 30 s. `OrbExtractorWorkspaceTest.*` (5) are new;
+  ThreadSanitizer was clean on them (plan summary 01-15).
 - Test suite (2026-10-14, ownership audit #6, 0.6.0): 827 tests (787
   `unit`, 39 `integration`, 1 `vocabulary`, skipped without ORBvoc);
   `check_all` about 30 s. `LifecycleTest.*` (12), `SlamTest.Lifecycle*` (8),
