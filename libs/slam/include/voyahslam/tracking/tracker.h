@@ -176,13 +176,18 @@ public:
     // Stops the worker before any member it uses is destroyed.
     ~Tracker();
 
-    // Start() and Stop() must be called from one controlling thread.
+    // Lifecycle (D-10..D-12): Created -> Running -> Stopped, Stopped is terminal.
+    // Start() twice or after Stop() throws UsageError; Stop() before Start() moves
+    // to Stopped; Stop() is idempotent and every concurrent call returns only after
+    // the worker is joined. Both are safe from any thread, except that Stop() on
+    // the Tracker's own worker thread throws UsageError (it would join itself).
     void Start();
     void Stop();
 
     // Enqueue the measurement for the Tracker thread and return immediately.
     // Taken by value: pass an rvalue to move the feature matrices instead of
-    // copying them.
+    // copying them. Before Start() it keeps queuing; during or after Stop() it
+    // throws UsageError (D-12).
     void Track(TMonocularMeasurement measurement);
     void Track(TBinocularMeasurement measurement);
 
@@ -269,6 +274,8 @@ private:
     // After the correction or merge: last_frame_ keeps its pose relative to
     // the first anchor still in the (new) active map; unchanged if none is.
     void FollowCorrection(const std::vector<FramePose>& anchors);
+    // Throws UsageError when the Tracker is Stopping or Stopped (Track()).
+    void ThrowIfStopped() const;
     // Makes the replica's Frame `start_frame` the last frame and starts tracking.
     void StartTracking(map::FrameId start_frame);
     // Merges `frame`'s observations into last_frame_.matches if it is made of
