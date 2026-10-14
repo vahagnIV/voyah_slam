@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(voyah_slam VERSION 0.6.0)
+project(voyah_slam VERSION 0.7.0)
 
 if(NOT DEFINED CMAKE_CXX_STANDARD)
     set(CMAKE_CXX_STANDARD 20)

@@ -19,6 +19,25 @@ public:
   OrbFeatureExtractor(precision_t scale_factor = 1.2, size_t levels = 8,
                       unsigned init_threshold_FAST = 20,
                       unsigned min_threshold_FAST = 7);
+  // Per-thread scratch for DetectAndExtract (the image pyramid). NOT thread-safe: keep one per
+  // extraction thread (stereo: two if left and right are extracted in parallel). Reusing it
+  // across frames avoids the per-frame pyramid allocation; it re-initialises itself when the
+  // image size or the extractor's level count changes.
+  class Workspace {
+  public:
+    Workspace() = default;
+
+  private:
+    friend class OrbFeatureExtractor;
+    orb::ImagePyramid pyramid_;
+  };
+
+  // Nothing in the extractor changes after construction, so one extractor may be shared by several
+  // threads as long as each passes its own Workspace.
+  [[nodiscard]] TFeatures DetectAndExtract(const images::TWorkingImage &image, size_t number_of_features,
+                                           Workspace &out_workspace) const;
+  // Convenience: builds a temporary Workspace per call (allocates the pyramid); fine for tests
+  // and one-offs. A loop over frames should reuse a Workspace instead.
   [[nodiscard]] TFeatures DetectAndExtract(const images::TWorkingImage &image, size_t number_of_features) const;
   static TDescriptorScalarType Distance(const TDescriptor& desc1, const TDescriptor& desc2);
 
@@ -44,7 +63,6 @@ private:
   unsigned min_threshold_FAST_;
 
   std::vector<precision_t> scale_factors_;
-  mutable orb::ImagePyramid pyramid_;
 
   std::vector<precision_t> level_sigma2_;
   std::vector<precision_t> inv_level_sigma2_;
@@ -52,9 +70,9 @@ private:
   void Initialize();
   static decltype(scale_factors_) ComputeScaleFactors(precision_t scale, size_t levels);
   void ComputeLevels();
-  TFeatures ComputeKeyPointsOctTree(size_t features) const;
+  TFeatures ComputeKeyPointsOctTree(const orb::ImagePyramid &pyramid, size_t features) const;
   std::tuple<geometry::TPoints2DF, geometry::TRowVectorF>
-  ComputePointsPerLevel(size_t level, int n_features) const;
+  ComputePointsPerLevel(const orb::ImagePyramid &pyramid, size_t level, int n_features) const;
   std::vector<size_t> ComputeFeaturesPerLevel(size_t number_of_features) const;
 
   geometry::TRowVectorF

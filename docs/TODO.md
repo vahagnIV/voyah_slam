@@ -61,6 +61,8 @@ as soon as they come up.
 
 ## ORB extractor (OQ 21)
 
+- [x] The pyramid is preallocated and reused per `Workspace` (done 2026-10-14,
+      0.7.0, ownership audit #7); the blur buffers remain (EXTR-01).
 - [ ] Run FAST once per pyramid level (our bit-exact port of OpenCV's FAST,
       `features/fast.h`, since 2026-10-11, still called per cell); assign
       corners to cells (≥ 20 if any, else ≥ 7). Removes the blind strips at
@@ -1010,9 +1012,14 @@ and android-arm64; tell the voyah_jni session the new version.
       and throws `UsageError`, changing nothing (no component stops, `Slam` stays
       `Running`); `~Slam()` on a component thread logs and terminates. Options
       (b), (c) and (d) were not taken. DESIGN §4 "Lifecycle", §7.
-- [ ] **#7 `OrbFeatureExtractor::DetectAndExtract` is `const` but not
-      thread-safe** (`mutable` pyramid): make it non-const or use a per-call /
-      caller-provided workspace.
+- [x] ~~#7 `OrbFeatureExtractor::DetectAndExtract` is `const` but not
+      thread-safe~~ (done 2026-10-14, 0.7.0, branch `refactor/extractor-workspace`):
+      the `mutable` pyramid moved into a caller-owned
+      `OrbFeatureExtractor::Workspace` passed to `DetectAndExtract(image, n,
+      Workspace&) const` (one per extraction thread, re-initialises on a new image
+      size or level count); the allocating two-argument overload stays for tests.
+      The extractor is shareable between threads; output unchanged. DESIGN
+      "ORB Extractor Workspace".
 - [ ] **#8 Logger global state depends on initialization order:**
       `Logger::Initialize` should also replace the sinks of loggers already
       created, and `sinks_` must be protected (see the logcat item under

@@ -76,6 +76,9 @@ int main(int argc, char** argv) {
         viewer.Start();
         slam.Start();
 
+        // One extraction scratch (image pyramid) per image, reused across frames; ready for
+        // extracting left and right on two threads.
+        TFeatureExtractor::Workspace left_workspace, right_workspace;
         dataset_reader::PlaybackClock clock(options.rate);
         full_slam::PlaybackStats stats;
         size_t num_frames = std::min(reader.size(), options.max_frames);
@@ -89,9 +92,9 @@ int main(int argc, char** argv) {
             // A dropped frame keeps its timestamp but has no features.
             const bool dropped = options.drop_frames && options.drop_frames->Contains(i);
             auto left = dropped ? TFeatureExtractor::TFeatures{}
-                                : extractor.DetectAndExtract(frame.left, full_slam::kNumFeatures);
+                                : extractor.DetectAndExtract(frame.left, full_slam::kNumFeatures, left_workspace);
             auto right = dropped ? TFeatureExtractor::TFeatures{}
-                                 : extractor.DetectAndExtract(frame.right, full_slam::kNumFeatures);
+                                 : extractor.DetectAndExtract(frame.right, full_slam::kNumFeatures, right_workspace);
             TBinocularMeasurement measurement(std::move(left), std::move(right), rig,
                                               frame.timestamp);
             auto extracted = std::chrono::steady_clock::now();

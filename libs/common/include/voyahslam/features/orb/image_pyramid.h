@@ -13,15 +13,23 @@ public:
                   const std::vector<precision_t> &scale_factors);
   [[nodiscard]] size_t GetDepth() const;
   void Build(const images::TWorkingImage &image);
-  const images::TWorkingImage &operator[](size_t i) {
+  const images::TWorkingImage &operator[](size_t i) const {
     return image_pyramid_[i];
   }
+  // Size of level 0 (the full-resolution image the pyramid was initialised for).
+  [[nodiscard]] unsigned Width() const { return image_width_; }
+  [[nodiscard]] unsigned Height() const { return image_height_; }
+
+  // True if Initialize() was called with exactly this image size and these scale factors, so
+  // Build() of an image of that size needs no re-initialisation.
+  [[nodiscard]] bool Fits(size_t image_width, size_t image_height,
+                          const std::vector<precision_t> &scale_factors) const;
 
   [[nodiscard]] bool Initialized() const { return initialized_; };
 
 private:
-  unsigned image_width_;
-  unsigned image_height_;
+  unsigned image_width_{0};
+  unsigned image_height_{0};
   bool initialized_{false};
   std::vector<precision_t> inv_scale_factors_;
   std::vector<images::TWorkingImage> image_pyramid_;
