@@ -137,7 +137,7 @@ optimization. With `-o shared=True` the libraries are shared, and spdlog and fmt
 shared too (both are PUBLIC: static copies would end up in `libvoyah_common.so` and in the
 consumer). `shared=True` is rejected on Windows (no export macros) and together with
 `compiler.libcxx=c++_static` (see "Android"); shared libraries get versioned sonames
-(`libvoyah_slam.so.0.8`) and an `$ORIGIN` runpath.
+(`libvoyah_slam.so.0.9`) and an `$ORIGIN` runpath.
 
 A consumer (`conanfile.txt` with `[requires] voyahslam/0.9.0`, generators `CMakeDeps` and
 `CMakeToolchain`) must also build with C++20: install its dependencies with
