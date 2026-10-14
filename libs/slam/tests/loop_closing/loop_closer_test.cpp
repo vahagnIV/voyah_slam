@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <support/synthetic_sequence.h>
 #include <support/test_measurements.h>
+#include <test_access.h>
 #include <voyahslam/bow/vocabulary.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
@@ -628,11 +629,11 @@ void ExpectLoopAtThirdConfirmation(uint32_t seed, const Sim3& drift, bool binocu
     const LoopCloser<Extractor>& loop_closer = harness.loop_closer();
     for (size_t k = 0; k < 3; ++k) {
         EXPECT_TRUE(scene.PublishReturn(harness, k).empty()) << "L" << k;
-        EXPECT_EQ(loop_closer.num_coincidences(), k) << "L" << k;
+        EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(loop_closer), k) << "L" << k;
         if (k == 0) {
             // Gates of the first detection, with margins over the thresholds.
             const CommonRegionResult result =
-                DetectCommonRegion(loop_closer.map_replica(), LoopScene::ReturnId(0), LoopCloserOptions{});
+                DetectCommonRegion(LoopCloserTestAccess::MapReplica(loop_closer), LoopScene::ReturnId(0), LoopCloserOptions{});
 
             const CommonRegionStats& stats = result.stats;
             ::testing::Test::RecordProperty(
@@ -657,7 +658,7 @@ void ExpectLoopAtThirdConfirmation(uint32_t seed, const Sim3& drift, bool binocu
     }
 
     const std::vector<Loop> loops = scene.PublishReturn(harness, 3);
-    const QueryStats& queries = loop_closer.query_stats();
+    const QueryStats& queries = LoopCloserTestAccess::Queries(loop_closer);
     ::testing::Test::RecordProperty(
         "seed" + std::to_string(seed) + (binocular ? "_stereo" : "_mono") + "_detection_ms",
         std::to_string(queries.detected) + " queries, mean " +
@@ -671,7 +672,7 @@ void ExpectLoopAtThirdConfirmation(uint32_t seed, const Sim3& drift, bool binocu
     EXPECT_EQ(loop.match_map_id, map::MapId{1});
     EXPECT_EQ(loop.query_frame, LoopScene::ReturnId(3));
     ASSERT_LT(loop.match_frame.value, kStartFrames);
-    EXPECT_EQ(loop_closer.num_coincidences(), 0u);  // dropped once published
+    EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(loop_closer), 0u);  // dropped once published
 
     const Sim3 truth = scene.TrueS(3, loop.match_frame);
     // Seeds 1..5 measured at most 0.09 deg, 1 % of scale (of a 10 % drift)
@@ -722,8 +723,8 @@ TEST(LoopCloserTest, CovisibleRevisitIsNotALoop) {
         ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
         for (size_t k = 0; k < kReturnFrames; ++k) {
             EXPECT_TRUE(scene.PublishReturn(harness, k).empty()) << "L" << k;
-            EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u) << "L" << k;
-            const CommonRegionStats& stats = harness.loop_closer().last_stats();
+            EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 0u) << "L" << k;
+            const CommonRegionStats& stats = LoopCloserTestAccess::LastStats(harness.loop_closer());
             EXPECT_FALSE(stats.candidates.empty()) << "L" << k;
             EXPECT_TRUE(std::none_of(stats.candidates.begin(), stats.candidates.end(), IsStartFrame)) << "L" << k;
             EXPECT_EQ(stats.bow_matches, 0u) << "L" << k;
@@ -745,8 +746,8 @@ TEST(LoopCloserTest, CandidateWindowTouchingQueryIsNotALoop) {
         ASSERT_TRUE(scene.PublishBridge(harness, map::FrameId{100}).empty());
         for (size_t k = 1; k < kReturnFrames; ++k) {
             EXPECT_TRUE(scene.PublishReturn(harness, k).empty()) << "L" << k;
-            EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u) << "L" << k;
-            const CommonRegionStats& stats = harness.loop_closer().last_stats();
+            EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 0u) << "L" << k;
+            const CommonRegionStats& stats = LoopCloserTestAccess::LastStats(harness.loop_closer());
             EXPECT_TRUE(std::any_of(stats.candidates.begin(), stats.candidates.end(), IsStartFrame)) << "L" << k;
             EXPECT_EQ(stats.bow_matches, 0u) << "L" << k;
         }
@@ -761,12 +762,12 @@ TEST(LoopCloserTest, FailedConfirmationsDropPendingRegion) {
     ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
     ASSERT_TRUE(scene.PublishReturn(harness, 0).empty());
     ASSERT_TRUE(scene.PublishReturn(harness, 1).empty());
-    ASSERT_EQ(harness.loop_closer().num_coincidences(), 1u);
+    ASSERT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 1u);
 
     EXPECT_TRUE(scene.PublishElsewhere(harness, map::FrameId{101}).empty());
-    EXPECT_EQ(harness.loop_closer().num_coincidences(), 1u);  // one failure: kept
+    EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 1u);  // one failure: kept
     EXPECT_TRUE(scene.PublishElsewhere(harness, map::FrameId{102}).empty());
-    EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);  // two: dropped
+    EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 0u);  // two: dropped
 }
 
 // LoopDetected is never dropped. Until 2026-10-13 a loop was dropped when
@@ -822,12 +823,12 @@ TEST(LoopCloserTest, CorrectionDropsPendingRegion) {
     ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
     ASSERT_TRUE(scene.PublishReturn(harness, 0).empty());
     ASSERT_TRUE(scene.PublishReturn(harness, 1).empty());
-    ASSERT_EQ(harness.loop_closer().num_coincidences(), 1u);
+    ASSERT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 1u);
     EXPECT_TRUE(harness.PublishEpoch(0).empty());
-    EXPECT_EQ(harness.loop_closer().num_coincidences(), 1u);
+    EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 1u);
     EXPECT_TRUE(harness.PublishEpoch(1).empty());
-    EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
-    EXPECT_EQ(harness.loop_closer().map_replica().map_epoch(), 1u);
+    EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 0u);
+    EXPECT_EQ(LoopCloserTestAccess::MapReplica(harness.loop_closer()).map_epoch(), 1u);
 }
 
 // Frames of one place, each a query (min_map_frames 1): Frame 0 adds the
@@ -882,8 +883,8 @@ TEST(LoopCloserTest, SlowDetectorHoldsNoTransaction) {
 
     EXPECT_EQ(harness.num_exhausted(), 0u);
     EXPECT_EQ(feed.num_sent(), kFrames);
-    EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), kFrames);
-    const QueryStats& queries = harness.loop_closer().query_stats();
+    EXPECT_EQ(LoopCloserTestAccess::MapReplica(harness.loop_closer()).num_keyframes(), kFrames);
+    const QueryStats& queries = LoopCloserTestAccess::Queries(harness.loop_closer());
     EXPECT_EQ(queries.detected, detected);
     EXPECT_GT(queries.dropped, kFrames / 4);
     EXPECT_EQ(queries.detected + queries.dropped, kFrames);
@@ -902,8 +903,8 @@ TEST(LoopCloserTest, CulledQueryIsSkipped) {
     harness.loop_closer().set_query_hook({});
 
     EXPECT_EQ(detected, std::vector<map::FrameId>{map::FrameId{0}});
-    EXPECT_EQ(harness.loop_closer().map_replica().keyframe(map::FrameId{1}), nullptr);
-    EXPECT_EQ(harness.loop_closer().query_stats().detected, 1u);
+    EXPECT_EQ(LoopCloserTestAccess::MapReplica(harness.loop_closer()).keyframe(map::FrameId{1}), nullptr);
+    EXPECT_EQ(LoopCloserTestAccess::Queries(harness.loop_closer()).detected, 1u);
 }
 
 // M3: Stop() returns after the query being detected, not after the backlog.
@@ -940,10 +941,10 @@ TEST(LoopCloserTest, UnmappedLookAlikeRejected) {
         ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
         for (size_t k = 0; k < kReturnFrames; ++k) {
             EXPECT_TRUE(scene.PublishReturn(harness, k).empty()) << "L" << k;
-            const CommonRegionStats& stats = harness.loop_closer().last_stats();
+            const CommonRegionStats& stats = LoopCloserTestAccess::LastStats(harness.loop_closer());
             EXPECT_GE(stats.bow_matches, 2 * LoopCloserOptions{}.min_bow_matches) << "L" << k;
             EXPECT_EQ(stats.projection_matches, 0u) << "L" << k;
-            EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u) << "L" << k;
+            EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 0u) << "L" << k;
         }
     }
 }
@@ -960,7 +961,7 @@ TEST(LoopCloserTest, ClearsOnNewMap) {
         for (size_t k = 0; k < 3; ++k) {
             ASSERT_TRUE(scene.PublishReturn(harness, k).empty());
         }
-        ASSERT_EQ(harness.loop_closer().num_coincidences(), 2u);
+        ASSERT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 2u);
 
         std::mt19937 rng(7);
         const auto region = MakeRegion(50, Pose(0.0, 0.0, 0.0, 0.0), 0x00, rng);
@@ -968,24 +969,24 @@ TEST(LoopCloserTest, ClearsOnNewMap) {
         if (by_tracking_lost) {
             // A non-final loss keeps everything.
             EXPECT_TRUE(harness.PublishTrackingLost(map::MapId{1}, false).empty());
-            EXPECT_EQ(harness.loop_closer().num_coincidences(), 2u);
-            EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), 15u);
+            EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 2u);
+            EXPECT_EQ(LoopCloserTestAccess::MapReplica(harness.loop_closer()).num_keyframes(), 15u);
             EXPECT_TRUE(harness.PublishTrackingLost(map::MapId{1}, true).empty());
-            EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), 15u);
+            EXPECT_EQ(LoopCloserTestAccess::MapReplica(harness.loop_closer()).num_keyframes(), 15u);
             EXPECT_TRUE(harness.PublishRemoval(map::MapId{1}).empty());
-            EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), 0u);
-            EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
+            EXPECT_EQ(LoopCloserTestAccess::MapReplica(harness.loop_closer()).num_keyframes(), 0u);
+            EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 0u);
             // A late transaction of the lost map is ignored.
             EXPECT_TRUE(scene.PublishReturn(harness, 3).empty());
-            EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), 0u);
-            EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
+            EXPECT_EQ(LoopCloserTestAccess::MapReplica(harness.loop_closer()).num_keyframes(), 0u);
+            EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 0u);
         } else {
             EXPECT_TRUE(harness.Publish(first, PointsOf(region, 0, Sim3{}, Centre(Pose(0, 0, 0, 0)), rng), true,
                                         map::MapId{2})
                             .empty());
-            EXPECT_EQ(harness.loop_closer().map_replica().map_id(), map::MapId{2});
-            EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), 1u);
-            EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
+            EXPECT_EQ(LoopCloserTestAccess::MapReplica(harness.loop_closer()).map_id(), map::MapId{2});
+            EXPECT_EQ(LoopCloserTestAccess::MapReplica(harness.loop_closer()).num_keyframes(), 1u);
+            EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 0u);
         }
     }
 }
@@ -1004,7 +1005,7 @@ TEST(LoopCloserTest, InactiveMapLeavesLoopCloserIdle) {
     ASSERT_TRUE(harness.Publish(observe(200), PointsOf(region, 0, Sim3{}, Centre(Pose(0, 0, 0, 0)), rng), true)
                     .empty());
     ASSERT_TRUE(harness.PublishEmpty(map::MapId{1}, std::nullopt).empty());  // kept inactive
-    const auto& atlas = harness.loop_closer().atlas();
+    const auto& atlas = LoopCloserTestAccess::Atlas(harness.loop_closer());
     ASSERT_EQ(atlas.map_ids(), std::vector<map::MapId>{map::MapId{1}});
     ASSERT_FALSE(atlas.active_map().has_value());
 
@@ -1014,8 +1015,8 @@ TEST(LoopCloserTest, InactiveMapLeavesLoopCloserIdle) {
     for (size_t k = 0; k < 3; ++k) {
         ASSERT_TRUE(scene.PublishReturn(harness, k).empty());
     }
-    ASSERT_EQ(harness.loop_closer().num_coincidences(), 2u);
-    const size_t detected = harness.loop_closer().query_stats().detected;
+    ASSERT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 2u);
+    const size_t detected = LoopCloserTestAccess::Queries(harness.loop_closer()).detected;
 
     // Map 1, inactive, gains a Frame and a correction epoch.
     ASSERT_TRUE(harness.Send(observe(201), {}, false, map::MapId{1}, map::MapId{2}));
@@ -1025,8 +1026,8 @@ TEST(LoopCloserTest, InactiveMapLeavesLoopCloserIdle) {
     EXPECT_EQ(atlas.map(map::MapId{1})->num_keyframes(), 2u);  // applied to its map
     EXPECT_EQ(atlas.map(map::MapId{1})->map_epoch(), 5u);
     EXPECT_EQ(atlas.active_map(), map::MapId{2});
-    EXPECT_EQ(harness.loop_closer().query_stats().detected, detected);
-    EXPECT_EQ(harness.loop_closer().num_coincidences(), 2u);
+    EXPECT_EQ(LoopCloserTestAccess::Queries(harness.loop_closer()).detected, detected);
+    EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 2u);
     // Map 2's pending region goes on to its loop.
     const std::vector<Loop> loops = scene.PublishReturn(harness, 3);
     ASSERT_EQ(loops.size(), 1u);
@@ -1042,8 +1043,8 @@ TEST(LoopCloserTest, NoVocabularyDoesNothing) {
     for (size_t k = 0; k < kReturnFrames; ++k) {
         EXPECT_TRUE(scene.PublishReturn(harness, k).empty()) << "L" << k;
     }
-    EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), 0u);
-    EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
+    EXPECT_EQ(LoopCloserTestAccess::MapReplica(harness.loop_closer()).num_keyframes(), 0u);
+    EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 0u);
 }
 
 LoopCloserOptions WithoutNormalGate() {
@@ -1075,8 +1076,8 @@ void ExpectOppositeRegionRejected(uint32_t seed, bool binocular) {
     ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
     for (size_t k = 0; k < kReturnFrames; ++k) {
         EXPECT_TRUE(scene.PublishReturn(harness, k).empty()) << "L" << k;
-        EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u) << "L" << k;
-        const CommonRegionStats& stats = harness.loop_closer().last_stats();
+        EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 0u) << "L" << k;
+        const CommonRegionStats& stats = LoopCloserTestAccess::LastStats(harness.loop_closer());
         EXPECT_GE(stats.projection_matches, LoopCloserOptions{}.min_projection) << "L" << k;
         ASSERT_FALSE(stats.normal_rejections.empty()) << "L" << k;
         for (const NormalRejection& rejection : stats.normal_rejections) {
@@ -1104,7 +1105,7 @@ TEST(LoopCloserTest, RefinementRejectedByNormals) {
     ASSERT_TRUE(scene.PublishStartAndMiddle(harness).empty());
     ASSERT_TRUE(scene.PublishReturn(harness, 0).empty());
     ASSERT_TRUE(scene.PublishReturn(harness, 1).empty());
-    const auto& replica = harness.loop_closer().map_replica();
+    const auto& replica = LoopCloserTestAccess::MapReplica(harness.loop_closer());
     const CommonRegionResult found = DetectCommonRegion(replica, LoopScene::ReturnId(0), WithoutNormalGate());
     ASSERT_TRUE(found.region.has_value());
     // L1's guess: L0's similarity moved by their relative pose.
@@ -1134,7 +1135,7 @@ TEST(LoopCloserTest, OffByDefault) {
     for (size_t k = 0; k < kReturnFrames; ++k) {
         EXPECT_TRUE(scene.PublishReturn(harness, k).empty()) << "L" << k;
     }
-    EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), 0u);
+    EXPECT_EQ(LoopCloserTestAccess::MapReplica(harness.loop_closer()).num_keyframes(), 0u);
 }
 
 // Disabled (the default; the apps without --loop_closing), the LoopCloser
@@ -1149,8 +1150,8 @@ TEST(LoopCloserTest, DisabledDoesNothing) {
     for (size_t k = 0; k < kReturnFrames; ++k) {
         EXPECT_TRUE(scene.PublishReturn(harness, k).empty()) << "L" << k;
     }
-    EXPECT_EQ(harness.loop_closer().map_replica().num_keyframes(), 0u);
-    EXPECT_EQ(harness.loop_closer().num_coincidences(), 0u);
+    EXPECT_EQ(LoopCloserTestAccess::MapReplica(harness.loop_closer()).num_keyframes(), 0u);
+    EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(harness.loop_closer()), 0u);
 }
 
 // ---- Map merging (ORB-SLAM3 NewDetectCommonRegions, merge part) ----
@@ -1347,13 +1348,13 @@ TEST(LoopCloserMergeTest, FindsMergeOnlyInInactiveMap) {
         MergeScene scene(seed, MonoDrift(), /*binocular=*/false);
         ASSERT_TRUE(scene.PublishUpTo(harness, 1, Sees::A).empty());
         const LoopCloser<Extractor>& loop_closer = harness.loop_closer();
-        ASSERT_EQ(loop_closer.atlas().active_map(), MergeScene::kMap2);
+        ASSERT_EQ(LoopCloserTestAccess::Atlas(loop_closer).active_map(), MergeScene::kMap2);
 
-        const CommonRegionStats& loop_stats = loop_closer.last_stats();
+        const CommonRegionStats& loop_stats = LoopCloserTestAccess::LastStats(loop_closer);
         EXPECT_FALSE(loop_stats.candidates.empty());
         EXPECT_TRUE(std::all_of(loop_stats.candidates.begin(), loop_stats.candidates.end(), MergeScene::InMap2));
         EXPECT_EQ(loop_stats.projection_matches, 0u);
-        const CommonRegionStats& merge_stats = loop_closer.last_merge_stats();
+        const CommonRegionStats& merge_stats = LoopCloserTestAccess::LastMergeStats(loop_closer);
         ASSERT_FALSE(merge_stats.candidates.empty());
         EXPECT_TRUE(std::all_of(merge_stats.candidates.begin(), merge_stats.candidates.end(), MergeScene::InMap1));
         EXPECT_TRUE(std::any_of(merge_stats.candidates.begin(), merge_stats.candidates.end(), IsStartFrame));
@@ -1366,12 +1367,12 @@ TEST(LoopCloserMergeTest, FindsMergeOnlyInInactiveMap) {
         EXPECT_GE(merge_stats.optimized_inliers, 2 * options.min_optimized);
         EXPECT_GE(merge_stats.projection_matches, 2 * options.min_projection);
         EXPECT_TRUE(merge_stats.normal_rejections.empty());
-        EXPECT_EQ(loop_closer.num_coincidences(), 0u);
+        EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(loop_closer), 0u);
 
         std::vector<Loop> loops;
         for (size_t k = 1; k <= 3; ++k) {
             for (Loop& loop : scene.PublishReturn(harness, k, Sees::A)) loops.push_back(std::move(loop));
-            EXPECT_EQ(loop_closer.num_coincidences(), 0u) << "R" << k;
+            EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(loop_closer), 0u) << "R" << k;
         }
         ASSERT_EQ(loops.size(), 1u);
         EXPECT_EQ(loops[0].map_id, MergeScene::kMap2);
@@ -1393,12 +1394,12 @@ void ExpectMergeAtThirdConfirmation(uint32_t seed, const Sim3& drift, bool binoc
     const LoopCloser<Extractor>& loop_closer = harness.loop_closer();
     for (size_t k = 0; k < 3; ++k) {
         EXPECT_TRUE(scene.PublishReturn(harness, k, Sees::A).empty()) << "R" << k;
-        EXPECT_EQ(loop_closer.num_merge_coincidences(), k) << "R" << k;
+        EXPECT_EQ(LoopCloserTestAccess::NumMergeCoincidences(loop_closer), k) << "R" << k;
         if (k == 0) {
             ::testing::Test::RecordProperty(
                 "seed" + std::to_string(seed) + (binocular ? "_stereo" : "_mono") + "_scale" +
                     std::to_string(drift.scale) + "_merge",
-                GateCounts(loop_closer.last_merge_stats()));
+                GateCounts(LoopCloserTestAccess::LastMergeStats(loop_closer)));
         }
     }
     const std::vector<Loop> loops = scene.PublishReturn(harness, 3, Sees::A);
@@ -1409,7 +1410,7 @@ void ExpectMergeAtThirdConfirmation(uint32_t seed, const Sim3& drift, bool binoc
     EXPECT_EQ(merge.match_map_id, MergeScene::kMap1);
     EXPECT_EQ(merge.query_frame, MergeScene::ReturnId(3));
     ASSERT_TRUE(IsStartFrame(merge.match_frame));
-    EXPECT_EQ(loop_closer.num_merge_coincidences(), 0u);  // dropped once published
+    EXPECT_EQ(LoopCloserTestAccess::NumMergeCoincidences(loop_closer), 0u);  // dropped once published
 
     const Sim3 truth = scene.TrueS(3, merge.match_frame);
     ::testing::Test::RecordProperty(
@@ -1525,16 +1526,16 @@ TEST(LoopCloserMergeTest, LoopAndMergePendingIndependent) {
         MergeScene scene(seed, MonoDrift(), /*binocular=*/false);
         ASSERT_TRUE(scene.PublishUpTo(harness, 2, Sees::Both).empty());
         const LoopCloser<Extractor>& loop_closer = harness.loop_closer();
-        EXPECT_EQ(loop_closer.num_coincidences(), 1u);
-        EXPECT_EQ(loop_closer.num_merge_coincidences(), 1u);
+        EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(loop_closer), 1u);
+        EXPECT_EQ(LoopCloserTestAccess::NumMergeCoincidences(loop_closer), 1u);
 
         EXPECT_TRUE(scene.PublishReturn(harness, 2, Sees::A).empty());
-        EXPECT_EQ(loop_closer.num_coincidences(), 1u);
-        EXPECT_EQ(loop_closer.num_merge_coincidences(), 2u);
+        EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(loop_closer), 1u);
+        EXPECT_EQ(LoopCloserTestAccess::NumMergeCoincidences(loop_closer), 2u);
 
         EXPECT_TRUE(scene.PublishReturn(harness, 3, Sees::D).empty());
-        EXPECT_EQ(loop_closer.num_coincidences(), 2u);
-        EXPECT_EQ(loop_closer.num_merge_coincidences(), 2u);
+        EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(loop_closer), 2u);
+        EXPECT_EQ(LoopCloserTestAccess::NumMergeCoincidences(loop_closer), 2u);
     }
 }
 
@@ -1552,19 +1553,19 @@ TEST(LoopCloserMergeTest, SearchesMergeWhileLoopConfirms) {
         MergeScene scene(seed, MonoDrift(), /*binocular=*/false);
         ASSERT_TRUE(scene.PublishUpTo(harness, 2, Sees::D).empty());
         const LoopCloser<Extractor>& loop_closer = harness.loop_closer();
-        ASSERT_EQ(loop_closer.num_coincidences(), 1u);
+        ASSERT_EQ(LoopCloserTestAccess::NumCoincidences(loop_closer), 1u);
 
         EXPECT_TRUE(scene.PublishReturn(harness, 2, Sees::Both).empty());
-        EXPECT_EQ(loop_closer.num_coincidences(), 2u);
-        const CommonRegionStats& merge_stats = loop_closer.last_merge_stats();
+        EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(loop_closer), 2u);
+        const CommonRegionStats& merge_stats = LoopCloserTestAccess::LastMergeStats(loop_closer);
         EXPECT_TRUE(std::any_of(merge_stats.candidates.begin(), merge_stats.candidates.end(), IsStartFrame));
         EXPECT_GE(merge_stats.projection_matches, LoopCloserOptions{}.min_projection);
 
         const std::vector<Loop> loops = scene.PublishReturn(harness, 3, Sees::Both);
         ASSERT_EQ(loops.size(), 1u);
         EXPECT_EQ(loops[0].match_map_id, MergeScene::kMap2);
-        EXPECT_EQ(loop_closer.num_coincidences(), 0u);
-        EXPECT_EQ(loop_closer.num_merge_coincidences(), 0u);
+        EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(loop_closer), 0u);
+        EXPECT_EQ(LoopCloserTestAccess::NumMergeCoincidences(loop_closer), 0u);
     }
 }
 
@@ -1578,16 +1579,16 @@ TEST(LoopCloserMergeTest, MergeWinsOverLoop) {
         MergeScene scene(seed, MonoDrift(), /*binocular=*/false);
         ASSERT_TRUE(scene.PublishUpTo(harness, 3, Sees::Both).empty());
         const LoopCloser<Extractor>& loop_closer = harness.loop_closer();
-        ASSERT_EQ(loop_closer.num_coincidences(), 2u);
-        ASSERT_EQ(loop_closer.num_merge_coincidences(), 2u);
+        ASSERT_EQ(LoopCloserTestAccess::NumCoincidences(loop_closer), 2u);
+        ASSERT_EQ(LoopCloserTestAccess::NumMergeCoincidences(loop_closer), 2u);
 
         const std::vector<Loop> loops = scene.PublishReturn(harness, 3, Sees::Both);
         ASSERT_EQ(loops.size(), 1u);
         EXPECT_EQ(loops[0].query_map_id, MergeScene::kMap2);
         EXPECT_EQ(loops[0].match_map_id, MergeScene::kMap1);
         EXPECT_TRUE(IsStartFrame(loops[0].match_frame));
-        EXPECT_EQ(loop_closer.num_coincidences(), 0u);
-        EXPECT_EQ(loop_closer.num_merge_coincidences(), 0u);
+        EXPECT_EQ(LoopCloserTestAccess::NumCoincidences(loop_closer), 0u);
+        EXPECT_EQ(LoopCloserTestAccess::NumMergeCoincidences(loop_closer), 0u);
     }
 }
 
@@ -1619,16 +1620,16 @@ TEST(LoopCloserMergeTest, NeverMatchesRemovedMap) {
         MergeScene scene(seed, MonoDrift(), /*binocular=*/false);
         ASSERT_TRUE(scene.PublishUpTo(harness, 3, Sees::A).empty());
         const LoopCloser<Extractor>& loop_closer = harness.loop_closer();
-        ASSERT_EQ(loop_closer.num_merge_coincidences(), 2u);
+        ASSERT_EQ(LoopCloserTestAccess::NumMergeCoincidences(loop_closer), 2u);
 
         EXPECT_TRUE(
             harness.PublishEmpty(MergeScene::kMap2, MergeScene::kMap2, 0, {MergeScene::kMap1}).empty());
-        EXPECT_EQ(loop_closer.atlas().map(MergeScene::kMap1), nullptr);
-        EXPECT_EQ(loop_closer.num_merge_coincidences(), 0u);
+        EXPECT_EQ(LoopCloserTestAccess::Atlas(loop_closer).map(MergeScene::kMap1), nullptr);
+        EXPECT_EQ(LoopCloserTestAccess::NumMergeCoincidences(loop_closer), 0u);
         for (size_t k = 3; k < kReturnFrames; ++k) {
             EXPECT_TRUE(scene.PublishReturn(harness, k, Sees::A).empty()) << "R" << k;
-            EXPECT_EQ(loop_closer.num_merge_coincidences(), 0u) << "R" << k;
-            const CommonRegionStats& stats = loop_closer.last_merge_stats();
+            EXPECT_EQ(LoopCloserTestAccess::NumMergeCoincidences(loop_closer), 0u) << "R" << k;
+            const CommonRegionStats& stats = LoopCloserTestAccess::LastMergeStats(loop_closer);
             EXPECT_TRUE(std::none_of(stats.candidates.begin(), stats.candidates.end(), MergeScene::InMap1))
                 << "R" << k;
         }

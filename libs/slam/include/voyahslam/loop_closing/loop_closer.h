@@ -36,6 +36,9 @@ struct QueryStats {
     double max_seconds = 0.0;
 };
 
+// Test access to the LoopCloser's thread-affine state (defined by the tests).
+struct LoopCloserTestAccess;
+
 // Detects loops and merges on its own replica of the Atlas and publishes
 // LoopDetected (ORB-SLAM3 NewDetectCommonRegions); the Mapper closes them.
 // Consumes the Mapper's MapTransactions; runs on its own thread; never
@@ -73,6 +76,12 @@ struct QueryStats {
 // or none after the Mapper drops or deactivates a finally lost map) drops
 // both pending regions and the queries. A TrackingLost changes nothing: the
 // Mapper's transaction does.
+//
+// Thread safety. Every public accessor is either atomic (any thread) or a
+// lifecycle/driver call (Start, Stop, ProcessPending, the test hook setter).
+// The replica and the worker-written statistics are private (tests read them
+// through LoopCloserTestAccess): apps read the map through
+// mapping::MapFollower, and the query figures are in the Stop() summary log.
 template <typename TFeatureExtractor>
 class LoopCloser : public events::EventNode {
 public:
@@ -96,8 +105,17 @@ public:
     // synchronously (never concurrently with a running worker).
     [[nodiscard]] bool ProcessPending();
 
-    // LoopCloser-thread state, for tests that drive ProcessPending()
-    // synchronously: never read while the worker runs.
+    // Tests: `hook` is called on the LoopCloser's thread before each query is
+    // detected (a slow detector, or one the Mapper outpaces). Set it while
+    // the worker is stopped.
+    void set_query_hook(std::function<void(map::FrameId)> hook) { query_hook_ = std::move(hook); }
+
+private:
+    friend struct LoopCloserTestAccess;
+
+    // LoopCloser-thread state; tests that drive ProcessPending() synchronously
+    // read it through LoopCloserTestAccess. Apps read the map through
+    // mapping::MapFollower.
     [[nodiscard]] const tracking::AtlasReplica<TFeatureExtractor>& atlas() const { return atlas_; }
     // The active map; empty if there is none.
     [[nodiscard]] const tracking::MapReplica<TFeatureExtractor>& map_replica() const {
@@ -114,14 +132,9 @@ public:
     // The last merge detection's gates (DetectCommonRegion on the merge
     // candidates).
     [[nodiscard]] const CommonRegionStats& last_merge_stats() const { return last_merge_stats_; }
+    // The worker's query figures (also in the Stop() summary log).
     [[nodiscard]] const QueryStats& query_stats() const { return query_stats_; }
 
-    // Tests: `hook` is called on the LoopCloser's thread before each query is
-    // detected (a slow detector, or one the Mapper outpaces). Set it while
-    // the worker is stopped.
-    void set_query_hook(std::function<void(map::FrameId)> hook) { query_hook_ = std::move(hook); }
-
-private:
     // A region being confirmed (ORB-SLAM3 mpLoopMatchedKF,
     // mpLoopLastCurrentKF, mg2oLoopSlw, mnLoopNumCoincidences,
     // mnLoopNumNotFound, and their Merge counterparts). S_last_world takes

@@ -19,6 +19,10 @@
 
 namespace voyahslam::global_ba {
 
+// Test access to the GlobalBundleAdjuster's thread-affine state (defined by the
+// tests).
+struct GlobalBundleAdjusterTestAccess;
+
 // Runs ORB-SLAM3's global BA after a loop correction, on its own replica of
 // the map and its own thread, and publishes GlobalBAFinished for the Mapper to
 // merge. Consumes the Mapper's MapTransactions; never modifies map objects.
@@ -40,6 +44,13 @@ namespace voyahslam::global_ba {
 // Maps: the replica is an AtlasReplica (the replica rule: atlas_replica.h),
 // and the run is on the active map. A change of the active map, or a new map,
 // drops a pending run.
+//
+// Thread safety. Every public accessor is either atomic (any thread:
+// num_runs_started(), num_runs_interrupted(), stop_requested()) or a
+// lifecycle/driver call (Start, Stop, ProcessPending, the test hook setters).
+// The replica is private (tests read it through
+// GlobalBundleAdjusterTestAccess): apps read the map through
+// mapping::MapFollower.
 template <typename TFeatureExtractor>
 class GlobalBundleAdjuster : public events::EventNode {
 public:
@@ -59,17 +70,13 @@ public:
     // concurrently with a running worker).
     [[nodiscard]] bool ProcessPending();
 
-    // GlobalBA-thread state, for tests that drive ProcessPending()
-    // synchronously: never read while the worker runs.
-    [[nodiscard]] const tracking::AtlasReplica<TFeatureExtractor>& atlas() const { return atlas_; }
-    // The active map; empty if there is none.
-    [[nodiscard]] const tracking::MapReplica<TFeatureExtractor>& map_replica() const {
-        return atlas_.active_or_empty();
-    }
-    [[nodiscard]] size_t num_runs_started() const { return num_runs_started_; }
+    // Runs started; any thread.
+    [[nodiscard]] size_t num_runs_started() const { return num_runs_started_.load(std::memory_order_acquire); }
     // Runs cut short by Stop(), an arrived newer correction or a change of
-    // the active map.
-    [[nodiscard]] size_t num_runs_interrupted() const { return num_runs_interrupted_; }
+    // the active map; any thread.
+    [[nodiscard]] size_t num_runs_interrupted() const {
+        return num_runs_interrupted_.load(std::memory_order_acquire);
+    }
     // True from Stop() until the next Start(); any thread.
     [[nodiscard]] bool stop_requested() const { return stop_requested_.load(std::memory_order_acquire); }
 
@@ -85,6 +92,17 @@ public:
     void set_publish_hook(std::function<void()> hook) { publish_hook_ = std::move(hook); }
 
 private:
+    friend struct GlobalBundleAdjusterTestAccess;
+
+    // GlobalBA-thread state; tests that drive ProcessPending() synchronously
+    // read it through GlobalBundleAdjusterTestAccess. Apps read the map
+    // through mapping::MapFollower.
+    [[nodiscard]] const tracking::AtlasReplica<TFeatureExtractor>& atlas() const { return atlas_; }
+    // The active map; empty if there is none.
+    [[nodiscard]] const tracking::MapReplica<TFeatureExtractor>& map_replica() const {
+        return atlas_.active_or_empty();
+    }
+
     // Applies a transaction to the Atlas; true iff it supersedes the run of
     // (map_id, map_epoch) (pass none for no run).
     bool ApplyEvent(const events::Event& event, std::optional<map::MapId> map_id = std::nullopt,
@@ -105,8 +123,8 @@ private:
     // GlobalBA-thread state.
     tracking::AtlasReplica<TFeatureExtractor> atlas_;
     bool run_pending_ = false;
-    size_t num_runs_started_ = 0;
-    size_t num_runs_interrupted_ = 0;
+    std::atomic<size_t> num_runs_started_{0};
+    std::atomic<size_t> num_runs_interrupted_{0};
     std::function<void()> run_hook_;
     std::function<void()> poll_hook_;
     std::function<void()> publish_hook_;

@@ -893,7 +893,7 @@ TEST(SlamTest, MeasurementsAreShared) {
     }
 
     const auto& tracker_replica = tracking::TrackerTestAccess::MapReplica(slam.tracker());
-    const auto& loop_closer_replica = slam.loop_closer().map_replica();
+    const auto& loop_closer_replica = loop_closing::LoopCloserTestAccess::MapReplica(slam.loop_closer());
     const std::vector<map::FrameId> frames = tracker_replica.keyframe_ids();
     ASSERT_GE(frames.size(), 2u);
     EXPECT_EQ(loop_closer_replica.keyframe_ids(), frames);
