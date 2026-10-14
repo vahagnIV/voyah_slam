@@ -17,7 +17,7 @@ Source: `../voyah_jni/docs/voyah_slam_ownership_audit.md` (TODO "Ownership audit
 - [x] **OWN-02** (audit #2): Observer registration does not keep a raw pointer that can dangle: an RAII subscription returned by `AddObserver` (or observers held by `shared_ptr`), covering `ConnectAsync`, `ConnectSync`'s `ctx` and `SetWakeSignal`; connecting or disconnecting while the component runs fails loudly. Acceptance: an observer destroyed before its producer is not notified again (test); the examples no longer need a declaration order. *[ownership audit #2]*
 - [x] **OWN-03** (audit #5): Thread-affinity accessors (`Mapper` "Mapper thread only"; `Tracker::atlas()`, `map_replica()`, `last_matches()`) are enforced (test access or a debug thread assert), and apps get a supported way to read the map from their own thread (for example a map follower consuming `MapTransaction` into its own replica, the core of a planned `voyahslam::Session` facade). Acceptance: to be specced. *[ownership audit #5]*
 - [x] **OWN-04** (audit #6): Lifecycle state machine (Created, Running, Stopped) with asserts or errors on invalid transitions (`AddObserver` while running, `Start` twice, `Start` after `Stop`, `Track()` after `Stop()`; `Track()` before `Start()` queues); restart after `Stop()` decided and documented. Acceptance: to be specced. *[ownership audit #6]*
-- [ ] **OWN-05** (audit #7): `OrbFeatureExtractor::DetectAndExtract` is either safe to call concurrently (per-call or caller-provided workspace) or non-const. Acceptance: to be specced. *[ownership audit #7]*
+- [x] **OWN-05** (audit #7): `OrbFeatureExtractor::DetectAndExtract` is either safe to call concurrently (per-call or caller-provided workspace) or non-const. Acceptance: to be specced. *[ownership audit #7]*
 - [ ] **OWN-06** (audit #8): `Logger::Initialize` also replaces the sinks of loggers created before it, and `sinks_` is protected against concurrent reads. Acceptance: a component constructed before `Initialize` logs to the new sinks (test). *[ownership audit #8]*
 - [ ] **OWN-07** (audit #9): `images::Image` correctness: default construction initializes every member; `Convert()`, `operator*=` and `operator*` honour `offset_` and `stride_` of views; `Set()` is non-const and the buffer aliasing of views is documented. Acceptance: tests on a sub-image view. *[ownership audit #9]*
 
@@ -86,7 +86,7 @@ None. All 27 pending requirements are mapped to phases. The remaining open items
 | OWN-02 | Phase 1 | Complete |
 | OWN-03 | Phase 1 | Complete |
 | OWN-04 | Phase 1 | Complete |
-| OWN-05 | Phase 1 | Pending |
+| OWN-05 | Phase 1 | Complete |
 | OWN-06 | Phase 1 | Pending |
 | OWN-07 | Phase 1 | Pending |
 | LOOP-01 | Phase 2 | Pending |

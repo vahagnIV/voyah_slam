@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: API Ownership and Lifetime Contracts
 status: executing
-stopped_at: Completed 01-15-PLAN.md
-last_updated: "2026-10-14T17:40:53.682Z"
+stopped_at: Completed 01-16-PLAN.md
+last_updated: "2026-10-14T19:51:23.075Z"
 last_activity: 2026-10-13
 last_activity_desc: Phase 01 execution started
-state_head: af70f85546efd98e6cf37c8daed23e3bf7143b38
+state_head: 823470d51dd25d3b7fd3dbd0632a85bdc8d18712
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 20
-  completed_plans: 15
+  completed_plans: 16
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 ## Current Position
 
 Phase: 01 (API Ownership and Lifetime Contracts) — EXECUTING
-Plan: 16 of 20
+Plan: 17 of 20
 Status: Ready to execute
 Last activity: 2026-10-13 — Phase 01 execution started
 
@@ -71,6 +71,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P13 | 25 min | 2 tasks | 8 files |
 | Phase 01 P14 | gates x2 + option (a) change + merge | 3 tasks | 14 files |
 | Phase 01 P15 | 35 min | 3 tasks | 15 files |
+| Phase 01 P16 | gates + merge | 3 tasks | 0 files |
 
 ## Accumulated Context
 
@@ -105,6 +106,7 @@ Recent decisions affecting current work:
 - [Phase 01]: Slam::Stop() from a component's own thread is a documented gap (DESIGN 4, TODO), options left for the user; package version 0.6.0 (01-13)
 - [Phase 01]: R3 (0.6.0) merged to master as 124a668 on user's 'merge and push'; option (a) chosen by user: Slam::Stop() from a component thread throws UsageError and changes nothing, ~Slam there terminates, Slam::run_state() added
 - [Phase 01]: 01-15: OrbFeatureExtractor pyramid moved into a caller-owned Workspace (chosen over non-const method and thread_local); Workspace re-initialises on a new image size, level count or scale factor (ImagePyramid::Fits); version 0.7.0 on branch refactor/extractor-workspace (merge pending)
+- [Phase 01]: R4 (0.7.0) merged to master as 823470d on user's 'merge and push'; one shared OrbFeatureExtractor with one Workspace per extraction thread; branch kept
 
 ### Pending Todos
 
@@ -132,6 +134,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-14T17:40:53.657Z
-Stopped at: Completed 01-15-PLAN.md
+Last session: 2026-10-14T19:51:23.048Z
+Stopped at: Completed 01-16-PLAN.md
 Resume file: None
