@@ -994,10 +994,30 @@ and android-arm64; tell the voyah_jni session the new version.
       translation unit (DESIGN §4 "Map Follower", 2026-10-14); apps and a
       Session should read a `Snapshot()`. A Session in the library would be
       defined in `src/` like the follower (DESIGN §7 "Structure").
-- [ ] **#6 Lifecycle rules unenforced:** a Created → Running → Stopped state
-      machine with asserts or errors on invalid transitions (`AddObserver`
-      while running, `Start` twice, `Track()` before `Start()`); decide and
-      document whether `Stop()` then `Start()` is supported.
+- [x] ~~#6 Lifecycle rules unenforced~~ (done 2026-10-14, 0.6.0, branch
+      `refactor/lifecycle`): Tracker, Mapper, LoopCloser, GlobalBA and `Slam`
+      follow Created, Starting, Running, Stopping, Stopped through an atomic CAS
+      (`EventNode::StartWith` / `StopWith`); `Start()` / `Stop()` are valid from any
+      thread; `Start()` twice or after `Stop()`, `Tracker::Track()` after `Stop()`
+      and `Stop()` on a component's own worker thread throw `UsageError`;
+      `Track()` before `Start()` queues. **Decision: `Stop()` then `Start()` is not
+      supported** (Stopped is terminal for `Slam` and its components; a new
+      session is a new `Slam`); `WorkerThread` and `MapViewer` stay restartable.
+      DESIGN §4 "Lifecycle".
+- [ ] **`Slam::Stop()` from a component's own thread (found in #6, decide):**
+      called from a component thread (a Mapper sync handler or any callback that
+      runs on one, for example a JNI callback), `Slam::Stop()` stops the
+      components before that one, then the component refuses the self-stop with
+      `UsageError`; `Slam` restores its state and rethrows, leaving the earlier
+      components stopped and `Slam` reporting `Running` until a later `Stop()`
+      from another thread. Callers must not call `Slam::Stop()` (or destroy the
+      `Slam`) on a component thread; only the single-component self-stop is
+      tested. Options: (a) check the calling thread against every component's
+      worker before stopping anything, so a refused `Stop()` changes nothing;
+      (b) add a `Slam`-level test of the current behavior and keep it documented;
+      (c) make `Slam::Stop()` from a component thread a no-throw "request stop"
+      completed by another thread (a design change); (d) keep as is and tell the
+      voyah_jni session. Not changed in 0.6.0.
 - [ ] **#7 `OrbFeatureExtractor::DetectAndExtract` is `const` but not
       thread-safe** (`mutable` pyramid): make it non-const or use a per-call /
       caller-provided workspace.
