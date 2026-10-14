@@ -1,14 +1,11 @@
 #ifndef VOYAHSLAM_MAPPING_MAP_FOLLOWER_H
 #define VOYAHSLAM_MAPPING_MAP_FOLLOWER_H
 
-#include <cassert>
 #include <cstddef>
 #include <memory>
 #include <thread>
 #include <voyahslam/events/async_observer.h>
-#include <voyahslam/events/event_types.h>
 #include <voyahslam/events/listener.h>
-#include <voyahslam/events/map_transaction.h>
 #include <voyahslam/mapping/map_snapshot.h>
 #include <voyahslam/tracking/atlas_replica.h>
 
@@ -27,94 +24,56 @@ namespace voyahslam::mapping {
 // the follower before the Subscription (the inbox must outlive the wire).
 //
 // Threads: Update(), atlas() and Snapshot() belong to one thread, the one that
-// makes the first Update() (checked by assert in debug builds). Snapshot()
-// returns immutable plain data that any thread may hold and read.
+// makes the first Update() (checked by assert in debug builds of the library).
+// Snapshot() returns immutable plain data that any thread may hold and read.
 //
 // Cost: a full AtlasReplica per follower (descriptors, BoW, covisibility) and
 // an O(map) copy per Snapshot(). A follower that is never updated lets its
 // inbox grow; the "consumer is behind" warning names it "MapFollower" (D-24).
+//
+// Defined in the library (map_follower.cpp, INSTANTIATE_CLASS) like the
+// components, not in this header: a header-only follower made every app that
+// uses it instantiate the replica code, and with it Eigen helpers the
+// library's hot loops call. Built at -O0 and linked before the library, the
+// app's copies replaced the library's optimized ones and the Debug-tree
+// Tracker ran 3.5 times slower (decisions log 2026-10-14). Every member,
+// trivial ones included, is therefore out of line.
 template <typename TFeatureExtractor>
 class MapFollower {
 public:
-    MapFollower() : inbox_("MapFollower") {}
+    MapFollower();
+    ~MapFollower();
     MapFollower(const MapFollower&) = delete;
     MapFollower& operator=(const MapFollower&) = delete;
 
     // Subscribe before the Mapper starts: Subscription s = mapper.AddObserver(follower.inbox());
-    [[nodiscard]] events::AsyncObserver& inbox() { return inbox_; }
+    [[nodiscard]] events::AsyncObserver& inbox();
 
     // Applies every pending MapTransaction on the calling thread, in order;
     // other events are released. Returns the number of transactions applied by
     // this call (those the replica ignores, such as a removed map's, are not
     // counted).
-    size_t Update() {
-        ClaimThread();
-        size_t applied = 0;
-        while (events::EventPtr event = listener_.GetNextEvent()) {
-            if (event->type != events::EventType::MapTransaction) {
-                continue;
-            }
-            const auto& transaction = static_cast<const events::MapTransaction<TFeatureExtractor>&>(*event);
-            if (atlas_.Apply(transaction)) {
-                ++applied;
-            }
-        }
-        num_applied_ += applied;
-        return applied;
-    }
+    size_t Update();
 
-    // The follower's own Atlas; same thread as Update().
-    [[nodiscard]] const tracking::AtlasReplica<TFeatureExtractor>& atlas() const {
-        AssertOwner();
-        return atlas_;
-    }
+    // The follower's own Atlas; same thread as Update(). Reading it calls the
+    // replica's inline accessors from the caller's translation unit: apps read
+    // a Snapshot() instead.
+    [[nodiscard]] const tracking::AtlasReplica<TFeatureExtractor>& atlas() const;
 
     // A copy of the Atlas as it is now; same thread as Update(), but the result
     // is immutable and any thread may hold it. O(map).
-    [[nodiscard]] std::shared_ptr<const MapSnapshot> Snapshot() const {
-        AssertOwner();
-        auto snapshot = std::make_shared<MapSnapshot>();
-        snapshot->active_map = atlas_.active_map();
-        snapshot->num_transactions_applied = num_applied_;
-        for (const map::MapId id : atlas_.map_ids()) {
-            const auto* replica = atlas_.map(id);
-            MapSnapshot::Map& out = snapshot->maps.emplace_back();
-            out.id = id;
-            out.epoch = replica->map_epoch();
-            for (uint32_t index = 0; index < replica->num_points(); ++index) {
-                const map::MapPointId point{index};
-                if (replica->IsAlive(point)) {
-                    out.point_ids.push_back(point);
-                    out.point_positions.push_back(replica->Position(point));
-                }
-            }
-            out.frame_ids = replica->keyframe_ids();
-            out.frame_poses.reserve(out.frame_ids.size());
-            for (const map::FrameId frame : out.frame_ids) {
-                out.frame_poses.push_back(replica->keyframe(frame)->T_cw);
-            }
-        }
-        return snapshot;
-    }
+    [[nodiscard]] std::shared_ptr<const MapSnapshot> Snapshot() const;
 
     // Transactions applied so far; same thread as Update().
-    [[nodiscard]] size_t num_transactions_applied() const { return num_applied_; }
+    [[nodiscard]] size_t num_transactions_applied() const;
 
 private:
-    void ClaimThread() {
-        if (owner_ == std::thread::id{}) {
-            owner_ = std::this_thread::get_id();
-        }
-        AssertOwner();
-    }
-    void AssertOwner() const {
-        assert((owner_ == std::thread::id{} || owner_ == std::this_thread::get_id()) &&
-               "MapFollower: Update(), atlas() and Snapshot() belong to one thread");
-    }
+    void ClaimThread();
+    void AssertOwner() const;
 
     // The inbox first: the listener (and the events it holds) is destroyed before it.
     events::AsyncObserver inbox_;
-    events::Listener listener_ = inbox_.GetListener();
+    events::Listener listener_;
     tracking::AtlasReplica<TFeatureExtractor> atlas_;
     size_t num_applied_ = 0;
     std::thread::id owner_;  // the thread of the first Update(); empty before
