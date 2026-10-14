@@ -988,6 +988,52 @@ same name could make `spdlog::register_logger` throw.
   concurrent creation of one name, concurrent logging with `Initialize`); the
   concurrent tests are clean under ThreadSanitizer.
 
+## Images (`images::Image`, ownership audit #9, 0.9.0)
+
+`images::Image<T, C>` (`voyah_common`, `images/image.h`) is a row-major, interleaved
+C-channel image over a `shared_ptr<T[]>`. A sub-image is a *view* of the same type
+(`Image(parent, x, y, w, h)`, `operator[]`): there is no separate `ImageView` type
+(CONTEXT D-20), so every function that takes an `Image` also takes a view. The contract
+the binding relies on, each point pinned by `ImageTest.*`:
+
+- **Empty default.** A default-constructed image has `Width()`, `Height()`, `Stride()`
+  and `Offset()` equal to 0 and a null `GetData()` (the members have in-class
+  initialisers). A moved-from image is empty too, not a stale size on a null buffer.
+- **Views alias.** A view shares its parent's buffer and keeps it alive; a write through
+  the view or the parent is visible in both. `Stride()` counts pixels, `Offset()` is the
+  element index of the view's first pixel.
+- **Every operation honours the view.** `Convert<K>()`, `operator*=` and `operator*`
+  loop row by row, `width * C` elements from `offset + y * stride * C`, so they touch
+  only the view's pixels, last row and column included (a view on the parent's right and
+  bottom borders is processed like an interior one). `Convert` and `operator*` return a
+  fresh compact image of the view's size; `operator*=` changes the shared buffer inside
+  the view only. An empty image gives an empty image without touching memory. Before
+  0.9.0 these three ran over the first `width * height` elements of the buffer, ignoring
+  the offset, the stride and (for `Convert`) the channels.
+- **`Set` is non-const**, so a `const Image` cannot be written through (checked by a
+  concept test). `At` stays const.
+- **`CopyTo`** copies `width * C * sizeof(T)` bytes per row on the strided path (it was
+  `width * C` bytes, so float views copied a quarter of each row; the 8-bit pyramid
+  copies were unaffected); empty images are a no-op.
+- **Size overflow.** `Image(width, height)` computes the element count in `size_t` and
+  throws `std::length_error` when `width * height * C` does not fit, before allocating
+  (the binding passes caller-supplied sizes; a wrapped count followed by a full-size
+  copy was a heap overflow). For `C == 1` on 64-bit, two `unsigned` values always fit,
+  so the guard cannot fire there and a byte count the allocator cannot serve is reported
+  by `new[]` itself (`std::bad_array_new_length` / `std::bad_alloc`), never a silent wrap.
+- **Offsets are `size_t` end to end:** the private view constructor, the public view
+  constructor's arithmetic and `Offset()` (it returned `unsigned`, and the private
+  constructor truncated a `size_t` offset to `unsigned`).
+- **`operator[]` is shape-dependent**, kept as it was and now documented: on several rows
+  `img[i]` is row `i`, on a single row pixel `i`, on a 1x1 view channel `i`, so
+  `img[y][x][c]` reads `At(y, x, c)` (`ImageTest.IndexChainMatchesAt`). The single-row
+  case (pixel instead of row) has no caller; it is a TODO item, not changed.
+- **Cost.** The header is compiled into the `-O0` example apps (§7: a header-only
+  template an app instantiates can replace the library's `-O2` copy). The new loops are
+  per row, not per pixel checks, and the corridor1 40-frame binocular run was measured
+  before and after: 39 FrameTracked, 390 OptimizePose, 3 Frames, 777 points both times
+  (plan summary 01-19). The ORB golden digests are unchanged.
+
 ## FAST Corner Detector (`features/fast.h`, `voyah_algs`)
 
 **Since 2026-10-11** the ORB extractor detects corners with our own port of
@@ -3051,7 +3097,7 @@ libs/
 cmake/VoyahTests.cmake      voyah_add_test_binary, voyah_optimize_target, check / check_all
 cmake/voyahslamConfig.cmake.in  installed CMake package config (find_dependency)
 vizualization/              voyahviz (+ voyahviz_tests)
-conanfile.py                package recipe voyahslam/0.8.0 (also the dev installs)
+conanfile.py                package recipe voyahslam/0.9.0 (also the dev installs)
 test_package/               conan create's consumer test (links voyahslam::voyahslam)
 profiles/                   linux-gcc13 (default + gnu20), android-arm64,
                             settings_user.yml (clang 21)
@@ -3080,7 +3126,7 @@ profiles/                   linux-gcc13 (default + gnu20), android-arm64,
   `transitive_headers` (spdlog also `transitive_libs`); g2o and stb are not
   (g2o's libraries still reach static consumers' link lines, never its
   include paths). `shared=True` also makes spdlog and fmt shared; shared
-  libraries get `VERSION` / `SOVERSION` (0.8) and an `$ORIGIN` install
+  libraries get `VERSION` / `SOVERSION` (0.9) and an `$ORIGIN` install
   runpath (not on Apple).
 - `validate()` requires `compiler.cppstd` >= 20 (public headers are C++20;
   `profiles/linux-gcc13` = default + `gnu20` + Release, used by the dev
@@ -3437,6 +3483,8 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-14 | **Package version 0.7.0** (`conanfile.py`, `project()`; SOVERSION 0.7). API change for consumers (the voyah_jni binding): `DetectAndExtract(image, n, Workspace&)` is the supported way to extract in a loop or from several threads (hold one `Workspace` per thread); the two-argument overload is unchanged but allocates a pyramid per call. | A public API addition with a documented concurrency contract gets a new minor version while 0.x (as 0.2.0 to 0.6.0). |
 | 2026-10-14 | **Ownership audit #8 implemented (Release R5, branch `fix/logger-init-order`; Phase 1 CONTEXT D-18, D-19, D-21).** All loggers made by `Logger::CreateLogger` write through one `spdlog::sinks::dist_sink_mt` (function-local static in `logger.cpp`); `Logger::Initialize(sinks)` replaces its children with `set_sinks` (empty vector: one stdout colour sink) and so re-targets loggers created before it; the level is a function-local `std::atomic`; `CreateLogger` is serialized by a function-local mutex. The `Logger` class lost its private static sink vector and level; the public API and `CLASS_LOGGER` are unchanged. The Android logcat default sink is not added (stays in PLAT-01). | A shared distributing sink fixes the order dependence at its root (one sink to re-target) and uses spdlog's own mutex, instead of walking the registry to rewrite each logger's sink vector (a race with logging threads, and a second list to keep in sync). Cost is one indirection and one mutex per log call, measured on the per-frame debug lines (plan summary 01-17). |
 | 2026-10-14 | **Package version 0.8.0** (`conanfile.py`, `project()`; SOVERSION 0.8). Behavior change for consumers (the voyah_jni binding): `Logger::Initialize` may be called at any time and also re-targets components that already exist, so the binding no longer has to call it before creating a `Slam`; `Logger::SetLevel` and logger creation are thread-safe. No signature changes. | A public behavior change with a concurrency contract gets a new minor version while 0.x (as 0.2.0 to 0.7.0). |
+| 2026-10-15 | **Ownership audit #9 implemented (Release R6, branch `fix/image-views`; Phase 1 CONTEXT D-20, D-21).** `images::Image` is fixed in place, with no `ImageView` type (D-20): zero-initialised members (a default image is empty), row-wise view-correct `Convert<K>()`, `operator*=` and `operator*`, non-const `Set`, `CopyTo` copying `width * C * sizeof(T)` bytes per strided row, an overflow-checked size constructor (`std::length_error`), `size_t` view offsets and `Offset()`, an empty moved-from state, and the aliasing and `operator[]` rules documented. `operator[]` 1x1 channel indexing is kept and pinned by a test (research listed its offset as a defect; `img[y][x][c]` selecting channel `c` is the intended chain). New unit tests `ImageTest.*` (14), clean under AddressSanitizer. | The binding builds working images from Java-provided sizes (a wrapped allocation followed by a full-size copy overflowed the heap), and `Convert` / `operator*=` on a sub-image read or wrote the wrong pixels. A separate view type would have changed every `TWorkingImage` signature for no behaviour gain. The corridor1 40-frame binocular run is unchanged (39 FrameTracked, 3 Frames, 777 points). |
+| 2026-10-15 | **Package version 0.9.0** (`conanfile.py`, `project()`; SOVERSION 0.9). Behavior change for consumers (the voyah_jni binding): `Image(width, height)` throws `std::length_error` on size overflow, `Offset()` returns `size_t`, `Set` needs a non-const image, and `Convert` / `operator*` / `operator*=` on a sub-image now operate on the view. | A public behavior change gets a new minor version while 0.x (as 0.2.0 to 0.8.0). |
 
 ## 9. Open Questions
 
@@ -3711,7 +3759,12 @@ branch → review → merge to `master`. Update this document at the end.
   `refactor/thread-affinity`, merge pending); #6 done (0.6.0, branch
   `refactor/lifecycle`, merged and pushed); #7 done (0.7.0, branch
   `refactor/extractor-workspace`, merged and pushed); #8 done (0.8.0, branch
-  `fix/logger-init-order`, merge pending); next #9.
+  `fix/logger-init-order`, merged and pushed); #9 done (0.9.0, branch
+  `fix/image-views`, merge pending), which completes the API hardening list.
+- Test suite (2026-10-15, ownership audit #9, 0.9.0): 852 tests (812
+  `unit`, 39 `integration`, 1 `vocabulary`, skipped without ORBvoc);
+  `check_all` about 30 s. `ImageTest.*` (14) are new; the corridor1 binocular run and the ORB golden digests
+  are unchanged (plan summary 01-19).
 - Test suite (2026-10-14, ownership audit #8, 0.8.0): 838 tests (798
   `unit`, 39 `integration`, 1 `vocabulary`, skipped without ORBvoc);
   `check_all` about 30 s. `LoggerTest.*` (6) are new; ThreadSanitizer was clean
