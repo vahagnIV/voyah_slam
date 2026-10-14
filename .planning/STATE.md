@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: API Ownership and Lifetime Contracts
 status: executing
-stopped_at: Completed 01-11-PLAN.md (R2 0.5.0 merged f1ecb28 and pushed)
-last_updated: "2026-10-14T12:49:25.722Z"
+stopped_at: Completed 01-12-PLAN.md
+last_updated: "2026-10-14T13:16:57.431Z"
 last_activity: 2026-10-13
 last_activity_desc: Phase 01 execution started
-state_head: f1ecb289141305851adc2c82cdbf0d9134ab21e4
+state_head: 66f449332e00f90731a2ef984059d00e94a7f3e0
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 20
-  completed_plans: 11
+  completed_plans: 12
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 ## Current Position
 
 Phase: 01 (API Ownership and Lifetime Contracts) — EXECUTING
-Plan: 12 of 20
+Plan: 13 of 20
 Status: Ready to execute
 Last activity: 2026-10-13 — Phase 01 execution started
 
@@ -67,6 +67,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P09 | 15 min | 2 tasks | 13 files |
 | Phase 01 P10 | 14 min | 2 tasks | 12 files |
 | Phase 01 P11 | gates x2 + regression fix | 3 tasks | 0 files |
+| Phase 01 P12 | 80 min | 2 tasks | 20 files |
 
 ## Accumulated Context
 
@@ -95,6 +96,8 @@ Recent decisions affecting current work:
 - [Phase 01]: 01-09: Tracker/LoopCloser/GlobalBA replicas and LoopCloser stats private behind *TestAccess in tests/test_access.h; GlobalBA run counters atomic — D-14/D-26: same hazard class as the Mapper accessors; ThreadAffinityTest concepts fail the build if one becomes public
 - [Phase 01]: 01-10: Mapper's twelve Mapper-thread accessors private behind MapperTestAccess in tests/test_access.h; ThreadAffinityTest concept checks; version 0.5.0 — OWN-03 enforced by types for all four components; D-14, D-26 recorded in DESIGN decisions log
 - [Phase 01]: [01-11] MapFollower defined in the library (INSTANTIATE_CLASS) so -O0 consumers do not override optimized library code; binocular app gate bar: >=36 FrameTracked, >=3 Frames on corridor1 40 frames
+- [Phase 01]: 01-12: GlobalBA stop_requested_ is not reset in Start() (Stopped is terminal); it is raised inside the stop lambda and restored if a self-stop is refused
+- [Phase 01]: 01-12: a Slam::Stop() refused by a component's own thread restores the Slam state and rethrows; a later Stop() from another thread completes it
 
 ### Pending Todos
 
@@ -122,6 +125,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-14T12:49:25.696Z
-Stopped at: Completed 01-11-PLAN.md (R2 0.5.0 merged f1ecb28 and pushed)
+Last session: 2026-10-14T13:16:57.406Z
+Stopped at: Completed 01-12-PLAN.md
 Resume file: None
