@@ -121,7 +121,8 @@ Every component derives from `events::EventNode` (`events/event_node.h`, no
 virtuals): an `Observable` it publishes through, one `AsyncObserver` inbox it
 consumes, `AddObserver(AsyncObserver&)` and `AddSyncObserver(fn, ctx)` (both
 return a `Subscription` and throw `UsageError` while the component runs),
-`inbox()`, and `BeginRun()` / `EndRun()` that publish its `RunState` (§6.1).
+`inbox()`, and the protected `StartWith()` / `StopWith()` that drive its `RunState`
+through an atomic CAS (§6.1).
 Components are templated on `TFeatureExtractor`, declared in headers and
 defined in `libs/slam/src/` with `INSTANTIATE_CLASS` (ORB; SIFT removed 2026-10-11).
 
@@ -554,11 +555,15 @@ allocator's internal locks are not locks on map data (§2 principle 1).
   `Subscription` it handed out. A `Subscription` that outlives its producer only
   edits this block.
 - `RunState` (`Created`, `Starting`, `Running`, `Stopping`, `Stopped`) lives in the
-  `Wiring`. `EventNode::BeginRun()` (before the worker thread is created) and
-  `EndRun()` (after it is joined) drive it in Tracker, Mapper, LoopCloser and
-  GlobalBA; `IsRunning` is true for the three middle values. Until the lifecycle
-  work (audit #6) it only gates wiring: it does not yet forbid `Start()` after
-  `Stop()`.
+  `Wiring`. `EventNode::StartWith()` (Created to Starting before the worker thread
+  is created, Running after) and `StopWith()` (Running to Stopping, Stopped after the
+  worker is joined) drive it in Tracker, Mapper, LoopCloser and GlobalBA with a CAS:
+  `Start()` twice or after `Stop()` throws `UsageError`, `Stop()` before `Start()` moves
+  Created to Stopped (terminal), concurrent `Stop()` calls wait on the atomic until the
+  worker is joined, and `Stop()` on a component's own worker thread throws instead of
+  self-joining. `Slam` has its own `RunState` with the same rules and rolls back a
+  failed `Start()`. `IsRunning` is true for the three middle values. (Plan 01-12;
+  the decisions log row and the restart rule write-up follow in plan 01-13.)
 - `Subscription` (`subscription.h`) — a move-only `[[nodiscard]]` RAII handle for
   one connection (`shared_ptr<Wiring>` + an entry id). Its destructor or
   `reset()` disconnects.

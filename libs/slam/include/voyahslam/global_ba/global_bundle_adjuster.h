@@ -58,7 +58,11 @@ public:
     // Stops the worker before any member it uses is destroyed.
     ~GlobalBundleAdjuster();
 
-    // Start() and Stop() must be called from one controlling thread.
+    // Lifecycle (D-10..D-12): Created -> Running -> Stopped, Stopped is terminal.
+    // Start() twice or after Stop() throws UsageError; Stop() before Start() moves
+    // to Stopped; Stop() is idempotent and every concurrent call returns only after
+    // the worker is joined. Both are safe from any thread, except that Stop() on
+    // the component's own worker thread throws UsageError (it would join itself).
     void Start();
     // Interrupts a running BA (it publishes nothing, even if it had passed its
     // last poll, and is not resumed by a later Start()) and joins the worker.
@@ -77,7 +81,7 @@ public:
     [[nodiscard]] size_t num_runs_interrupted() const {
         return num_runs_interrupted_.load(std::memory_order_acquire);
     }
-    // True from Stop() until the next Start(); any thread.
+    // True once Stop() was called (Stopped is terminal); any thread.
     [[nodiscard]] bool stop_requested() const { return stop_requested_.load(std::memory_order_acquire); }
 
     // Tests: `hook` is called on the GlobalBA thread before each run. Set it

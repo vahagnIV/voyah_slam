@@ -69,10 +69,6 @@ protected:
     // component"). The Starting store happens before the worker thread exists, so
     // the thread start is the happens-before edge for the wiring. If start_worker
     // throws, the state becomes Stopped and the exception propagates.
-    // Removed with the last caller in plan 01-12 task 2.
-    void BeginRun() { observable_.SetState(RunState::Running); }
-    void EndRun() { observable_.SetState(RunState::Stopped); }
-
     template <typename TStartWorker>
     void StartWith(TStartWorker&& start_worker) {
         RunState expected = RunState::Created;

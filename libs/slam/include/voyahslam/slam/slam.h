@@ -1,9 +1,11 @@
 #ifndef VOYAHSLAM_SLAM_SLAM_H
 #define VOYAHSLAM_SLAM_SLAM_H
 
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <vector>
+#include <voyahslam/errors.h>
 #include <voyahslam/events/subscription.h>
 #include <voyahslam/global_ba/global_bundle_adjuster.h>
 #include <voyahslam/loop_closing/loop_closer.h>
@@ -25,6 +27,14 @@ namespace voyahslam::slam {
 // keeps each returned Subscription, best in a container declared before the
 // Slam, so it is destroyed after it (a no-op on a stopped producer). Not
 // movable: subscriptions_ refer to the members' inboxes.
+//
+// Lifecycle (D-10, D-11): Created -> Running -> Stopped, Stopped is terminal; a
+// new session is a new Slam. Start() twice or after Stop() throws UsageError;
+// Stop() before Start() stops every component (so none can start later); Stop()
+// is idempotent and every concurrent call returns only after all threads are
+// joined. Both are safe from any thread (the destructor calls Stop()). A Start()
+// that fails midway stops the components it started and rethrows, leaving the
+// Slam Stopped. Track() after Stop() throws UsageError.
 template <typename TFeatureExtractor>
 class Slam {
 public:
@@ -50,8 +60,10 @@ public:
     Slam& operator=(const Slam&) = delete;
 
     // Starts consumers before producers: Mapper, GlobalBA, LoopCloser, Tracker.
+    // Throws UsageError unless the Slam is Created.
     void Start();
     // Stops producers before consumers: Tracker, LoopCloser, GlobalBA, Mapper.
+    // Idempotent; see the class comment.
     void Stop();
 
     [[nodiscard]] TTracker& tracker() { return tracker_; }
@@ -68,6 +80,8 @@ private:
     TMapper mapper_;
     TLoopCloser loop_closer_;
     std::optional<TGlobalBundleAdjuster> global_ba_;
+    // The Slam's own lifecycle (control plane, not map data).
+    std::atomic<events::RunState> state_{events::RunState::Created};
     // Last member: destroyed first, after ~Slam() has stopped every producer.
     std::vector<events::Subscription> subscriptions_;
 };

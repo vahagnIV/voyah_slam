@@ -11,29 +11,33 @@
 namespace voyahslam::global_ba {
 template <typename TFeatureExtractor>
 GlobalBundleAdjuster<TFeatureExtractor>::~GlobalBundleAdjuster() {
-    // Interrupts a running BA instead of waiting it out (it publishes nothing).
-    stop_requested_.store(true, std::memory_order_release);
-    worker_.Stop();
-    EndRun();
+    Stop();  // interrupts a running BA instead of waiting it out (it publishes nothing)
 }
 
 template <typename TFeatureExtractor>
 void GlobalBundleAdjuster<TFeatureExtractor>::Start() {
-    stop_requested_.store(false, std::memory_order_release);
-    BeginRun();
-    worker_.Start([this] { return ProcessPending(); });
+    // stop_requested_ needs no reset here: Stopped is terminal, so it is false
+    // exactly until Stop() is called.
+    StartWith([this] { worker_.Start([this] { return ProcessPending(); }); });
 }
 
 template <typename TFeatureExtractor>
 void GlobalBundleAdjuster<TFeatureExtractor>::Stop() {
-    // Before joining: a running BA polls it and stops.
+    StopWith([this] {
+        // Before joining: a running BA polls it and stops.
+        stop_requested_.store(true, std::memory_order_release);
+        try {
+            worker_.Stop();
+        } catch (...) {
+            stop_requested_.store(false, std::memory_order_release);  // a Stop() from the worker itself: keep running
+            throw;
+        }
+        if (num_runs_started() > 0) {  // once: the stop lambda runs for a running component only
+            log_->info("Global BA: {} runs, {} interrupted", num_runs_started(), num_runs_interrupted());
+        }
+    });
+    // Also when it was never started (Created -> Stopped): a BA driven by hand polls it.
     stop_requested_.store(true, std::memory_order_release);
-    const bool was_running = worker_.running();
-    worker_.Stop();
-    EndRun();
-    if (was_running && num_runs_started() > 0) {  // once per run
-        log_->info("Global BA: {} runs, {} interrupted", num_runs_started(), num_runs_interrupted());
-    }
 }
 
 template <typename TFeatureExtractor>

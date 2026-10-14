@@ -49,20 +49,17 @@ Mapper<TFeatureExtractor>::Mapper(MapperOptions options,
 
 template <typename TFeatureExtractor>
 Mapper<TFeatureExtractor>::~Mapper() {
-    worker_.Stop();
-    EndRun();
+    Stop();
 }
 
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::Start() {
-    BeginRun();
-    worker_.Start([this] { return ProcessPending(); });
+    StartWith([this] { worker_.Start([this] { return ProcessPending(); }); });
 }
 
 template <typename TFeatureExtractor>
 void Mapper<TFeatureExtractor>::Stop() {
-    worker_.Stop();
-    EndRun();
+    StopWith([this] { worker_.Stop(); });
 }
 
 template <typename TFeatureExtractor>

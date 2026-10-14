@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <voyahslam/errors.h>
 #include <voyahslam/features/instantiation.h>
 #include <voyahslam/slam/slam.h>
 
@@ -45,18 +46,69 @@ Slam<TFeatureExtractor>::~Slam() {
 
 template <typename TFeatureExtractor>
 void Slam<TFeatureExtractor>::Start() {
-    mapper_.Start();
-    if (global_ba_) global_ba_->Start();
-    loop_closer_.Start();
-    tracker_.Start();
+    events::RunState expected = events::RunState::Created;
+    if (!state_.compare_exchange_strong(expected, events::RunState::Starting, std::memory_order_acq_rel,
+                                        std::memory_order_acquire)) {
+        throw UsageError(expected == events::RunState::Stopped
+                             ? "Start() after Stop(): create a new component"
+                             : "Start() called twice");
+    }
+    try {
+        mapper_.Start();
+        if (global_ba_) global_ba_->Start();
+        loop_closer_.Start();
+        tracker_.Start();
+    } catch (...) {
+        // Stops what was started and makes the rest terminal (Created -> Stopped).
+        tracker_.Stop();
+        loop_closer_.Stop();
+        if (global_ba_) global_ba_->Stop();
+        mapper_.Stop();
+        state_.store(events::RunState::Stopped, std::memory_order_release);
+        state_.notify_all();
+        throw;
+    }
+    state_.store(events::RunState::Running, std::memory_order_release);
+    state_.notify_all();
 }
 
 template <typename TFeatureExtractor>
 void Slam<TFeatureExtractor>::Stop() {
-    tracker_.Stop();
-    loop_closer_.Stop();
-    if (global_ba_) global_ba_->Stop();
-    mapper_.Stop();
+    while (true) {
+        events::RunState state = state_.load(std::memory_order_acquire);
+        switch (state) {
+            case events::RunState::Stopped:
+                return;
+            case events::RunState::Starting:
+            case events::RunState::Stopping:
+                state_.wait(state, std::memory_order_acquire);
+                break;
+            case events::RunState::Created:
+            case events::RunState::Running: {
+                if (!state_.compare_exchange_strong(state, events::RunState::Stopping,
+                                                    std::memory_order_acq_rel,
+                                                    std::memory_order_acquire)) {
+                    break;
+                }
+                // From Created every component moves to Stopped without a thread, so
+                // none can start later.
+                try {
+                    tracker_.Stop();
+                    loop_closer_.Stop();
+                    if (global_ba_) global_ba_->Stop();
+                    mapper_.Stop();
+                } catch (...) {
+                    // A Stop() from a component's own thread: the Slam keeps running.
+                    state_.store(state, std::memory_order_release);
+                    state_.notify_all();
+                    throw;
+                }
+                state_.store(events::RunState::Stopped, std::memory_order_release);
+                state_.notify_all();
+                return;
+            }
+        }
+    }
 }
 
 INSTANTIATE_CLASS(Slam)
