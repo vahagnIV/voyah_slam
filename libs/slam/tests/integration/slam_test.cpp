@@ -1960,6 +1960,61 @@ TEST(SlamTest, UnwindPastSubscriptionHolderDoesNotTerminate) {
     EXPECT_TRUE(caught);
 }
 
+// Lifecycle (D-09..D-12): Created -> Running -> Stopped, Stopped is terminal, Start()
+// and Stop() are safe from any thread.
+void ExpectEveryComponent(OrbSlam& slam, events::RunState expected) {
+    EXPECT_EQ(slam.tracker().run_state(), expected);
+    EXPECT_EQ(slam.mapper().run_state(), expected);
+    EXPECT_EQ(slam.loop_closer().run_state(), expected);
+}
+
+TEST(SlamTest, LifecycleStartTwiceThrows) {
+    OrbSlam slam;
+    slam.Start();
+    EXPECT_THROW(slam.Start(), UsageError);
+    ExpectEveryComponent(slam, events::RunState::Running);  // the second Start() changed nothing
+}
+
+TEST(SlamTest, LifecycleStartAfterStopThrows) {
+    OrbSlam slam;
+    slam.Start();
+    slam.Stop();
+    ExpectEveryComponent(slam, events::RunState::Stopped);
+    EXPECT_THROW(slam.Start(), UsageError);
+    ExpectEveryComponent(slam, events::RunState::Stopped);  // nothing was restarted
+}
+
+TEST(SlamTest, LifecycleStopBeforeStartIsTerminal) {
+    OrbSlam slam;
+    EXPECT_NO_THROW(slam.Stop());
+    ExpectEveryComponent(slam, events::RunState::Stopped);
+    EXPECT_THROW(slam.Start(), UsageError);
+    ExpectEveryComponent(slam, events::RunState::Stopped);
+}
+
+TEST(SlamTest, LifecycleStopIsIdempotentFromManyThreads) {
+    OrbSlam slam;
+    slam.Start();
+    std::vector<std::thread> threads;
+    for (int i = 0; i < 4; ++i) {
+        threads.emplace_back([&] {
+            slam.Stop();
+            // Every caller returns only after the whole Slam is stopped and joined.
+            EXPECT_EQ(slam.mapper().run_state(), events::RunState::Stopped);
+        });
+    }
+    for (auto& thread : threads) thread.join();
+    ExpectEveryComponent(slam, events::RunState::Stopped);
+    EXPECT_NO_THROW(slam.Stop());
+}  // ~Slam() stops once more
+
+TEST(SlamTest, LifecycleTrackAfterStopThrows) {
+    OrbSlam slam;
+    slam.Start();
+    slam.Stop();
+    EXPECT_THROW(slam.tracker().Track(test::MakeMonocular(200, 0.0)), UsageError);
+}
+
 // D-05: connecting while the Slam runs is a usage error; after Stop() it works.
 TEST(SlamTest, AddObserverWhileRunningThrows) {
     events::AsyncObserver observer;
