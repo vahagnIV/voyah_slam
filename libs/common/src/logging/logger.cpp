@@ -42,6 +42,10 @@ void Logger::SetLevel(spdlog::level::level_enum level) {
 }
 
 std::shared_ptr<spdlog::logger> Logger::CreateLogger(std::string_view name) {
+    // spdlog::register_logger throws on a duplicate name, so get-or-create must be one step.
+    // Logger setup is control plane, never on the map or event path (DESIGN principle 1).
+    static std::mutex creation_mutex;
+    std::lock_guard<std::mutex> lock(creation_mutex);
     auto log = spdlog::get(std::string(name));
     if (log) {
         return log;
