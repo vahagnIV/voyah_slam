@@ -239,8 +239,10 @@ aborting (0.3.0), #3 with #2 (0.4.0, 2026-10-13: events are
 `shared_ptr<const T>` with no pools, `AddObserver` returns a `Subscription`,
 and every destruction order of producer, subscription, observer and listener is
 safe, so `Slam`'s users no longer need a declaration or teardown order beyond
-holding their `Subscription`s before the `Slam`). Remaining, in order: #5, #6,
-#7, #8, #9. Each item is merged separately with a minor version bump and new
+holding their `Subscription`s before the `Slam`), #5 (0.5.0, 2026-10-14:
+the thread-affine accessors of the Mapper, Tracker, LoopCloser and GlobalBA are
+private behind test access structs, and `mapping::MapFollower` is the supported
+map read path). Remaining, in order: #6, #7, #8, #9. Each item is merged separately with a minor version bump and new
 Conan packages.
 
 ## 6. TUM-VI tuning

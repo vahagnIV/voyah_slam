@@ -123,7 +123,7 @@ equivalent. Dependencies built for `gnu17` are reused (Conan's cppstd compatibil
 
 ## Install locally (Conan package)
 
-The package is `voyahslam/0.4.0` (options `shared`, default False, and `fPIC`). g2o first
+The package is `voyahslam/0.5.0` (options `shared`, default False, and `fPIC`). g2o first
 (once per profile and build type; see "One-time: package g2o with Conan"):
 
 ```
@@ -137,9 +137,9 @@ optimization. With `-o shared=True` the libraries are shared, and spdlog and fmt
 shared too (both are PUBLIC: static copies would end up in `libvoyah_common.so` and in the
 consumer). `shared=True` is rejected on Windows (no export macros) and together with
 `compiler.libcxx=c++_static` (see "Android"); shared libraries get versioned sonames
-(`libvoyah_slam.so.0.4`) and an `$ORIGIN` runpath.
+(`libvoyah_slam.so.0.5`) and an `$ORIGIN` runpath.
 
-A consumer (`conanfile.txt` with `[requires] voyahslam/0.4.0`, generators `CMakeDeps` and
+A consumer (`conanfile.txt` with `[requires] voyahslam/0.5.0`, generators `CMakeDeps` and
 `CMakeToolchain`) must also build with C++20: install its dependencies with
 `-pr profiles/linux-gcc13` (or `-s compiler.cppstd=gnu20`, or a profile of its own that sets
 `compiler.cppstd` to 20 / gnu20), otherwise `validate()` rejects the package:
@@ -200,7 +200,7 @@ concurrentqueue, stb; our g2o) build unpatched. `test_package` is cross-built bu
    after `conan create` of a new voyahslam version). From this repository:
 
    ```
-   conan install --requires=voyahslam/0.4.0 -g CMakeDeps \
+   conan install --requires=voyahslam/0.5.0 -g CMakeDeps \
          -pr:h profiles/android-arm64 -pr:b default \
          --output-folder=<app>/app/src/main/cpp/voyahslam-deps
    ```

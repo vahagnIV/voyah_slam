@@ -951,12 +951,22 @@ and android-arm64; tell the voyah_jni session the new version.
       it runs terminates; every destruction order of producer, subscription,
       observer and listener is safe (shared `InboxCore` and `Wiring`). The
       component `Start`/`Stop` transitions stay with #6.
-- [ ] **#5 Thread-affinity accessors enforced only by comments**
-      (`Mapper` "Mapper thread only", `Tracker::atlas()` / `map_replica()` /
-      `last_matches()`): move them behind test access or assert the thread,
-      and give apps a supported way to read the map from their own thread (a
-      map follower consuming `MapTransaction` into its own replica; the core
-      of a planned `voyahslam::Session` facade for JNI).
+- [x] ~~#5 Thread-affinity accessors enforced only by comments~~ (done
+      2026-10-14, 0.5.0, branch `refactor/thread-affinity`): the Mapper's
+      twelve "Mapper thread only" accessors, `Tracker::atlas()` /
+      `map_replica()` / `last_matches()`, `LoopCloser::atlas()` /
+      `map_replica()` and its five stats accessors, and
+      `GlobalBundleAdjuster::atlas()` / `map_replica()` are private behind
+      `*TestAccess` structs (`libs/slam/tests/test_access.h`, compile-time
+      `ThreadAffinityTest`); GlobalBA's run counters are atomic; apps read the
+      map through `mapping::MapFollower` / `MapSnapshot` (DESIGN §4 "Map
+      Follower"). The LoopCloser stats accessors are test-only like D-14's, so
+      no item is left to decide. Still deferred with the JNI work: the
+      `voyahslam::Session` facade and the viewer on a follower.
+- [ ] **Follow-ups of #5 (deferred, after the binding uses `MapFollower`):** a
+      `voyahslam::Session` facade (`Slam` plus `MapFollower` in one object for
+      JNI; design it in the library or in voyah_jni), and moving voyahviz's
+      `SceneState` onto a `MapFollower` (dogfooding it in the viewer).
 - [ ] **#6 Lifecycle rules unenforced:** a Created → Running → Stopped state
       machine with asserts or errors on invalid transitions (`AddObserver`
       while running, `Start` twice, `Track()` before `Start()`); decide and
