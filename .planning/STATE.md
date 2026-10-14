@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: API Ownership and Lifetime Contracts
 status: executing
-stopped_at: Completed 01-08-PLAN.md
-last_updated: "2026-10-14T09:38:22.429Z"
+stopped_at: Completed 01-09-PLAN.md
+last_updated: "2026-10-14T09:45:21.588Z"
 last_activity: 2026-10-13
 last_activity_desc: Phase 01 execution started
-state_head: a4e09dd1447f47957c3d918bb8b7b93df6a644e1
+state_head: f269d9f045f3c0c83a1aed2ada6abcdba6c174d5
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 20
-  completed_plans: 8
+  completed_plans: 9
   percent: 0
 ---
 
@@ -28,7 +28,7 @@ See: .planning/PROJECT.md (updated 2026-10-12)
 ## Current Position
 
 Phase: 01 (API Ownership and Lifetime Contracts) — EXECUTING
-Plan: 9 of 20
+Plan: 10 of 20
 Status: Ready to execute
 Last activity: 2026-10-13 — Phase 01 execution started
 
@@ -64,6 +64,7 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P06 | 10 min | 2 tasks | 7 files |
 | Phase 01 P07 | ~30min | 3 tasks | 0 files |
 | Phase 01 P08 | 40 min | 2 tasks | 8 files |
+| Phase 01 P09 | 15 min | 2 tasks | 13 files |
 
 ## Accumulated Context
 
@@ -89,6 +90,7 @@ Recent decisions affecting current work:
 - [Phase 01]: Package version 0.4.0 (SOVERSION 0.4); DESIGN 6.1 rewritten as the shared-ownership lifecycle, decisions-log rows R1 implemented and Package version 0.4.0 — Every audit item is an API break for the voyah_jni binding; DESIGN must describe the code as merged (CLAUDE.md)
 - [Phase 01]: R1 (0.4.0) merged to master as 33a270f on user's 'merge and push'; origin/master == master
 - [Phase 01]: MapFollower: Update()/atlas()/Snapshot() thread-affine (debug assert from first Update()); Snapshot is immutable shared_ptr<const MapSnapshot>; Update counts only admitted transactions
+- [Phase 01]: 01-09: Tracker/LoopCloser/GlobalBA replicas and LoopCloser stats private behind *TestAccess in tests/test_access.h; GlobalBA run counters atomic — D-14/D-26: same hazard class as the Mapper accessors; ThreadAffinityTest concepts fail the build if one becomes public
 
 ### Pending Todos
 
@@ -116,6 +118,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-14T09:38:22.381Z
-Stopped at: Completed 01-08-PLAN.md
+Last session: 2026-10-14T09:45:21.540Z
+Stopped at: Completed 01-09-PLAN.md
 Resume file: None
