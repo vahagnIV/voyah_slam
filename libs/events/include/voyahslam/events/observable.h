@@ -82,8 +82,25 @@ public:
     [[nodiscard]] size_t async_count() const { return wiring_->async.size(); }
 
     [[nodiscard]] RunState state() const { return wiring_->state.load(std::memory_order_acquire); }
-    // Release store; called by the owning EventNode only.
-    void SetState(RunState state) { wiring_->state.store(state, std::memory_order_release); }
+    // Release store, then wakes every WaitWhileState(); called by the owning
+    // EventNode only.
+    void SetState(RunState state) {
+        wiring_->state.store(state, std::memory_order_release);
+        wiring_->state.notify_all();
+    }
+    // Atomically moves the state from `expected` to `desired` (acq_rel). On
+    // failure `expected` holds the state found. Called by the owning EventNode
+    // only. It does not notify: nobody waits for a state that is being left
+    // (Created), and the settling transitions go through SetState().
+    [[nodiscard]] bool CompareExchangeState(RunState& expected, RunState desired) {
+        return wiring_->state.compare_exchange_strong(expected, desired, std::memory_order_acq_rel,
+                                                      std::memory_order_acquire);
+    }
+    // Blocks while the state equals `current` (std::atomic::wait; control plane,
+    // never on the event path).
+    void WaitWhileState(RunState current) const {
+        wiring_->state.wait(current, std::memory_order_acquire);
+    }
 
 private:
     void ThrowIfRunning(const char* what) const {

@@ -39,15 +39,19 @@ inline std::shared_ptr<ProbeEvent> MakeProbe(int value = 0, bool priority = fals
     return event;
 }
 
-// A producer: Start() / Stop() only flip the run state a real component flips
-// from its worker thread (BeginRun / EndRun), so D-05 and D-07 are testable.
+// A producer: Start() / Stop() only drive the run state (StartWith / StopWith with
+// no worker), so D-05 and D-07 are testable.
 class TestNode : public EventNode {
 public:
     explicit TestNode(std::string inbox_name = "TestNode") : EventNode(std::move(inbox_name)) {}
 
     void Publish(std::shared_ptr<ProbeEvent> event) { observable_.Notify(std::move(event)); }
-    void Start() { BeginRun(); }
-    void Stop() { EndRun(); }
+    void Start() {
+        StartWith([] {});
+    }
+    void Stop() {
+        StopWith([] {});
+    }
 };
 
 }  // namespace voyahslam::events

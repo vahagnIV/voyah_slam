@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <string>
 #include <utility>
+#include <voyahslam/errors.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/event_types.h>
 #include <voyahslam/events/observable.h>
@@ -23,9 +24,12 @@ namespace voyahslam::events {
 // not running (D-05): connecting then throws voyahslam::UsageError, so does
 // Subscription::reset(), and destroying a Subscription while the component runs
 // terminates. A Subscription may outlive the component (then it does nothing).
-// Whether a stopped component may start again is decided by the component
-// (the terminal Stopped rule arrives with the lifecycle work, plan 01-12), not
-// here: BeginRun() and EndRun() only publish the run state.
+//
+// Lifecycle (D-09..D-12): Created -> Starting -> Running -> Stopping -> Stopped,
+// driven by StartWith() / StopWith() with an atomic compare-and-swap, so Start()
+// and Stop() are safe from any thread. Stopped is terminal: a second Start() and
+// a Start() after Stop() throw voyahslam::UsageError, Stop() before Start() moves
+// Created to Stopped, and Stop() is idempotent (destructors call it).
 class EventNode {
 public:
     explicit EventNode(std::string inbox_name = "EventNode") : inbox_(std::move(inbox_name)) {}
@@ -60,11 +64,61 @@ protected:
     // the inbox's core, so it lives as long as the inbox does.
     [[nodiscard]] WakeSignal& wake_signal() { return inbox_.wake_signal(); }
 
-    // Mark the component running (before its worker thread is created, so the
-    // thread start is the happens-before edge for the wiring) and stopped (after
-    // the worker thread is joined).
-    void BeginRun() { observable_.SetState(RunState::Running); }
-    void EndRun() { observable_.SetState(RunState::Stopped); }
+    // Created -> Starting -> start_worker() -> Running. Any other state throws
+    // UsageError ("Start() called twice" / "Start() after Stop(): create a new
+    // component"). The Starting store happens before the worker thread exists, so
+    // the thread start is the happens-before edge for the wiring. If start_worker
+    // throws, the state becomes Stopped and the exception propagates.
+    template <typename TStartWorker>
+    void StartWith(TStartWorker&& start_worker) {
+        RunState expected = RunState::Created;
+        if (!observable_.CompareExchangeState(expected, RunState::Starting)) {
+            throw UsageError(expected == RunState::Stopped
+                                 ? "Start() after Stop(): create a new component"
+                                 : "Start() called twice");
+        }
+        try {
+            start_worker();
+        } catch (...) {
+            observable_.SetState(RunState::Stopped);
+            throw;
+        }
+        observable_.SetState(RunState::Running);
+    }
+
+    // Created -> Stopped; Running -> Stopping -> stop_worker() -> Stopped (the
+    // worker is joined by then); Starting or Stopping: waits until the other
+    // thread settled the state and retries, so every concurrent Stop() returns
+    // only after the worker is joined; Stopped: returns. If stop_worker throws
+    // (a Stop() on the component's own worker thread), the state goes back to
+    // Running and the exception propagates.
+    template <typename TStopWorker>
+    void StopWith(TStopWorker&& stop_worker) {
+        while (true) {
+            RunState state = observable_.state();
+            switch (state) {
+                case RunState::Stopped:
+                    return;
+                case RunState::Starting:
+                case RunState::Stopping:
+                    observable_.WaitWhileState(state);
+                    break;
+                case RunState::Created:
+                    if (observable_.CompareExchangeState(state, RunState::Stopped)) return;
+                    break;
+                case RunState::Running:
+                    if (!observable_.CompareExchangeState(state, RunState::Stopping)) break;
+                    try {
+                        stop_worker();
+                    } catch (...) {
+                        observable_.SetState(RunState::Running);
+                        throw;
+                    }
+                    observable_.SetState(RunState::Stopped);
+                    return;
+            }
+        }
+    }
 
     Observable observable_;
     AsyncObserver inbox_;

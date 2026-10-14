@@ -242,7 +242,10 @@ safe, so `Slam`'s users no longer need a declaration or teardown order beyond
 holding their `Subscription`s before the `Slam`), #5 (0.5.0, 2026-10-14:
 the thread-affine accessors of the Mapper, Tracker, LoopCloser and GlobalBA are
 private behind test access structs, and `mapping::MapFollower` is the supported
-map read path). Remaining, in order: #6, #7, #8, #9. Each item is merged separately with a minor version bump and new
+map read path), #6 (0.6.0, 2026-10-14: the Created to Stopped lifecycle is an atomic
+state machine with `UsageError` on invalid transitions, `Start()` / `Stop()` are
+valid from any thread, and `Stop()` then `Start()` is decided as not supported:
+Stopped is terminal, a new session is a new `Slam`). Remaining, in order: #7, #8, #9. Each item is merged separately with a minor version bump and new
 Conan packages.
 
 ## 6. TUM-VI tuning

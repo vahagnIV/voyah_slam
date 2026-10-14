@@ -186,9 +186,16 @@ public:
     // Stops the worker before any member it uses is destroyed.
     ~Mapper();
 
-    // Start() and Stop() must be called from one controlling thread.
+    // Lifecycle (D-10..D-12): Created -> Running -> Stopped, Stopped is terminal.
+    // Start() twice or after Stop() throws UsageError; Stop() before Start() moves
+    // to Stopped; Stop() is idempotent and every concurrent call returns only after
+    // the worker is joined. Both are safe from any thread, except that Stop() on
+    // the component's own worker thread throws UsageError (it would join itself).
     void Start();
     void Stop();
+    // True on this component's own worker thread (a sync handler or other callback
+    // it runs), where Stop() is refused with UsageError. Any thread.
+    [[nodiscard]] bool OnWorkerThread() const { return worker_.OnWorkerThread(); }
 
     // Drains the inbox. Returns true iff an event was processed. Called by the
     // worker thread; public so tests can drive it synchronously (never

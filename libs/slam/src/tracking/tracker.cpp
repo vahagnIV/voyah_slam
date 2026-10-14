@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <utility>
 #include <variant>
+#include <voyahslam/errors.h>
 #include <voyahslam/features/bow_matcher.h>
 #include <voyahslam/features/instantiation.h>
 #include <voyahslam/mapping/mapper.h>
@@ -51,32 +52,39 @@ size_t CountMatches(const std::vector<int64_t>& matches) {
 
 template <typename TFeatureExtractor>
 Tracker<TFeatureExtractor>::~Tracker() {
-    worker_.Stop();
-    EndRun();
+    Stop();
 }
 
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::Start() {
-    BeginRun();
-    worker_.Start([this] { return ProcessPending(); });
+    StartWith([this] { worker_.Start([this] { return ProcessPending(); }); });
 }
 
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::Stop() {
-    worker_.Stop();
-    EndRun();
+    StopWith([this] { worker_.Stop(); });
 }
 
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::Track(TMonocularMeasurement measurement) {
+    ThrowIfStopped();
     measurements_.enqueue(TMeasurement(std::move(measurement)));
     wake_signal().Notify();
 }
 
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::Track(TBinocularMeasurement measurement) {
+    ThrowIfStopped();
     measurements_.enqueue(TMeasurement(std::move(measurement)));
     wake_signal().Notify();
+}
+
+template <typename TFeatureExtractor>
+void Tracker<TFeatureExtractor>::ThrowIfStopped() const {
+    const events::RunState state = run_state();
+    if (state == events::RunState::Stopping || state == events::RunState::Stopped) {
+        throw UsageError("Track() after Stop()");
+    }
 }
 
 template <typename TFeatureExtractor>

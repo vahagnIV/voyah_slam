@@ -994,10 +994,22 @@ and android-arm64; tell the voyah_jni session the new version.
       translation unit (DESIGN §4 "Map Follower", 2026-10-14); apps and a
       Session should read a `Snapshot()`. A Session in the library would be
       defined in `src/` like the follower (DESIGN §7 "Structure").
-- [ ] **#6 Lifecycle rules unenforced:** a Created → Running → Stopped state
-      machine with asserts or errors on invalid transitions (`AddObserver`
-      while running, `Start` twice, `Track()` before `Start()`); decide and
-      document whether `Stop()` then `Start()` is supported.
+- [x] ~~#6 Lifecycle rules unenforced~~ (done 2026-10-14, 0.6.0, branch
+      `refactor/lifecycle`): Tracker, Mapper, LoopCloser, GlobalBA and `Slam`
+      follow Created, Starting, Running, Stopping, Stopped through an atomic CAS
+      (`EventNode::StartWith` / `StopWith`); `Start()` / `Stop()` are valid from any
+      thread; `Start()` twice or after `Stop()`, `Tracker::Track()` after `Stop()`
+      and `Stop()` on a component's own worker thread throw `UsageError`;
+      `Track()` before `Start()` queues. **Decision: `Stop()` then `Start()` is not
+      supported** (Stopped is terminal for `Slam` and its components; a new
+      session is a new `Slam`); `WorkerThread` and `MapViewer` stay restartable.
+      DESIGN §4 "Lifecycle".
+- [x] ~~`Slam::Stop()` from a component's own thread (found in #6)~~ (done
+      2026-10-14, 0.6.0, option (a) chosen by the user): `Slam::Stop()` checks the
+      calling thread against every component's worker before stopping anything
+      and throws `UsageError`, changing nothing (no component stops, `Slam` stays
+      `Running`); `~Slam()` on a component thread logs and terminates. Options
+      (b), (c) and (d) were not taken. DESIGN §4 "Lifecycle", §7.
 - [ ] **#7 `OrbFeatureExtractor::DetectAndExtract` is `const` but not
       thread-safe** (`mutable` pyramid): make it non-const or use a per-call /
       caller-provided workspace.

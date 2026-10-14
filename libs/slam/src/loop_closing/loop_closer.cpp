@@ -17,27 +17,25 @@ using detail::ToSim3;
 
 template <typename TFeatureExtractor>
 LoopCloser<TFeatureExtractor>::~LoopCloser() {
-    worker_.Stop();
-    EndRun();
+    Stop();
 }
 
 template <typename TFeatureExtractor>
 void LoopCloser<TFeatureExtractor>::Start() {
-    BeginRun();
-    worker_.Start([this] { return ProcessPending(); });
+    StartWith([this] { worker_.Start([this] { return ProcessPending(); }); });
 }
 
 template <typename TFeatureExtractor>
 void LoopCloser<TFeatureExtractor>::Stop() {
-    const bool was_running = worker_.running();
-    worker_.Stop();
-    EndRun();
-    if (was_running && query_stats_.detected > 0) {  // once per run
-        log_->info("Loop detection: {} queries, {:.1f} ms mean, {:.1f} ms max; {} queries dropped",
-                   query_stats_.detected,
-                   1e3 * query_stats_.total_seconds / static_cast<double>(query_stats_.detected),
-                   1e3 * query_stats_.max_seconds, query_stats_.dropped);
-    }
+    StopWith([this] {
+        worker_.Stop();
+        if (query_stats_.detected > 0) {  // once: the stop lambda runs for a running component only
+            log_->info("Loop detection: {} queries, {:.1f} ms mean, {:.1f} ms max; {} queries dropped",
+                       query_stats_.detected,
+                       1e3 * query_stats_.total_seconds / static_cast<double>(query_stats_.detected),
+                       1e3 * query_stats_.max_seconds, query_stats_.dropped);
+        }
+    });
 }
 
 template <typename TFeatureExtractor>

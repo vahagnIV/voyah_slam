@@ -117,11 +117,78 @@ before `Start()` (`global_ba()` is null without a GlobalBA). Each call returns a
 (which stops every producer) runs first and no app-side teardown guard is
 needed (§6.1).
 
+**Lifecycle (Phase 1 D-09..D-12, D-26; ownership audit #6).** A component
+(Tracker, Mapper, LoopCloser, GlobalBA) and `Slam` each hold one atomic
+`RunState`: `Created`, `Starting`, `Running`, `Stopping`, `Stopped` (for a
+component it sits in the shared wiring block, §6.1; `Slam` has its own
+`std::atomic<RunState>`). `Start()` and `Stop()` may be called from **any
+thread** (a Java finalizer or `close()` is one); the transitions are
+compare-and-swap, not an agreement between callers. Rules:
+
+- **Stopped is terminal. Stop() then Start() is not supported** for `Slam` and its
+  components: `Start()` after `Stop()` throws `UsageError`, and a new session is a
+  new `Slam` (D-10). The reason is the happens-before story: a restart would
+  have to re-arm the wiring, the inbox and every counter against threads that
+  may still hold the old state, for a use case (pause and resume) that a caller
+  gets by not stopping. `events::WorkerThread` stays a restartable primitive
+  (`WorkerThreadTest.RestartAfterStop`) and `MapViewer` keeps "restart after
+  `Stop()`" (D-26); neither is a component.
+- Invalid calls throw `voyahslam::UsageError` (§7): `Start()` twice, `Start()` after
+  `Stop()`, `AddObserver` / `AddSyncObserver` or `Subscription::reset()` while
+  `Starting`, `Running` or `Stopping`, `Tracker::Track()` after `Stop()` (it
+  can never be processed), `Stop()` called on a component's own worker
+  thread (it would join itself), and `Slam::Stop()` called on any component's
+  worker thread (checked before anything is stopped, see below).
+- `Stop()` before `Start()` moves `Created` to `Stopped` (the component can no longer
+  start). `Stop()` is idempotent, and a `Stop()` that finds `Starting` or
+  `Stopping` waits for the other thread and returns only after the worker is
+  joined, so "`Stop()` returned" always means "no thread of mine runs".
+  Destructors call `Stop()` (and never throw, §7).
+- `Tracker::Track()` before `Start()` is valid and queues the measurement for the
+  worker (D-12); only `Track()` after `Stop()` throws.
+- A failed `Start()` (the worker thread could not be created) leaves a component
+  `Stopped` and the exception propagates. `Slam::Start()` rolls back: it stops
+  every component it started (those not started go `Created` to `Stopped`),
+  stores `Stopped` and rethrows, so a failed `Start()` is a dead `Slam`, not a
+  half-started one.
+- Implementation: `EventNode::StartWith(start_worker)` / `StopWith(stop_worker)`
+  hold the CAS and the waiting (`std::atomic::wait` / `notify_all`, control plane
+  only; no mutex); the component passes a lambda that starts or joins its
+  `WorkerThread`. `Slam` implements the same rules on its own atomic.
+
+**`Slam::Stop()` on a component's own thread (option (a), chosen by the user
+2026-10-14, 0.6.0).** `Slam::Stop()` first asks every component that owns a worker
+(Tracker, Mapper, LoopCloser and, when present, GlobalBA) whether the calling
+thread is that worker (`OnWorkerThread()`, backed by the atomic thread id
+`WorkerThread` already stores; no lock) and, if it is any of them, throws
+`UsageError` **before it changes anything**: no component is stopped, `Slam`
+stays `Running` (`Slam::run_state()`), and the Tracker still accepts
+measurements. The call can then be handed to another thread, which stops
+everything as usual. A `Stop()` on a thread that is not a component's (the test
+thread, a Java finalizer, a foreign `std::thread`) is unaffected. The per-component
+refusal stays too: a component's own `Stop()` on its own worker throws and leaves
+the component `Running`.
+**`~Slam()` on a component thread terminates:** destroying the `Slam` inside one of
+its own threads cannot work (the thread would join itself and keep running inside
+a destroyed object) and a destructor cannot throw, so `~Slam()` logs "Slam
+destroyed on one of its component threads" (stderr and the logger) and calls
+`std::terminate`, the same policy as a `Subscription` destroyed while its
+producer runs (§6.1, §7). Tests: `SlamTest.LifecycleStopFromComponentThreadChangesNothing`
+(Stop from a Mapper sync handler: `UsageError`, every component and the `Slam`
+`Running`, then a stop from the test thread ends everything `Stopped`),
+`SlamTest.LifecycleStopFromForeignThreadStillStops`,
+`SlamDeathTest.DestroyedOnAComponentThreadTerminates`,
+`WorkerThreadTest.OnWorkerThreadIsTrueOnlyOnTheWorker`.
+**Consequence for callers:** a callback that runs on a component thread (a sync
+handler, a JNI callback) must not stop or destroy the `Slam`; the first is a
+recoverable `UsageError`, the second ends the process.
+
 Every component derives from `events::EventNode` (`events/event_node.h`, no
 virtuals): an `Observable` it publishes through, one `AsyncObserver` inbox it
 consumes, `AddObserver(AsyncObserver&)` and `AddSyncObserver(fn, ctx)` (both
 return a `Subscription` and throw `UsageError` while the component runs),
-`inbox()`, and `BeginRun()` / `EndRun()` that publish its `RunState` (§6.1).
+`inbox()`, and the protected `StartWith()` / `StopWith()` that drive its `RunState`
+through an atomic CAS (§6.1).
 Components are templated on `TFeatureExtractor`, declared in headers and
 defined in `libs/slam/src/` with `INSTANTIATE_CLASS` (ORB; SIFT removed 2026-10-11).
 
@@ -554,11 +621,16 @@ allocator's internal locks are not locks on map data (§2 principle 1).
   `Subscription` it handed out. A `Subscription` that outlives its producer only
   edits this block.
 - `RunState` (`Created`, `Starting`, `Running`, `Stopping`, `Stopped`) lives in the
-  `Wiring`. `EventNode::BeginRun()` (before the worker thread is created) and
-  `EndRun()` (after it is joined) drive it in Tracker, Mapper, LoopCloser and
-  GlobalBA; `IsRunning` is true for the three middle values. Until the lifecycle
-  work (audit #6) it only gates wiring: it does not yet forbid `Start()` after
-  `Stop()`.
+  `Wiring`. `EventNode::StartWith()` (Created to Starting before the worker thread
+  is created, Running after) and `StopWith()` (Running to Stopping, Stopped after the
+  worker is joined) drive it in Tracker, Mapper, LoopCloser and GlobalBA with a CAS:
+  `Start()` twice or after `Stop()` throws `UsageError`, `Stop()` before `Start()` moves
+  Created to Stopped (terminal), concurrent `Stop()` calls wait on the atomic until the
+  worker is joined, and `Stop()` on a component's own worker thread throws instead of
+  self-joining. `Slam` has its own `RunState` with the same rules and rolls back a
+  failed `Start()`. `IsRunning` is true for the three middle values. The full
+  rules, the restart decision (Stopped is terminal) and a known gap are in §4
+  "Lifecycle".
 - `Subscription` (`subscription.h`) — a move-only `[[nodiscard]]` RAII handle for
   one connection (`shared_ptr<Wiring>` + an entry id). Its destructor or
   `reset()` disconnects.
@@ -813,7 +885,8 @@ Specs: `docs/superpowers/specs/2026-10-04-pangolin-viewer-design.md`
   threads end that run with `RequestStop()` only (a `Stop()` before the loop is
   entered would consume the request and a later `RunOnCurrentThread()` would
   block), and `Stop()` / the destructor belong on the loop's thread after it
-  returns. `Start()`/`Stop()` must be called from one controlling thread
+  returns. The viewer's `Start()`/`Stop()` (not a component's: those are
+  any-thread, §4 "Lifecycle") must be called from one controlling thread
   (externally ordered). A
   `RequestStop()` made before the loop is entered is kept (the run drains once
   and returns). `fps <= 0` throws.
@@ -2906,7 +2979,7 @@ libs/
 cmake/VoyahTests.cmake      voyah_add_test_binary, voyah_optimize_target, check / check_all
 cmake/voyahslamConfig.cmake.in  installed CMake package config (find_dependency)
 vizualization/              voyahviz (+ voyahviz_tests)
-conanfile.py                package recipe voyahslam/0.5.0 (also the dev installs)
+conanfile.py                package recipe voyahslam/0.6.0 (also the dev installs)
 test_package/               conan create's consumer test (links voyahslam::voyahslam)
 profiles/                   linux-gcc13 (default + gnu20), android-arm64,
                             settings_user.yml (clang 21)
@@ -2935,7 +3008,7 @@ profiles/                   linux-gcc13 (default + gnu20), android-arm64,
   `transitive_headers` (spdlog also `transitive_libs`); g2o and stb are not
   (g2o's libraries still reach static consumers' link lines, never its
   include paths). `shared=True` also makes spdlog and fmt shared; shared
-  libraries get `VERSION` / `SOVERSION` (0.5) and an `$ORIGIN` install
+  libraries get `VERSION` / `SOVERSION` (0.6) and an `$ORIGIN` install
   runpath (not on Apple).
 - `validate()` requires `compiler.cppstd` >= 20 (public headers are C++20;
   `profiles/linux-gcc13` = default + `gnu20` + Release, used by the dev
@@ -3010,13 +3083,16 @@ profiles/                   linux-gcc13 (default + gnu20), android-arm64,
 **Exception policy (since 2026-10-13, ownership audit #3+#2, D-09):** the library
 throws almost nowhere (only `io/read_image.cpp`), and this is its first policy.
 An invalid call sequence (connecting to a producer that runs, resetting a
-`Subscription` while its producer runs, and later `Start()` twice or after
-`Stop()`) throws `voyahslam::UsageError` (`voyahslam/errors.h`, a
+`Subscription` while its producer runs, `Start()` twice or after `Stop()`,
+`Tracker::Track()` after `Stop()`, `Stop()` on a component's own worker thread and
+`Slam::Stop()` on any component's worker thread; ownership audit #6, §4 "Lifecycle") throws `voyahslam::UsageError` (`voyahslam/errors.h`, a
 `std::logic_error`) in every build, never only an `assert`, because the caller
 (a C++ app, the JNI binding) can recover or at least report it; the binding maps
 it to `IllegalStateException`. **Destructors never throw:** a misuse that can only
 be detected in a destructor (a `Subscription` destroyed while its producer runs)
-logs and calls `std::terminate` instead (§6.1, D-07).
+logs and calls `std::terminate` instead (§6.1, D-07): a `Subscription` destroyed
+while its producer runs, and `~Slam()` on one of its own component threads (§4
+"Lifecycle").
 
 **Test conventions for misuse (2026-10-13):**
 - A test that expects the process to die (`std::terminate`, `abort`) is a gtest
@@ -3282,6 +3358,9 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-14 | **Ownership audit #5 implemented (Release R2, branch `refactor/thread-affinity`; Phase 1 CONTEXT D-13, D-14, D-26).** `mapping::MapFollower<FE>` (an inbox and a private `AtlasReplica`, `Update()` on the caller's thread, one-thread rule asserted in debug builds) and the immutable `std::shared_ptr<const MapSnapshot>` (per live map: id, epoch, alive point ids and world positions, Frame ids and `T_cw`; the active map; the transaction count) are the supported cross-thread map read path; see "Map Follower" in §4. The thread-affine accessors are private behind friend `*TestAccess` structs, all defined in `libs/slam/tests/test_access.h` (one definition per test binary): `Tracker::atlas()`, `map_replica()`, `last_matches()` (`TrackerTestAccess`); `LoopCloser::atlas()`, `map_replica()` and the five stats accessors (`LoopCloserTestAccess`); `GlobalBundleAdjuster::atlas()`, `map_replica()` (`GlobalBundleAdjusterTestAccess`); and the Mapper's twelve: `covisibility()`, `Reference()`, `NumVisible()`, `NumFound()`, `last_local_ba()`, `BowVectorOf()`, `Parent()`, `LoopEdges()`, `KeyFrame()`, `map_ids()`, `active_map()`, `num_keyframes(MapId)` (`MapperTestAccess`, which keeps the existing graph-edit helpers). `Mapper::num_keyframes()` with no argument and the other atomic counters stay public. GlobalBA's `num_runs_started_` / `num_runs_interrupted_` are `std::atomic<size_t>`. `ThreadAffinityTest` holds a C++20 `concept` plus `static_assert(!Concept<T>)` per restricted accessor, so making one public again fails the build. **D-26 reading:** the LoopCloser's worker-written stats (the pending-region counts, the vector-bearing `CommonRegionStats`, `QueryStats`) are the same hazard class as D-14's accessors and get the same treatment (private behind `LoopCloserTestAccess`; only tests read them, and the `Stop()` summary log reports the query figures), while counters an app may read are atomic (the GlobalBA run counts), so every public LoopCloser/GlobalBA accessor is atomic or a lifecycle/driver call. Both example apps print the Atlas from a follower snapshot taken after `Stop()`; `voyahslam::Session` and the viewer on a follower are deferred (the JNI work). About 250 test call sites (about 100 Mapper, about 150 Tracker, LoopCloser and GlobalBA) were rewritten to the access structs with every assertion unchanged (the per-file multiset of `EXPECT_` / `ASSERT_` macros equals the branch base's). | An app that reads a map structure the Mapper is writing races with it (§2); comments did not stop that, types do. A follower keeps the Mapper the only writer, costs a full replica per reader and an O(map) copy per snapshot, and needs no lock. The stats accessors return worker-written vectors and counters read without synchronization, so they are test-only like D-14's; making them atomic would need a copy-out of vectors per read for no consumer. |
 | 2026-10-14 | **Package version 0.5.0** (`conanfile.py`, `project()`; SOVERSION 0.5). API breaks for consumers (the voyah_jni binding): `Tracker::atlas()` / `map_replica()` / `last_matches()`, `LoopCloser::atlas()` / `map_replica()` and its stats accessors (`num_coincidences()`, `num_merge_coincidences()`, `last_stats()`, `last_merge_stats()`, `query_stats()`), `GlobalBundleAdjuster::atlas()` / `map_replica()` and the twelve Mapper-thread accessors are private (use `mapping::MapFollower` / `MapSnapshot`); `GlobalBundleAdjuster::num_runs_started()` / `num_runs_interrupted()` keep their signatures and are now atomic; new public `mapping::MapFollower` and `mapping::MapSnapshot`. | Every audit item is an API break for the binding; a public API change gets a new minor version while 0.x (as 0.2.0, 0.3.0 and 0.4.0). |
 | 2026-10-14 | **`MapFollower` is defined in the library, not in its header** (regression fix on R2, before release). Its members, trivial accessors included, are out of line in `libs/slam/src/mapping/map_follower.cpp` and instantiated with `INSTANTIATE_CLASS`; its API, threading and wiring contract are unchanged. New unit test `BuildCheck.MapFollowerAddsNoLibraryInstantiations` (`libs/slam/tests/build_checks/`): two `-O0` objects of an app-shaped consumer (`Slam`, a subscription on the Mapper, `Update()` + `Snapshot()` read like `PrintAtlas`), with and without the follower, compared with `nm`; it fails when the follower variant defines a weak function (nm `W`) that `voyah_slam` / `voyah_algs` / `voyah_events` / `voyah_common` define and the baseline does not (66 at the header-only version, 0 now). §7 "Structure" gains the rule: a template an app uses is defined in `src/`. | When the apps subscribed a header-only follower (fd43a13), `binocular_full_slam` on corridor1 (`--rate=0 --max-frames=40`, Debug tree) tracked 10–12 of 40 frames and built 1 Frame instead of 39 and 3; the follower did nothing until after `Stop()`. Cause, measured: the app TU (`-O0`) instantiated the replica code and with it Eigen's `call_dense_assignment_loop<Matrix<uint8_t, 32, 1>, Block<...>>`; `tracker.cpp.o` (`-O2`) calls that function out of line in `MatchStereo` (each right descriptor copied, ~1500 × 1500 per frame), `SearchByBoW`, `SearchFromLocalMap`, `SearchFromLastFrame`; with static libraries and the app object first, the binary held the app's 0x116-byte `-O0` copy, not the library's 0xe6-byte one. Same source with only the app TU at `-O2`: 39 frames; follower code without a subscription: 11; an undrained plain inbox on the Mapper without follower code: 38 (so not fan-out or event retention). After the fix the binary holds the library's copy, 39 of 40 frames, 3 Frames, 0.25–0.27 s per frame (3 runs). |
+| 2026-10-14 | **Ownership audit #6 implemented (Release R3, branch `refactor/lifecycle`; Phase 1 CONTEXT D-09..D-12, D-26).** Tracker, Mapper, LoopCloser, GlobalBA and `Slam` follow Created, Starting, Running, Stopping, Stopped through an atomic CAS (`EventNode::StartWith` / `StopWith`, `Observable::CompareExchangeState` / `WaitWhileState`; `EventNode::BeginRun()` / `EndRun()` are removed). `Start()` / `Stop()` are valid from any thread; `Start()` twice or after `Stop()`, `Tracker::Track()` after `Stop()` and `Stop()` on a component's own worker thread throw `UsageError`; `Track()` before `Start()` queues; `Stop()` is idempotent and a concurrent `Stop()` returns only after the join; a failed `Start()` leaves the component `Stopped` and `Slam::Start()` rolls back. **`Stop()` then `Start()` is not supported: Stopped is terminal for `Slam` and its components, a new session is a new `Slam`; `WorkerThread` and `MapViewer` stay restartable.** `WorkerThread::Stop()` throws on the worker's own thread and a failed thread start resets `running()`. GlobalBA does not reset `stop_requested_` in `Start()` (Stopped is terminal; a reset could undo a `Stop()` waiting on `Starting`). Known gap at the time, closed by the next row: `Slam::Stop()` on a component's own thread stopped the components before it, then was refused. | A Java `close()`, finalizer or GC can run `Stop()` on any thread, so one-controlling-thread rules cannot be assumed and a data race on the state is a crash. Deterministic `UsageError`s replace silent no-ops (before 0.6.0 `BeginRun()` / `EndRun()` only published the state: a misused `Start()` or `Stop()` was a silent no-op or a silent restart). A restart would have to re-arm the wiring, the inbox and the counters against threads that may still hold the old state; a new `Slam` is cheap and removes that whole class. Tracker `Track()` before `Start()` is harmless (the queue is lock-free) and refusing it would only add an ordering rule. |
+| 2026-10-14 | **`Slam::Stop()` on a component's own thread is refused before it stops anything (TODO option (a), chosen by the user; Release R3, 0.6.0).** `Slam::Stop()` checks the calling thread against the worker of the Tracker, Mapper, LoopCloser and GlobalBA first (`WorkerThread::OnWorkerThread()` over the existing atomic `worker_id_`, exposed per component as `OnWorkerThread()`) and throws `UsageError`, changing nothing: no component stops and `Slam::run_state()` (new accessor) stays `Running`. `~Slam()` on a component thread logs and calls `std::terminate`. Replaces the "Known gap" of the row above. | The earlier behavior stopped the components before the caller's (Tracker, LoopCloser) and only then refused, leaving a half-stopped `Slam` that reported `Running`; a JNI callback that stops the session is a realistic mistake and must be recoverable and side-effect free. The check is lock-free (an atomic thread-id load per worker), consistent with principle 1, and a destructor cannot throw, hence the loud terminate, as for a `Subscription` destroyed while its producer runs. Options (b), (c) (a no-throw "request stop") and (d) were not chosen. |
+| 2026-10-14 | **Package version 0.6.0** (`conanfile.py`, `project()`; SOVERSION 0.6). Behavior breaks for consumers (the voyah_jni binding): `Start()` twice, `Start()` after `Stop()`, `Tracker::Track()` after `Stop()` and `Stop()` on a component's own worker thread throw `voyahslam::UsageError` (map it to `IllegalStateException`); `Stop()` before `Start()` makes the component and `Slam` terminal (a later `Start()` throws); `Start()` / `Stop()` are safe from any thread, so `close()` / GC need no external ordering; `Slam::Stop()` called from a component's thread or an event callback throws `UsageError` and changes nothing, and destroying the `Slam` there terminates; `EventNode::BeginRun()` / `EndRun()` are removed (they were protected). | Every audit item is a behavior or API break for the binding; a public API change gets a new minor version while 0.x (as 0.2.0 to 0.5.0). |
 
 ## 9. Open Questions
 
@@ -3553,7 +3632,13 @@ branch → review → merge to `master`. Update this document at the end.
   inactive maps is TODO ("Map merging follow-ups").
 - Ownership audit (`docs/TODO.md`): #3 + #2 done (0.4.0, branch
   `refactor/event-ownership`, merge pending); #5 done (0.5.0, branch
-  `refactor/thread-affinity`, merge pending); next #6, #7, #8, #9.
+  `refactor/thread-affinity`, merge pending); #6 done (0.6.0, branch
+  `refactor/lifecycle`, merge pending); next #7, #8, #9.
+- Test suite (2026-10-14, ownership audit #6, 0.6.0): 827 tests (787
+  `unit`, 39 `integration`, 1 `vocabulary`, skipped without ORBvoc);
+  `check_all` about 30 s. `LifecycleTest.*` (12), `SlamTest.Lifecycle*` (8),
+  `SlamDeathTest.*` (1) and `WorkerThreadTest.OnWorkerThreadIsTrueOnlyOnTheWorker` are new; ThreadSanitizer was clean on them over repeated runs (plan summaries
+  01-12 and 01-13).
 - Test suite (2026-10-14, ownership audit #5, 0.5.0): 802 tests (771
   `unit`, 30 `integration`, 1 `vocabulary`, skipped without ORBvoc);
   `check_all` about 30 s. `ThreadAffinityTest` (compile-time concept checks)

@@ -3,6 +3,7 @@
 #include <support/synthetic_sequence.h>
 #include <support/test_measurements.h>
 #include <support/trajectory_error.h>
+#include <voyahslam/errors.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
 #include <voyahslam/events/observable.h>
@@ -505,6 +506,24 @@ TEST_F(TrackerTest, NewMapAfterLoss) {
 
     EXPECT_EQ(tracker_.state(), TrackerState::Tracking);
     EXPECT_EQ(tracker_.current_map_id(), map::MapId{2});
+}
+
+TEST_F(TrackerTest, TrackBeforeStartQueues) {
+    ASSERT_EQ(tracker_.run_state(), events::RunState::Created);
+    EXPECT_EQ(tracker_.pending_measurements(), 0u);
+    tracker_.Track(test::MakeMonocular(200, 0.0));
+    EXPECT_EQ(tracker_.pending_measurements(), 1u);
+    EXPECT_TRUE(tracker_.ProcessPending());  // the queued measurement is tracked once driven
+    EXPECT_EQ(tracker_.pending_measurements(), 0u);
+}
+
+TEST_F(TrackerTest, TrackAfterStopThrows) {
+    tracker_.Start();
+    tracker_.Stop();
+    EXPECT_THROW(tracker_.Track(test::MakeMonocular(200, 0.0)), UsageError);
+    EXPECT_THROW(tracker_.Track(test::MakeSyntheticStereoFrame().measurement), UsageError);
+    EXPECT_EQ(tracker_.pending_measurements(), 0u);
+    EXPECT_THROW(tracker_.Start(), UsageError);  // Stopped is terminal
 }
 
 TEST_F(TrackerTest, ThreadProcessesTrackedMeasurements) {
