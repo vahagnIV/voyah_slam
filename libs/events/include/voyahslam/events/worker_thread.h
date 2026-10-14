@@ -31,6 +31,12 @@ public:
     void Stop();
 
     [[nodiscard]] bool running() const { return running_.load(std::memory_order_acquire); }
+    // True when called on the worker thread itself (lock-free; any thread may ask,
+    // a thread that is not the worker always gets false). A composite that must
+    // refuse a Stop() before changing anything asks this of every worker first.
+    [[nodiscard]] bool OnWorkerThread() const {
+        return worker_id_.load(std::memory_order_acquire) == std::this_thread::get_id();
+    }
 
 private:
     WakeSignal& signal_;

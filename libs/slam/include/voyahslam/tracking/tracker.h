@@ -183,6 +183,9 @@ public:
     // the Tracker's own worker thread throws UsageError (it would join itself).
     void Start();
     void Stop();
+    // True on this component's own worker thread (a sync handler or other callback
+    // it runs), where Stop() is refused with UsageError. Any thread.
+    [[nodiscard]] bool OnWorkerThread() const { return worker_.OnWorkerThread(); }
 
     // Enqueue the measurement for the Tracker thread and return immediately.
     // Taken by value: pass an rvalue to move the feature matrices instead of

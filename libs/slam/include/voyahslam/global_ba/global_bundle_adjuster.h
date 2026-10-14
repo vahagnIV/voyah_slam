@@ -67,6 +67,9 @@ public:
     // Interrupts a running BA (it publishes nothing, even if it had passed its
     // last poll, and is not resumed by a later Start()) and joins the worker.
     void Stop();
+    // True on this component's own worker thread (a callback it runs), where
+    // Stop() is refused with UsageError. Any thread.
+    [[nodiscard]] bool OnWorkerThread() const { return worker_.OnWorkerThread(); }
 
     // Drains the inbox, applying every transaction, then runs a pending
     // global BA. Returns true iff an event or a run was processed. Called by

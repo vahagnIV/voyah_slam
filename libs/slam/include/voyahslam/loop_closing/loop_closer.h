@@ -101,6 +101,9 @@ public:
     // the component's own worker thread throws UsageError (it would join itself).
     void Start();
     void Stop();
+    // True on this component's own worker thread (a sync handler or other callback
+    // it runs), where Stop() is refused with UsageError. Any thread.
+    [[nodiscard]] bool OnWorkerThread() const { return worker_.OnWorkerThread(); }
 
     // Drains the inbox, applying each transaction and queueing its new Frames
     // as queries (dropping the oldest beyond max_query_backlog), then detects

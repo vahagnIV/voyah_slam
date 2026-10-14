@@ -33,7 +33,7 @@ void WorkerThread::Start(std::function<bool()> process_pending) {
 }
 
 void WorkerThread::Stop() {
-    if (worker_id_.load(std::memory_order_acquire) == std::this_thread::get_id()) {
+    if (OnWorkerThread()) {
         throw UsageError("Stop() from the component's own worker thread");
     }
     running_.store(false, std::memory_order_release);

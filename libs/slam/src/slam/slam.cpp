@@ -1,6 +1,9 @@
 #include <cstdint>
+#include <cstdio>
+#include <exception>
 #include <voyahslam/errors.h>
 #include <voyahslam/features/instantiation.h>
+#include <voyahslam/logging/logger.h>
 #include <voyahslam/slam/slam.h>
 
 namespace voyahslam::slam {
@@ -40,7 +43,22 @@ Slam<TFeatureExtractor>::Slam(mapping::MapperOptions mapper_options,
 }
 
 template <typename TFeatureExtractor>
+bool Slam<TFeatureExtractor>::OnComponentThread() const {
+    return tracker_.OnWorkerThread() || mapper_.OnWorkerThread() || loop_closer_.OnWorkerThread() ||
+           (global_ba_ && global_ba_->OnWorkerThread());
+}
+
+template <typename TFeatureExtractor>
 Slam<TFeatureExtractor>::~Slam() {
+    // Destroying the Slam inside one of its own threads cannot work (that thread
+    // would join itself and keep running inside a destroyed object) and a
+    // destructor must not throw: log and terminate (DESIGN section 7).
+    if (OnComponentThread()) {
+        constexpr const char* kMessage = "Slam destroyed on one of its component threads";
+        std::fprintf(stderr, "%s\n", kMessage);
+        Logger::CreateLogger("Slam")->critical(kMessage);
+        std::terminate();
+    }
     Stop();
 }
 
@@ -74,6 +92,11 @@ void Slam<TFeatureExtractor>::Start() {
 
 template <typename TFeatureExtractor>
 void Slam<TFeatureExtractor>::Stop() {
+    // Before any state change or component Stop(): a refused call changes nothing.
+    // Lock-free: each worker publishes its thread id in an atomic.
+    if (OnComponentThread()) {
+        throw UsageError("Slam::Stop() from a component's own thread");
+    }
     while (true) {
         events::RunState state = state_.load(std::memory_order_acquire);
         switch (state) {
@@ -98,7 +121,9 @@ void Slam<TFeatureExtractor>::Stop() {
                     if (global_ba_) global_ba_->Stop();
                     mapper_.Stop();
                 } catch (...) {
-                    // A Stop() from a component's own thread: the Slam keeps running.
+                    // Not a UsageError (the caller's thread was checked above); for
+                    // example a failed join. Do not leave other callers waiting on
+                    // Stopping.
                     state_.store(state, std::memory_order_release);
                     state_.notify_all();
                     throw;

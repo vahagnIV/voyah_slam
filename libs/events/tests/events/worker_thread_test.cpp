@@ -125,5 +125,23 @@ TEST(WorkerThreadTest, RestartAfterStop) {
     worker.Stop();
 }
 
+TEST(WorkerThreadTest, OnWorkerThreadIsTrueOnlyOnTheWorker) {
+    WakeSignal signal;
+    WorkerThread worker(signal);
+    EXPECT_FALSE(worker.OnWorkerThread());  // never started
+    std::atomic<int> on_worker{-1};         // -1 not yet, 0 false, 1 true
+    worker.Start([&] {
+        if (on_worker.load() < 0) on_worker.store(worker.OnWorkerThread() ? 1 : 0);
+        return false;
+    });
+    ASSERT_TRUE(WaitFor([&] { return on_worker.load() >= 0; }));
+    EXPECT_EQ(on_worker.load(), 1);
+    EXPECT_FALSE(worker.OnWorkerThread());  // the test thread is not the worker
+    std::thread other([&] { EXPECT_FALSE(worker.OnWorkerThread()); });
+    other.join();
+    worker.Stop();
+    EXPECT_FALSE(worker.OnWorkerThread());
+}
+
 } // namespace
 } // namespace voyahslam::events
