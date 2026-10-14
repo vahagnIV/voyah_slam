@@ -296,18 +296,22 @@ size_t OrbFeatureExtractor::num_levels() const { return scale_factors_.size(); }
 
 OrbFeatureExtractor::TFeatures
 OrbFeatureExtractor::DetectAndExtract(const images::TWorkingImage &image,
-                                      size_t number_of_features, Workspace &) const {
-  return DetectAndExtract(image, number_of_features);
+                                      size_t number_of_features,
+                                      Workspace &out_workspace) const {
+  orb::ImagePyramid &pyramid = out_workspace.pyramid_;
+  // A reused workspace re-initialises on another image size, level count or scale factor.
+  if (!pyramid.Fits(image.Width(), image.Height(), scale_factors_))
+    pyramid.Initialize(image.Width(), image.Height(), scale_factors_);
+
+  pyramid.Build(image);
+  return ComputeKeyPointsOctTree(pyramid, number_of_features);
 }
 
 OrbFeatureExtractor::TFeatures
 OrbFeatureExtractor::DetectAndExtract(const images::TWorkingImage &image,
                                       size_t number_of_features) const {
-  if (!pyramid_.Initialized())
-    pyramid_.Initialize(image.Width(), image.Height(), scale_factors_);
-
-  pyramid_.Build(image);
-  return ComputeKeyPointsOctTree(number_of_features);
+  Workspace workspace;
+  return DetectAndExtract(image, number_of_features, workspace);
 }
 
 void OrbFeatureExtractor::Initialize() {
@@ -441,7 +445,8 @@ OrbFeatureExtractor::ComputeFeaturesPerLevel(size_t number_of_features) const {
 }
 
 OrbFeatureExtractor::TFeatures
-OrbFeatureExtractor::ComputeKeyPointsOctTree(size_t features) const {
+OrbFeatureExtractor::ComputeKeyPointsOctTree(const orb::ImagePyramid &pyramid,
+                                             size_t features) const {
 
   std::vector<size_t> features_per_level = ComputeFeaturesPerLevel(features);
 
@@ -452,10 +457,10 @@ OrbFeatureExtractor::ComputeKeyPointsOctTree(size_t features) const {
 
   for (size_t level = 0; level < scale_factors_.size(); level++) {
     auto [r_points, r_strengths] =
-        ComputePointsPerLevel(level, features_per_level[level]);
-    auto r_angles = ComputeOrientation(pyramid_[level], r_points);
+        ComputePointsPerLevel(pyramid, level, features_per_level[level]);
+    auto r_angles = ComputeOrientation(pyramid[level], r_points);
     auto r_descriptors =
-        ComputeDescriptors(pyramid_[level], r_points, r_angles);
+        ComputeDescriptors(pyramid[level], r_points, r_angles);
     pts.emplace_back(std::move(r_points));
     strngths.emplace_back(std::move(r_strengths));
     ngls.emplace_back(std::move(r_angles));
@@ -542,11 +547,12 @@ geometry::TRowVectorF OrbFeatureExtractor::ComputeOrientation(
 }
 
 std::tuple<geometry::TPoints2DF, geometry::TRowVectorF>
-OrbFeatureExtractor::ComputePointsPerLevel(size_t level, int n_features) const {
+OrbFeatureExtractor::ComputePointsPerLevel(const orb::ImagePyramid &pyramid,
+                                           size_t level, int n_features) const {
 
   constexpr int W = 35;
 
-  const images::TWorkingImage &image = pyramid_[level];
+  const images::TWorkingImage &image = pyramid[level];
   const int image_cols = static_cast<int>(image.Width());
   const int image_rows = static_cast<int>(image.Height());
   const uint8_t *image_data = &image.At(0, 0, 0);

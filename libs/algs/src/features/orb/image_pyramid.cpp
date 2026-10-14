@@ -9,6 +9,9 @@ void ImagePyramid::Initialize(size_t image_width, size_t image_height,
   initialized_ = true;
   image_width_ = image_width;
   image_height_ = image_height;
+  // Re-initialising (another image size or level count) must not append to the old levels.
+  inv_scale_factors_.clear();
+  image_pyramid_.clear();
   inv_scale_factors_.reserve(scale_factors.size());
   for (auto s : scale_factors) {
     assert(s > 0);
@@ -19,6 +22,18 @@ void ImagePyramid::Initialize(size_t image_width, size_t image_height,
     auto height = static_cast<unsigned>(std::round(image_height_ * scale));
     image_pyramid_.push_back(images::TWorkingImage(width, height));
   }
+}
+
+bool ImagePyramid::Fits(size_t image_width, size_t image_height,
+                        const std::vector<precision_t> &scale_factors) const {
+  if (!initialized_ || image_width_ != image_width ||
+      image_height_ != image_height ||
+      inv_scale_factors_.size() != scale_factors.size())
+    return false;
+  for (size_t level = 0; level < scale_factors.size(); ++level)
+    if (inv_scale_factors_[level] != 1. / scale_factors[level])
+      return false;
+  return true;
 }
 
 size_t ImagePyramid::GetDepth() const { return image_pyramid_.size(); }
