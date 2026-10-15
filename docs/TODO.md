@@ -1027,10 +1027,16 @@ and android-arm64; tell the voyah_jni session the new version.
       `CreateLogger` is serialized. DESIGN "Logging". The logcat default sink is
       still open (see "Logs do not reach Android logcat" under "Environment",
       PLAT-01).
-- [ ] **#9 `images::Image` correctness:** a default-constructed image has
-      uninitialized members; `Convert()`, `operator*=` / `operator*` ignore
-      `offset_` / `stride_` of sub-image views; `Set()` is `const` but writes
-      the shared buffer.
+- [x] ~~#9 `images::Image` correctness~~ (done 2026-10-15, 0.9.0, branch
+      `fix/image-views`): fixed in place, no `ImageView` type. A default image is
+      empty (and so is a moved-from one); `Convert()`, `operator*=` and
+      `operator*` work row by row on the view; `Set()` is non-const; `CopyTo`
+      copies `width * C * sizeof(T)` bytes per strided row; `Image(width, height)`
+      throws `std::length_error` on size overflow; view offsets are `size_t`.
+      DESIGN "Images". This completes the ownership audit.
+- [ ] `Image::operator[]` on a single-row image returns a pixel, not the row
+      (shape-dependent: row, pixel or channel by the image's shape; no caller
+      outside the header). Decide whether to make it uniform when a caller needs it.
 
 ## Review follow-ups (tracking states, 2026-10-03)
 
