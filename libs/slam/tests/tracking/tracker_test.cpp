@@ -564,8 +564,9 @@ TEST_F(TrackerTest, ThreadProcessesTrackedMeasurements) {
 
 // `min_map_frames` is RelocalizationOptions::min_map_frames_to_relocalize; a
 // fresh stereo map has one Frame.
-TrackerOptions LossOptions(size_t min_map_frames) {
+TrackerOptions LossOptions(size_t min_map_frames, bool relocalization_enabled = true) {
     TrackerOptions options;
+    options.relocalization.enabled = relocalization_enabled;
     options.relocalization.min_map_frames_to_relocalize = min_map_frames;
     return options;
 }
@@ -573,8 +574,9 @@ TrackerOptions LossOptions(size_t min_map_frames) {
 class TrackerBowTest : public TrackerTest {
 protected:
     explicit TrackerBowTest(size_t min_map_frames = 0,
-                            std::shared_ptr<const TVocabulary> vocabulary = MakeRootVocabulary())
-        : TrackerTest({}, LossOptions(min_map_frames), vocabulary) {}
+                            std::shared_ptr<const TVocabulary> vocabulary = MakeRootVocabulary(),
+                            bool relocalization_enabled = true)
+        : TrackerTest({}, LossOptions(min_map_frames, relocalization_enabled), vocabulary) {}
 
     // Tracks frames 1..3 of `sequence` (a velocity, a reference Frame), then
     // the frame `jumped`: frame 4's timestamp, yawed 15 degrees from where the
@@ -755,6 +757,65 @@ TEST_F(TrackerSmallMapTest, SmallMapGoesStraightToLost) {
     EXPECT_TRUE(captured[0].final);
     EXPECT_EQ(tracker_.state(), TrackerState::Lost);
     EXPECT_EQ(mapper_.state(), mapping::MapperState::Initializing);
+}
+
+// A vocabulary and a map above min_map_frames_to_relocalize (0 Frames needed,
+// the fresh map has one), but relocalization switched off.
+class TrackerRelocalizationDisabledTest : public TrackerBowTest {
+protected:
+    TrackerRelocalizationDisabledTest()
+        : TrackerBowTest(0, MakeRootVocabulary(), /*relocalization_enabled=*/false) {}
+};
+
+TEST(TrackerOptionsTest, RelocalizationIsEnabledByDefault) {
+    EXPECT_TRUE(RelocalizationOptions{}.enabled);
+}
+
+TEST_F(TrackerRelocalizationDisabledTest, RelocalizationDisabledGoesStraightToLostWithVocabulary) {
+    const auto sequence = StereoSequence();
+    ASSERT_EQ(InitializeStereo(sequence, 0), 0u);
+    // The map is above the threshold, so only the switch decides.
+    ASSERT_GT(TrackerTestAccess::MapReplica(tracker_).keyframe_ids().size(), 0u);
+
+    // The observer sees the state at every publication: never RecentlyLost.
+    struct Probe {
+        TTracker* tracker;
+        bool saw_recently_lost = false;
+    } probe{&tracker_};
+    const events::Subscription probe_subscription = tracker_.AddSyncObserver(
+        [](void* ctx, const events::Event&) {
+            auto* p = static_cast<Probe*>(ctx);
+            if (p->tracker->state() == TrackerState::RecentlyLost) p->saw_recently_lost = true;
+        },
+        &probe);
+
+    const auto captured = LoseAt(1.0);
+
+    ASSERT_EQ(captured.size(), 1u);
+    EXPECT_EQ(captured[0].type, events::EventType::TrackingLost);
+    EXPECT_TRUE(captured[0].final);
+    EXPECT_EQ(tracker_.state(), TrackerState::Lost);
+    EXPECT_EQ(mapper_.state(), mapping::MapperState::Initializing);
+    EXPECT_FALSE(probe.saw_recently_lost);
+}
+
+TEST_F(TrackerRelocalizationDisabledTest, RelocalizationDisabledNeverRelocalizes) {
+    const auto sequence = StereoSequence();
+    ASSERT_EQ(InitializeStereo(sequence, 0), 0u);
+    ASSERT_EQ(LoseAt(1.0).size(), 1u);
+    ASSERT_EQ(tracker_.state(), TrackerState::Lost);
+
+    // The same scene again, which relocalization would recognise: with the
+    // switch off no measurement yields a FrameTracked in the Relocalization
+    // stage, and the Tracker never enters RecentlyLost.
+    for (size_t k = 1; k < sequence.frames.size(); ++k) {
+        for (const Captured& c : Feed(sequence.frames[k].measurement)) {
+            if (c.type == events::EventType::FrameTracked) {
+                EXPECT_NE(c.stage, events::TrackingStage::Relocalization) << k;
+            }
+        }
+        EXPECT_NE(tracker_.state(), TrackerState::RecentlyLost) << k;
+    }
 }
 
 class TrackerDefaultBowTest : public TrackerBowTest {

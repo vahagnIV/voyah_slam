@@ -17,9 +17,14 @@
 namespace voyahslam::tracking {
 
 // The loss protocol (ORB-SLAM3 RECENTLY_LOST) and relocalization in the
-// current map (ORB-SLAM3 Relocalization), with a vocabulary only (spec
-// sections 2 and 4).
+// current map (ORB-SLAM3 Relocalization), with a vocabulary and enabled only
+// (spec sections 2 and 4).
 struct RelocalizationOptions {
+    // When false, a lost Tracker does not relocalize even with a vocabulary:
+    // it never enters RecentlyLost and never attempts relocalization, so a
+    // loss goes straight to Lost (TrackingLost, final = true). The default
+    // keeps the 0.9.0 behaviour.
+    bool enabled = true;
     // RecentlyLost for this long, in measurement timestamps, then Lost.
     double recently_lost_seconds = 5.0;
     // A map with at most this many Frames goes straight to Lost.

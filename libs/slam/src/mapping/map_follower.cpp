@@ -54,6 +54,8 @@ std::shared_ptr<const MapSnapshot> MapFollower<TFeatureExtractor>::Snapshot() co
         MapSnapshot::Map& out = snapshot->maps.emplace_back();
         out.id = id;
         out.epoch = replica->map_epoch();
+        out.point_ids.reserve(replica->num_points());
+        out.point_positions.reserve(replica->num_points());
         for (uint32_t index = 0; index < replica->num_points(); ++index) {
             const map::MapPointId point{index};
             if (replica->IsAlive(point)) {
