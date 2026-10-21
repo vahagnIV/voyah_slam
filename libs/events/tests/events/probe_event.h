@@ -50,7 +50,7 @@ public:
         StartWith([] {});
     }
     void Stop() {
-        StopWith([] {});
+        StopWith([] {}, [] { return false; });  // no worker thread
     }
 };
 

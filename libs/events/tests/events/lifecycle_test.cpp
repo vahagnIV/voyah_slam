@@ -77,10 +77,12 @@ public:
         });
     }
     void Stop() {
-        StopWith([this] {
-            worker_.Stop();
-            joined_.store(true, std::memory_order_release);
-        });
+        StopWith(
+            [this] {
+                worker_.Stop();
+                joined_.store(true, std::memory_order_release);
+            },
+            [this] { return worker_.OnWorkerThread(); });
     }
 
     bool ProcessPending() {

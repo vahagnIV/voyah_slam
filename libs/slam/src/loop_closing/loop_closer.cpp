@@ -35,7 +35,8 @@ void LoopCloser<TFeatureExtractor>::Stop() {
                        1e3 * query_stats_.total_seconds / static_cast<double>(query_stats_.detected),
                        1e3 * query_stats_.max_seconds, query_stats_.dropped);
         }
-    });
+    },
+    [this] { return worker_.OnWorkerThread(); });
 }
 
 template <typename TFeatureExtractor>

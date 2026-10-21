@@ -62,7 +62,7 @@ void Tracker<TFeatureExtractor>::Start() {
 
 template <typename TFeatureExtractor>
 void Tracker<TFeatureExtractor>::Stop() {
-    StopWith([this] { worker_.Stop(); });
+    StopWith([this] { worker_.Stop(); }, [this] { return worker_.OnWorkerThread(); });
 }
 
 template <typename TFeatureExtractor>
