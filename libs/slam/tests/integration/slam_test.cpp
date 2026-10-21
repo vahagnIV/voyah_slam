@@ -22,6 +22,8 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <functional>
 #include <iterator>
 #include <map>
@@ -2106,6 +2108,56 @@ TEST(SlamTest, LifecycleStopFromComponentThreadChangesNothing) {
 
     // Another thread can stop the Slam, and everything ends Stopped.
     slam.Stop();
+    ExpectEveryComponent(slam, events::RunState::Stopped);
+    EXPECT_EQ(slam.run_state(), events::RunState::Stopped);
+}
+
+// WR-01 at the Slam level: a Mapper sync handler (a binding callback) calls the
+// Mapper's own Stop() while another thread runs Slam::Stop(), which is joining the
+// Mapper's thread. The handler must get UsageError (not wait for the join), and the
+// Slam ends Stopped. A deadlock ends the process with a DEADLOCK line.
+TEST(SlamTest, LifecycleComponentStopOnItsThreadWhileSlamStopsThrows) {
+    OnMapperThread on_mapper;
+    std::vector<events::Subscription> subscriptions;
+    OrbSlam slam(WellConditionedMapperOptions());
+    on_mapper.action = [&] {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+        while (slam.mapper().run_state() != events::RunState::Stopping) {
+            if (std::chrono::steady_clock::now() > deadline) return;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        slam.mapper().Stop();
+    };
+    subscriptions.push_back(slam.mapper().AddSyncObserver(&OnMapperThread::Handle, &on_mapper));
+    slam.Start();
+    FeedUntilMapperPublishes(slam);
+
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+        while (!on_mapper.fired.load(std::memory_order_acquire)) {
+            ASSERT_LT(std::chrono::steady_clock::now(), deadline) << "the Mapper never published";
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    std::atomic<bool> stopped{false};
+    std::thread stopper([&] {
+        slam.Stop();
+        stopped.store(true, std::memory_order_release);
+    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+    while (!stopped.load(std::memory_order_acquire)) {
+        if (std::chrono::steady_clock::now() > deadline) {
+            // The stuck Slam cannot be destroyed: end the process instead of hanging.
+            std::fprintf(stderr, "DEADLOCK: Slam::Stop() did not return within 120 s\n");
+            std::fflush(stderr);
+            std::_Exit(1);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    stopper.join();
+
+    ASSERT_TRUE(on_mapper.WaitForOutcome());
+    EXPECT_EQ(on_mapper.outcome.load(), OnMapperThread::Outcome::UsageErrorThrown);
     ExpectEveryComponent(slam, events::RunState::Stopped);
     EXPECT_EQ(slam.run_state(), events::RunState::Stopped);
 }
