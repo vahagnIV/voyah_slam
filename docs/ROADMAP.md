@@ -253,6 +253,8 @@ logger creation is serialized), #9 (0.9.0, 2026-10-15: `images::Image` is fixed 
 empty default, view-correct `Convert` / `operator*=` / `operator*`, an overflow-checked size constructor
 and `size_t` view offsets). The API hardening list is complete. Each item is merged separately with a minor
 version bump and new Conan packages.
+The Phase 1 verification gaps and the review findings CR-01, CR-02, WR-01, WR-06 and IN-07 are fixed in
+0.9.2 (2026-10-21, patch release on branch `fix/phase1-gaps`; the other review findings are open items in TODO).
 
 ## 6. TUM-VI tuning
 

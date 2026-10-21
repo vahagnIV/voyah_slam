@@ -1052,6 +1052,72 @@ and android-arm64; tell the voyah_jni session the new version.
       `GlobalBundleAdjuster::set_run_hook` / `set_poll_hook` / `set_publish_hook` are
       public and only documented as "set while stopped"; same hazard class as IN-07
       (left out of 0.9.2 by its scope).
+- [x] ~~Review CR-01 and CR-02~~ (done 2026-10-21, 0.9.2, branch `fix/phase1-gaps`):
+      `OrbFeatureExtractor`'s constructor and `DetectAndExtract` throw
+      `std::invalid_argument` (levels 0, a scale factor not finite and above 1, any pyramid
+      level below 66 px, which is an image below 235 px with the defaults); `Image` views
+      throw `std::out_of_range` outside their parent and `CopyTo` throws
+      `std::invalid_argument` on a size mismatch, in every build. DESIGN §7 "Argument-error
+      policy", "ORB Extractor Workspace", "Images".
+- [ ] Portrait images give no ORB features (found by reading while planning 0.9.2, not
+      verified by a run): `QuadTreeDistributor::ComputeInitialNodeCount` rounds
+      width / height, which is 0 for an image more than twice as tall as wide; the
+      distributor then keeps no keypoints, so such an image silently yields no features. Not a
+      crash. Decide whether to fix the node count (for example a floor of 1) and add a test
+      with a tall image.
+
+## Phase 1 code review findings deferred (2026-10-15, `.planning/phases/01-api-ownership-and-lifetime-contracts/01-REVIEW.md`)
+
+Findings of the Phase 1 code review that the 0.9.2 gap closure did not fix. Fixed in
+0.9.2: CR-01, CR-02, WR-01, WR-06, IN-07. IN-03 is already tracked in the `MapViewer`
+hardening item (`Start()` thread-creation failure leaves the state stuck), so it has no item
+here.
+
+- [ ] WR-02: an exception leaving `process_pending` or a sync handler (`worker_thread.cpp`
+      loop, `Observable::Notify`) calls `std::terminate` with no log line, and a throwing sync
+      handler skips the async pushes. Suggested fix: `try/catch` in the worker loop that logs
+      critically and marks the node stopped (or terminates after logging), deliver the async
+      pushes first or guard each sync handler, and document the policy in DESIGN §7.
+- [ ] WR-03: `MapFollower` thread ownership is `assert`-only and `owner_` is a plain
+      `std::thread::id`, so a second thread calling `Snapshot()` in a release build races
+      with `Update()`. Suggested fix: `std::atomic<std::thread::id>` claimed by compare and
+      exchange, `UsageError` on mismatch in every build.
+- [ ] WR-04: connecting or disconnecting (`ConnectAsync`, `Subscription` destruction or
+      `reset()`) is check-then-act against `Start()`: `Start()` can win the CAS between the
+      `ThrowIfRunning()` check and the vector edit. Suggested fix: document that connections
+      must be ordered before `Start()`, or add an "Editing" claim on the wiring that makes
+      `Start()` throw while a connection is edited.
+- [ ] WR-05: `Slam::Start()` rollback and `Slam::Stop()` can strand the state machine when a
+      component `Stop()` throws (for example `std::system_error` from `join`): the state stays
+      `Starting` or reverts to `Running` while the Tracker is already `Stopped`. Suggested
+      fix: stop each component in its own `try/catch`, always end in `Stopped`
+      (store and `notify_all`), rethrow the original exception.
+- [ ] IN-01: `InboxCore::Push` increments `pending_priority_` before `enqueue`, which can
+      throw `std::bad_alloc`; the count then stays inflated and local BA is cut short for
+      good. Suggested fix: undo the increment in a `catch (...)` and rethrow.
+- [ ] IN-02: logger edge cases (`logger.cpp`): `SetLevel` does not take the creation mutex;
+      `CreateLogger` returns a host application's own spdlog logger of the same name
+      ("Tracker"), bypassing the shared sink; `Initialize` accepts null sinks; the global
+      mutex in `CreateLogger` is on the rare `WarnIfBehind` / terminate paths. Suggested fix:
+      prefix library logger names, reject null sinks, take the mutex in `SetLevel`.
+- [ ] IN-04: test hygiene: `subscription_test.cpp` pops the sink it pushed on the shared
+      "AsyncObserver" logger only at the end of the body (a failed `ASSERT_` leaves it
+      attached); `ASSERT_EQ(ProbeEvent::alive.load(), 0)` couples tests through a global;
+      `ConcurrentLogAndInitialize` asserts nothing about the logged data. Suggested fix: an
+      RAII sink guard.
+- [ ] IN-05: process-terminating paths a JNI caller can reach by design (D-07): a
+      `Subscription` destroyed while its producer runs, `~Slam` on a component thread, a
+      `WorkerThread` destroyed on its own thread. Suggested fix: expose
+      `Subscription::producer_running()` or a `try_reset()` returning bool so the binding
+      can defer instead of aborting.
+- [ ] IN-06: small items in `image.h` and ORB code: `operator=(float)` and `operator T`
+      dereference a null buffer on an empty image; `operator<<` prints `uint8_t` pixels as
+      characters; `std::ceil((image_cols - PATCH_SIZE) / n_cols)` ceils an integer division
+      so the FAST grid can leave up to `n_cols - 1` right-hand columns uncovered (ORB-SLAM3
+      uses floating point; changing it changes the golden digests); `WrapAsCvMat` takes
+      `&image.At(0, 0, 0)` of a possibly empty image. Suggested fix: guard empty images, cast
+      before streaming, `std::ceil(static_cast<double>(...) / n_cols)` if full coverage is
+      intended (re-record the golden digests then).
 
 ## Review follow-ups (tracking states, 2026-10-03)
 
