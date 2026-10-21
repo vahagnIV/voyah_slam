@@ -16,6 +16,8 @@ public:
   typedef TFeatures::TDescriptors TDescriptors;
   typedef TDescriptorScalarType (*distance_f)(const TDescriptor &, const TDescriptor &);
 
+  // Throws std::invalid_argument (in every build) when `levels` is 0 or `scale_factor` is not a
+  // finite number greater than 1; nothing is computed from an invalid value.
   OrbFeatureExtractor(precision_t scale_factor = 1.2, size_t levels = 8,
                       unsigned init_threshold_FAST = 20,
                       unsigned min_threshold_FAST = 7);
@@ -34,12 +36,22 @@ public:
 
   // Nothing in the extractor changes after construction, so one extractor may be shared by several
   // threads as long as each passes its own Workspace.
+  //
+  // Both overloads throw std::invalid_argument (in every build, message containing "too small")
+  // when any pyramid level would be narrower or shorter than MinLevelSize() = 66 px (the 31 px
+  // ORB patch plus one 35 px FAST cell), and for an empty image. With the defaults (scale 1.2,
+  // 8 levels) the smallest level is the image divided by 1.2^7 = 3.58, so the smallest accepted
+  // image is 235x235 px. The check runs before the workspace is touched: a rejected call leaves
+  // the Workspace as it was.
   [[nodiscard]] TFeatures DetectAndExtract(const images::TWorkingImage &image, size_t number_of_features,
                                            Workspace &out_workspace) const;
   // Convenience: builds a temporary Workspace per call (allocates the pyramid); fine for tests
   // and one-offs. A loop over frames should reuse a Workspace instead.
   [[nodiscard]] TFeatures DetectAndExtract(const images::TWorkingImage &image, size_t number_of_features) const;
   static TDescriptorScalarType Distance(const TDescriptor& desc1, const TDescriptor& desc2);
+
+  // Smallest width and height, in pixels, of every pyramid level that DetectAndExtract accepts.
+  [[nodiscard]] static constexpr unsigned MinLevelSize() { return 66; }
 
   // Scale of pyramid `level` relative to the full-resolution image.
   [[nodiscard]] double ScaleFactor(uint8_t level) const;
@@ -66,6 +78,13 @@ private:
 
   std::vector<precision_t> level_sigma2_;
   std::vector<precision_t> inv_level_sigma2_;
+
+  // Returns `scale_factor` after checking the configuration (std::invalid_argument); used in the
+  // first member initializer so no member is computed from an invalid value.
+  static precision_t ValidatedScaleFactor(precision_t scale_factor, size_t levels);
+  // Throws std::invalid_argument when a pyramid level of a width x height image would be below
+  // MinLevelSize().
+  void CheckImageSize(size_t width, size_t height) const;
 
   void Initialize();
   static decltype(scale_factors_) ComputeScaleFactors(precision_t scale, size_t levels);

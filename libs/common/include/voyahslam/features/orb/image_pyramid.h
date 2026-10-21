@@ -27,6 +27,13 @@ public:
 
   [[nodiscard]] bool Initialized() const { return initialized_; };
 
+  // Width or height of the level with the given scale factor for a full-resolution
+  // width or height of `size`: the arithmetic Initialize() uses (multiply by
+  // 1 / scale_factor, round, cast to unsigned). Public so that a size check made
+  // before Initialize() (OrbFeatureExtractor::DetectAndExtract) cannot disagree
+  // with the levels Initialize() creates.
+  [[nodiscard]] static unsigned LevelSize(size_t size, precision_t scale_factor);
+
 private:
   unsigned image_width_{0};
   unsigned image_height_{0};
