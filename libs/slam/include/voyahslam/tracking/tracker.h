@@ -116,8 +116,8 @@ struct TrackerTestAccess;
 // projection gate, the reference Frame (the local Frame observing the most
 // final inliers) and, as its stage, the initial pose's source.
 //
-// Loss (spec section 2). With a vocabulary and a map of more than
-// min_map_frames_to_relocalize Frames, a failure enters RecentlyLost
+// Loss (spec section 2). With a vocabulary, RelocalizationOptions::enabled and
+// a map of more than min_map_frames_to_relocalize Frames, a failure enters RecentlyLost
 // (TrackingLost, final = false): each measurement tries relocalization
 // (relocalizer.h); a success resumes Tracking in the same map with the
 // velocity reset, and for post_relocalization_seconds from the relocalized

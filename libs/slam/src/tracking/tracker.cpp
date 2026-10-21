@@ -323,7 +323,7 @@ void Tracker<TFeatureExtractor>::TrackMeasurement(TMeasurement& measurement) {
     velocity_.reset();
     const double timestamp = TimestampOf(measurement);
     // State first: whoever observes TrackingLost also observes the new state.
-    if (vocabulary_ &&
+    if (vocabulary_ && options_.relocalization.enabled &&
         map_replica().num_keyframes() > options_.relocalization.min_map_frames_to_relocalize) {
         recently_lost_since_ = timestamp;
         SetState(TrackerState::RecentlyLost);
@@ -500,7 +500,7 @@ auto Tracker<TFeatureExtractor>::TrackReferenceFrame(const TMeasurement& measure
 template <typename TFeatureExtractor>
 auto Tracker<TFeatureExtractor>::TryRelocalize(const TMeasurement& measurement)
     -> std::optional<PoseResult> {
-    if (!vocabulary_) {
+    if (!vocabulary_ || !options_.relocalization.enabled) {
         return std::nullopt;
     }
     RelocalizationResult relocalized = Relocalize(map_replica(), measurement, *vocabulary_,

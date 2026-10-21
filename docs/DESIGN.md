@@ -2156,6 +2156,13 @@ Lost: TrackingLost(final = true) → the Mapper clears its map (one transaction,
 - Options: `TrackerOptions::relocalization` (`RelocalizationOptions`,
   `tracking/relocalizer.h`) holds the loss protocol and every §4 value below;
   the §3 reference-Frame values live in `TrackingOptions` (ruling B, amended).
+- Switch (0.9.1): `RelocalizationOptions::enabled` (default `true`, the 0.9.0
+  behavior). With `false`, even with a vocabulary, a failure goes straight to
+  `Lost` (`TrackingLost`, `final = true`): the Tracker never enters
+  `RecentlyLost` and never calls `Relocalize`. It is a real option, not
+  thresholds set out of reach; `min_map_frames_to_relocalize` and the other §4
+  values keep their defaults. Reference-Frame tracking (§3) is not
+  relocalization and is unaffected.
 
 **`TrackingStage`** (ruling C). `FrameTracked::stage` reports the **source of
 the initial pose** that the local-map step refined: `MotionModel`,
@@ -3097,7 +3104,7 @@ libs/
 cmake/VoyahTests.cmake      voyah_add_test_binary, voyah_optimize_target, check / check_all
 cmake/voyahslamConfig.cmake.in  installed CMake package config (find_dependency)
 vizualization/              voyahviz (+ voyahviz_tests)
-conanfile.py                package recipe voyahslam/0.9.0 (also the dev installs)
+conanfile.py                package recipe voyahslam/0.9.1 (also the dev installs)
 test_package/               conan create's consumer test (links voyahslam::voyahslam)
 profiles/                   linux-gcc13 (default + gnu20), android-arm64,
                             settings_user.yml (clang 21)
@@ -3485,6 +3492,7 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-14 | **Package version 0.8.0** (`conanfile.py`, `project()`; SOVERSION 0.8). Behavior change for consumers (the voyah_jni binding): `Logger::Initialize` may be called at any time and also re-targets components that already exist, so the binding no longer has to call it before creating a `Slam`; `Logger::SetLevel` and logger creation are thread-safe. No signature changes. | A public behavior change with a concurrency contract gets a new minor version while 0.x (as 0.2.0 to 0.7.0). |
 | 2026-10-15 | **Ownership audit #9 implemented (Release R6, branch `fix/image-views`; Phase 1 CONTEXT D-20, D-21).** `images::Image` is fixed in place, with no `ImageView` type (D-20): zero-initialised members (a default image is empty), row-wise view-correct `Convert<K>()`, `operator*=` and `operator*`, non-const `Set`, `CopyTo` copying `width * C * sizeof(T)` bytes per strided row, an overflow-checked size constructor (`std::length_error`), `size_t` view offsets and `Offset()`, an empty moved-from state, and the aliasing and `operator[]` rules documented. `operator[]` 1x1 channel indexing is kept and pinned by a test (research listed its offset as a defect; `img[y][x][c]` selecting channel `c` is the intended chain). New unit tests `ImageTest.*` (14), clean under AddressSanitizer. | The binding builds working images from Java-provided sizes (a wrapped allocation followed by a full-size copy overflowed the heap), and `Convert` / `operator*=` on a sub-image read or wrote the wrong pixels. A separate view type would have changed every `TWorkingImage` signature for no behaviour gain. The corridor1 40-frame binocular run is unchanged (39 FrameTracked, 3 Frames, 777 points). |
 | 2026-10-15 | **Package version 0.9.0** (`conanfile.py`, `project()`; SOVERSION 0.9). Behavior change for consumers (the voyah_jni binding): `Image(width, height)` throws `std::length_error` on size overflow, `Offset()` returns `size_t`, `Set` needs a non-const image, and `Convert` / `operator*` / `operator*=` on a sub-image now operate on the view. | A public behavior change gets a new minor version while 0.x (as 0.2.0 to 0.8.0). |
+| 2026-10-21 | **`RelocalizationOptions::enabled` (default `true`) for apps that offer a relocalization toggle (voyah_jni D-10); package version 0.9.1** (`conanfile.py`, `project()`; SOVERSION 0.9). With a vocabulary and `enabled = false` a loss goes straight to `Lost` (final `TrackingLost`) and `Relocalize` is never called; `enabled = true` behaves exactly as 0.9.0. `MapFollower::Snapshot` reserves its point vectors (no API change). | The binding must not fake the switch with impossible thresholds. A new field in a public options struct gets a new patch version (additive, default unchanged). |
 
 ## 9. Open Questions
 
