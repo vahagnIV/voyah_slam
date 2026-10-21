@@ -122,7 +122,7 @@ protected:
     }
 
     void Drain() {
-        while (mapper_.ProcessPending()) {
+        while (mapping::MapperTestAccess::ProcessPending(mapper_)) {
         }
     }
 
@@ -955,7 +955,7 @@ TEST_F(MapperInboxTest, DrainsToLatest) {
     for (size_t k = 0; k < 3; ++k) {
         PublishFrameTracked(1, next_ + k, TrackedPairs(next_ + k, num_points_ / 2));
     }
-    ASSERT_TRUE(mapper_.ProcessPending());
+    ASSERT_TRUE(mapping::MapperTestAccess::ProcessPending(mapper_));
 
     EXPECT_EQ(mapper_.num_frame_evaluations(), evaluations + 1);
     EXPECT_EQ(mapper_.backlog_skipped(), skipped + 2);
@@ -1925,7 +1925,7 @@ TEST_F(MapperCullingTest, CountersIncludeSkippedFrameTracked) {
         PublishFrameTracked(1, next_, pairs, map::FrameId{1}, num_points_, std::nullopt,
                             {found, unmatched});
     }
-    ASSERT_TRUE(mapper_.ProcessPending());
+    ASSERT_TRUE(mapping::MapperTestAccess::ProcessPending(mapper_));
     ASSERT_EQ(mapper_.num_frame_evaluations(), evaluations + 1);
 
     EXPECT_EQ(MapperTestAccess::NumVisible(mapper_, found), visible_before + 3);

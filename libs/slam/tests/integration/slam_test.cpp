@@ -891,9 +891,9 @@ TEST(SlamTest, MeasurementsAreShared) {
     }
     slam.Stop();
     // What the Mapper published before it stopped reaches both replicas.
-    while (slam.tracker().ProcessPending()) {
+    while (tracking::TrackerTestAccess::ProcessPending(slam.tracker())) {
     }
-    while (slam.loop_closer().ProcessPending()) {
+    while (loop_closing::LoopCloserTestAccess::ProcessPending(slam.loop_closer())) {
     }
 
     const auto& tracker_replica = tracking::TrackerTestAccess::MapReplica(slam.tracker());

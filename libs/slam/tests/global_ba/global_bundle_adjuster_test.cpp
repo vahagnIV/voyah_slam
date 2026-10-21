@@ -108,7 +108,7 @@ public:
     // are emptied before anything is destroyed.
     ~Harness() {
         global_ba_.Stop();
-        while (global_ba_.ProcessPending()) {
+        while (global_ba::GlobalBundleAdjusterTestAccess::ProcessPending(global_ba_)) {
         }
         Take();
     }
@@ -194,7 +194,7 @@ public:
     // Runs the GlobalBA until it is idle; returns what it published, or
     // nothing while held.
     std::vector<Result> Run() {
-        while (global_ba_.ProcessPending()) {
+        while (global_ba::GlobalBundleAdjusterTestAccess::ProcessPending(global_ba_)) {
         }
         if (hold_) {
             // The consumer keeps what was published, unacknowledged (legal: holding costs memory only).

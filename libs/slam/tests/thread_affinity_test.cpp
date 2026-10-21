@@ -73,6 +73,20 @@ concept HasNumKeyframesOfMap = requires(const T& t, map::MapId id) { t.num_keyfr
 template <typename T>
 concept HasNumKeyframes = requires(const T& t) { t.num_keyframes(); };
 
+// The worker's loop pass: a non-const call, so it is a separate concept.
+template <typename T>
+concept HasProcessPending = requires(T& t) { t.ProcessPending(); };
+
+static_assert(!HasProcessPending<TTracker>,
+              "Tracker::ProcessPending() is driven by the worker thread; tests use TrackerTestAccess");
+static_assert(!HasProcessPending<TMapper>,
+              "Mapper::ProcessPending() is driven by the worker thread; tests use MapperTestAccess");
+static_assert(!HasProcessPending<TLoopCloser>,
+              "LoopCloser::ProcessPending() is driven by the worker thread; tests use LoopCloserTestAccess");
+static_assert(!HasProcessPending<TGlobalBa>,
+              "GlobalBundleAdjuster::ProcessPending() is driven by the worker thread; tests use "
+              "GlobalBundleAdjusterTestAccess");
+
 static_assert(!HasAtlas<TTracker>, "Tracker::atlas() is Tracker-thread state");
 static_assert(!HasMapReplica<TTracker>, "Tracker::map_replica() is Tracker-thread state");
 static_assert(!HasLastMatches<TTracker>, "Tracker::last_matches() is Tracker-thread state");

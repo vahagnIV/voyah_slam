@@ -180,7 +180,8 @@ public:
     // Start() twice or after Stop() throws UsageError; Stop() before Start() moves
     // to Stopped; Stop() is idempotent and every concurrent call returns only after
     // the worker is joined. Both are safe from any thread, except that Stop() on
-    // the Tracker's own worker thread throws UsageError (it would join itself).
+    // the Tracker's own worker thread throws UsageError (it would join itself), in
+    // every state, also while another thread is stopping or starting it.
     void Start();
     void Stop();
     // True on this component's own worker thread (a sync handler or other callback
@@ -193,12 +194,6 @@ public:
     // throws UsageError (D-12).
     void Track(TMonocularMeasurement measurement);
     void Track(TBinocularMeasurement measurement);
-
-    // One pass of the Tracker loop: drains the inbox, then tracks at most one
-    // measurement. Returns true iff an event or a measurement was processed.
-    // Called by the worker thread; public so tests can drive it synchronously
-    // (never concurrently with a running worker).
-    [[nodiscard]] bool ProcessPending();
 
     // Safe to call from any thread.
     [[nodiscard]] TrackerState state() const { return state_.load(std::memory_order_acquire); }
@@ -214,6 +209,12 @@ public:
 
 private:
     friend struct TrackerTestAccess;
+
+    // One pass of the Tracker loop: drains the inbox, then tracks at most one
+    // measurement. Returns true iff an event or a measurement was processed.
+    // Called by the worker thread; tests drive it synchronously through
+    // TrackerTestAccess::ProcessPending (never concurrently with a running worker).
+    [[nodiscard]] bool ProcessPending();
 
     // Tracker-thread state; tests that drive ProcessPending() synchronously
     // read it through TrackerTestAccess. Apps read the map through

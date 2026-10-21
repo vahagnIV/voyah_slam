@@ -16,6 +16,7 @@
 
 #include "support/synthetic_sequence.h"
 #include "support/test_measurements.h"
+#include <test_access.h>
 #include <voyahslam/events/async_observer.h>
 #include <voyahslam/events/events.h>
 #include <voyahslam/events/observable.h>
@@ -611,7 +612,7 @@ SyntheticMap BuildSyntheticMap() {
         event->map_id = map::MapId{0};
         event->measurement = frames[i].measurement;
         tracker.Notify(std::move(event));
-        while (mapper.ProcessPending()) {
+        while (mapping::MapperTestAccess::ProcessPending(mapper)) {
         }
     }
     EXPECT_EQ(mapper.state(), mapping::MapperState::Mapping);

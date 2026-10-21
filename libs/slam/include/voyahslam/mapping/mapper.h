@@ -190,17 +190,13 @@ public:
     // Start() twice or after Stop() throws UsageError; Stop() before Start() moves
     // to Stopped; Stop() is idempotent and every concurrent call returns only after
     // the worker is joined. Both are safe from any thread, except that Stop() on
-    // the component's own worker thread throws UsageError (it would join itself).
+    // the component's own worker thread throws UsageError (it would join itself), in
+    // every state, also while another thread is stopping or starting it.
     void Start();
     void Stop();
     // True on this component's own worker thread (a sync handler or other callback
     // it runs), where Stop() is refused with UsageError. Any thread.
     [[nodiscard]] bool OnWorkerThread() const { return worker_.OnWorkerThread(); }
-
-    // Drains the inbox. Returns true iff an event was processed. Called by the
-    // worker thread; public so tests can drive it synchronously (never
-    // concurrently with a running worker).
-    [[nodiscard]] bool ProcessPending();
 
     // Safe to call from any thread.
     [[nodiscard]] MapperState state() const { return state_.load(std::memory_order_acquire); }
@@ -259,6 +255,11 @@ public:
 
 private:
     friend struct MapperTestAccess;
+
+    // Drains the inbox. Returns true iff an event was processed. Called by the
+    // worker thread; tests drive it synchronously through
+    // MapperTestAccess::ProcessPending (never concurrently with a running worker).
+    [[nodiscard]] bool ProcessPending();
 
     // The current map's observations. Mapper-thread state; tests read it through
     // MapperTestAccess; apps use mapping::MapFollower.

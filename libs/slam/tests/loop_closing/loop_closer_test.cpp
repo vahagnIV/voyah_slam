@@ -260,7 +260,7 @@ public:
     // The inbox holds this harness's events and capture_ the LoopCloser's:
     // both are emptied before anything is destroyed.
     ~Harness() {
-        while (loop_closer_.ProcessPending()) {
+        while (loop_closing::LoopCloserTestAccess::ProcessPending(loop_closer_)) {
         }
         Take();
     }
@@ -378,7 +378,7 @@ public:
 
     // Runs the LoopCloser; returns what it published, or nothing while held.
     std::vector<Loop> Run() {
-        while (loop_closer_.ProcessPending()) {
+        while (loop_closing::LoopCloserTestAccess::ProcessPending(loop_closer_)) {
         }
         if (hold_) {
             // The consumer keeps what was published, unacknowledged (legal: holding costs memory only).

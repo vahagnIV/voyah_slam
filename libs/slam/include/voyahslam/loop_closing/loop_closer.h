@@ -78,7 +78,7 @@ struct LoopCloserTestAccess;
 // Mapper's transaction does.
 //
 // Thread safety. Every public accessor is either atomic (any thread) or a
-// lifecycle/driver call (Start, Stop, ProcessPending, the test hook setter).
+// lifecycle call (Start, Stop) or the test hook setter; ProcessPending() is private.
 // The replica and the worker-written statistics are private (tests read them
 // through LoopCloserTestAccess): apps read the map through
 // mapping::MapFollower, and the query figures are in the Stop() summary log.
@@ -98,19 +98,13 @@ public:
     // Start() twice or after Stop() throws UsageError; Stop() before Start() moves
     // to Stopped; Stop() is idempotent and every concurrent call returns only after
     // the worker is joined. Both are safe from any thread, except that Stop() on
-    // the component's own worker thread throws UsageError (it would join itself).
+    // the component's own worker thread throws UsageError (it would join itself), in
+    // every state, also while another thread is stopping or starting it.
     void Start();
     void Stop();
     // True on this component's own worker thread (a sync handler or other callback
     // it runs), where Stop() is refused with UsageError. Any thread.
     [[nodiscard]] bool OnWorkerThread() const { return worker_.OnWorkerThread(); }
-
-    // Drains the inbox, applying each transaction and queueing its new Frames
-    // as queries (dropping the oldest beyond max_query_backlog), then detects
-    // the oldest query. Returns true iff an event or a query was processed.
-    // Called by the worker thread; public so tests can drive it
-    // synchronously (never concurrently with a running worker).
-    [[nodiscard]] bool ProcessPending();
 
     // Tests: `hook` is called on the LoopCloser's thread before each query is
     // detected (a slow detector, or one the Mapper outpaces). Set it while
@@ -119,6 +113,13 @@ public:
 
 private:
     friend struct LoopCloserTestAccess;
+
+    // Drains the inbox, applying each transaction and queueing its new Frames
+    // as queries (dropping the oldest beyond max_query_backlog), then detects
+    // the oldest query. Returns true iff an event or a query was processed.
+    // Called by the worker thread; tests drive it synchronously through
+    // LoopCloserTestAccess::ProcessPending (never concurrently with a running worker).
+    [[nodiscard]] bool ProcessPending();
 
     // LoopCloser-thread state; tests that drive ProcessPending() synchronously
     // read it through LoopCloserTestAccess. Apps read the map through
