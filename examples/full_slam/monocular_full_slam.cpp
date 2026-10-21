@@ -53,7 +53,8 @@ int main(int argc, char** argv) {
         if (options.show) window.emplace("monocular_full_slam");
         std::optional<full_slam::TrajectoryWriter<TFeatureExtractor>> trajectory;
         if (!options.trajectory_out.empty()) trajectory.emplace(options.trajectory_out);
-        // The app's own read path to the map: updated on this thread after Stop.
+        // The app's own read path to the map: updated on this thread every frame
+        // and once more after Stop().
         // Declared before the wires, so it outlives them.
         mapping::MapFollower<TFeatureExtractor> follower;
         // The external wires. Declared before slam, so it is destroyed after it:
@@ -98,6 +99,9 @@ int main(int argc, char** argv) {
             }
             slam.tracker().Track(std::move(measurement));
             if (trajectory) trajectory->Poll();
+            // Drained every frame, on this thread (the follower's owner): its inbox
+            // holds at most the transactions published during one frame.
+            follower.Update();
 
             stats.Add(lateness, loaded - start, extracted - loaded, num_features);
             if (window && full_slam::IsQuitKey(window->WaitKey(1))) {
@@ -130,7 +134,9 @@ int main(int argc, char** argv) {
                   << "mapper state: " << full_slam::StateName(slam.mapper().state()) << "\n"
                   << "map: " << slam.mapper().num_keyframes() << " Frames, " << slam.mapper().num_map_points()
                   << " points\n";
-        follower.Update();
+        const size_t applied_after_stop = follower.Update();
+        std::cout << "map follower: " << applied_after_stop << " of " << follower.num_transactions_applied()
+                  << " transactions applied after Stop()\n";
         full_slam::PrintAtlas(*follower.Snapshot(), slam.mapper().num_merges(), std::cout);
         std::cout << "viewer: " << viewer.events_processed() << " events processed\n";
     } catch (const std::exception& e) {
