@@ -137,8 +137,10 @@ compare-and-swap, not an agreement between callers. Rules:
   `Stop()`, `AddObserver` / `AddSyncObserver` or `Subscription::reset()` while
   `Starting`, `Running` or `Stopping`, `Tracker::Track()` after `Stop()` (it
   can never be processed), `Stop()` called on a component's own worker
-  thread (it would join itself), and `Slam::Stop()` called on any component's
-  worker thread (checked before anything is stopped, see below).
+  thread (it would join itself; refused in every state, checked before the state
+  is read, so also while another thread is stopping or starting the component:
+  0.9.2, verification gap 1, review WR-01), and `Slam::Stop()` called on any
+  component's worker thread (checked before anything is stopped, see below).
 - `Stop()` before `Start()` moves `Created` to `Stopped` (the component can no longer
   start). `Stop()` is idempotent, and a `Stop()` that finds `Starting` or
   `Stopping` waits for the other thread and returns only after the worker is
@@ -151,10 +153,15 @@ compare-and-swap, not an agreement between callers. Rules:
   every component it started (those not started go `Created` to `Stopped`),
   stores `Stopped` and rethrows, so a failed `Start()` is a dead `Slam`, not a
   half-started one.
-- Implementation: `EventNode::StartWith(start_worker)` / `StopWith(stop_worker)`
-  hold the CAS and the waiting (`std::atomic::wait` / `notify_all`, control plane
+- Implementation: `EventNode::StartWith(start_worker)` /
+  `StopWith(stop_worker, on_worker_thread)` hold the CAS and the waiting (`std::atomic::wait` / `notify_all`, control plane
   only; no mutex); the component passes a lambda that starts or joins its
-  `WorkerThread`. `Slam` implements the same rules on its own atomic.
+  `WorkerThread`. `StopWith` asks `on_worker_thread()` (the component's
+  `worker_.OnWorkerThread()`; required, no overload without it) first and throws
+  `UsageError` before it reads the state: a worker that waited for `Starting` or
+  `Stopping` to settle would wait for the thread that joins it. A refused call
+  changes nothing (`run_state()`, `GlobalBundleAdjuster::stop_requested()`).
+  `Slam` implements the same rules on its own atomic.
 
 **`Slam::Stop()` on a component's own thread (option (a), chosen by the user
 2026-10-14, 0.6.0).** `Slam::Stop()` first asks every component that owns a worker
@@ -181,7 +188,10 @@ producer runs (§6.1, §7). Tests: `SlamTest.LifecycleStopFromComponentThreadCha
 `WorkerThreadTest.OnWorkerThreadIsTrueOnlyOnTheWorker`.
 **Consequence for callers:** a callback that runs on a component thread (a sync
 handler, a JNI callback) must not stop or destroy the `Slam`; the first is a
-recoverable `UsageError`, the second ends the process.
+recoverable `UsageError`, the second ends the process. A callback must not call
+another component's `Stop()` either: that is not refused (only the caller's own
+component is), so two callbacks on two components that stop each other's
+component deadlock (open item in `docs/TODO.md`, "Ownership audit").
 
 Every component derives from `events::EventNode` (`events/event_node.h`, no
 virtuals): an `Observable` it publishes through, one `AsyncObserver` inbox it
@@ -194,15 +204,20 @@ defined in `libs/slam/src/` with `INSTANTIATE_CLASS` (ORB; SIFT removed 2026-10-
 
 | Component | Header | Public API so far |
 |---|---|---|
-| `tracking::Tracker<FE>` | `tracking/tracker.h` | `Start()`, `Stop()`, `Track(TMonocularMeasurement)`, `Track(TBinocularMeasurement)`, `ProcessPending()`, `state()`, `current_map_id()`, `pending_measurements()`, `num_processed()`; `atlas()`, `map_replica()` and `last_matches()` are Tracker-thread state, private and read by tests through `TrackerTestAccess` |
-| `mapping::Mapper<FE>` | `mapping/mapper.h` | `Mapper(MapperOptions)`, `Start()`, `Stop()`, `ProcessPending()`, and the any-thread atomics: `state()`, `current_map_id()`, `num_keyframes()` (no argument), `num_map_points()` and the other counters. The Mapper-thread accessors (`covisibility()`, `Reference()`, `NumVisible()`, `NumFound()`, `last_local_ba()`, `BowVectorOf()`, `Parent()`, `LoopEdges()`, `KeyFrame()`, `map_ids()`, `active_map()`, `num_keyframes(MapId)`) are private and read by tests through `MapperTestAccess`; apps read the map through a `MapFollower` |
-| `loop_closing::LoopCloser<FE>` | `loop_closing/loop_closer.h` | `LoopCloser(LoopCloserOptions, vocabulary)`, `Start()`, `Stop()`, `ProcessPending()` (applies every transaction to its replica, queues the new Frames as queries, detects one; with loop closing off or no vocabulary only acknowledges). `atlas()`, `map_replica()` and the five worker-written stats accessors `num_coincidences()`, `num_merge_coincidences()`, `last_stats()`, `last_merge_stats()`, `query_stats()` are private and test-only through `LoopCloserTestAccess` (the `Stop()` summary log reports the query figures) — see "Loop Closing" (merge detection since map merging Task 4) |
-| `global_ba::GlobalBundleAdjuster<FE>` | `global_ba/global_bundle_adjuster.h` | `GlobalBundleAdjuster(GlobalBaOptions)`, `Start()`, `Stop()` (interrupts a running BA), `ProcessPending()` (applies every transaction, runs one pending global BA), and the atomic run counters `num_runs_started()`, `num_runs_interrupted()` (`std::atomic<size_t>`, any thread); `atlas()` and `map_replica()` are private and test-only through `GlobalBundleAdjusterTestAccess`; test-only `stop_requested()`, `set_run_hook()`, `set_poll_hook()`, `set_publish_hook()` — see "Global BA" |
+| `tracking::Tracker<FE>` | `tracking/tracker.h` | `Start()`, `Stop()`, `Track(TMonocularMeasurement)`, `Track(TBinocularMeasurement)`, `state()`, `current_map_id()`, `pending_measurements()`, `num_processed()`; `atlas()`, `map_replica()` and `last_matches()` are Tracker-thread state, private and read by tests through `TrackerTestAccess` |
+| `mapping::Mapper<FE>` | `mapping/mapper.h` | `Mapper(MapperOptions)`, `Start()`, `Stop()`, and the any-thread atomics: `state()`, `current_map_id()`, `num_keyframes()` (no argument), `num_map_points()` and the other counters. The Mapper-thread accessors (`covisibility()`, `Reference()`, `NumVisible()`, `NumFound()`, `last_local_ba()`, `BowVectorOf()`, `Parent()`, `LoopEdges()`, `KeyFrame()`, `map_ids()`, `active_map()`, `num_keyframes(MapId)`) are private and read by tests through `MapperTestAccess`; apps read the map through a `MapFollower` |
+| `loop_closing::LoopCloser<FE>` | `loop_closing/loop_closer.h` | `LoopCloser(LoopCloserOptions, vocabulary)`, `Start()`, `Stop()`; its private `ProcessPending()` applies every transaction to its replica, queues the new Frames as queries and detects one (with loop closing off or no vocabulary it only acknowledges). `atlas()`, `map_replica()` and the five worker-written stats accessors `num_coincidences()`, `num_merge_coincidences()`, `last_stats()`, `last_merge_stats()`, `query_stats()` are private and test-only through `LoopCloserTestAccess` (the `Stop()` summary log reports the query figures) — see "Loop Closing" (merge detection since map merging Task 4) |
+| `global_ba::GlobalBundleAdjuster<FE>` | `global_ba/global_bundle_adjuster.h` | `GlobalBundleAdjuster(GlobalBaOptions)`, `Start()`, `Stop()` (interrupts a running BA), and the atomic run counters `num_runs_started()`, `num_runs_interrupted()` (`std::atomic<size_t>`, any thread); `atlas()` and `map_replica()` are private and test-only through `GlobalBundleAdjusterTestAccess`; test-only `stop_requested()`, `set_run_hook()`, `set_poll_hook()`, `set_publish_hook()` — see "Global BA" |
 
 Each component owns a `events::WorkerThread` (`events/worker_thread.h`) bound to
 the `events::WakeSignal` of its `EventNode` (`events/wake_signal.h`) and a
-public `[[nodiscard]] bool ProcessPending()` (one pass, returns true if it did
-work; tests drive it without a thread). Spec:
+private `[[nodiscard]] bool ProcessPending()` (one pass, returns true if it did
+work; the GlobalBA's pass also runs one pending global BA). `ProcessPending()` is
+private since 0.9.2 (review IN-07): the worker drives it, and tests drive it
+synchronously through `*TestAccess::ProcessPending` (`TrackerTestAccess`,
+`MapperTestAccess`, `LoopCloserTestAccess`, `GlobalBundleAdjusterTestAccess`),
+never concurrently with a running worker; `ThreadAffinityTest` fails the build
+if one becomes public again. Spec:
 `docs/superpowers/specs/2026-10-03-tracking-states-design.md`.
 
 **Waking without locks (resolves OQ 20).** `WakeSignal` is a
@@ -255,7 +270,11 @@ Atlas into a `mapping::MapSnapshot` (`mapping/map_snapshot.h`) and returns it as
 - **Cost.** A follower holds a full replica (descriptors, BoW, covisibility),
   so its memory is that of the Tracker's, and a `Snapshot()` is O(map). A
   follower that is never updated lets its inbox grow; the "consumer is behind"
-  warning names it "MapFollower".
+  warning names it "MapFollower". The example apps therefore call `Update()`
+  every frame, next to the trajectory poll, and once more after `Stop()`; they
+  print how many transactions were still pending at `Stop()` (`map follower: k
+  of N transactions applied after Stop()`), then print the Atlas from a
+  snapshot (0.9.2, review WR-06).
 - **Defined in the library, not in its header (2026-10-14).** Every member,
   trivial accessors included, is out of line and instantiated in `voyah_slam`,
   so an app that uses the follower instantiates none of the replica code,
@@ -3209,8 +3228,8 @@ profiles/                   linux-gcc13 (default + gnu20), android-arm64,
 throws almost nowhere (only `io/read_image.cpp`), and this is its first policy.
 An invalid call sequence (connecting to a producer that runs, resetting a
 `Subscription` while its producer runs, `Start()` twice or after `Stop()`,
-`Tracker::Track()` after `Stop()`, `Stop()` on a component's own worker thread and
-`Slam::Stop()` on any component's worker thread; ownership audit #6, §4 "Lifecycle") throws `voyahslam::UsageError` (`voyahslam/errors.h`, a
+`Tracker::Track()` after `Stop()`, `Stop()` on a component's own worker thread (in
+every state) and `Slam::Stop()` on any component's worker thread; ownership audit #6, §4 "Lifecycle") throws `voyahslam::UsageError` (`voyahslam/errors.h`, a
 `std::logic_error`) in every build, never only an `assert`, because the caller
 (a C++ app, the JNI binding) can recover or at least report it; the binding maps
 it to `IllegalStateException`. **Destructors never throw:** a misuse that can only
@@ -3229,6 +3248,11 @@ while its producer runs, and `~Slam()` on one of its own component threads (§4
   per target in `voyah_add_test_binary` and in `examples/full_slam`), so a
   discarded `[[nodiscard]]` `Subscription` is a build error there. The installed
   package build is not affected.
+- A test for a would-be deadlock (a `Stop()` that waits for the thread joining
+  its caller) runs the blocking call on a helper thread under a deadline and,
+  when the deadline passes, writes "DEADLOCK" to stderr and calls
+  `std::_Exit(1)`: the stuck object cannot be destroyed, so a bounded exit is the
+  only way the test fails instead of hanging the run (0.9.2).
 
 **Build & test (Conan 2 + CMake):**
 - Dependencies (`conanfile.py`; was `conanfile.txt` until 2026-10-11): eigen,
@@ -3493,6 +3517,9 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-15 | **Ownership audit #9 implemented (Release R6, branch `fix/image-views`; Phase 1 CONTEXT D-20, D-21).** `images::Image` is fixed in place, with no `ImageView` type (D-20): zero-initialised members (a default image is empty), row-wise view-correct `Convert<K>()`, `operator*=` and `operator*`, non-const `Set`, `CopyTo` copying `width * C * sizeof(T)` bytes per strided row, an overflow-checked size constructor (`std::length_error`), `size_t` view offsets and `Offset()`, an empty moved-from state, and the aliasing and `operator[]` rules documented. `operator[]` 1x1 channel indexing is kept and pinned by a test (research listed its offset as a defect; `img[y][x][c]` selecting channel `c` is the intended chain). New unit tests `ImageTest.*` (14), clean under AddressSanitizer. | The binding builds working images from Java-provided sizes (a wrapped allocation followed by a full-size copy overflowed the heap), and `Convert` / `operator*=` on a sub-image read or wrote the wrong pixels. A separate view type would have changed every `TWorkingImage` signature for no behaviour gain. The corridor1 40-frame binocular run is unchanged (39 FrameTracked, 3 Frames, 777 points). |
 | 2026-10-15 | **Package version 0.9.0** (`conanfile.py`, `project()`; SOVERSION 0.9). Behavior change for consumers (the voyah_jni binding): `Image(width, height)` throws `std::length_error` on size overflow, `Offset()` returns `size_t`, `Set` needs a non-const image, and `Convert` / `operator*` / `operator*=` on a sub-image now operate on the view. | A public behavior change gets a new minor version while 0.x (as 0.2.0 to 0.8.0). |
 | 2026-10-21 | **`RelocalizationOptions::enabled` (default `true`) for apps that offer a relocalization toggle (voyah_jni D-10); package version 0.9.1** (`conanfile.py`, `project()`; SOVERSION 0.9). With a vocabulary and `enabled = false` a loss goes straight to `Lost` (final `TrackingLost`) and `Relocalize` is never called; `enabled = true` behaves exactly as 0.9.0. `MapFollower::Snapshot` reserves its point vectors (no API change). | The binding must not fake the switch with impossible thresholds. A new field in a public options struct gets a new patch version (additive, default unchanged). |
+| 2026-10-21 | **Own-thread `Stop()` refused in every state (Phase 1 verification gap 1, review WR-01; branch `fix/phase1-gaps`, 0.9.2).** `EventNode::StopWith(stop_worker, on_worker_thread)` evaluates `on_worker_thread()` first and throws `UsageError("Stop() from the component's own worker thread")` before it reads the state; the one-argument form is deleted, so a component cannot forget the predicate. Tracker, Mapper, LoopCloser and GlobalBA pass `worker_.OnWorkerThread()`; the two test nodes pass their own (`TestNode`: `false`). A refused call changes nothing (`run_state()`, `stop_requested()`). Tests: `LifecycleTest.StopFromWorkerThreadWhileAnotherThreadStopsThrows`, `StopFromWorkerThreadWhileStartingThrows`, `SlamTest.LifecycleComponentStopOnItsThreadWhileSlamStopsThrows` (before the fix the first and the third ended with the watchdog's "DEADLOCK" line, the second failed its "caught while Starting" expectation); TSan clean (`LifecycleTest.*` x50). | The documented contract (D-09, D-11) held only from `Running`: in `Starting` and `Stopping` the state loop waited for the other thread to settle, and the other thread was joining the caller. A JNI callback that stops its component while `close()` stops the `Slam` hung both threads (found by the 2026-10-15 verification). Checking before the state switch is one atomic load, lock-free like `Slam::Stop()`'s check. |
+| 2026-10-21 | **`ProcessPending()` private behind `*TestAccess` (Phase 1 verification gap 2, review IN-07; 0.9.2).** The member of Tracker, Mapper, LoopCloser and GlobalBA moved to the private section after the existing `friend struct *TestAccess`; the four structs gained a `ProcessPending` wrapper (`out_` parameter) and every test call site uses it; `ThreadAffinityTest` gained `HasProcessPending` and four `static_assert(!...)`. Chosen over a run-time `UsageError`. | (1) Only tests call it (examples, viewer, test_package, benchmarks, tools and the voyah_jni API doc show no other caller). (2) It is the D-14 pattern of every other thread-affine member of these classes: misuse fails at compile time. (3) A run-time check (throw unless Created/Stopped or the worker) is check-then-act against a concurrent `Start()`, the race class of review WR-04, and would add atomic loads to each worker pass. |
+| 2026-10-21 | **Example apps update the `MapFollower` every frame (review WR-06; amends the D-26 example detail "Update()d after Stop()", user decision 2026-10-21; 0.9.2).** `binocular_full_slam` and `monocular_full_slam` call `follower.Update()` after `trajectory->Poll()` in the frame loop and once more after `Stop()`, and print `map follower: k of N transactions applied after Stop()`. | An undrained follower holds every `MapTransaction` until `Stop()`, and the examples are what users copy. Measured on corridor1 (`--rate=0 --max-frames=40`, Debug tree): binocular before `5 of 5` (every transaction waited for Stop), after `0 of 5`; 39 `FrameTracked` lines and `map: 3 Frames, 777 points` both times (monocular ends in WaitingForMap, `0 of 0`). |
 
 ## 9. Open Questions
 

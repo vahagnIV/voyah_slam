@@ -1037,6 +1037,21 @@ and android-arm64; tell the voyah_jni session the new version.
 - [ ] `Image::operator[]` on a single-row image returns a pixel, not the row
       (shape-dependent: row, pixel or channel by the image's shape; no caller
       outside the header). Decide whether to make it uniform when a caller needs it.
+- [x] ~~Phase 1 verification gaps and review WR-06~~ (done 2026-10-21, 0.9.2,
+      branch `fix/phase1-gaps`): `Stop()` on a component's own worker throws
+      `UsageError` in every state, also while another thread is stopping or starting
+      it (`EventNode::StopWith(stop_worker, on_worker_thread)`; gap 1, WR-01);
+      `ProcessPending()` of Tracker, Mapper, LoopCloser and GlobalBA is private
+      behind the `*TestAccess` structs (gap 2, IN-07); the example apps update the
+      `MapFollower` every frame (WR-06). DESIGN §4 "Lifecycle", §8.
+- [ ] A component's `Stop()` called on another component's worker thread is not
+      refused: two callbacks that stop each other's component deadlock (found while
+      planning the 0.9.2 gap closure, by reading; `Slam::Stop()` already refuses every
+      component thread).
+- [ ] The test hook setters `LoopCloser::set_query_hook` and
+      `GlobalBundleAdjuster::set_run_hook` / `set_poll_hook` / `set_publish_hook` are
+      public and only documented as "set while stopped"; same hazard class as IN-07
+      (left out of 0.9.2 by its scope).
 
 ## Review follow-ups (tracking states, 2026-10-03)
 
