@@ -9,6 +9,7 @@
 #include <memory>
 #include <ostream>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 namespace voyahslam::images {
@@ -36,6 +37,18 @@ namespace voyahslam::images {
 //
 // Offsets are size_t end to end (a view into a buffer of more than 2^32
 // elements keeps its offset).
+//
+// Views and CopyTo are checked in EVERY build (the sizes may come from a
+// caller, e.g. the JNI binding, and an unchecked view or copy writes outside
+// the buffer): Image(parent, x, y, w, h) throws std::out_of_range when the
+// rectangle does not lie inside the parent (the bound is the immediate parent,
+// so a view of a view cannot reach outside the outer view; a view touching the
+// right and bottom borders, or an empty view inside the bounds, is fine), and
+// CopyTo throws std::invalid_argument when the target's width or height differs
+// from the source's, before any element is copied. Both are O(1). The
+// per-pixel paths At, Set, operator[], operator T and operator=(float) are
+// deliberately unchecked (this header is compiled into the -O0 example apps and
+// used per pixel): the caller keeps the indices inside the image.
 template <typename T, int C> class Image {
 public:
   typedef T TScalar;
@@ -47,11 +60,10 @@ public:
       : offset_(0), width_(width), height_(height), stride_(width),
         data_(AllocateElements(width, height)) {}
 
+  // Throws std::out_of_range when the rectangle is not inside `other`.
   Image(Image<T, C> &other, unsigned start_x, unsigned start_y, unsigned width,
         unsigned height)
-      : Image(other,
-              other.offset_ +
-                  (static_cast<size_t>(start_y) * other.stride_ + start_x) * C,
+      : Image(other, CheckedViewOffset(other, start_x, start_y, width, height),
               width, height) {}
 
   [[nodiscard]] unsigned Width() const { return width_; }
@@ -163,11 +175,16 @@ public:
 
   operator T() const { return data_[offset_]; }
 
-  // Copies this view's pixels into `other` (same width and height), row by
-  // row when either side is strided.
+  // Copies this view's pixels into `other`, row by row when either side is
+  // strided. Throws std::invalid_argument, before any element is copied, when
+  // `other` has another width or height (also when one side is empty).
   void CopyTo(Image<T, C> &other) const {
-    assert(other.Width() == Width());
-    assert(other.Height() == Height());
+    if (other.width_ != width_ || other.height_ != height_) {
+      throw std::invalid_argument(
+          "Image::CopyTo: target is " + std::to_string(other.width_) + "x" +
+          std::to_string(other.height_) + ", source is " +
+          std::to_string(width_) + "x" + std::to_string(height_));
+    }
     if (width_ == 0 || height_ == 0) {
       return;
     }
@@ -187,6 +204,25 @@ private:
   Image(Image<T, C> &other, size_t offset, unsigned width, unsigned height)
       : offset_(offset), width_(width), height_(height), stride_(other.stride_),
         data_(other.data_) {}
+
+  // The element offset of the view (start_x, start_y, width, height) of
+  // `parent`; throws std::out_of_range when the rectangle is not inside the
+  // parent. The sums are computed in size_t, so large values cannot wrap.
+  static size_t CheckedViewOffset(const Image<T, C> &parent, unsigned start_x,
+                                  unsigned start_y, unsigned width,
+                                  unsigned height) {
+    if (static_cast<size_t>(start_x) + width > parent.width_ ||
+        static_cast<size_t>(start_y) + height > parent.height_) {
+      throw std::out_of_range(
+          "Image view (x=" + std::to_string(start_x) +
+          ", y=" + std::to_string(start_y) + ", " + std::to_string(width) +
+          "x" + std::to_string(height) + ") is outside its parent (" +
+          std::to_string(parent.width_) + "x" + std::to_string(parent.height_) +
+          ")");
+    }
+    return parent.offset_ +
+           (static_cast<size_t>(start_y) * parent.stride_ + start_x) * C;
+  }
 
   // Element count computed in size_t; throws instead of allocating a wrapped
   // size (see the class comment).

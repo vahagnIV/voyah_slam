@@ -89,11 +89,20 @@ protected:
     // Created -> Stopped; Running -> Stopping -> stop_worker() -> Stopped (the
     // worker is joined by then); Starting or Stopping: waits until the other
     // thread settled the state and retries, so every concurrent Stop() returns
-    // only after the worker is joined; Stopped: returns. If stop_worker throws
-    // (a Stop() on the component's own worker thread), the state goes back to
-    // Running and the exception propagates.
-    template <typename TStopWorker>
-    void StopWith(TStopWorker&& stop_worker) {
+    // only after the worker is joined; Stopped: returns.
+    //
+    // `on_worker_thread()` says whether the caller is this component's own worker
+    // thread. It is asked first, before the state is read, so a Stop() from the
+    // worker throws UsageError in every state: waiting for the state to settle
+    // while another thread is Stopping (or Starting) the component would wait for
+    // the thread that joins the caller (0.9.2, review WR-01). A refused call changes
+    // nothing. If `stop_worker` throws for another reason (a failed join), the state
+    // goes back to Running and the exception propagates. A node without a worker
+    // thread passes a predicate that returns false; there is no overload without
+    // it, so a component cannot forget the check.
+    template <typename TStopWorker, typename TOnWorkerThread>
+    void StopWith(TStopWorker&& stop_worker, TOnWorkerThread&& on_worker_thread) {
+        if (on_worker_thread()) throw UsageError("Stop() from the component's own worker thread");
         while (true) {
             RunState state = observable_.state();
             switch (state) {

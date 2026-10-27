@@ -137,8 +137,10 @@ compare-and-swap, not an agreement between callers. Rules:
   `Stop()`, `AddObserver` / `AddSyncObserver` or `Subscription::reset()` while
   `Starting`, `Running` or `Stopping`, `Tracker::Track()` after `Stop()` (it
   can never be processed), `Stop()` called on a component's own worker
-  thread (it would join itself), and `Slam::Stop()` called on any component's
-  worker thread (checked before anything is stopped, see below).
+  thread (it would join itself; refused in every state, checked before the state
+  is read, so also while another thread is stopping or starting the component:
+  0.9.2, verification gap 1, review WR-01), and `Slam::Stop()` called on any
+  component's worker thread (checked before anything is stopped, see below).
 - `Stop()` before `Start()` moves `Created` to `Stopped` (the component can no longer
   start). `Stop()` is idempotent, and a `Stop()` that finds `Starting` or
   `Stopping` waits for the other thread and returns only after the worker is
@@ -151,10 +153,15 @@ compare-and-swap, not an agreement between callers. Rules:
   every component it started (those not started go `Created` to `Stopped`),
   stores `Stopped` and rethrows, so a failed `Start()` is a dead `Slam`, not a
   half-started one.
-- Implementation: `EventNode::StartWith(start_worker)` / `StopWith(stop_worker)`
-  hold the CAS and the waiting (`std::atomic::wait` / `notify_all`, control plane
+- Implementation: `EventNode::StartWith(start_worker)` /
+  `StopWith(stop_worker, on_worker_thread)` hold the CAS and the waiting (`std::atomic::wait` / `notify_all`, control plane
   only; no mutex); the component passes a lambda that starts or joins its
-  `WorkerThread`. `Slam` implements the same rules on its own atomic.
+  `WorkerThread`. `StopWith` asks `on_worker_thread()` (the component's
+  `worker_.OnWorkerThread()`; required, no overload without it) first and throws
+  `UsageError` before it reads the state: a worker that waited for `Starting` or
+  `Stopping` to settle would wait for the thread that joins it. A refused call
+  changes nothing (`run_state()`, `GlobalBundleAdjuster::stop_requested()`).
+  `Slam` implements the same rules on its own atomic.
 
 **`Slam::Stop()` on a component's own thread (option (a), chosen by the user
 2026-10-14, 0.6.0).** `Slam::Stop()` first asks every component that owns a worker
@@ -181,7 +188,10 @@ producer runs (§6.1, §7). Tests: `SlamTest.LifecycleStopFromComponentThreadCha
 `WorkerThreadTest.OnWorkerThreadIsTrueOnlyOnTheWorker`.
 **Consequence for callers:** a callback that runs on a component thread (a sync
 handler, a JNI callback) must not stop or destroy the `Slam`; the first is a
-recoverable `UsageError`, the second ends the process.
+recoverable `UsageError`, the second ends the process. A callback must not call
+another component's `Stop()` either: that is not refused (only the caller's own
+component is), so two callbacks on two components that stop each other's
+component deadlock (open item in `docs/TODO.md`, "Ownership audit").
 
 Every component derives from `events::EventNode` (`events/event_node.h`, no
 virtuals): an `Observable` it publishes through, one `AsyncObserver` inbox it
@@ -194,15 +204,20 @@ defined in `libs/slam/src/` with `INSTANTIATE_CLASS` (ORB; SIFT removed 2026-10-
 
 | Component | Header | Public API so far |
 |---|---|---|
-| `tracking::Tracker<FE>` | `tracking/tracker.h` | `Start()`, `Stop()`, `Track(TMonocularMeasurement)`, `Track(TBinocularMeasurement)`, `ProcessPending()`, `state()`, `current_map_id()`, `pending_measurements()`, `num_processed()`; `atlas()`, `map_replica()` and `last_matches()` are Tracker-thread state, private and read by tests through `TrackerTestAccess` |
-| `mapping::Mapper<FE>` | `mapping/mapper.h` | `Mapper(MapperOptions)`, `Start()`, `Stop()`, `ProcessPending()`, and the any-thread atomics: `state()`, `current_map_id()`, `num_keyframes()` (no argument), `num_map_points()` and the other counters. The Mapper-thread accessors (`covisibility()`, `Reference()`, `NumVisible()`, `NumFound()`, `last_local_ba()`, `BowVectorOf()`, `Parent()`, `LoopEdges()`, `KeyFrame()`, `map_ids()`, `active_map()`, `num_keyframes(MapId)`) are private and read by tests through `MapperTestAccess`; apps read the map through a `MapFollower` |
-| `loop_closing::LoopCloser<FE>` | `loop_closing/loop_closer.h` | `LoopCloser(LoopCloserOptions, vocabulary)`, `Start()`, `Stop()`, `ProcessPending()` (applies every transaction to its replica, queues the new Frames as queries, detects one; with loop closing off or no vocabulary only acknowledges). `atlas()`, `map_replica()` and the five worker-written stats accessors `num_coincidences()`, `num_merge_coincidences()`, `last_stats()`, `last_merge_stats()`, `query_stats()` are private and test-only through `LoopCloserTestAccess` (the `Stop()` summary log reports the query figures) — see "Loop Closing" (merge detection since map merging Task 4) |
-| `global_ba::GlobalBundleAdjuster<FE>` | `global_ba/global_bundle_adjuster.h` | `GlobalBundleAdjuster(GlobalBaOptions)`, `Start()`, `Stop()` (interrupts a running BA), `ProcessPending()` (applies every transaction, runs one pending global BA), and the atomic run counters `num_runs_started()`, `num_runs_interrupted()` (`std::atomic<size_t>`, any thread); `atlas()` and `map_replica()` are private and test-only through `GlobalBundleAdjusterTestAccess`; test-only `stop_requested()`, `set_run_hook()`, `set_poll_hook()`, `set_publish_hook()` — see "Global BA" |
+| `tracking::Tracker<FE>` | `tracking/tracker.h` | `Start()`, `Stop()`, `Track(TMonocularMeasurement)`, `Track(TBinocularMeasurement)`, `state()`, `current_map_id()`, `pending_measurements()`, `num_processed()`; `atlas()`, `map_replica()` and `last_matches()` are Tracker-thread state, private and read by tests through `TrackerTestAccess` |
+| `mapping::Mapper<FE>` | `mapping/mapper.h` | `Mapper(MapperOptions)`, `Start()`, `Stop()`, and the any-thread atomics: `state()`, `current_map_id()`, `num_keyframes()` (no argument), `num_map_points()` and the other counters. The Mapper-thread accessors (`covisibility()`, `Reference()`, `NumVisible()`, `NumFound()`, `last_local_ba()`, `BowVectorOf()`, `Parent()`, `LoopEdges()`, `KeyFrame()`, `map_ids()`, `active_map()`, `num_keyframes(MapId)`) are private and read by tests through `MapperTestAccess`; apps read the map through a `MapFollower` |
+| `loop_closing::LoopCloser<FE>` | `loop_closing/loop_closer.h` | `LoopCloser(LoopCloserOptions, vocabulary)`, `Start()`, `Stop()`; its private `ProcessPending()` applies every transaction to its replica, queues the new Frames as queries and detects one (with loop closing off or no vocabulary it only acknowledges). `atlas()`, `map_replica()` and the five worker-written stats accessors `num_coincidences()`, `num_merge_coincidences()`, `last_stats()`, `last_merge_stats()`, `query_stats()` are private and test-only through `LoopCloserTestAccess` (the `Stop()` summary log reports the query figures) — see "Loop Closing" (merge detection since map merging Task 4) |
+| `global_ba::GlobalBundleAdjuster<FE>` | `global_ba/global_bundle_adjuster.h` | `GlobalBundleAdjuster(GlobalBaOptions)`, `Start()`, `Stop()` (interrupts a running BA), and the atomic run counters `num_runs_started()`, `num_runs_interrupted()` (`std::atomic<size_t>`, any thread); `atlas()` and `map_replica()` are private and test-only through `GlobalBundleAdjusterTestAccess`; test-only `stop_requested()`, `set_run_hook()`, `set_poll_hook()`, `set_publish_hook()` — see "Global BA" |
 
 Each component owns a `events::WorkerThread` (`events/worker_thread.h`) bound to
 the `events::WakeSignal` of its `EventNode` (`events/wake_signal.h`) and a
-public `[[nodiscard]] bool ProcessPending()` (one pass, returns true if it did
-work; tests drive it without a thread). Spec:
+private `[[nodiscard]] bool ProcessPending()` (one pass, returns true if it did
+work; the GlobalBA's pass also runs one pending global BA). `ProcessPending()` is
+private since 0.9.2 (review IN-07): the worker drives it, and tests drive it
+synchronously through `*TestAccess::ProcessPending` (`TrackerTestAccess`,
+`MapperTestAccess`, `LoopCloserTestAccess`, `GlobalBundleAdjusterTestAccess`),
+never concurrently with a running worker; `ThreadAffinityTest` fails the build
+if one becomes public again. Spec:
 `docs/superpowers/specs/2026-10-03-tracking-states-design.md`.
 
 **Waking without locks (resolves OQ 20).** `WakeSignal` is a
@@ -255,7 +270,11 @@ Atlas into a `mapping::MapSnapshot` (`mapping/map_snapshot.h`) and returns it as
 - **Cost.** A follower holds a full replica (descriptors, BoW, covisibility),
   so its memory is that of the Tracker's, and a `Snapshot()` is O(map). A
   follower that is never updated lets its inbox grow; the "consumer is behind"
-  warning names it "MapFollower".
+  warning names it "MapFollower". The example apps therefore call `Update()`
+  every frame, next to the trajectory poll, and once more after `Stop()`; they
+  print how many transactions were still pending at `Stop()` (`map follower: k
+  of N transactions applied after Stop()`), then print the Atlas from a
+  snapshot (0.9.2, review WR-06).
 - **Defined in the library, not in its header (2026-10-14).** Every member,
   trivial accessors included, is out of line and instantiated in `voyah_slam`,
   so an app that uses the follower instantiates none of the replica code,
@@ -950,6 +969,27 @@ auto features2 = extractor.DetectAndExtract(image, n);             // allocates 
   `OrbExtractorWorkspaceTest.*` (two threads on one extractor equal the
   single-thread result, clean under ThreadSanitizer; the allocating overload,
   a reused workspace and the size / level-count changes equal fresh results).
+- **Input validation (0.9.2, review CR-01).** A pyramid level needs the 31 px ORB
+  patch border plus at least one 35 px FAST cell, so 66 px
+  (`OrbFeatureExtractor::MinLevelSize()`, derived from `PATCH_SIZE` and the named cell
+  constant `FAST_CELL_SIZE`). Below that `ComputePointsPerLevel` divided by zero (SIGFPE
+  in release builds, an `assert` in debug builds). Both `DetectAndExtract` overloads now
+  throw `std::invalid_argument` (message containing "too small", naming the image size,
+  level count, scale factor and the minimum) when any level would be narrower or shorter
+  than 66 px, and for an empty image; with the defaults (scale 1.2, 8 levels) the smallest
+  level is the image divided by 1.2^7 = 3.58, so the smallest accepted image is 235x235 px
+  (224x224 is rejected). The check is the first statement of the workspace overload, before
+  `Fits` / `Initialize`, so a rejected call leaves the `Workspace` as it was
+  (`OrbInputTest.RejectedImageLeavesTheWorkspaceUsable`: bit-identical features afterwards).
+  It uses `orb::ImagePyramid::LevelSize(size, scale)`, the helper `Initialize()` now calls
+  for every level (multiply by `1 / scale`, `std::round`, cast to `unsigned`), so the check
+  and the pyramid cannot disagree. The constructor validates in its first member
+  initializer and throws `std::invalid_argument` when `levels` is 0 (it wrote to an empty
+  vector) or the scale factor is not a finite number greater than 1 (scale 1 gave NaN
+  feature counts, 0.5 hung the binding); no member is computed from an invalid value. The
+  asserts inside `ComputePointsPerLevel` stay as internal invariants. Output unchanged: the
+  golden digests were not re-recorded. Tests: `OrbInputTest.*` (4). Policy: §7 "Argument-error
+  policy".
 - `orb::ImagePyramid` has a `const operator[]`, `Width()`, `Height()` and `Fits()`;
   `Initialize()` clears before building, and its size members are initialised.
   The `Workspace` class is declared in `voyah_common` with the extractor
@@ -1033,6 +1073,27 @@ the binding relies on, each point pinned by `ImageTest.*`:
   per row, not per pixel checks, and the corridor1 40-frame binocular run was measured
   before and after: 39 FrameTracked, 390 OptimizePose, 3 Frames, 777 points both times
   (plan summary 01-19). The ORB golden digests are unchanged.
+- **Checked views and copies (0.9.2, review CR-02).** `Image(parent, x, y, w, h)` throws
+  `std::out_of_range` (message naming the rectangle and the parent size) when
+  `x + w > parent.Width()` or `y + h > parent.Height()`, the sums computed in `size_t` so a
+  huge value cannot wrap; the bound is the immediate parent, so a view of a view cannot
+  reach outside the outer view. Views touching the parent's right and bottom borders and
+  empty views inside the bounds are accepted, as before. `CopyTo` throws
+  `std::invalid_argument` (naming both sizes) when the target's width or height differs,
+  before any element is copied and also when one side is empty; an empty-to-empty copy
+  stays a no-op. Before, the view constructor checked nothing and `CopyTo` had two
+  `assert`s, so a release build with caller-supplied sizes (the JNI binding) read or wrote
+  outside the buffer, a heap overflow for a smaller copy target. `At`, `Set`, `operator[]`,
+  `operator T` and `operator=(float)` stay unchecked on purpose (per-pixel paths of a header
+  compiled into the `-O0` apps); the new checks are O(1) per view and per copy. Tests:
+  `ImageTest.ViewOutsideParentThrows`, `ViewsInsideTheBoundsAreAccepted`,
+  `ViewOfAnEmptyImage`, `CopyToSizeMismatchThrows` (18 `ImageTest` cases, clean under
+  AddressSanitizer). Measured with the corridor1 40-frame binocular run (Debug tree):
+  before 39 FrameTracked, `map: 3 Frames, 777 points`, mean extract 203.8 ms; after the
+  same 39 / 3 / 777 and 246-258 ms. The extract time moved with machine load (load average
+  4 to 6 during the second series), not with the header: the same run with the old header
+  restored, taken in that second series, gave 289-298 ms. The ORB golden digests are
+  unchanged. Policy: §7 "Argument-error policy".
 
 ## FAST Corner Detector (`features/fast.h`, `voyah_algs`)
 
@@ -3104,7 +3165,7 @@ libs/
 cmake/VoyahTests.cmake      voyah_add_test_binary, voyah_optimize_target, check / check_all
 cmake/voyahslamConfig.cmake.in  installed CMake package config (find_dependency)
 vizualization/              voyahviz (+ voyahviz_tests)
-conanfile.py                package recipe voyahslam/0.9.1 (also the dev installs)
+conanfile.py                package recipe voyahslam/0.9.2 (also the dev installs)
 test_package/               conan create's consumer test (links voyahslam::voyahslam)
 profiles/                   linux-gcc13 (default + gnu20), android-arm64,
                             settings_user.yml (clang 21)
@@ -3209,8 +3270,8 @@ profiles/                   linux-gcc13 (default + gnu20), android-arm64,
 throws almost nowhere (only `io/read_image.cpp`), and this is its first policy.
 An invalid call sequence (connecting to a producer that runs, resetting a
 `Subscription` while its producer runs, `Start()` twice or after `Stop()`,
-`Tracker::Track()` after `Stop()`, `Stop()` on a component's own worker thread and
-`Slam::Stop()` on any component's worker thread; ownership audit #6, §4 "Lifecycle") throws `voyahslam::UsageError` (`voyahslam/errors.h`, a
+`Tracker::Track()` after `Stop()`, `Stop()` on a component's own worker thread (in
+every state) and `Slam::Stop()` on any component's worker thread; ownership audit #6, §4 "Lifecycle") throws `voyahslam::UsageError` (`voyahslam/errors.h`, a
 `std::logic_error`) in every build, never only an `assert`, because the caller
 (a C++ app, the JNI binding) can recover or at least report it; the binding maps
 it to `IllegalStateException`. **Destructors never throw:** a misuse that can only
@@ -3218,6 +3279,28 @@ be detected in a destructor (a `Subscription` destroyed while its producer runs)
 logs and calls `std::terminate` instead (§6.1, D-07): a `Subscription` destroyed
 while its producer runs, and `~Slam()` on one of its own component threads (§4
 "Lifecycle").
+
+**Argument-error policy (0.9.2, review CR-01 and CR-02; planner's decision under D-09):**
+`UsageError` is for invalid call *sequences*, where a later call can succeed
+(`Start()` twice, connecting while the producer runs, `Stop()` on the own
+worker). An invalid argument *value*, which can never succeed however often it
+is repeated, throws the standard `std::logic_error` subclass that already says
+so, in every build and never only through an `assert`:
+`std::invalid_argument` (a value that is not acceptable), `std::out_of_range` (an
+index or rectangle outside what it indexes) or `std::length_error` (a size that
+overflows; the 0.9.0 precedent for `Image(width, height)`). All of them derive
+from `std::logic_error`, as `UsageError` does, so a binding can catch that once;
+voyah_jni maps `std::out_of_range` to `IndexOutOfBoundsException`,
+`std::invalid_argument` to `IllegalArgumentException` and `UsageError` to
+`IllegalStateException`. Current throw sites: `Image(width, height)`
+(`std::length_error`), `Image(parent, x, y, w, h)` (`std::out_of_range`),
+`Image::CopyTo` (`std::invalid_argument`), the `OrbFeatureExtractor` constructor
+and both `DetectAndExtract` overloads (`std::invalid_argument`), and
+`io/read_image.cpp`. The per-pixel accessors of `Image` (`At`, `Set`,
+`operator[]`, `operator T`, `operator=(float)`) stay unchecked on purpose: they
+run per pixel in a header that is compiled into the `-O0` example apps (the R2
+lesson), so the caller keeps the indices inside the image; the checks sit on
+the O(1) paths (view construction, `CopyTo`).
 
 **Test conventions for misuse (2026-10-13):**
 - A test that expects the process to die (`std::terminate`, `abort`) is a gtest
@@ -3229,6 +3312,11 @@ while its producer runs, and `~Slam()` on one of its own component threads (§4
   per target in `voyah_add_test_binary` and in `examples/full_slam`), so a
   discarded `[[nodiscard]]` `Subscription` is a build error there. The installed
   package build is not affected.
+- A test for a would-be deadlock (a `Stop()` that waits for the thread joining
+  its caller) runs the blocking call on a helper thread under a deadline and,
+  when the deadline passes, writes "DEADLOCK" to stderr and calls
+  `std::_Exit(1)`: the stuck object cannot be destroyed, so a bounded exit is the
+  only way the test fails instead of hanging the run (0.9.2).
 
 **Build & test (Conan 2 + CMake):**
 - Dependencies (`conanfile.py`; was `conanfile.txt` until 2026-10-11): eigen,
@@ -3493,6 +3581,13 @@ branch → review → merge to `master`. Update this document at the end.
 | 2026-10-15 | **Ownership audit #9 implemented (Release R6, branch `fix/image-views`; Phase 1 CONTEXT D-20, D-21).** `images::Image` is fixed in place, with no `ImageView` type (D-20): zero-initialised members (a default image is empty), row-wise view-correct `Convert<K>()`, `operator*=` and `operator*`, non-const `Set`, `CopyTo` copying `width * C * sizeof(T)` bytes per strided row, an overflow-checked size constructor (`std::length_error`), `size_t` view offsets and `Offset()`, an empty moved-from state, and the aliasing and `operator[]` rules documented. `operator[]` 1x1 channel indexing is kept and pinned by a test (research listed its offset as a defect; `img[y][x][c]` selecting channel `c` is the intended chain). New unit tests `ImageTest.*` (14), clean under AddressSanitizer. | The binding builds working images from Java-provided sizes (a wrapped allocation followed by a full-size copy overflowed the heap), and `Convert` / `operator*=` on a sub-image read or wrote the wrong pixels. A separate view type would have changed every `TWorkingImage` signature for no behaviour gain. The corridor1 40-frame binocular run is unchanged (39 FrameTracked, 3 Frames, 777 points). |
 | 2026-10-15 | **Package version 0.9.0** (`conanfile.py`, `project()`; SOVERSION 0.9). Behavior change for consumers (the voyah_jni binding): `Image(width, height)` throws `std::length_error` on size overflow, `Offset()` returns `size_t`, `Set` needs a non-const image, and `Convert` / `operator*` / `operator*=` on a sub-image now operate on the view. | A public behavior change gets a new minor version while 0.x (as 0.2.0 to 0.8.0). |
 | 2026-10-21 | **`RelocalizationOptions::enabled` (default `true`) for apps that offer a relocalization toggle (voyah_jni D-10); package version 0.9.1** (`conanfile.py`, `project()`; SOVERSION 0.9). With a vocabulary and `enabled = false` a loss goes straight to `Lost` (final `TrackingLost`) and `Relocalize` is never called; `enabled = true` behaves exactly as 0.9.0. `MapFollower::Snapshot` reserves its point vectors (no API change). | The binding must not fake the switch with impossible thresholds. A new field in a public options struct gets a new patch version (additive, default unchanged). |
+| 2026-10-21 | **Own-thread `Stop()` refused in every state (Phase 1 verification gap 1, review WR-01; branch `fix/phase1-gaps`, 0.9.2).** `EventNode::StopWith(stop_worker, on_worker_thread)` evaluates `on_worker_thread()` first and throws `UsageError("Stop() from the component's own worker thread")` before it reads the state; the one-argument form is deleted, so a component cannot forget the predicate. Tracker, Mapper, LoopCloser and GlobalBA pass `worker_.OnWorkerThread()`; the two test nodes pass their own (`TestNode`: `false`). A refused call changes nothing (`run_state()`, `stop_requested()`). Tests: `LifecycleTest.StopFromWorkerThreadWhileAnotherThreadStopsThrows`, `StopFromWorkerThreadWhileStartingThrows`, `SlamTest.LifecycleComponentStopOnItsThreadWhileSlamStopsThrows` (before the fix the first and the third ended with the watchdog's "DEADLOCK" line, the second failed its "caught while Starting" expectation); TSan clean (`LifecycleTest.*` x50). | The documented contract (D-09, D-11) held only from `Running`: in `Starting` and `Stopping` the state loop waited for the other thread to settle, and the other thread was joining the caller. A JNI callback that stops its component while `close()` stops the `Slam` hung both threads (found by the 2026-10-15 verification). Checking before the state switch is one atomic load, lock-free like `Slam::Stop()`'s check. |
+| 2026-10-21 | **`ProcessPending()` private behind `*TestAccess` (Phase 1 verification gap 2, review IN-07; 0.9.2).** The member of Tracker, Mapper, LoopCloser and GlobalBA moved to the private section after the existing `friend struct *TestAccess`; the four structs gained a `ProcessPending` wrapper (`out_` parameter) and every test call site uses it; `ThreadAffinityTest` gained `HasProcessPending` and four `static_assert(!...)`. Chosen over a run-time `UsageError`. | (1) Only tests call it (examples, viewer, test_package, benchmarks, tools and the voyah_jni API doc show no other caller). (2) It is the D-14 pattern of every other thread-affine member of these classes: misuse fails at compile time. (3) A run-time check (throw unless Created/Stopped or the worker) is check-then-act against a concurrent `Start()`, the race class of review WR-04, and would add atomic loads to each worker pass. |
+| 2026-10-21 | **Example apps update the `MapFollower` every frame (review WR-06; amends the D-26 example detail "Update()d after Stop()", user decision 2026-10-21; 0.9.2).** `binocular_full_slam` and `monocular_full_slam` call `follower.Update()` after `trajectory->Poll()` in the frame loop and once more after `Stop()`, and print `map follower: k of N transactions applied after Stop()`. | An undrained follower holds every `MapTransaction` until `Stop()`, and the examples are what users copy. Measured on corridor1 (`--rate=0 --max-frames=40`, Debug tree): binocular before `5 of 5` (every transaction waited for Stop), after `0 of 5`; 39 `FrameTracked` lines and `map: 3 Frames, 777 points` both times (monocular ends in WaitingForMap, `0 of 0`). |
+| 2026-10-21 | **ORB extractor input validation (review CR-01; 0.9.2).** `OrbFeatureExtractor`'s constructor throws `std::invalid_argument` for `levels == 0` and for a scale factor that is not finite and greater than 1; both `DetectAndExtract` overloads throw `std::invalid_argument` ("too small") when any pyramid level would be below 66 px (`OrbFeatureExtractor::MinLevelSize()`: `PATCH_SIZE` 31 plus the 35 px FAST cell), which with the defaults means an image below 235 px in width or height, and for an empty image. The check is the first statement, before the workspace is touched, and uses the new `orb::ImagePyramid::LevelSize()` that `Initialize()` also calls. | A 224x224 image (a common size) divided by zero in `ComputePointsPerLevel` in release builds (SIGFPE kills the JVM), `levels == 0` wrote to an empty vector and scale 1 gave NaN feature counts; the binding already validated its own arguments (`feature_peers.h`), which agrees with the library rule. One shared size helper makes the check and the pyramid unable to disagree, and the golden digests are unchanged (`OrbExtractorGoldenTest` ran, not re-recorded). `OrbInputTest.*` (4). |
+| 2026-10-21 | **`Image` views and `CopyTo` checked in every build (review CR-02; 0.9.2).** `Image(parent, x, y, w, h)` throws `std::out_of_range` when the rectangle is not inside the immediate parent (sums in `size_t`); `CopyTo` throws `std::invalid_argument` when the target's width or height differs, before any copy. `At`, `Set`, `operator[]`, `operator T` and `operator=(float)` stay unchecked. | Caller-supplied rectangles and sizes (the JNI binding) read or wrote outside the buffer in release builds, a heap overflow for a copy into a smaller image. The checks are O(1) per view and per copy; the per-pixel paths live in a header compiled into the `-O0` apps (the R2 lesson), so they get no check. corridor1 40-frame binocular run before and after: 39 FrameTracked, 3 Frames, 777 points both times; the timing difference seen (204 against 251 ms mean extract) was machine load, the old header measured at 289-298 ms in the same later series. `ImageTest.*` is 18 cases, clean under AddressSanitizer. |
+| 2026-10-21 | **Exception policy for argument values (0.9.2).** An invalid argument *value* throws `std::invalid_argument`, `std::out_of_range` or `std::length_error` in every build; `UsageError` stays for invalid call *sequences*; all are `std::logic_error`. See §7 "Argument-error policy". | `UsageError` tells a binding "state it can retry from" (`IllegalStateException`); a value that can never succeed is not that, and the standard types already say so and map to `IndexOutOfBoundsException` / `IllegalArgumentException` without a new class. Follows the 0.9.0 precedent of `std::length_error` for an overflowing `Image`. A binding can still catch `std::logic_error` once. |
+| 2026-10-21 | **Package version 0.9.2** (`conanfile.py`, `project()`; SOVERSION stays 0.9). Patch version by user decision (the next minor is reserved); closes the Phase 1 verification gaps and review findings WR-01, WR-06, IN-07, CR-01 and CR-02. Behavior changes for consumers (the voyah_jni binding), from plans 01-21 and 01-22: `Stop()` on a component's own worker thread throws `UsageError` in every state, also while another thread is stopping or starting the component (it used to deadlock); `ProcessPending()` of Tracker, Mapper, LoopCloser and GlobalBundleAdjuster is no longer public (the `set_*_hook()` test setters are unchanged); `OrbFeatureExtractor`'s constructor and `DetectAndExtract` throw `std::invalid_argument`; `Image(parent, x, y, w, h)` throws `std::out_of_range`; `Image::CopyTo` throws `std::invalid_argument`; the example apps update the `MapFollower` every frame. Error mapping for the binding: `std::out_of_range` before `std::logic_error`, `std::invalid_argument` now also comes from the library. | No class layout changes and access specifiers are not part of mangled names, so binaries built against 0.9 still link (SOVERSION 0.9); the release changes behavior, which this row lists, and an additive or behavior-only change gets a patch version (as 0.9.1). |
 
 ## 9. Open Questions
 
@@ -3768,7 +3863,19 @@ branch → review → merge to `master`. Update this document at the end.
   `refactor/lifecycle`, merged and pushed); #7 done (0.7.0, branch
   `refactor/extractor-workspace`, merged and pushed); #8 done (0.8.0, branch
   `fix/logger-init-order`, merged and pushed); #9 done (0.9.0, branch
-  `fix/image-views`, merge pending), which completes the API hardening list.
+  `fix/image-views`, merge pending), which completes the API hardening list;
+  Phase 1 gap closure 0.9.2 (branch `fix/phase1-gaps`, merge pending): own-thread
+  `Stop()` in every state, private `ProcessPending()`, example followers drained
+  every frame, ORB extractor and `Image` argument validation (review CR-01, CR-02,
+  WR-01, WR-06, IN-07).
+- Test suite (2026-10-21, 0.9.2): 866 tests (825 `unit`, 40 `integration`, 1
+  `vocabulary`, skipped without ORBvoc); `check_all` about 30 s. New in 0.9.2:
+  `ImageTest.ViewOutsideParentThrows`, `ViewsInsideTheBoundsAreAccepted`,
+  `ViewOfAnEmptyImage`, `CopyToSizeMismatchThrows` (4) and `OrbInputTest.*` (4: too
+  small, smallest accepted, rejected image leaves the workspace usable, invalid
+  constructor arguments); plan 01-21 added the own-thread `Stop()` and
+  thread-affinity tests. The corridor1 binocular run (39 FrameTracked, 3 Frames, 777
+  points) and the ORB golden digests are unchanged.
 - Test suite (2026-10-15, ownership audit #9, 0.9.0): 852 tests (812
   `unit`, 39 `integration`, 1 `vocabulary`, skipped without ORBvoc);
   `check_all` about 30 s. `ImageTest.*` (14) are new; the corridor1 binocular run and the ORB golden digests

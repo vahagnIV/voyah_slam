@@ -4,6 +4,11 @@
 
 namespace voyahslam::features::orb {
 
+unsigned ImagePyramid::LevelSize(size_t size, precision_t scale_factor) {
+  const precision_t scale = 1. / scale_factor;
+  return static_cast<unsigned>(std::round(size * scale));
+}
+
 void ImagePyramid::Initialize(size_t image_width, size_t image_height,
                            const std::vector<precision_t> &scale_factors) {
   initialized_ = true;
@@ -17,10 +22,9 @@ void ImagePyramid::Initialize(size_t image_width, size_t image_height,
     assert(s > 0);
     inv_scale_factors_.push_back(1. / s);
   }
-  for (double scale : inv_scale_factors_) {
-    auto width = static_cast<unsigned>(std::round(image_width_ * scale));
-    auto height = static_cast<unsigned>(std::round(image_height_ * scale));
-    image_pyramid_.push_back(images::TWorkingImage(width, height));
+  for (auto s : scale_factors) {
+    image_pyramid_.push_back(images::TWorkingImage(
+        LevelSize(image_width_, s), LevelSize(image_height_, s)));
   }
 }
 

@@ -5,8 +5,10 @@
 // D-26). Each component keeps its replica (and, for the LoopCloser, its
 // worker-written statistics) private, because reading it while the worker runs
 // is a data race; the component befriends the struct named here, defined once
-// per test binary in this header. Tests that drive ProcessPending()
-// synchronously (never concurrently with a running worker) read through it.
+// per test binary in this header. ProcessPending() of the four components is
+// private too (IN-07, 0.9.2): tests drive it synchronously (never concurrently
+// with a running worker) through the ProcessPending wrappers here, and read the
+// state through the other members.
 
 #include <voyahslam/bow/bow_vector.h>
 #include <voyahslam/geometry/sim3.h>
@@ -31,6 +33,11 @@ namespace voyahslam::mapping {
 // loop edge between Frames `a` and `b` of the current map; runs the loop
 // correction's CorrectWindow (nothing published) and reads the map back.
 struct MapperTestAccess {
+    // One pass of the worker loop, driven by the test thread.
+    template <typename TFeatureExtractor>
+    [[nodiscard]] static bool ProcessPending(Mapper<TFeatureExtractor>& out_mapper) {
+        return out_mapper.ProcessPending();
+    }
     template <typename TFeatureExtractor>
     static void PublishLoopEdge(Mapper<TFeatureExtractor>& out_mapper, map::FrameId a,
                                 map::FrameId b) {
@@ -159,6 +166,11 @@ struct MapperTestAccess {
 namespace voyahslam::tracking {
 
 struct TrackerTestAccess {
+    // One pass of the worker loop, driven by the test thread.
+    template <typename TFeatureExtractor>
+    [[nodiscard]] static bool ProcessPending(Tracker<TFeatureExtractor>& out_tracker) {
+        return out_tracker.ProcessPending();
+    }
     template <typename TFeatureExtractor>
     static const tracking::AtlasReplica<TFeatureExtractor>& Atlas(const Tracker<TFeatureExtractor>& tracker) {
         return tracker.atlas();
@@ -181,6 +193,11 @@ namespace voyahslam::loop_closing {
 // named after its return type: a member may not change the meaning of a name
 // used earlier in the class.
 struct LoopCloserTestAccess {
+    // One pass of the worker loop, driven by the test thread.
+    template <typename TFeatureExtractor>
+    [[nodiscard]] static bool ProcessPending(LoopCloser<TFeatureExtractor>& out_loop_closer) {
+        return out_loop_closer.ProcessPending();
+    }
     template <typename TFeatureExtractor>
     static const tracking::AtlasReplica<TFeatureExtractor>& Atlas(const LoopCloser<TFeatureExtractor>& loop_closer) {
         return loop_closer.atlas();
@@ -217,6 +234,11 @@ struct LoopCloserTestAccess {
 namespace voyahslam::global_ba {
 
 struct GlobalBundleAdjusterTestAccess {
+    // One pass of the worker loop, driven by the test thread.
+    template <typename TFeatureExtractor>
+    [[nodiscard]] static bool ProcessPending(GlobalBundleAdjuster<TFeatureExtractor>& out_global_ba) {
+        return out_global_ba.ProcessPending();
+    }
     template <typename TFeatureExtractor>
     static const tracking::AtlasReplica<TFeatureExtractor>& Atlas(
         const GlobalBundleAdjuster<TFeatureExtractor>& global_ba) {

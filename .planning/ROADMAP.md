@@ -54,7 +54,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   5. Two threads may call `DetectAndExtract` concurrently, or the API makes that impossible to do by mistake; `Logger::Initialize` also re-targets loggers created before it; a default-constructed `Image` is empty and view operations honour `offset_` / `stride_`.
   6. Each item has a DESIGN decisions-log entry, `check_all` is green, ThreadSanitizer is clean on the event and Slam tests, and the Conan packages (linux-gcc13 static and shared, android-arm64) are recreated with a version the voyah_jni session is told about.
 
-**Plans**: 20/23 plans executed (six releases plus the gap-closure release 0.9.2, sequential; each release ends with the user's "merge and push")
+**Plans**: 22/23 plans executed (six releases plus the gap-closure release 0.9.2, sequential; each release ends with the user's "merge and push")
 
 Plans:
 **Wave 1**
@@ -118,10 +118,10 @@ Plans:
 - [x] 01-20-PLAN.md — R6 release gates, checkpoint, merge (0.9.0)
 
 **Wave 21** *(gap closure, 0.9.2; blocked on Wave 20 completion)*
-- [ ] 01-21-PLAN.md — own-thread Stop() refused in every state (gap 1, WR-01), ProcessPending() private (gap 2, IN-07), examples drain the MapFollower (WR-06)
+- [x] 01-21-PLAN.md — own-thread Stop() refused in every state (gap 1, WR-01), ProcessPending() private (gap 2, IN-07), examples drain the MapFollower (WR-06)
 
 **Wave 22** *(blocked on Wave 21 completion)*
-- [ ] 01-22-PLAN.md — Image views and CopyTo checked (CR-02), ORB extractor input validation (CR-01), argument-error policy, version 0.9.2
+- [x] 01-22-PLAN.md — Image views and CopyTo checked (CR-02), ORB extractor input validation (CR-01), argument-error policy, version 0.9.2
 
 **Wave 23** *(blocked on Wave 22 completion)*
 - [ ] 01-23-PLAN.md — 0.9.2 release gates (G1-G8), checkpoint, merge, voyah_jni message and API handover update
@@ -227,7 +227,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 (decimal 
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. API Ownership and Lifetime Contracts | 20/23 | In Progress (gap closure 0.9.2 planned; audit #1, #4 merged before GSD) | - |
+| 1. API Ownership and Lifetime Contracts | 22/23 | In Progress (gap closure 0.9.2 planned; audit #1, #4 merged before GSD) | - |
 | 2. Loop-Closing False-Positive Rejection | 0/TBD | Not started | - |
 | 3. Multi-Map and Global BA Hardening | 0/TBD | Not started | - |
 | 4. Feature Front-End and Geometry Robustness | 0/TBD | Not started | - |

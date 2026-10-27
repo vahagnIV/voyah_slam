@@ -12,6 +12,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdio>
+#include <cstdlib>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -33,6 +35,29 @@ bool WaitFor(TPredicate predicate, std::chrono::milliseconds timeout = std::chro
     return true;
 }
 
+// Runs `stop` on a helper thread and waits at most `limit` for it. A node whose Stop()
+// deadlocked cannot be destroyed (its worker never returns), so when the deadline
+// passes the process ends here with a DEADLOCK line instead of hanging the test run.
+template <typename TStop>
+void StopUnderWatchdog(TStop stop, std::chrono::seconds limit) {
+    std::atomic<bool> done{false};
+    std::thread stopper([&] {
+        stop();
+        done.store(true, std::memory_order_release);
+    });
+    const auto deadline = Clock::now() + limit;
+    while (!done.load(std::memory_order_acquire)) {
+        if (Clock::now() > deadline) {
+            std::fprintf(stderr, "DEADLOCK: Stop() did not return within %lld s\n",
+                         static_cast<long long>(limit.count()));
+            std::fflush(stderr);
+            std::_Exit(1);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    stopper.join();
+}
+
 // A component shaped like the Tracker: Start()/Stop() through StartWith/StopWith
 // around a WorkerThread that is the last member.
 class LifecycleNode : public EventNode {
@@ -44,18 +69,30 @@ public:
         StartWith([this] {
             if (fail_start_) throw std::runtime_error("cannot start the worker");
             worker_.Start([this] { return ProcessPending(); });
+            if (hold_start_for_worker_) {
+                // Stay in Starting until the worker's refused Stop() was seen.
+                caught_while_starting_.store(WaitFor([this] { return caught(); }, std::chrono::seconds(3)),
+                                             std::memory_order_release);
+            }
         });
     }
     void Stop() {
-        StopWith([this] {
-            worker_.Stop();
-            joined_.store(true, std::memory_order_release);
-        });
+        StopWith(
+            [this] {
+                worker_.Stop();
+                joined_.store(true, std::memory_order_release);
+            },
+            [this] { return worker_.OnWorkerThread(); });
     }
 
     bool ProcessPending() {
         calls_.fetch_add(1, std::memory_order_relaxed);
-        if (stop_from_worker_ && !attempted_.exchange(true)) {
+        if ((stop_from_worker_ || stop_when_stopping_) && !attempted_.exchange(true)) {
+            if (stop_when_stopping_) {
+                // Park until another thread is inside Stop(), then call Stop() ourselves.
+                parked_.store(true, std::memory_order_release);
+                WaitFor([this] { return run_state() == RunState::Stopping; }, std::chrono::seconds(10));
+            }
             try {
                 Stop();
             } catch (const UsageError& error) {
@@ -68,14 +105,24 @@ public:
 
     [[nodiscard]] bool joined() const { return joined_.load(std::memory_order_acquire); }
     [[nodiscard]] bool caught() const { return caught_.load(std::memory_order_acquire); }
+    [[nodiscard]] bool parked() const { return parked_.load(std::memory_order_acquire); }
+    [[nodiscard]] bool caught_while_starting() const {
+        return caught_while_starting_.load(std::memory_order_acquire);
+    }
     [[nodiscard]] int calls() const { return calls_.load(std::memory_order_relaxed); }
     // Read after caught() is true.
     [[nodiscard]] const std::string& worker_error() const { return worker_error_; }
 
     bool fail_start_ = false;
     bool stop_from_worker_ = false;
+    // The worker waits for run_state() == Stopping before it calls Stop().
+    bool stop_when_stopping_ = false;
+    // The start lambda stays in Starting until the worker's Stop() was refused.
+    bool hold_start_for_worker_ = false;
 
 private:
+    std::atomic<bool> parked_{false};
+    std::atomic<bool> caught_while_starting_{false};
     std::atomic<int> calls_{0};
     std::atomic<bool> joined_{false};
     std::atomic<bool> attempted_{false};
@@ -206,6 +253,37 @@ TEST(LifecycleTest, StopFromWorkerThreadThrows) {
     ASSERT_TRUE(WaitFor([&] { return node.caught(); }));
     EXPECT_NE(node.worker_error().find("worker thread"), std::string::npos);
     // The component keeps running, and another thread can stop it.
+    EXPECT_EQ(node.run_state(), RunState::Running);
+    EXPECT_FALSE(node.joined());
+    node.Stop();
+    EXPECT_EQ(node.run_state(), RunState::Stopped);
+    EXPECT_TRUE(node.joined());
+}
+
+// WR-01: the refusal must not depend on the state. Another thread is inside Stop()
+// (Stopping, joining this worker) when the worker calls Stop() itself; waiting for
+// the state to settle would wait for the thread that joins the caller.
+TEST(LifecycleTest, StopFromWorkerThreadWhileAnotherThreadStopsThrows) {
+    LifecycleNode node;
+    node.stop_when_stopping_ = true;
+    node.Start();
+    ASSERT_TRUE(WaitFor([&] { return node.parked(); }));
+    StopUnderWatchdog([&] { node.Stop(); }, std::chrono::seconds(10));
+    ASSERT_TRUE(node.caught());
+    EXPECT_NE(node.worker_error().find("worker thread"), std::string::npos);
+    EXPECT_EQ(node.run_state(), RunState::Stopped);
+    EXPECT_TRUE(node.joined());
+}
+
+// Same for Starting: the worker is already running while Start() has not returned.
+TEST(LifecycleTest, StopFromWorkerThreadWhileStartingThrows) {
+    LifecycleNode node;
+    node.stop_from_worker_ = true;
+    node.hold_start_for_worker_ = true;
+    node.Start();
+    EXPECT_TRUE(node.caught_while_starting());  // refused at once, not after Start() settled
+    ASSERT_TRUE(WaitFor([&] { return node.caught(); }));
+    EXPECT_NE(node.worker_error().find("worker thread"), std::string::npos);
     EXPECT_EQ(node.run_state(), RunState::Running);
     EXPECT_FALSE(node.joined());
     node.Stop();

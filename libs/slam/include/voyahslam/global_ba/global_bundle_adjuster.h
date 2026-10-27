@@ -47,7 +47,7 @@ struct GlobalBundleAdjusterTestAccess;
 //
 // Thread safety. Every public accessor is either atomic (any thread:
 // num_runs_started(), num_runs_interrupted(), stop_requested()) or a
-// lifecycle/driver call (Start, Stop, ProcessPending, the test hook setters).
+// lifecycle call (Start, Stop) or a test hook setter; ProcessPending() is private.
 // The replica is private (tests read it through
 // GlobalBundleAdjusterTestAccess): apps read the map through
 // mapping::MapFollower.
@@ -62,7 +62,8 @@ public:
     // Start() twice or after Stop() throws UsageError; Stop() before Start() moves
     // to Stopped; Stop() is idempotent and every concurrent call returns only after
     // the worker is joined. Both are safe from any thread, except that Stop() on
-    // the component's own worker thread throws UsageError (it would join itself).
+    // the component's own worker thread throws UsageError (it would join itself), in
+    // every state, also while another thread is stopping or starting it.
     void Start();
     // Interrupts a running BA (it publishes nothing, even if it had passed its
     // last poll, and is not resumed by a later Start()) and joins the worker.
@@ -70,12 +71,6 @@ public:
     // True on this component's own worker thread (a callback it runs), where
     // Stop() is refused with UsageError. Any thread.
     [[nodiscard]] bool OnWorkerThread() const { return worker_.OnWorkerThread(); }
-
-    // Drains the inbox, applying every transaction, then runs a pending
-    // global BA. Returns true iff an event or a run was processed. Called by
-    // the worker thread; public so tests can drive it synchronously (never
-    // concurrently with a running worker).
-    [[nodiscard]] bool ProcessPending();
 
     // Runs started; any thread.
     [[nodiscard]] size_t num_runs_started() const { return num_runs_started_.load(std::memory_order_acquire); }
@@ -100,6 +95,13 @@ public:
 
 private:
     friend struct GlobalBundleAdjusterTestAccess;
+
+    // Drains the inbox, applying every transaction, then runs a pending
+    // global BA. Returns true iff an event or a run was processed. Called by
+    // the worker thread; tests drive it synchronously through
+    // GlobalBundleAdjusterTestAccess::ProcessPending (never concurrently with a
+    // running worker).
+    [[nodiscard]] bool ProcessPending();
 
     // GlobalBA-thread state; tests that drive ProcessPending() synchronously
     // read it through GlobalBundleAdjusterTestAccess. Apps read the map

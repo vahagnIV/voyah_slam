@@ -221,8 +221,81 @@ TEST(ImageTest, OffsetIsSizeT) {
   EXPECT_EQ(inner.At(0, 0, 0), parent.At(3, 3, 0));
 }
 
+// Review CR-02: a view outside its parent used to read and write outside the
+// parent's buffer in release builds; the constructor throws in every build.
+TEST(ImageTest, ViewOutsideParentThrows) {
+  auto parent = MakeParent(8, 6);
+  EXPECT_THROW((Image<uint8_t, 3>(parent, 5, 0, 4, 1)), std::out_of_range);  // x + w = 9 > 8
+  EXPECT_THROW((Image<uint8_t, 3>(parent, 0, 4, 1, 3)), std::out_of_range);  // y + h = 7 > 6
+  EXPECT_THROW((Image<uint8_t, 3>(parent, 8, 0, 1, 1)), std::out_of_range);  // starts at the border
+  EXPECT_THROW((Image<uint8_t, 3>(parent, 0, 0, 9, 6)), std::out_of_range);  // wider than the parent
+  // The sums are computed in size_t, so a huge start cannot wrap around.
+  EXPECT_THROW((Image<uint8_t, 3>(parent, 0xFFFFFFFFu, 0, 2, 1)), std::out_of_range);
+  EXPECT_THROW((Image<uint8_t, 3>(parent, 0, 0xFFFFFFFFu, 1, 2)), std::out_of_range);
+
+  // The bound is the immediate parent: (4, 0, 2, 1) of the outer view lies
+  // inside the parent's buffer (columns 6 and 7) but outside the outer view.
+  Image<uint8_t, 3> outer(parent, 2, 1, 5, 4);
+  EXPECT_THROW((Image<uint8_t, 3>(outer, 4, 0, 2, 1)), std::out_of_range);
+}
+
+TEST(ImageTest, ViewsInsideTheBoundsAreAccepted) {
+  auto parent = MakeParent(8, 6);
+  EXPECT_NO_THROW((Image<uint8_t, 3>(parent, 5, 4, 3, 2)));  // touches right and bottom borders
+  EXPECT_NO_THROW((Image<uint8_t, 3>(parent, 0, 0, 8, 6)));  // the whole parent
+  EXPECT_NO_THROW((Image<uint8_t, 3>(parent, 8, 6, 0, 0)));  // empty, on the far corner
+  Image<uint8_t, 3> empty_view(parent, 8, 6, 0, 0);
+  EXPECT_EQ(empty_view.Width(), 0u);
+  EXPECT_EQ(empty_view.Height(), 0u);
+
+  Image<uint8_t, 3> outer(parent, 2, 1, 5, 4);
+  EXPECT_NO_THROW((Image<uint8_t, 3>(outer, 3, 2, 2, 2)));  // touches the outer view's borders
+}
+
+TEST(ImageTest, ViewOfAnEmptyImage) {
+  Image<uint8_t, 3> empty;
+  Image<uint8_t, 3> same(empty, 0, 0, 0, 0);
+  EXPECT_EQ(same.Width(), 0u);
+  EXPECT_EQ(same.Height(), 0u);
+  EXPECT_THROW((Image<uint8_t, 3>(empty, 0, 0, 1, 1)), std::out_of_range);
+}
+
+// Review CR-02: a CopyTo into a smaller image used to overflow the target's
+// buffer in release builds (the size check was an assert).
+TEST(ImageTest, CopyToSizeMismatchThrows) {
+  constexpr uint8_t kSentinel = 0xEE;
+  auto fill = [&](Image<uint8_t, 3> &image) {
+    for (unsigned y = 0; y < image.Height(); ++y)
+      for (unsigned x = 0; x < image.Width(); ++x)
+        for (unsigned c = 0; c < 3; ++c) image.Set(y, x, c, kSentinel);
+  };
+  auto untouched = [&](const Image<uint8_t, 3> &image) {
+    for (unsigned y = 0; y < image.Height(); ++y)
+      for (unsigned x = 0; x < image.Width(); ++x)
+        for (unsigned c = 0; c < 3; ++c)
+          if (image.At(y, x, c) != kSentinel) return false;
+    return true;
+  };
+
+  auto source = MakeParent(4, 3);  // no value of MakeParent(4, 3) equals kSentinel
+  for (const auto &[w, h] : {std::pair{4u, 2u}, std::pair{3u, 3u}, std::pair{5u, 3u}}) {
+    Image<uint8_t, 3> target(w, h);
+    fill(target);
+    EXPECT_THROW(source.CopyTo(target), std::invalid_argument) << w << "x" << h;
+    EXPECT_TRUE(untouched(target)) << w << "x" << h;
+  }
+
+  // An empty source into a non-empty target is a mismatch too (the early
+  // return for empty images must not hide it).
+  Image<uint8_t, 3> empty;
+  Image<uint8_t, 3> target(2, 2);
+  fill(target);
+  EXPECT_THROW(empty.CopyTo(target), std::invalid_argument);
+  EXPECT_TRUE(untouched(target));
+}
+
 template <typename I>
-concept CanSet = requires(I &image) { image.Set(0, 0, 0, uint8_t{0}); };
+concept CanSet =requires(I &image) { image.Set(0, 0, 0, uint8_t{0}); };
 
 TEST(ImageTest, SetOnConstDoesNotCompile) {
   static_assert(CanSet<Image<uint8_t, 3>>);

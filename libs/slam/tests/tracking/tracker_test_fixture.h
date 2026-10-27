@@ -124,8 +124,8 @@ protected:
         bool processed = true;
         while (processed) {
             processed = false;
-            while (tracker_.ProcessPending()) processed = true;
-            while (mapper_.ProcessPending()) processed = true;
+            while (tracking::TrackerTestAccess::ProcessPending(tracker_)) processed = true;
+            while (mapping::MapperTestAccess::ProcessPending(mapper_)) processed = true;
         }
     }
 

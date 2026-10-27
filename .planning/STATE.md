@@ -3,16 +3,16 @@ gsd_state_version: "1.0"
 current_phase: 01
 current_phase_name: API Ownership and Lifetime Contracts
 status: executing
-stopped_at: Completed 01-20-PLAN.md
-last_updated: "2026-10-21T15:08:00.338Z"
+stopped_at: Completed 01-22-PLAN.md
+last_updated: "2026-10-21T15:37:14.081Z"
 last_activity: 2026-10-13
 last_activity_desc: Phase 01 execution started
-state_head: f0d02d3fe60e72abc2e0860928f267f617f209fb
+state_head: 5c913183da7569a7fbc1b676cf83d0f332543ec5
 progress:
   total_phases: 7
   completed_phases: 0
   total_plans: 23
-  completed_plans: 20
+  completed_plans: 22
   percent: 0
 ---
 
@@ -76,6 +76,8 @@ Progress: [░░░░░░░░░░] 0%
 | Phase 01 P18 | gates + merge | 3 tasks | 0 files |
 | Phase 01 P19 | 45 min | 3 tasks | 10 files |
 | Phase 01 P20 | gates + merge | 3 tasks | 0 files |
+| Phase 01 P21 | 35 min | 3 tasks | 25 files |
+| Phase 01 P22 | 13 min | 3 tasks | 14 files |
 
 ## Accumulated Context
 
@@ -115,6 +117,11 @@ Recent decisions affecting current work:
 - [Phase 01]: R5 (0.8.0) merged to master as 93c00ce on user's 'merge and push'; Logger::Initialize re-targets existing loggers, branch kept
 - [Phase 01]: Plan 01-19: images::Image fixed in place (no ImageView type, D-20); operator[] 1x1 channel indexing kept and pinned; Image(width, height) throws std::length_error on size_t overflow; version 0.9.0 on fix/image-views (merge pending)
 - [Phase 01]: R6 (0.9.0) merged to master as 9e57bfa on user's 'merge and push'; images::Image views, overflow guard, empty default; branch kept
+- [Phase 01]: 01-21: EventNode::StopWith takes a required own-thread predicate and checks it before the state switch; no one-argument overload — The refusal held only from Running; Starting/Stopping waited for the thread joining the caller (deadlock, WR-01)
+- [Phase 01]: 01-21: ProcessPending() of the four components is private behind *TestAccess (compile-time), not a run-time UsageError — Only tests call it; D-14 pattern; a run-time check is check-then-act against Start() (WR-04 class)
+- [Phase 01]: 01-21: example apps call follower.Update() every frame and once more after Stop() (amends D-26 example detail, user decision 2026-10-21) — Undrained follower held every MapTransaction until Stop(): binocular corridor1 5 of 5 before, 0 of 5 after
+- [Phase 01]: 01-22: argument-value errors throw std::invalid_argument / std::out_of_range / std::length_error in every build; UsageError stays for call sequences; Image per-pixel accessors stay unchecked
+- [Phase 01]: 01-22: OrbFeatureExtractor rejects any pyramid level below 66 px (235 px with defaults) and invalid configurations with std::invalid_argument via shared ImagePyramid::LevelSize; package version 0.9.2, SOVERSION 0.9
 
 ### Pending Todos
 
@@ -142,6 +149,6 @@ Items acknowledged and deferred at milestone close, most recent first:
 
 ## Session Continuity
 
-Last session: 2026-10-15T04:05:34.718Z
-Stopped at: Completed 01-20-PLAN.md
+Last session: 2026-10-21T15:37:14.049Z
+Stopped at: Completed 01-22-PLAN.md
 Resume file: None

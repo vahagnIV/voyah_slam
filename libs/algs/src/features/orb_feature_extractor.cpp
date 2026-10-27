@@ -5,8 +5,13 @@
 #include "orb/extract_node.h"
 #include "orb/quad_tree_distributor.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
+#include <limits>
 #include <numeric>
+#include <stdexcept>
+#include <string>
 #if defined(AVX2) || defined(__AVX2__)
 #include <immintrin.h>
 #endif
@@ -15,6 +20,10 @@ namespace voyahslam::features {
 
 static constexpr int HALF_PATCH_SIZE = 15;
 static constexpr int PATCH_SIZE = 31;
+// Side of the grid cell FAST runs on (ComputePointsPerLevel). A level needs the patch border
+// plus at least one cell, which is OrbFeatureExtractor::MinLevelSize().
+static constexpr int FAST_CELL_SIZE = 35;
+static_assert(PATCH_SIZE + FAST_CELL_SIZE == OrbFeatureExtractor::MinLevelSize());
 static const int UMax[HALF_PATCH_SIZE + 1] = {15, 15, 15, 15, 14, 14, 14, 13,
                                               13, 12, 11, 10, 9,  8,  6,  3};
 
@@ -280,12 +289,46 @@ OrbFeatureExtractor::OrbFeatureExtractor(precision_t scale_factor,
                                          size_t levels,
                                          unsigned init_threshold_FAST,
                                          unsigned min_threshold_FAST)
-    : scale_factor_(scale_factor), log_scale_factor_(std::log(scale_factor_)),
+    : scale_factor_(ValidatedScaleFactor(scale_factor, levels)),
+      log_scale_factor_(std::log(scale_factor_)),
       init_threshold_FAST_(init_threshold_FAST),
       min_threshold_FAST_(min_threshold_FAST),
       scale_factors_(ComputeScaleFactors(scale_factor, levels)) {
-  assert(scale_factor != 0);
   Initialize();
+}
+
+precision_t OrbFeatureExtractor::ValidatedScaleFactor(precision_t scale_factor,
+                                                      size_t levels) {
+  if (levels == 0) {
+    throw std::invalid_argument("OrbFeatureExtractor: levels must be at least 1");
+  }
+  if (!std::isfinite(scale_factor) || !(scale_factor > 1.)) {
+    throw std::invalid_argument(
+        "OrbFeatureExtractor: scale factor must be a finite number greater "
+        "than 1, got " +
+        std::to_string(scale_factor));
+  }
+  return scale_factor;
+}
+
+void OrbFeatureExtractor::CheckImageSize(size_t width, size_t height) const {
+  unsigned smallest_width = std::numeric_limits<unsigned>::max();
+  unsigned smallest_height = std::numeric_limits<unsigned>::max();
+  for (const precision_t scale : scale_factors_) {
+    smallest_width =
+        std::min(smallest_width, orb::ImagePyramid::LevelSize(width, scale));
+    smallest_height =
+        std::min(smallest_height, orb::ImagePyramid::LevelSize(height, scale));
+  }
+  if (smallest_width < MinLevelSize() || smallest_height < MinLevelSize()) {
+    throw std::invalid_argument(
+        "OrbFeatureExtractor: image " + std::to_string(width) + "x" +
+        std::to_string(height) + " is too small: with " +
+        std::to_string(scale_factors_.size()) + " levels and scale factor " +
+        std::to_string(scale_factor_) + " the smallest pyramid level would be " +
+        std::to_string(smallest_width) + "x" + std::to_string(smallest_height) +
+        " px, below the " + std::to_string(MinLevelSize()) + " px minimum");
+  }
 }
 
 double OrbFeatureExtractor::ScaleFactor(uint8_t level) const {
@@ -298,6 +341,8 @@ OrbFeatureExtractor::TFeatures
 OrbFeatureExtractor::DetectAndExtract(const images::TWorkingImage &image,
                                       size_t number_of_features,
                                       Workspace &out_workspace) const {
+  // Before the workspace is touched: a rejected image leaves it as it was.
+  CheckImageSize(image.Width(), image.Height());
   orb::ImagePyramid &pyramid = out_workspace.pyramid_;
   // A reused workspace re-initialises on another image size, level count or scale factor.
   if (!pyramid.Fits(image.Width(), image.Height(), scale_factors_))
@@ -550,7 +595,7 @@ std::tuple<geometry::TPoints2DF, geometry::TRowVectorF>
 OrbFeatureExtractor::ComputePointsPerLevel(const orb::ImagePyramid &pyramid,
                                            size_t level, int n_features) const {
 
-  constexpr int W = 35;
+  constexpr int W = FAST_CELL_SIZE;
 
   const images::TWorkingImage &image = pyramid[level];
   const int image_cols = static_cast<int>(image.Width());

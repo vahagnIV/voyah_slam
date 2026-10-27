@@ -64,7 +64,7 @@ TEST_F(TrackerTest, StereoMatchedBeforeForwarding) {
     const features::StereoMatches expected =
         features::MatchStereo<Extractor>(frame.measurement, features::StereoMatcherOptions{});
     tracker_.Track(std::move(frame.measurement));
-    ASSERT_TRUE(tracker_.ProcessPending());  // the Mapper does not run
+    ASSERT_TRUE(tracking::TrackerTestAccess::ProcessPending(tracker_));  // the Mapper does not run
 
     const events::EventPtr event = listener_.GetNextEvent();
     ASSERT_NE(event, nullptr);
@@ -513,7 +513,7 @@ TEST_F(TrackerTest, TrackBeforeStartQueues) {
     EXPECT_EQ(tracker_.pending_measurements(), 0u);
     tracker_.Track(test::MakeMonocular(200, 0.0));
     EXPECT_EQ(tracker_.pending_measurements(), 1u);
-    EXPECT_TRUE(tracker_.ProcessPending());  // the queued measurement is tracked once driven
+    EXPECT_TRUE(tracking::TrackerTestAccess::ProcessPending(tracker_));  // the queued measurement is tracked once driven
     EXPECT_EQ(tracker_.pending_measurements(), 0u);
 }
 
@@ -541,7 +541,7 @@ TEST_F(TrackerTest, ThreadProcessesTrackedMeasurements) {
     ASSERT_EQ(captured.size(), 1u);
     EXPECT_EQ(captured[0].type, events::EventType::InitializationMeasurement);
 
-    while (mapper_.ProcessPending()) {
+    while (mapping::MapperTestAccess::ProcessPending(mapper_)) {
     }
     while (tracker_.state() != TrackerState::Tracking && Clock::now() < deadline) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
@@ -1011,7 +1011,7 @@ protected:
             Drain();
             return;
         }
-        while (tracker_.ProcessPending()) {
+        while (tracking::TrackerTestAccess::ProcessPending(tracker_)) {
         }
     }
 

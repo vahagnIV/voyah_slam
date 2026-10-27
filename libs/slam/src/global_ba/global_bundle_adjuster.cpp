@@ -35,7 +35,10 @@ void GlobalBundleAdjuster<TFeatureExtractor>::Stop() {
         if (num_runs_started() > 0) {  // once: the stop lambda runs for a running component only
             log_->info("Global BA: {} runs, {} interrupted", num_runs_started(), num_runs_interrupted());
         }
-    });
+    },
+    // A refused call (own worker thread, any state) throws before the lambda and before
+    // the store below, so it leaves stop_requested() alone.
+    [this] { return worker_.OnWorkerThread(); });
     // Also when it was never started (Created -> Stopped): a BA driven by hand polls it.
     stop_requested_.store(true, std::memory_order_release);
 }
