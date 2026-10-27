@@ -54,7 +54,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   5. Two threads may call `DetectAndExtract` concurrently, or the API makes that impossible to do by mistake; `Logger::Initialize` also re-targets loggers created before it; a default-constructed `Image` is empty and view operations honour `offset_` / `stride_`.
   6. Each item has a DESIGN decisions-log entry, `check_all` is green, ThreadSanitizer is clean on the event and Slam tests, and the Conan packages (linux-gcc13 static and shared, android-arm64) are recreated with a version the voyah_jni session is told about.
 
-**Plans**: 22/23 plans executed (six releases plus the gap-closure release 0.9.2, sequential; each release ends with the user's "merge and push")
+**Plans**: 23/23 plans executed (six releases plus the gap-closure release 0.9.2, sequential; each release ends with the user's "merge and push")
 
 Plans:
 **Wave 1**
@@ -124,7 +124,7 @@ Plans:
 - [x] 01-22-PLAN.md — Image views and CopyTo checked (CR-02), ORB extractor input validation (CR-01), argument-error policy, version 0.9.2
 
 **Wave 23** *(blocked on Wave 22 completion)*
-- [ ] 01-23-PLAN.md — 0.9.2 release gates (G1-G8), checkpoint, merge, voyah_jni message and API handover update
+- [x] 01-23-PLAN.md — 0.9.2 release gates (G1-G8), checkpoint, merge, voyah_jni message and API handover update
 
 **Cross-cutting constraints:**
 - Nothing is merged into master or pushed until the user types 'merge and push' (D-21, project rule)
@@ -227,7 +227,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7 (decimal 
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. API Ownership and Lifetime Contracts | 22/23 | In Progress (gap closure 0.9.2 planned; audit #1, #4 merged before GSD) | - |
+| 1. API Ownership and Lifetime Contracts | 23/23 | In Progress (gap closure 0.9.2 planned; audit #1, #4 merged before GSD) | - |
 | 2. Loop-Closing False-Positive Rejection | 0/TBD | Not started | - |
 | 3. Multi-Map and Global BA Hardening | 0/TBD | Not started | - |
 | 4. Feature Front-End and Geometry Robustness | 0/TBD | Not started | - |

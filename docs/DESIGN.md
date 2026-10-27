@@ -3858,13 +3858,13 @@ branch → review → merge to `master`. Update this document at the end.
 - Roadmap (`docs/ROADMAP.md`): TUM-VI tuning (step 6); relocalization into
   inactive maps is TODO ("Map merging follow-ups").
 - Ownership audit (`docs/TODO.md`): #3 + #2 done (0.4.0, branch
-  `refactor/event-ownership`, merge pending); #5 done (0.5.0, branch
-  `refactor/thread-affinity`, merge pending); #6 done (0.6.0, branch
+  `refactor/event-ownership`, merged and pushed); #5 done (0.5.0, branch
+  `refactor/thread-affinity`, merged and pushed); #6 done (0.6.0, branch
   `refactor/lifecycle`, merged and pushed); #7 done (0.7.0, branch
   `refactor/extractor-workspace`, merged and pushed); #8 done (0.8.0, branch
   `fix/logger-init-order`, merged and pushed); #9 done (0.9.0, branch
-  `fix/image-views`, merge pending), which completes the API hardening list;
-  Phase 1 gap closure 0.9.2 (branch `fix/phase1-gaps`, merge pending): own-thread
+  `fix/image-views`, merged and pushed), which completes the API hardening list;
+  Phase 1 gap closure 0.9.2 (branch `fix/phase1-gaps`, merged and pushed, `a975ee7`): own-thread
   `Stop()` in every state, private `ProcessPending()`, example followers drained
   every frame, ORB extractor and `Image` argument validation (review CR-01, CR-02,
   WR-01, WR-06, IN-07).
